@@ -1,11 +1,11 @@
 [package]
-name = "rrt"
+name = "rustviz"
 version = "0.1.0"
-authors = ["Gabriel Luo <luogm@umich.edu>", "Ke Du <madoka@umich.edu>", "Yingying Zhu <zyy@umich.edu>", "Marcelo Almeida <mgba@umich.edu>", "Haochen Zhang <haochenz@umich.edu>"]
+authors = ["Gabriel Luo <luogm@umich.edu>", "Ke Du <madoka@umich.edu>", "Yingying Zhu <zyy@umich.edu>", "Marcelo Almeida <mgba@umich.edu>", "Haochen Zhang <haochenz@umich.edu>", "Vishnu Reddy <reddyvis@umich.edu>"]
 edition = "2018"
 
 [lib]
-name = "rrt_lib"
+name = "rustviz_lib"
 path = "src/lib.rs"
 
 # The development profile, used for `cargo build`
@@ -17,84 +17,6 @@ debug = true   # Controls whether the compiler passes `-g`
 opt-level = 3
 debug = false
 
-#compile with cargo run --example default
-[[example]]
-name = "one_var"
-path = "examples/book_04_01_01_one_var/main.rs"
-
-[[example]]
-name = "scope"
-path = "examples/book_04_01_02_scope/main.rs"
-
-[[example]]
-name = "string_from"
-path = "examples/book_04_01_03_string_from/main.rs"
-
-[[example]]
-name = "reference"
-path = "examples/book_04_01_04_reference/main.rs"
-
-[[example]]
-name = "scope2"
-path = "examples/book_04_01_05_scope2/main.rs"
-
-[[example]]
-name = "int_copy"
-path = "examples/book_04_01_06_int_copy/main.rs"
-
-[[example]]
-name = "string_move"
-path = "examples/book_04_01_07_string_move/main.rs"
-
-[[example]]
-name = "string_clone"
-path = "examples/book_04_01_09_string_clone/main.rs"
-
-[[example]]
-name = "int_copy_2"
-path = "examples/book_04_01_10_int_copy_2/main.rs"
-
-[[example]]
-name = "ownership_function"
-path = "examples/book_04_01_11_ownership_function/main.rs"
-
-[[example]]
-name = "return_values"
-path = "examples/book_04_01_12_return_values/main.rs"
-
-[[example]]
-name = "return_tuple"
-path = "examples/book_04_01_13_return_tuple/main.rs"
-
-[[example]]
-name = "pass_reference"
-path = "examples/book_04_02_01_pass_reference/main.rs"
-
-[[example]]
-name = "acquire_from_function"
-path = "examples/book_04_02_02_acquire_from_function/main.rs"
-
-[[example]]
-name = "safely_out_of_scope"
-path = "examples/book_04_02_03_safely_out_of_scope/main.rs"
-
-[[example]]
-name = "mut_ref"
-path = "examples/book_04_02_05_mut_ref/main.rs"
-
-[[example]]
-name = "scope_reference"
-path = "examples/book_04_02_07_scope_reference/main.rs"
-
-[[example]]
-name = "shared_and_unique_borrow"
-path = "examples/book_04_02_09_shared_and_unique_borrow/main.rs"
-
-[[example]]
-name = "no_dangle"
-path = "examples/book_04_02_12_no_dangle/main.rs"
-
 [dependencies]
 handlebars = "3.0.1"
 serde = { version = "1.0", features = ["derive"] }
-# rrt_lib = { path = "./" }
