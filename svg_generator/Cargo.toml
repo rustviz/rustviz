@@ -17,6 +17,9 @@ debug = true   # Controls whether the compiler passes `-g`
 opt-level = 3
 debug = false
 
+[[example]]
+name = "simple"
+
 [dependencies]
 handlebars = "3.0.1"
 serde = { version = "1.0", features = ["derive"] }
