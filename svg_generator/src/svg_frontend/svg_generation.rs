@@ -17,10 +17,9 @@ struct SvgData {
     height: i32,
 }
 
-pub fn render_svg(listing_id: &String, description: &String, visualization_data: &VisualizationData) {
-    let example_dir_path = format!("examples/book_{}_{}/", listing_id, description);
-    let code_image_file_path = format!("rustBook/src/img/vis_{}_code.svg", listing_id);
-    let timeline_image_file_path = format!("rustBook/src/img/vis_{}_timeline.svg", listing_id);
+pub fn render_svg(input_path: &String, output_path: &String, visualization_data: &VisualizationData) {
+    let code_image_file_path = format!("{}vis_code.svg", output_path);
+    let timeline_image_file_path = format!("{}vis_timeline.svg", output_path);
     
     let mut code_panel_string = String::new();
     let mut num_lines = 0;
@@ -48,7 +47,7 @@ pub fn render_svg(listing_id: &String, description: &String, visualization_data:
         .unwrap_or("Reading book_svg_style.css failed.".to_owned());
 
     // data for code panel
-    if let Ok(lines) = utils::read_lines(example_dir_path.to_owned() + "annotated_source.rs") {
+    if let Ok(lines) = utils::read_lines(input_path.to_owned() + "annotated_source.rs") {
         let (output, line_of_code) = code_panel::render_code_panel(lines);
         code_panel_string = output;
         num_lines = line_of_code;
@@ -58,11 +57,11 @@ pub fn render_svg(listing_id: &String, description: &String, visualization_data:
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
         
     let svg_data = SvgData {
-        visualization_name: description.to_owned(),
+        visualization_name: input_path.to_owned(),
         css: css_string,
         code: code_panel_string,
         diagram: timeline_panel_string,
-        tl_id: "tl_".to_owned() + listing_id,
+        tl_id: "tl_".to_owned() + input_path,
         tl_width: cmp::max(max_width, 200),
         height: (num_lines * 20 + 80) + 50,
     };
@@ -75,8 +74,6 @@ pub fn render_svg(listing_id: &String, description: &String, visualization_data:
     // println!("{}", final_timeline_svg_content);
 
     // write to file
-    utils::create_and_write_to_file(&final_code_svg_content, example_dir_path.clone() + "rendering_code.svg"); // write svg to /examples
-    utils::create_and_write_to_file(&final_timeline_svg_content, example_dir_path.clone() + "rendering_timeline.svg"); // write svg to /examples
     utils::create_and_write_to_file(&final_code_svg_content, code_image_file_path); // write svg code
     utils::create_and_write_to_file(&final_timeline_svg_content, timeline_image_file_path); // write svg timeline
 }
