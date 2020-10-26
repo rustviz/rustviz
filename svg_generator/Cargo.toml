@@ -18,13 +18,16 @@ opt-level = 3
 debug = false
 
 [[example]]
-name = "simple"
-
-[[example]]
 name = "hatra1"
 
 [[example]]
 name = "hatra2"
+
+[[example]]
+name = "string_from"
+
+[[example]]
+name = "string_from_print"
 
 [dependencies]
 handlebars = "3.0.1"

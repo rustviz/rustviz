@@ -23,5 +23,5 @@ fn main() {
     vd.append_external_event(ExternalEvent::Move{from: Some(from_func), to: Some(s.clone())}, &(2 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: s.clone() }, &(3 as usize));
 
-    svg_generation::render_svg(&"examples/simple/input/".to_owned(), &"examples/simple/".to_owned(), &vd);
+    svg_generation::render_svg(&"examples/string_from/input/".to_owned(), &"examples/string_from/".to_owned(), &vd);
 }
