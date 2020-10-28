@@ -24,9 +24,6 @@ name = "hatra1"
 name = "hatra2"
 
 [[example]]
-name = "string_from"
-
-[[example]]
 name = "string_from_print"
 
 [[example]]
