@@ -47,22 +47,31 @@ fn main() {
     };
 
     // let s = String::from("hello");
-    vd.append_external_event(ExternalEvent::Move{from: Some(from_func.clone()), to: Some(s.clone())}, &(2 as usize));
+    vd.append_external_event(ExternalEvent::Move{from: Some(from_func.clone()),
+        to: Some(s.clone())}, &(2 as usize));
     // takes_ownership(s);
-    vd.append_external_event(ExternalEvent::Move{from: Some(s.clone()), to: Some(takes_ownership.clone())}, &(3 as usize));
+    vd.append_external_event(ExternalEvent::Move{from: Some(s.clone()),
+        to: Some(takes_ownership.clone())}, &(3 as usize));
 
     // fn takes_ownership(some_string: String) {
-    vd.append_external_event(ExternalEvent::Duplicate{from: None, to: Some(some_string.clone()) }, &(9 as usize));
+    vd.append_external_event(ExternalEvent::Duplicate{from: None,
+        to: Some(some_string.clone()) }, &(9 as usize));
     // println!("{}", some_string);
-    vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(some_string.clone()), to: Some(println_func.clone()) }, &(10 as usize));
-    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: some_string }, &(11 as usize));
+    vd.append_external_event(ExternalEvent::PassByStaticReference{
+        from: Some(some_string.clone()), to: Some(println_func.clone()) },
+        &(10 as usize));
+    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: some_string },
+        &(11 as usize));
 
     // let mut x = 5;
-    vd.append_external_event(ExternalEvent::Move{from: None, to: Some(x.clone())}, &(4 as usize));
+    vd.append_external_event(ExternalEvent::Duplicate{from: None,
+        to: Some(x.clone())}, &(4 as usize));
     // let y = x;
-    vd.append_external_event(ExternalEvent::Duplicate{from: Some(x.clone()), to: Some(y.clone())}, &(5 as usize));
+    vd.append_external_event(ExternalEvent::Duplicate{from: Some(x.clone()),
+        to: Some(y.clone())}, &(5 as usize));
     // x = 6;
-    vd.append_external_event(ExternalEvent::Duplicate{from: None, to: Some(x.clone())}, &(6 as usize));
+    vd.append_external_event(ExternalEvent::Duplicate{from: None,
+        to: Some(x.clone())}, &(6 as usize));
 
     // Out of Scope
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: s }, &(7 as usize));
@@ -70,5 +79,6 @@ fn main() {
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: y }, &(7 as usize));
 
     //rendering image
-    svg_generation::render_svg(&"examples/hatra1/input/".to_owned().to_owned(), &"examples/hatra1/".to_owned(), &vd);
+    svg_generation::render_svg(&"examples/hatra1/input/".to_owned().to_owned(),
+        &"examples/hatra1/".to_owned(), &vd);
 }
