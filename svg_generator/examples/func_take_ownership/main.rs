@@ -10,20 +10,8 @@ fn main() {
         is_mut: false,
         lifetime_trait: LifetimeTrait::Move,
     });
-    let x = ResourceAccessPoint::Owner(Owner {
-        hash: 2,
-        name: String::from("x"),
-        is_mut: true,
-        lifetime_trait: LifetimeTrait::Copy,
-    });
-    let y = ResourceAccessPoint::Owner(Owner {
-        hash: 3,
-        name: String::from("y"),
-        is_mut: false,
-        lifetime_trait: LifetimeTrait::Copy,
-    });
     let some_string = ResourceAccessPoint::Owner(Owner {
-        hash: 4,
+        hash: 2,
         name: String::from("some_string"),
         is_mut: false,
         lifetime_trait: LifetimeTrait::Move,
@@ -55,30 +43,18 @@ fn main() {
 
     // fn takes_ownership(some_string: String) {
     vd.append_external_event(ExternalEvent::Move{from: None,
-        to: Some(some_string.clone()) }, &(9 as usize));
+        to: Some(some_string.clone()) }, &(7 as usize));
     // println!("{}", some_string);
     vd.append_external_event(ExternalEvent::PassByStaticReference{
         from: Some(some_string.clone()), to: Some(println_func.clone()) },
-        &(10 as usize));
+        &(8 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: some_string },
-        &(11 as usize));
-
-    // let mut x = 5;
-    vd.append_external_event(ExternalEvent::Duplicate{from: None,
-        to: Some(x.clone())}, &(4 as usize));
-    // let y = x;
-    vd.append_external_event(ExternalEvent::Duplicate{from: Some(x.clone()),
-        to: Some(y.clone())}, &(5 as usize));
-    // x = 6;
-    vd.append_external_event(ExternalEvent::Duplicate{from: None,
-        to: Some(x.clone())}, &(6 as usize));
+        &(9 as usize));
 
     // Out of Scope
-    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: s }, &(7 as usize));
-    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: x }, &(7 as usize));
-    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: y }, &(7 as usize));
+    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: s }, &(5 as usize));
 
     //rendering image
-    svg_generation::render_svg(&"examples/hatra1/input/".to_owned().to_owned(),
-        &"examples/hatra1/".to_owned(), &vd);
+    svg_generation::render_svg(&"examples/func_take_ownership/input/".to_owned().to_owned(),
+        &"examples/func_take_ownership/".to_owned(), &vd);
 }

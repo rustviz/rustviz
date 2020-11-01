@@ -5,5 +5,5 @@ fn main() {
 }
 
 fn f(s : &String) {
-    println!("Length: {}", s.len())
+    println!("{}", s)
 }

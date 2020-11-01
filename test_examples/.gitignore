@@ -1,5 +1,6 @@
 book
 src/assets
+src/SUMMARY.md
 theme
 helpers.js
 visualization.css

@@ -169,8 +169,8 @@ object.code_panel {
 
     <g id="code">
         <text class="code" x="20" y="90"> fn main() { </text>
-        <text class="code" x="20" y="110">     let <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="2">String::from</tspan>("hello"); </text>
-        <text class="code" x="20" y="130">     println!("{}", <tspan data-hash="1">s</tspan>); </text>
+        <text class="code" x="20" y="110">     let <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
+        <text class="code" x="20" y="130">     <tspan class="fn" data-hash="0" hash="6">println!</tspan>("{}", <tspan data-hash="1">s</tspan>); </text>
         <text class="code" x="20" y="150"> } </text>
     </g>
 

@@ -10,8 +10,12 @@ fn main() {
         lifetime_trait: LifetimeTrait::None
     });
     let from_func = ResourceAccessPoint::Function(Function {
-        hash: 2,
+        hash: 5,
         name: String::from("String::from()"),
+    });
+    let print_func = ResourceAccessPoint::Function(Function {
+        hash: 6,
+        name: String::from("println!()")
     });
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
@@ -20,7 +24,10 @@ fn main() {
     //
     // hash s : 1
     //
-    vd.append_external_event(ExternalEvent::Move{from: Some(from_func), to: Some(s.clone())}, &(2 as usize));
+    vd.append_external_event(ExternalEvent::Move{from: Some(from_func.clone()),
+        to: Some(s.clone())}, &(2 as usize));
+    vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(s.clone()),
+        to: Some(print_func.clone())}, &(3 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: s.clone() }, &(4 as usize));
 
     svg_generation::render_svg(&"examples/string_from_print/input/".to_owned(), &"examples/string_from_print/".to_owned(), &vd);
