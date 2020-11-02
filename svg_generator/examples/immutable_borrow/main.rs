@@ -54,8 +54,7 @@ fn main() {
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : y.clone() }, 
         &(5 as usize));
 
-    vd.append_external_event(ExternalEvent::Duplicate{from: None,
-        to: Some(s.clone())}, &(7 as usize));
+    vd.append_external_event(ExternalEvent::InitializeParam{param: s.clone()}, &(7 as usize));
     vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(s.clone()),
         to: print_func.clone()}, &(8 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : s.clone() }, 
