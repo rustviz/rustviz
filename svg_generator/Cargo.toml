@@ -32,6 +32,12 @@ name = "string_from_move_print"
 [[example]]
 name = "immutable_borrow"
 
+[[example]]
+name = "multiple_immutable_borrow"
+
+[[example]]
+name = "mutable_borrow"
+
 [dependencies]
 handlebars = "3.0.1"
 serde = { version = "1.0", features = ["derive"] }

@@ -1,6 +1,6 @@
 fn main() {
     let <tspan data-hash="1">x</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello");
-    let <tspan data-hash="2">y</tspan> = <tspan class="fn" data-hash="0" hash="6">f</tspan>(<tspan data-hash="1">&amp;x</tspan>); 
+    <tspan class="fn" data-hash="0" hash="6">f</tspan>(<tspan data-hash="1">&amp;x</tspan>); 
     <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">x</tspan>)
 }
 

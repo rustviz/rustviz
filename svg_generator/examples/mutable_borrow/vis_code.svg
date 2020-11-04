@@ -1,7 +1,7 @@
 <svg height="310px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
-    <desc>examples/immutable_borrow/input/</desc>
+    <desc>examples/mutable_borrow/input/</desc>
 
     <defs>
         <style type="text/css">
@@ -169,13 +169,13 @@ object.code_panel {
 
     <g id="code">
         <text class="code" x="20" y="90"> fn main() { </text>
-        <text class="code" x="20" y="110">     let <tspan data-hash="1">x</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
-        <text class="code" x="20" y="130">     <tspan class="fn" data-hash="0" hash="6">f</tspan>(<tspan data-hash="1">&amp;x</tspan>);  </text>
-        <text class="code" x="20" y="150">     <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">x</tspan>) </text>
+        <text class="code" x="20" y="110">     let mut <tspan data-hash="1">x</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
+        <text class="code" x="20" y="130">     <tspan class="fn" data-hash="0" hash="6">world</tspan>(&amp;mut <tspan data-hash="1">&amp;x</tspan>); </text>
+        <text class="code" x="20" y="150">     <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="1">x</tspan>) </text>
         <text class="code" x="20" y="170"> } </text>
         <text class="code" x="20" y="190">  </text>
-        <text class="code" x="20" y="210"> fn <tspan class="fn" data-hash="0" hash="6">f</tspan>(<tspan data-hash="3">s</tspan> : &amp;String) { </text>
-        <text class="code" x="20" y="230">     <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="3">s</tspan>) </text>
+        <text class="code" x="20" y="210"> fn world(<tspan data-hash="2">s</tspan> : &amp;mut String) { </text>
+        <text class="code" x="20" y="230">     <tspan data-hash="2">s</tspan>.<tspan class="fn" data-hash="0" hash="8">push_str</tspan>(", world") </text>
         <text class="code" x="20" y="250"> } </text>
     </g>
 
