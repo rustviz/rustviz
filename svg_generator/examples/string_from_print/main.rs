@@ -20,6 +20,8 @@ fn main() {
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
         external_events: Vec::new(),
+        preprocess_external_events: Vec::new(),
+        event_line_map: BTreeMap::new()
     };
     //
     // hash s : 1
@@ -30,5 +32,5 @@ fn main() {
         to: Some(print_func.clone())}, &(3 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: s.clone() }, &(4 as usize));
 
-    svg_generation::render_svg(&"examples/string_from_print/input/".to_owned(), &"examples/string_from_print/".to_owned(), &vd);
+    svg_generation::render_svg(&"examples/string_from_print/input/".to_owned(), &"examples/string_from_print/".to_owned(), & mut vd);
 }

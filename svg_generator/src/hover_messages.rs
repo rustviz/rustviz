@@ -1,6 +1,16 @@
 /* Event Dot messages: shows up when someone hovers over a dot */
-static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
-static SPAN_END : &'static str = "&lt;/span&gt;";
+
+// Add styling to string name with <span>
+fn fmt_style(plain: &String) -> String {
+    let span_begin = String::from(
+        "&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;"
+    );
+    let span_end = "&lt;/span&gt;";
+
+    span_begin + plain + span_end
+}
 
 /* The Event dot does not connect to any arrows, we typically follow the following format:
    ... happens
@@ -17,11 +27,11 @@ static SPAN_END : &'static str = "&lt;/span&gt;";
 //   // it refers to, nothing happens.
 pub fn event_dot_ref_go_out_out_scope(my_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} goes out of scope",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -31,11 +41,11 @@ pub fn event_dot_ref_go_out_out_scope(my_name: &String) -> String {
 //
 pub fn event_dot_owner_go_out_out_scope(my_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} goes out of scope", //we shouldn't say "the resource is dropped"
-        my_name_code                   //because we don't distinguish if the resource
+        my_name_fmt              //because we don't distinguish if the resource
     )                             //was moved from the variable earlier.
 }
 
@@ -48,11 +58,11 @@ pub fn event_dot_owner_go_out_out_scope(my_name: &String) -> String {
 // }
 pub fn event_dot_init_param(my_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} is initialized as the function argument",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -67,11 +77,11 @@ pub fn event_dot_init_param(my_name: &String) -> String {
 // |   |
 pub fn event_dot_copy_to(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s resource is copied",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -81,11 +91,11 @@ pub fn event_dot_copy_to(my_name: &String, target_name: &String) -> String {
 // |
 pub fn event_dot_move_to(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s resource is moved",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -95,11 +105,11 @@ pub fn event_dot_move_to(my_name: &String, target_name: &String) -> String {
 // |   |
 pub fn event_dot_static_lend(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
 
     format!(
         "{0}'s resource is immutably borrowed",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -109,11 +119,11 @@ pub fn event_dot_static_lend(my_name: &String, target_name: &String) -> String {
 // |
 pub fn event_dot_mut_lend(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
 
     format!(
         "{0}'s resource is mutably borrowed",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -124,11 +134,11 @@ pub fn event_dot_mut_lend(my_name: &String, target_name: &String) -> String {
 // *-->o   the star event (&)
 pub fn event_dot_static_return(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s mutable borrow ends",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -139,11 +149,11 @@ pub fn event_dot_static_return(my_name: &String, target_name: &String) -> String
 // *-->o   the star event (&mut)
 pub fn event_dot_mut_return(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s immutable borrow ends",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -157,11 +167,23 @@ pub fn event_dot_mut_return(my_name: &String, target_name: &String) -> String {
 // |   |            |
 pub fn event_dot_acquire(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} acquires ownership of a resource",
-        my_name_code
+        my_name_fmt
+    )
+}
+
+// 1   0        1   0
+// |            |   
+// o-->*   or   o-->*     the star event
+// |   |            |
+pub fn event_dot_copy_from(my_name: &String, target_name: &String) -> String {
+    format!(
+        "{0} is initialized by copy from {1}",
+        my_name,
+        target_name
     )
 }
 
@@ -171,11 +193,11 @@ pub fn event_dot_acquire(my_name: &String, target_name: &String) -> String {
 // |   |
 pub fn event_dot_mut_borrow(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} mutably borrows a resource",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -185,11 +207,11 @@ pub fn event_dot_mut_borrow(my_name: &String, target_name: &String) -> String {
 // |   |
 pub fn event_dot_static_borrow(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} immutably borrows a resource",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -200,11 +222,11 @@ pub fn event_dot_static_borrow(my_name: &String, target_name: &String) -> String
 // o-->*   the star event (&)
 pub fn event_dot_static_reacquire(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s resource is no longer immutably borrowed",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -215,11 +237,11 @@ pub fn event_dot_static_reacquire(my_name: &String, target_name: &String) -> Str
 // o-->*   the star event (&mut)
 pub fn event_dot_mut_reacquire(my_name: &String, target_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s resource is no longer mutably borrowed",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -233,13 +255,13 @@ pub fn event_dot_mut_reacquire(my_name: &String, target_name: &String) -> String
 // |
 pub fn arrow_move_val_to_val(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is moved to {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -249,13 +271,13 @@ pub fn arrow_move_val_to_val(from_name: &String, to_name: &String) -> String {
 // |   |
 pub fn arrow_copy_val_to_val(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is copied to {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -265,13 +287,13 @@ pub fn arrow_copy_val_to_val(from_name: &String, to_name: &String) -> String {
 // |
 pub fn arrow_move_val_to_func(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is moved to function {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -281,13 +303,13 @@ pub fn arrow_move_val_to_func(from_name: &String, to_name: &String) -> String {
 // |   |
 pub fn arrow_copy_val_to_func(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is copied to function {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -297,13 +319,13 @@ pub fn arrow_copy_val_to_func(from_name: &String, to_name: &String) -> String {
 // |
 pub fn arrow_move_func_to_val(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "Function {0}'s resource is moved to {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -313,13 +335,13 @@ pub fn arrow_move_func_to_val(from_name: &String, to_name: &String) -> String {
 // |   |
 pub fn arrow_static_lend_val_to_val(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is immutably borrowed by {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -329,13 +351,13 @@ pub fn arrow_static_lend_val_to_val(from_name: &String, to_name: &String) -> Str
 //     |
 pub fn arrow_static_lend_val_to_func(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is immutably borrowed by function {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -345,13 +367,13 @@ pub fn arrow_static_lend_val_to_func(from_name: &String, to_name: &String) -> St
 // |
 pub fn arrow_mut_lend_val_to_val(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is mutably borrowed by {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -361,13 +383,13 @@ pub fn arrow_mut_lend_val_to_val(from_name: &String, to_name: &String) -> String
 //     |
 pub fn arrow_mut_lend_val_to_func(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s resource is mutably borrowed by function {1}",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -378,13 +400,13 @@ pub fn arrow_mut_lend_val_to_func(from_name: &String, to_name: &String) -> Strin
 // o-->o   this arrow (&)
 pub fn arrow_static_return(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s immutable borrow of {1}'s resource ends",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -395,13 +417,13 @@ pub fn arrow_static_return(from_name: &String, to_name: &String) -> String {
 // o-->o   the star event (&mut)
 pub fn arrow_mut_return(from_name: &String, to_name: &String) -> String {
     // update styling
-    let from_name_code = SPAN_BEGIN.to_string() + from_name + SPAN_END;
-    let to_name_code = SPAN_BEGIN.to_string() + to_name + SPAN_END;
+    let from_name_fmt = fmt_style(from_name);
+    let to_name_fmt = fmt_style(to_name);
     
     format!(
         "{0}'s mutable borrow of {1}'s resource ends",
-        from_name_code,
-        to_name_code
+        from_name_fmt,
+        to_name_fmt
     )
 }
 
@@ -412,11 +434,11 @@ pub fn arrow_mut_return(from_name: &String, to_name: &String) -> String {
 // The viable is no longer in the scope after this line.
 pub fn state_out_of_scope(my_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} is out of scope",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -424,11 +446,11 @@ pub fn state_out_of_scope(my_name: &String) -> String {
 // thus it is impossible to access this variable anymore. This is an invisible line in the timeline.
 pub fn state_resource_moved(my_name: &String, to_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s resource was moved, so {0} no longer has ownership",
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -436,22 +458,22 @@ pub fn state_resource_moved(my_name: &String, to_name: &String) -> String {
 // the privilege will come back. Occurs when mutably borrowed. This is an invisible line in the timeline.
 pub fn state_resource_revoked(my_name: &String, to_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s resource is mutably borrowed, so it cannot access the resource",
-        my_name_code,
+        my_name_fmt,
     )
 }
 
 // This ResourceOwner is the unique object that holds the ownership to the underlying resource.
 pub fn state_full_privilege(my_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} is the owner of the resource", //not necessarily write if let was used rather than let mut
-        my_name_code
+        my_name_fmt
     )
 }
 
@@ -467,21 +489,21 @@ pub fn state_full_privilege(my_name: &String) -> String {
 //          FullPrivilege once again.
 pub fn state_partial_privilege(my_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s resource is being shared by one or more variables",
-        my_name_code
+        my_name_fmt
     )
 }
 
 // should not appear for visualization in a correct program
 pub fn state_invalid(my_name: &String) -> String {
     // update styling
-    let my_name_code = SPAN_BEGIN.to_string() + my_name + SPAN_END;
+    let my_name_fmt = fmt_style(my_name);
     
     format!(
         "something is wrong with the timeline of {0}",
-        my_name_code
+        my_name_fmt
     )
 }

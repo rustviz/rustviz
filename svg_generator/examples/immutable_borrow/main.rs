@@ -39,6 +39,8 @@ fn main() {
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
         external_events: Vec::new(),
+        preprocess_external_events: Vec::new(),
+        event_line_map: BTreeMap::new()
     };
 
     vd.append_external_event(ExternalEvent::Move{from: string_ctor.clone(),
@@ -62,5 +64,5 @@ fn main() {
     
 
     //rendering image
-    svg_generation::render_svg(&"examples/immutable_borrow/input/".to_owned(), &"examples/immutable_borrow/".to_owned(), &vd);
+    svg_generation::render_svg(&"examples/immutable_borrow/input/".to_owned(), &"examples/immutable_borrow/".to_owned(), & mut vd);
 }

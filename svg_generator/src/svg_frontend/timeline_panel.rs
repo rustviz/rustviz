@@ -10,7 +10,7 @@ use std::cmp;
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
 static SPAN_END : &'static str = "&lt;/span&gt;";
-
+#[derive(Debug)]
 struct TimelineColumnData {
     name: String,
     x_val: i64,
@@ -52,10 +52,8 @@ struct FunctionDotData {
 
 #[derive(Serialize)]
 struct ArrowData {
-    x1: i64,
-    x2: i64,
-    y1: i64,
-    y2: i64,
+    coordinates: Vec<(f64, f64)>,
+    coordinates_hbs: String,
     title: String
 }
 
@@ -137,7 +135,8 @@ fn prepare_registry(registry: &mut Handlebars) {
     let function_logo_template =
         "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
     let arrow_template =
-        "        <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{x2}} {{y2}} {{x1}} {{y1}} \" marker-end=\"url(#arrowHead)\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
+        // "        <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{x2}} {{y2}} {{x1}} {{y1}} \" marker-end=\"url(#arrowHead)\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" marker-end=\"url(#arrowHead)\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\" style=\"fill: none;\"/> \n";
     let vertical_line_template =
         "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let hollow_line_template =
@@ -286,6 +285,7 @@ fn render_arrows_string_external_events_version(
     resource_owners_layout: &HashMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ) -> (String, String) {
+
     let (mut output, mut fn_timeline) = (String::new(), String::new());
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
@@ -345,16 +345,22 @@ fn render_arrows_string_external_events_version(
             let styled_to_string = SPAN_BEGIN.to_string() + &to_string + SPAN_END;
             title = format!("{} to {}", title, styled_to_string);
         };
+        // Old structure for data
         // calc arrow data and function logo data
+        // x1: 0,
+        // y1: get_y_axis_pos(line_number),
+        // x2: 0,
+        // y2: get_y_axis_pos(line_number),
+        // Q: can I replace mut with simply Vec::new()?
+
+        // order of points is to -> from
         let mut data = ArrowData {
-            x1: 0,
-            y1: get_y_axis_pos(line_number),
-            x2: 0,
-            y2: get_y_axis_pos(line_number),
+            coordinates: Vec::new(),
+            coordinates_hbs: String::new(),
             title: title
         };
-        let arrow_length = 20;
 
+        let arrow_length = 20;
         // render title
         match (from, to, external_event) {
             (Some(ResourceAccessPoint::Function(_)), Some(ResourceAccessPoint::Function(_)), _) => {
@@ -363,11 +369,16 @@ fn render_arrows_string_external_events_version(
             },
             (Some(ResourceAccessPoint::Function(from_function)), Some(to_variable), _) => {  // (Some(function), Some(variable), _)
                 // ro1 (to_variable) <- ro2 (from_function)
-                data.x1 = resource_owners_layout[to_variable.hash()].x_val + 3; // adjust arrow head pos
-                data.x2 = data.x1 + arrow_length;
+                // arrow go from (x2, y2) -> (x1, y1)
+                let x1 = resource_owners_layout[to_variable.hash()].x_val + 3; // adjust arrow head pos
+                let x2 = x1 + arrow_length;
+                let y1 = get_y_axis_pos(line_number);
+                let y2 = get_y_axis_pos(line_number);
+                data.coordinates.push((x1 as f64, y1 as f64));
+                data.coordinates.push((x2 as f64, y2 as f64));
                 let function_data = FunctionLogoData {
-                    x: data.x2 + 3,
-                    y: data.y2 + 5,
+                    x: x2 + 3,
+                    y: y2 + 5,
                     hash: from_function.hash.to_owned() as u64,
                     title: SPAN_BEGIN.to_string() + &from_function.name + SPAN_END,
                 };
@@ -403,33 +414,106 @@ fn render_arrows_string_external_events_version(
             },
             (Some(from_variable), Some(ResourceAccessPoint::Function(to_function)), _) => { // (Some(variable), Some(function), _)
                 let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
-
                 //  ro1 (to_function) <- ro2 (from_variable)
-                data.x2 = resource_owners_layout[from_variable.hash()].x_val - 5;
-                data.x1 = data.x2 - arrow_length;
+                let x2 = resource_owners_layout[from_variable.hash()].x_val - 5;
+                let x1 = x2 - arrow_length;
+                let y1 = get_y_axis_pos(line_number);
+                let y2 = get_y_axis_pos(line_number);
+                data.coordinates.push((x1 as f64, y1 as f64));
+                data.coordinates.push((x2 as f64, y2 as f64));
                 let function_data = FunctionLogoData {
                     // adjust Function logo pos
-                    x: data.x1 - 10,  
-                    y: data.y1 + 5,
+                    x: x1 - 10,  
+                    y: y1 + 5,
                     hash: to_function.hash.to_owned() as u64,
                     title: styled_fn_name,
                 };
                 fn_timeline.push_str(&registry.render("function_logo_template", &function_data).unwrap());
             },
             (Some(from_variable), Some(to_variable), _) => {
-                data.x1 = resource_owners_layout[to_variable.hash()].x_val;
-                data.x2 = resource_owners_layout[from_variable.hash()].x_val;
+                // Only place to address overlay arrows
+                // Q : can I do * to dereference?
+                // Q : why we have reference stored in variables and vectors AKA containers?
+                let arrow_order = visualization_data.event_line_map.get(line_number).unwrap().iter().position(|x| x == external_event).unwrap() as i64;
+
+                let x1 = resource_owners_layout[to_variable.hash()].x_val;
+                let x2 = resource_owners_layout[from_variable.hash()].x_val;
+                let y1 = get_y_axis_pos(line_number);
+                let y2 = get_y_axis_pos(line_number);
+                // if the arrow is pointing from left to right
+                if arrow_order > 0 && x2 <= x1{
+                    let x3 = resource_owners_layout[from_variable.hash()].x_val + 20;
+                    let x4 = resource_owners_layout[to_variable.hash()].x_val - 20;
+                    let y3 = get_y_axis_pos(line_number)+20*arrow_order;
+                    let y4 = get_y_axis_pos(line_number)+20*arrow_order;
+
+                    data.coordinates.push((x1 as f64, y1 as f64));
+                    data.coordinates.push((x4 as f64, y4 as f64));
+                    data.coordinates.push((x3 as f64, y3 as f64));
+                    data.coordinates.push((x2 as f64, y2 as f64));
+
+                // if the arrow is pointing from right to left
+                } else if arrow_order > 0 && x2 > x1 {
+                    let x3 = resource_owners_layout[from_variable.hash()].x_val - 20;
+                    let x4 = resource_owners_layout[to_variable.hash()].x_val + 20;
+                    let y3 = get_y_axis_pos(line_number)+20*arrow_order;
+                    let y4 = get_y_axis_pos(line_number)+20*arrow_order;
+
+                    data.coordinates.push((x1 as f64, y1 as f64));
+                    data.coordinates.push((x4 as f64, y4 as f64));
+                    data.coordinates.push((x3 as f64, y3 as f64));
+                    data.coordinates.push((x2 as f64, y2 as f64));
+
+                } else {
+                    data.coordinates.push((x1 as f64, y1 as f64));
+                    data.coordinates.push((x2 as f64, y2 as f64));
+                }
             },
             _ => (), // don't support other cases for now
         }
         // draw arrow only if data.x1 is not default value
-        if data.x1 != 0 {
+        if !data.coordinates.is_empty() {
             // adjust arrow head pos
-            if data.x1 < data.x2 {
-                data.x1 = data.x1 + 10;
+            // Q : better way to do this?
+            // if arrow is straight
+            let last_index = data.coordinates.len() - 1;
+
+            if data.coordinates.len() == 2 {
+                // [0]     [last index]
+                // <-------------------
+                if data.coordinates[0].0 < data.coordinates[last_index].0 {
+
+                    data.coordinates[0].0 += 10 as f64;
+                }
+                // [last index]     [0]
+                // ------------------->
+                else {
+                    data.coordinates[0].0 -= 10 as f64;
+                }
+            } else {
+
+                if data.coordinates[0].0 < data.coordinates[last_index].0 {
+                    let hypotenuse = (((data.coordinates[1].0 - data.coordinates[0].0) as f64).powi(2) + ((data.coordinates[1].1 - data.coordinates[0].1) as f64).powi(2)).sqrt();
+                    let cos_ratio = ((data.coordinates[1].0 - data.coordinates[0].0) as f64) / hypotenuse;
+                    let sin_ratio = ((data.coordinates[1].1 - data.coordinates[0].1) as f64) / hypotenuse;
+                    data.coordinates[0].0 += cos_ratio*10 as f64;
+                    data.coordinates[0].1 += sin_ratio*10 as f64;
+                }
+                else {
+                    let hypotenuse = (((data.coordinates[0].0 - data.coordinates[1].0) as f64).powi(2) + ((data.coordinates[1].1 - data.coordinates[0].1) as f64).powi(2)).sqrt();
+                    let cos_ratio = ((data.coordinates[0].0 - data.coordinates[1].0) as f64) / hypotenuse;
+                    let sin_ratio = ((data.coordinates[1].1 - data.coordinates[0].1) as f64) / hypotenuse;
+                    data.coordinates[0].0 -= cos_ratio*10 as f64;
+                    data.coordinates[0].1 += sin_ratio*10 as f64;
+                }
             }
-            else {
-                data.x1 = data.x1 - 10;
+
+            while !data.coordinates.is_empty() {
+                let recent = data.coordinates.pop();
+                data.coordinates_hbs.push_str(&recent.unwrap().0.to_string());
+                data.coordinates_hbs.push_str(&String::from(" "));
+                data.coordinates_hbs.push_str(&recent.unwrap().1.to_string());
+                data.coordinates_hbs.push_str(&String::from(" "));
             }
             output.push_str(&registry.render("arrow_template", &data).unwrap()); 
         }
@@ -567,7 +651,7 @@ fn create_reference_line_string(
             let output = registry.render("hollow_line_template", &hollow_line_data).unwrap();
             output
         },
-        (State::PartialPrivilege{ borrow_count: _, borrow_to: _ }, _) => {
+        (State::PartialPrivilege{ .. }, _) => {
             data.line_class = String::from("solid");
             data.title += "; can only read data";
             
@@ -579,7 +663,7 @@ fn create_reference_line_string(
             output
 
         },
-        (State::ResourceMoved{ move_to: _, move_at_line: _ }, true) => {
+        (State::ResourceMoved{ .. }, true) => {
             data.line_class = String::from("extend");
             data.title += "; cannot access data";
             registry.render("vertical_line_template", &data).unwrap()
@@ -603,6 +687,7 @@ fn render_timelines(
         let rap = &timeline.resource_access_point;
         let rap_states = visualization_data.get_states(hash);
         for (line_start, line_end, state) in rap_states.iter() {
+            // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
             let data = match rap {
                 ResourceAccessPoint::Function(_) => {
                     None
@@ -681,7 +766,7 @@ fn render_ref_line(
 
                 for (line_start, _line_end, state) in states.iter() {
                     match state { // consider removing .clone()
-                        State::OutOfScope => {
+                        State::OutOfScope | State::ResourceMoved{ .. } => {
                             if alive {
                                 // finish line template
                                 data.x2 = data.x1.clone();
@@ -710,7 +795,9 @@ fn render_ref_line(
                                 data.x1 = resource_owners_layout[hash].x_val;
                                 data.y1 = get_y_axis_pos(line_start);
 
-                                data.title = String::from("can mutate the resource it refers to");
+                                data.title = String::from(
+                                    format!("can mutate *{}", visualization_data.get_name_from_hash(hash).unwrap())
+                                );
                                 data.line_class = String::from("solid");
                                 alive = true;
                             }
@@ -722,7 +809,9 @@ fn render_ref_line(
                                 data.x1 = resource_owners_layout[hash].x_val;
                                 data.y1 = get_y_axis_pos(line_start);
 
-                                data.title = String::from("cannot mutate the resource it refers to");
+                                data.title = String::from(
+                                    format!("cannot mutate *{}",visualization_data.get_name_from_hash(hash).unwrap())
+                                );
                                 data.line_class = String::from("solid");
                                 alive = true;
                             }

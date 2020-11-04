@@ -32,6 +32,8 @@ fn main() {
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
         external_events: Vec::new(),
+        preprocess_external_events: Vec::new(),
+        event_line_map: BTreeMap::new()
     };
 
     // let s = String::from("hello");
@@ -55,5 +57,5 @@ fn main() {
 
     //rendering image
     svg_generation::render_svg(&"examples/func_take_ownership/input/".to_owned().to_owned(),
-        &"examples/func_take_ownership/".to_owned(), &vd);
+        &"examples/func_take_ownership/".to_owned(), & mut vd);
 }

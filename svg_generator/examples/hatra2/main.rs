@@ -47,6 +47,8 @@ fn main() {
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
         external_events: Vec::new(),
+        preprocess_external_events: Vec::new(),
+        event_line_map: BTreeMap::new()
     };
     //
     // hash s : 1
@@ -89,5 +91,5 @@ fn main() {
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : r3.clone() },  &(10 as usize));
 
     //rendering image
-    svg_generation::render_svg(&"examples/hatra2/input/".to_owned(), &"examples/hatra2/".to_owned(), &vd);
+    svg_generation::render_svg(&"examples/hatra2/input/".to_owned(), &"examples/hatra2/".to_owned(), & mut vd);
 }
