@@ -1,10 +1,11 @@
 extern crate handlebars;
 
-use crate::data::VisualizationData;
+use crate::data::{VisualizationData, Visualizable, ExternalEvent, ResourceAccessPoint_extract};
 use crate::svg_frontend::{code_panel, timeline_panel, utils};
 use handlebars::Handlebars;
 use serde::Serialize;
 use std::cmp;
+use std::collections::BTreeMap;
 
 #[derive(Serialize)]
 struct SvgData {
@@ -17,10 +18,54 @@ struct SvgData {
     height: i32,
 }
 
-pub fn render_svg(input_path: &String, output_path: &String, visualization_data: &VisualizationData) {
+pub fn render_svg(input_path: &String, output_path: &String, visualization_data: & mut VisualizationData) {
+    //------------------------sort HashMap<usize, Vec<ExternalEvent>>----------------------
+    // first by sorting "to" from small to large number then sort by "from" from small to large number
+    // Q: does for loop do the "move"?
+    // Q: how is this okay??
+    for (line_number, event_vec) in & mut visualization_data.event_line_map{
+        event_vec.sort_by(|a, b| 
+            ResourceAccessPoint_extract(a).1.as_ref().unwrap().hash().cmp(&ResourceAccessPoint_extract(b).1.as_ref().unwrap().hash())
+            .then(ResourceAccessPoint_extract(a).0.as_ref().unwrap().hash().cmp(&ResourceAccessPoint_extract(b).0.as_ref().unwrap().hash())));
+    }
+
+    // Q: is this a copy?
+    //-----------------------update line number for external events------------------
+    for (line_number, event) in visualization_data.preprocess_external_events.clone(){
+        let mut extra_line : usize = 0;
+        for (info_line_number, event_vec) in &visualization_data.event_line_map{
+            if info_line_number < &line_number {
+                extra_line += (event_vec.len()-1);
+            } else {
+                break;
+            }
+        }
+        let final_line_num = line_number.clone()+extra_line;
+        visualization_data.append_processed_external_event(event, final_line_num);
+    }
+    //-----------------------update event_line_map line number------------------
+    let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
+    let mut extra_line_sum = 0;
+    for (line_number, event_vec) in &visualization_data.event_line_map {
+        event_line_map_replace.insert(line_number+extra_line_sum, event_vec.clone());
+        extra_line_sum += event_vec.len()-1;
+    }
+    visualization_data.event_line_map = event_line_map_replace;
+    //---------------------------------------------------------------------------
+    // debug!("-------------------------visualization data.timelines------------------");
+    // debug!("{:?}", visualization_data.timelines);
+    // debug!("-------------------------visualization data.external_events------------------");
+    // debug!("{:?}", visualization_data.external_events);
+    // debug!("-------------------------visualization data.event_line_map------------------");
+    // debug!("{:?}", visualization_data.event_line_map);
+
+
+    // let example_dir_path = format!("examples/book_{}_{}/", listing_id, description);
+    // let code_image_file_path = format!("rustBook/src/img/vis_{}_code.svg", listing_id);
+    // let timeline_image_file_path = format!("rustBook/src/img/vis_{}_timeline.svg", listing_id);
     let code_image_file_path = format!("{}vis_code.svg", output_path);
     let timeline_image_file_path = format!("{}vis_timeline.svg", output_path);
-    
+
     let mut code_panel_string = String::new();
     let mut num_lines = 0;
 
@@ -48,7 +93,7 @@ pub fn render_svg(input_path: &String, output_path: &String, visualization_data:
 
     // data for code panel
     if let Ok(lines) = utils::read_lines(input_path.to_owned() + "annotated_source.rs") {
-        let (output, line_of_code) = code_panel::render_code_panel(lines);
+        let (output, line_of_code) = code_panel::render_code_panel(lines, &visualization_data.event_line_map);
         code_panel_string = output;
         num_lines = line_of_code;
     }
@@ -74,6 +119,8 @@ pub fn render_svg(input_path: &String, output_path: &String, visualization_data:
     // println!("{}", final_timeline_svg_content);
 
     // write to file
+    // utils::create_and_write_to_file(&final_code_svg_content, example_dir_path.clone() + "rendering_code.svg"); // write svg to /examples
+    // utils::create_and_write_to_file(&final_timeline_svg_content, example_dir_path.clone() + "rendering_timeline.svg"); // write svg to /examples
     utils::create_and_write_to_file(&final_code_svg_content, code_image_file_path); // write svg code
     utils::create_and_write_to_file(&final_timeline_svg_content, timeline_image_file_path); // write svg timeline
 }

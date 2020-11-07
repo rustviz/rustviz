@@ -28,7 +28,9 @@ fn main() {
 
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
-        external_events: Vec::new()
+        external_events: Vec::new(),
+        preprocess_external_events: Vec::new(),
+        event_line_map: BTreeMap::new()
     };
 
     // let s = String::from("hello");
@@ -44,5 +46,5 @@ fn main() {
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: y }, &(5 as usize));
 
     // rendering image
-    svg_generation::render_svg(&"examples/string_from_move_print/input/".to_owned().to_owned(), &"examples/string_from_move_print/".to_owned(), &vd);
+    svg_generation::render_svg(&"examples/string_from_move_print/input/".to_owned().to_owned(), &"examples/string_from_move_print/".to_owned(), & mut vd);
 }

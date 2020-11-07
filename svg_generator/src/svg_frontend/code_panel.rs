@@ -1,11 +1,12 @@
 extern crate handlebars;
 
+use crate::data::{ExternalEvent};
 use handlebars::Handlebars;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 
-pub fn render_code_panel(lines: io::Lines<io::BufReader<File>>) -> (String, i32) {
+pub fn render_code_panel(lines: io::Lines<io::BufReader<File>>, event_line_map: &BTreeMap<usize, Vec<ExternalEvent>>) -> (String, i32) {
     /* Template creation */
     let mut handlebars = Handlebars::new();
     // We want to preserve the inputs `as is`, and want to make no changes based on html escape.
@@ -30,6 +31,22 @@ pub fn render_code_panel(lines: io::Lines<io::BufReader<File>>) -> (String, i32)
             data.insert("LINE".to_string(), line_string.clone());
             output.push_str(&handlebars.render("code_line_template", &data).unwrap());
             y = y + 20;
+        }
+        let mut extra_line_num = 0;
+        match event_line_map.get(&(line_of_code as usize)) {
+            Some(event_vec) => extra_line_num = event_vec.len(),
+            None => (),
+        }
+        if  extra_line_num > 1 {
+            for i in 0..(extra_line_num - 1) {
+                let mut data = BTreeMap::new();
+                data.insert("X_VAL".to_string(), x.to_string());
+                data.insert("Y_VAL".to_string(), y.to_string());
+                data.insert("LINE".to_string(), "   ".to_string());
+                output.push_str(&handlebars.render("code_line_template", &data).unwrap());
+                y = y + 20;
+                line_of_code = line_of_code + 1;
+            }
         }
         line_of_code = line_of_code + 1;
     }
