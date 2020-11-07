@@ -66,6 +66,10 @@ fn main() {
         to: f_func.clone()}, &(5 as usize));
     vd.append_external_event(ExternalEvent::Duplicate{from: Some(z.clone()),
         to: f_func.clone()}, &(5 as usize));
+    vd.append_external_event(ExternalEvent::StaticReturn{from: Some(y.clone()),
+        to: Some(x.clone())}, &(5 as usize));
+    vd.append_external_event(ExternalEvent::StaticReturn{from: Some(z.clone()),
+        to: Some(x.clone())}, &(5 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : x.clone() }, 
         &(6 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : y.clone() }, 

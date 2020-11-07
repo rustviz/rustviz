@@ -8,3 +8,4 @@
 - [immutable_borrow](./immutable_borrow.md)
 - [multiple_immutable_borrow](./multiple_immutable_borrow.md)
 - [mutable_borrow](./mutable_borrow.md)
+- [nll_lexical_scope_different](./nll_lexical_scope_different.md)
