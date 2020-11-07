@@ -23,6 +23,7 @@ declare -a targetExamples=(
     "multiple_immutable_borrow"
     "mutable_borrow"
     "nll_lexical_scope_different"
+    "move_different_scope"
     #"error_use_after_move" # The "error_" examples are for visualizing Rust code with errors. This is not yet supported by RustViz.
     #"error_reassign_immutably_borrowed"
     #"error_reassign_mutably_borrowed"

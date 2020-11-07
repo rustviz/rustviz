@@ -6,32 +6,29 @@ fn main() {
     let x = ResourceAccessPoint::Owner(Owner {
         hash: 1,
         name: String::from("x"),
-        is_mut: true,
-        lifetime_trait: LifetimeTrait::Move,
-    });
-    let s = ResourceAccessPoint::MutRef(MutRef {
-        hash: 2,
-        my_owner_hash: Some(1),
-        name: String::from("s"),
         is_mut: false,
         lifetime_trait: LifetimeTrait::Move,
     });
+    let y = ResourceAccessPoint::Owner(Owner {
+        hash: 2,
+        name: String::from("y"),
+        is_mut: false,
+        lifetime_trait: LifetimeTrait::Move,
+    });
+    let z = ResourceAccessPoint::Owner(Owner {
+        hash: 3,
+        name: String::from("z"),
+        is_mut: false,
+        lifetime_trait: LifetimeTrait::Move,
+    });
+
     let string_ctor = Some(ResourceAccessPoint::Function(Function {
         hash: 5,
         name: String::from("String::from()"),
     }));
-
-    let world_func = Some(ResourceAccessPoint::Function(Function {
-        hash: 6,
-        name: String::from("world()"),
-    }));
     let print_func = Some(ResourceAccessPoint::Function(Function {
-        hash: 7,
+        hash: 6,
         name: String::from("println!()"),
-    }));
-    let push_func = Some(ResourceAccessPoint::Function(Function {
-        hash: 8,
-        name: String::from("push_str()"),
     }));
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
@@ -42,20 +39,20 @@ fn main() {
 
     vd.append_external_event(ExternalEvent::Move{from: string_ctor.clone(),
         to: Some(x.clone())}, &(2 as usize));
-    vd.append_external_event(ExternalEvent::PassByMutableReference{from: Some(x.clone()),
-        to: world_func.clone()}, &(3 as usize));
-    vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(x.clone()),
-        to: print_func.clone()}, &(4 as usize));
+    vd.append_external_event(ExternalEvent::Move{from: None,
+        to: Some(z.clone())}, &(3 as usize));
+    vd.append_external_event(ExternalEvent::Move{from: Some(x.clone()),
+        to: Some(y.clone())}, &(4 as usize));
+    vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(y.clone()),
+        to: print_func.clone()}, &(5 as usize));
+    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : y.clone() }, 
+        &(7 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : x.clone() }, 
-        &(5 as usize));
-
-    vd.append_external_event(ExternalEvent::InitializeParam{param: s.clone()}, &(7 as usize));
-    vd.append_external_event(ExternalEvent::PassByMutableReference{from: Some(s.clone()),
-        to: push_func.clone()}, &(8 as usize));
-    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : s.clone() }, 
+        &(9 as usize));
+    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : z.clone() }, 
         &(9 as usize));
     
 
     //rendering image
-    svg_generation::render_svg(&"examples/mutable_borrow/input/".to_owned(), &"examples/mutable_borrow/".to_owned(), &mut vd);
+    svg_generation::render_svg(&"examples/move_different_scope/input/".to_owned(), &"examples/move_different_scope/".to_owned(), & mut vd);
 }
