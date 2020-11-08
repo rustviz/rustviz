@@ -14,3 +14,4 @@
 - [move_func_return](./move_func_return.md)
 - [func_take_return_ownership](./func_take_return_ownership.md)
 - [immutable_borrow_method_call](./immutable_borrow_method_call.md)
+- [mutable_borrow_method_call](./mutable_borrow_method_call.md)
