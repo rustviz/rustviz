@@ -26,6 +26,7 @@ declare -a targetExamples=(
     "move_different_scope"
     "move_assignment"
     "move_func_return"
+    "func_take_return_ownership"
     #"error_use_after_move" # The "error_" examples are for visualizing Rust code with errors. This is not yet supported by RustViz.
     #"error_reassign_immutably_borrowed"
     #"error_reassign_mutably_borrowed"

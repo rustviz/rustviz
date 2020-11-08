@@ -12,3 +12,4 @@
 - [move_different_scope](./move_different_scope.md)
 - [move_assignment](./move_assignment.md)
 - [move_func_return](./move_func_return.md)
+- [func_take_return_ownership](./func_take_return_ownership.md)
