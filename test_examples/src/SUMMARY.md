@@ -11,3 +11,4 @@
 - [nll_lexical_scope_different](./nll_lexical_scope_different.md)
 - [move_different_scope](./move_different_scope.md)
 - [move_assignment](./move_assignment.md)
+- [move_func_return](./move_func_return.md)
