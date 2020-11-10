@@ -82,7 +82,7 @@ fn main() {
     vd.append_external_event(ExternalEvent::PassByMutableReference{from: Some(r3.clone()),
         to: clear_string_func.clone()}, &(9 as usize));
     // Event 11-12: r3 return resource priviledges to s
-    vd.append_external_event(ExternalEvent::MutableReturn{from: clear_string_func.clone(),
+    vd.append_external_event(ExternalEvent::MutableReturn{from: Some(r3.clone()),
         to: Some(s.clone())}, &(9 as usize));
     //all variables go out of scope at end of function
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : s.clone() },  &(10 as usize));

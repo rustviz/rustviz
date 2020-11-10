@@ -46,9 +46,6 @@ fn main() {
     // fn takes_ownership(some_string: String) {
     vd.append_external_event(ExternalEvent::InitializeParam{param: some_string.clone()}, &(7 as usize));
     // println!("{}", some_string);
-    vd.append_external_event(ExternalEvent::PassByStaticReference{
-        from: Some(some_string.clone()), to: Some(println_func.clone()) },
-        &(8 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: some_string },
         &(9 as usize));
 

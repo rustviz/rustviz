@@ -34,18 +34,18 @@ fn main() {
     };
 
     vd.append_external_event(ExternalEvent::Move{from: string_ctor.clone(),
-        to: Some(s.clone())}, &(7 as usize));
-    vd.append_external_event(ExternalEvent::Move{ from : Some(s.clone()),
-        to: take_return_func.clone()}, &(8 as usize));
-    vd.append_external_event(ExternalEvent::Move{ from : take_return_func.clone(),
         to: Some(s.clone())}, &(8 as usize));
+    vd.append_external_event(ExternalEvent::Move{ from : Some(s.clone()),
+        to: take_return_func.clone()}, &(9 as usize));
+    vd.append_external_event(ExternalEvent::Move{ from : take_return_func.clone(),
+        to: Some(s.clone())}, &(9 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : s.clone() }, 
-        &(10 as usize));
+        &(11 as usize));
 
     vd.append_external_event(ExternalEvent::InitializeParam{param: some_string.clone()},
-        &(1 as usize));
+        &(2 as usize));
     vd.append_external_event(ExternalEvent::Move{ from : Some(some_string.clone()),
-        to: None}, &(4 as usize));
+        to: None}, &(5 as usize));
 
     //rendering image
     svg_generation::render_svg(&"examples/func_take_return_ownership/input/".to_owned(), &"examples/func_take_return_ownership/".to_owned(), &mut vd);

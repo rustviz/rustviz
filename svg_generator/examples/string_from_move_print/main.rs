@@ -39,8 +39,6 @@ fn main() {
     // let y = x;
     vd.append_external_event(ExternalEvent::Move{from: Some(x.clone()),
         to: Some(y.clone())}, &(3 as usize));
-    vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(y.clone()),
-        to: Some(print_func.clone())}, &(4 as usize));
     // Out of Scope
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: x }, &(5 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: y }, &(5 as usize));

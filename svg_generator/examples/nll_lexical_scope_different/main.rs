@@ -58,13 +58,13 @@ fn main() {
         to: Some(x.clone())}, &(2 as usize));
     vd.append_external_event(ExternalEvent::MutableBorrow{from: Some(x.clone()),
         to: Some(y.clone())}, &(3 as usize));
-    vd.append_external_event(ExternalEvent::Move{from: Some(y.clone()),
+    vd.append_external_event(ExternalEvent::PassByMutableReference{from: Some(y.clone()),
         to: world_func.clone()}, &(4 as usize));
     vd.append_external_event(ExternalEvent::MutableReturn{from: Some(y.clone()), 
         to: Some(x.clone())}, &(4 as usize));
     vd.append_external_event(ExternalEvent::MutableBorrow{from: Some(x.clone()),
         to: Some(z.clone())}, &(5 as usize));
-    vd.append_external_event(ExternalEvent::Move{from: Some(z.clone()),
+    vd.append_external_event(ExternalEvent::PassByMutableReference{from: Some(z.clone()),
         to: world_func.clone()}, &(6 as usize));
     vd.append_external_event(ExternalEvent::MutableReturn{from: Some(z.clone()), 
         to: Some(x.clone())}, &(6 as usize));
@@ -72,6 +72,12 @@ fn main() {
         to: push_func.clone()}, &(7 as usize));
     vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(x.clone()),
         to: print_func.clone()}, &(8 as usize));
+    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : x.clone() }, 
+        &(9 as usize));
+    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : y.clone() }, 
+        &(9 as usize));
+    vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : z.clone() }, 
+        &(9 as usize));
 
     vd.append_external_event(ExternalEvent::InitializeParam{param: s.clone()}, &(11 as usize));
     vd.append_external_event(ExternalEvent::PassByMutableReference{from: Some(s.clone()),

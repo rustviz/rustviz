@@ -1,3 +1,4 @@
+
 <tspan fill="#AAA">1  </tspan>fn <tspan class="fn" data-hash="0" hash="6">take_and_return_ownership</tspan>(<tspan data-hash="2">some_string</tspan> : String) -> String {
 <tspan fill="#AAA">2  </tspan>    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="2">some_string</tspan>);
 <tspan fill="#AAA">3  </tspan>    <tspan data-hash="2">some_string</tspan>

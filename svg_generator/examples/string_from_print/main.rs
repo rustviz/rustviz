@@ -28,8 +28,6 @@ fn main() {
     //
     vd.append_external_event(ExternalEvent::Move{from: Some(from_func.clone()),
         to: Some(s.clone())}, &(2 as usize));
-    vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(s.clone()),
-        to: Some(print_func.clone())}, &(3 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: s.clone() }, &(4 as usize));
 
     svg_generation::render_svg(&"examples/string_from_print/input/".to_owned(), &"examples/string_from_print/".to_owned(), & mut vd);

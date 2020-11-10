@@ -47,11 +47,11 @@ fn main() {
         to: Some(s.clone())}, &(2 as usize));
     vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(s.clone()),
         to: len1_func.clone()}, &(3 as usize));
-    vd.append_external_event(ExternalEvent::Duplicate{from: len1_func.clone(),
+    vd.append_external_event(ExternalEvent::Move{from: len1_func.clone(),
         to: Some(len1.clone())}, &(3 as usize));
     vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(s.clone()),
         to: len2_func.clone()}, &(4 as usize));
-    vd.append_external_event(ExternalEvent::Duplicate{from: len2_func.clone(),
+    vd.append_external_event(ExternalEvent::Move{from: len2_func.clone(),
         to: Some(len2.clone())}, &(4 as usize));
     vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(len1.clone()),
         to: print_func.clone()}, &(5 as usize));

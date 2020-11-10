@@ -15,3 +15,8 @@
 - [func_take_return_ownership](./func_take_return_ownership.md)
 - [immutable_borrow_method_call](./immutable_borrow_method_call.md)
 - [mutable_borrow_method_call](./mutable_borrow_method_call.md)
+- [immutable_variable](./immutable_variable.md)
+- [mutable_variables](./mutable_variables.md)
+- [copy](./copy.md)
+- [function](./function.md)
+- [printing](./printing.md)
