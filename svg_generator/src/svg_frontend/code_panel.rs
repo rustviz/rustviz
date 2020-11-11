@@ -22,7 +22,7 @@ pub fn render_code_panel(lines: io::Lines<io::BufReader<File>>, event_line_map: 
     let x = 20;
     let mut y = 90;
     let mut output = String::from("    <g id=\"code\">\n");
-    let mut line_of_code = 0;
+    let mut line_of_code = 1;
     for line in lines {
         if let Ok(line_string) = line {
             let mut data = BTreeMap::new();
@@ -37,7 +37,7 @@ pub fn render_code_panel(lines: io::Lines<io::BufReader<File>>, event_line_map: 
             Some(event_vec) => extra_line_num = event_vec.len(),
             None => (),
         }
-        if  extra_line_num > 1 {
+        if extra_line_num > 1 {
             for i in 0..(extra_line_num - 1) {
                 let mut data = BTreeMap::new();
                 data.insert("X_VAL".to_string(), x.to_string());
