@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::data::{VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint};
+use crate::data::{VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event};
 use crate::svg_frontend::line_styles::{RefDataLine, RefValueLine, OwnerLine};
 use handlebars::Handlebars;
 use std::collections::HashMap;
@@ -250,6 +250,7 @@ fn render_dots_string(
     resource_owners_layout: &HashMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ) -> String {
+
     let timelines = &visualization_data.timelines;
     let mut output = String::new();
     for (hash, timeline) in timelines {
@@ -260,7 +261,23 @@ fn render_dots_string(
             },
             ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
+                let mut resource_hold = false;
                 for (line_number, event) in timeline.history.iter() {
+                    //matching the event
+                    match event {
+                        Event::Acquire{..} => {
+                            resource_hold = true;
+                        },
+                        Event::Copy{..} => {
+                            resource_hold = true;
+                        },
+                        Event::Move{..} => {
+                            resource_hold = false;
+                        },
+                        _ => {
+                            //do nothing
+                        }
+                    }
                     let mut data = EventDotData {
                         hash: *hash as u64,
                         dot_x: resource_owners_layout[hash].x_val,
@@ -269,7 +286,22 @@ fn render_dots_string(
                                                                                 // print_message_with_name() fails
                     };
                     if let Some(name) = visualization_data.get_name_from_hash(hash) {
-                        data.title = event.print_message_with_name(&name);
+                        match event {
+                            Event::OwnerGoOutOfScope => {
+                                if !resource_hold {
+                                    let resource_info: &str = " resource not dropped";
+                                    data.title = event.print_message_with_name(&name);
+                                    data.title.push_str(resource_info);
+                                } else {
+                                    let resource_info: &str = " resource dropped";
+                                    data.title = event.print_message_with_name(&name);
+                                    data.title.push_str(resource_info);
+                                }
+                            },
+                            _ => {
+                                data.title = event.print_message_with_name(&name);
+                            }
+                        }
                     }
                     output.push_str(&registry.render("dot_template", &data).unwrap());
                 }
