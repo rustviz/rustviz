@@ -168,13 +168,13 @@ object.code_panel {
     </g>
 
     <g id="code">
-        <text class="code" x="20" y="90"> fn main() {  </text>
-        <text class="code" x="20" y="110">     let mut <tspan data-hash="1">s1</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
-        <text class="code" x="20" y="130">     let <tspan data-hash="2">s2</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>(", world"); </text>
-        <text class="code" x="20" y="150">     <tspan class="fn" data-hash="0" hash="6">String::push_str</tspan>(&amp;mut <tspan data-hash="1">s1</tspan>, <tspan data-hash="2">&amp;s2</tspan>);  </text>
-        <text class="code" x="20" y="170">     <tspan data-hash="1">s1</tspan>.<tspan class="fn" data-hash="0" hash="7">push_str</tspan>(<tspan data-hash="2">&amp;s2</tspan>); // shorthand for the above </text>
-        <text class="code" x="20" y="190">     <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">s1</tspan>); // prints "Hello, world, world" </text>
-        <text class="code" x="20" y="210"> } </text>
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn main() {  </text>
+        <text class="code" x="20" y="110"> <tspan fill="#AAA">2  </tspan>    let mut <tspan data-hash="1">s1</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
+        <text class="code" x="20" y="130"> <tspan fill="#AAA">3  </tspan>    let <tspan data-hash="2">s2</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>(", world"); </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">4  </tspan>    <tspan class="fn" data-hash="0" hash="6">String::push_str</tspan>(&amp;mut <tspan data-hash="1">s1</tspan>, <tspan data-hash="2">&amp;s2</tspan>);  </text>
+        <text class="code" x="20" y="170"> <tspan fill="#AAA">5  </tspan>    <tspan data-hash="1">s1</tspan>.<tspan class="fn" data-hash="0" hash="7">push_str</tspan>(<tspan data-hash="2">&amp;s2</tspan>); // shorthand for the above </text>
+        <text class="code" x="20" y="190"> <tspan fill="#AAA">6  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">s1</tspan>); // prints "Hello, world, world" </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">7  </tspan>} </text>
     </g>
 
    
