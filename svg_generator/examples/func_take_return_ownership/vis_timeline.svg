@@ -1,4 +1,4 @@
-<svg width="300px" height="350px" 
+<svg width="300px" height="370px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
         id="tl_examples/func_take_return_ownership/input/">
 
@@ -200,8 +200,8 @@ object.code_panel {
     </defs>
 
     <g id="labels">
-        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, mutable">s</text>
         <text x="200" y="90" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;, immutable">some_string</text>
+        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, mutable">s</text>
     </g>
 
     <g id="timelines">
@@ -228,7 +228,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; acquires ownership of a resource"/>
         <circle cx="70" cy="285" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;s&lt;/span&gt; goes out of scope"/>
+        monospace, monospace !important;&quot;&gt;s&lt;/span&gt; goes out of scope resource dropped"/>
         <circle cx="200" cy="105" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; is initialized as the function argument"/>

@@ -289,11 +289,11 @@ fn render_dots_string(
                         match event {
                             Event::OwnerGoOutOfScope => {
                                 if !resource_hold {
-                                    let resource_info: &str = " resource not dropped";
+                                    let resource_info: &str = ". No resource is dropped.";
                                     data.title = event.print_message_with_name(&name);
                                     data.title.push_str(resource_info);
                                 } else {
-                                    let resource_info: &str = " resource dropped";
+                                    let resource_info: &str = ". Its resource is dropped.";
                                     data.title = event.print_message_with_name(&name);
                                     data.title.push_str(resource_info);
                                 }

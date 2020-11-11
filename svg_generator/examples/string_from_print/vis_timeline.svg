@@ -1,4 +1,4 @@
-<svg width="200px" height="210px" 
+<svg width="200px" height="230px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
         id="tl_examples/string_from_print/input/">
 
@@ -218,7 +218,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; acquires ownership of a resource"/>
         <circle cx="70" cy="145" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;s&lt;/span&gt; goes out of scope"/>
+        monospace, monospace !important;&quot;&gt;s&lt;/span&gt; goes out of scope resource dropped"/>
         <text x="96" y="110" data-hash="5" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
     </g>
 

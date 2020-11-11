@@ -1,4 +1,4 @@
-<svg width="200px" height="190px" 
+<svg width="200px" height="210px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
         id="tl_examples/immutable_variable/input/">
 
@@ -218,7 +218,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; acquires ownership of a resource"/>
         <circle cx="70" cy="125" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;x&lt;/span&gt; goes out of scope"/>
+        monospace, monospace !important;&quot;&gt;x&lt;/span&gt; goes out of scope resource dropped"/>
     </g>
 
     <g id="arrows">

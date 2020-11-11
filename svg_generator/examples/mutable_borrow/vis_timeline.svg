@@ -1,4 +1,4 @@
-<svg width="260px" height="310px" 
+<svg width="260px" height="330px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
         id="tl_examples/mutable_borrow/input/">
 
@@ -200,8 +200,8 @@ object.code_panel {
     </defs>
 
     <g id="labels">
-        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;, mutable">x</text>
         <text x="160" y="90" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, immutable">s<tspan stroke="none" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, immutable">|</tspan>*s</text>
+        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;, mutable">x</text>
     </g>
 
     <g id="timelines">
@@ -243,7 +243,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is no longer immutably borrowed"/>
         <circle cx="70" cy="165" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;x&lt;/span&gt; goes out of scope"/>
+        monospace, monospace !important;&quot;&gt;x&lt;/span&gt; goes out of scope resource dropped"/>
         <circle cx="160" cy="205" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is initialized as the function argument"/>
