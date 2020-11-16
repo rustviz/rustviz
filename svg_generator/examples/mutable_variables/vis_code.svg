@@ -170,7 +170,7 @@ object.code_panel {
     <g id="code">
         <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn main() { </text>
         <text class="code" x="20" y="110"> <tspan fill="#AAA">2  </tspan>    let mut <tspan data-hash="1">x</tspan> = 5; </text>
-        <text class="code" x="20" y="130"> <tspan fill="#AAA">3  </tspan>    x = <tspan data-hash="1">x</tspan>; //OK </text>
+        <text class="code" x="20" y="130"> <tspan fill="#AAA">3  </tspan>    <tspan data-hash="1">x</tspan> = 6; //OK </text>
         <text class="code" x="20" y="150"> <tspan fill="#AAA">4  </tspan>} </text>
     </g>
 

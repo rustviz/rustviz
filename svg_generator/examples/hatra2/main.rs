@@ -79,7 +79,7 @@ fn main() {
     vd.append_external_event(ExternalEvent::MutableBorrow{from: Some(s.clone()),
         to: Some(r3.clone())}, &(8 as usize));
 
-    vd.append_external_event(ExternalEvent::PassByMutableReference{from: Some(r3.clone()),
+    vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(r3.clone()),
         to: clear_string_func.clone()}, &(9 as usize));
     // Event 11-12: r3 return resource priviledges to s
     vd.append_external_event(ExternalEvent::MutableReturn{from: Some(r3.clone()),
