@@ -177,8 +177,8 @@ object.code_panel {
         <text class="code" x="20" y="210"> <tspan fill="#AAA">7  </tspan>} </text>
         <text class="code" x="20" y="230"> <tspan fill="#AAA">8  </tspan> </text>
         <text class="code" x="20" y="250"> <tspan fill="#AAA">9  </tspan>fn <tspan class="fn" data-hash="0" hash="6">takes_ownership</tspan>(<tspan data-hash="4">some_string</tspan>: String) { </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">10 </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="4">some_string</tspan>) </text>
-        <text class="code" x="20" y="290"> <tspan fill="#AAA">11 </tspan>} </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">10  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="4">some_string</tspan>) </text>
+        <text class="code" x="20" y="290"> <tspan fill="#AAA">11  </tspan>} </text>
     </g>
 
    

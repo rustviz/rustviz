@@ -75,7 +75,7 @@ pub fn event_dot_init_param(my_name: &String) -> String {
 //     |
 // o<--*   the star event
 // |   |
-pub fn event_dot_copy_to(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_copy_to(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -89,7 +89,7 @@ pub fn event_dot_copy_to(my_name: &String, target_name: &String) -> String {
 //     |
 // o<--*   the star event
 // |
-pub fn event_dot_move_to(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -103,7 +103,7 @@ pub fn event_dot_move_to(my_name: &String, target_name: &String) -> String {
 //     |
 // o<--*   the star event (&)
 // |   |
-pub fn event_dot_static_lend(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_static_lend(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
 
@@ -117,7 +117,7 @@ pub fn event_dot_static_lend(my_name: &String, target_name: &String) -> String {
 //     |
 // o<--*   the star event (&mut)
 // |
-pub fn event_dot_mut_lend(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_mut_lend(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
 
@@ -132,7 +132,7 @@ pub fn event_dot_mut_lend(my_name: &String, target_name: &String) -> String {
 // o<--o
 // |   |
 // *-->o   the star event (&)
-pub fn event_dot_static_return(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_static_return(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -147,7 +147,7 @@ pub fn event_dot_static_return(my_name: &String, target_name: &String) -> String
 // o<--o
 // |
 // *-->o   the star event (&mut)
-pub fn event_dot_mut_return(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -165,7 +165,7 @@ pub fn event_dot_mut_return(my_name: &String, target_name: &String) -> String {
 // |            |   
 // o-->*   or   o-->*     the star event
 // |   |            |
-pub fn event_dot_acquire(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_acquire(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -191,7 +191,7 @@ pub fn event_dot_copy_from(my_name: &String, target_name: &String) -> String {
 //     |
 // *<--o   the star event (&mut)
 // |   |
-pub fn event_dot_mut_borrow(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_mut_borrow(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -205,7 +205,7 @@ pub fn event_dot_mut_borrow(my_name: &String, target_name: &String) -> String {
 //     |
 // *<--o   the star event (&)
 // |   |
-pub fn event_dot_static_borrow(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_static_borrow(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -220,7 +220,7 @@ pub fn event_dot_static_borrow(my_name: &String, target_name: &String) -> String
 // o<--o
 // |   |
 // o-->*   the star event (&)
-pub fn event_dot_static_reacquire(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_static_reacquire(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -235,7 +235,7 @@ pub fn event_dot_static_reacquire(my_name: &String, target_name: &String) -> Str
 // o<--o
 // |
 // o-->*   the star event (&mut)
-pub fn event_dot_mut_reacquire(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_mut_reacquire(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -444,7 +444,7 @@ pub fn state_out_of_scope(my_name: &String) -> String {
 
 // The resource is transferred on this line or before this line due to move,
 // thus it is impossible to access this variable anymore. This is an invisible line in the timeline.
-pub fn state_resource_moved(my_name: &String, to_name: &String) -> String {
+pub fn state_resource_moved(my_name: &String, _to_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
@@ -456,7 +456,7 @@ pub fn state_resource_moved(my_name: &String, to_name: &String) -> String {
 
 // temporarily no read or write access right to the resource, but eventually
 // the privilege will come back. Occurs when mutably borrowed. This is an invisible line in the timeline.
-pub fn state_resource_revoked(my_name: &String, to_name: &String) -> String {
+pub fn state_resource_revoked(my_name: &String, _to_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     

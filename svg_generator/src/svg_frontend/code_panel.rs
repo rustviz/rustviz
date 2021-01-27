@@ -28,7 +28,9 @@ pub fn render_code_panel(lines: io::Lines<io::BufReader<File>>, event_line_map: 
             let mut data = BTreeMap::new();
             data.insert("X_VAL".to_string(), x.to_string());
             data.insert("Y_VAL".to_string(), y.to_string());
-            data.insert("LINE".to_string(), line_string.clone());
+            /* automatically add line numbers to code */
+            let fmt_line = format!("<tspan fill=\"#AAA\">{}  </tspan>{}", line_of_code, line_string);
+            data.insert("LINE".to_string(), fmt_line);
             output.push_str(&handlebars.render("code_line_template", &data).unwrap());
             y = y + 20;
         }
@@ -37,16 +39,18 @@ pub fn render_code_panel(lines: io::Lines<io::BufReader<File>>, event_line_map: 
             Some(event_vec) => extra_line_num = event_vec.len(),
             None => (),
         }
-        if extra_line_num > 1 {
-            for i in 0..(extra_line_num - 1) {
-                let mut data = BTreeMap::new();
-                data.insert("X_VAL".to_string(), x.to_string());
-                data.insert("Y_VAL".to_string(), y.to_string());
-                data.insert("LINE".to_string(), "   ".to_string());
-                output.push_str(&handlebars.render("code_line_template", &data).unwrap());
-                y = y + 20;
-                line_of_code = line_of_code + 1;
-            }
+        /* add empty lines for arrows */
+        while extra_line_num > 1 {
+            let mut data = BTreeMap::new();
+            data.insert("X_VAL".to_string(), x.to_string());
+            data.insert("Y_VAL".to_string(), y.to_string());
+            /* automatically add line numbers to code */
+            line_of_code = line_of_code + 1;
+            let empty_line = format!("<tspan fill=\"#AAA\">{}</tspan>", line_of_code);
+            data.insert("LINE".to_string(), empty_line);
+            output.push_str(&handlebars.render("code_line_template", &data).unwrap());
+            y = y + 20;
+            extra_line_num -= 1;
         }
         line_of_code = line_of_code + 1;
     }

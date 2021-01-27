@@ -177,10 +177,10 @@ object.code_panel {
         <text class="code" x="20" y="210"> <tspan fill="#AAA">7  </tspan>    <tspan data-hash="1">x</tspan>.<tspan class="fn" data-hash="0" hash="7">push_str</tspan>("!!"); // Also OK, because y and z's lifetimes have ended </text>
         <text class="code" x="20" y="230"> <tspan fill="#AAA">8  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">x</tspan>) </text>
         <text class="code" x="20" y="250"> <tspan fill="#AAA">9  </tspan>} </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">10 </tspan> </text>
-        <text class="code" x="20" y="290"> <tspan fill="#AAA">11 </tspan>fn <tspan class="fn" data-hash="0" hash="6">world</tspan>(<tspan data-hash="4">s</tspan> : &amp;mut String) { </text>
-        <text class="code" x="20" y="310"> <tspan fill="#AAA">12 </tspan>    <tspan data-hash="4">s</tspan>.<tspan class="fn" data-hash="0" hash="7">push_str</tspan>(", world") </text>
-        <text class="code" x="20" y="330"> <tspan fill="#AAA">13 </tspan>} </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">10  </tspan> </text>
+        <text class="code" x="20" y="290"> <tspan fill="#AAA">11  </tspan>fn <tspan class="fn" data-hash="0" hash="6">world</tspan>(<tspan data-hash="4">s</tspan> : &amp;mut String) { </text>
+        <text class="code" x="20" y="310"> <tspan fill="#AAA">12  </tspan>    <tspan data-hash="4">s</tspan>.<tspan class="fn" data-hash="0" hash="7">push_str</tspan>(", world") </text>
+        <text class="code" x="20" y="330"> <tspan fill="#AAA">13  </tspan>} </text>
     </g>
 
    

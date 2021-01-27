@@ -174,11 +174,11 @@ object.code_panel {
         <text class="code" x="20" y="150"> <tspan fill="#AAA">4  </tspan>    let <tspan data-hash="2">r1</tspan> = <tspan data-hash="1">&amp;s</tspan>; </text>
         <text class="code" x="20" y="170"> <tspan fill="#AAA">5  </tspan>    let <tspan data-hash="3">r2</tspan> = <tspan data-hash="1">&amp;s</tspan>; </text>
         <text class="code" x="20" y="190"> <tspan fill="#AAA">6  </tspan>    assert!(<tspan class="fn" data-hash="0" hash="6">compare_strings</tspan>(<tspan data-hash="2">r1</tspan>, <tspan data-hash="3">r2</tspan>)); </text>
-        <text class="code" x="20" y="210">     </text>
-        <text class="code" x="20" y="230"> <tspan fill="#AAA">7  </tspan> </text>
-        <text class="code" x="20" y="250"> <tspan fill="#AAA">8  </tspan>    let <tspan data-hash="4">r3</tspan> = <tspan data-hash="1">&amp;mut s</tspan>; </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">9  </tspan>    <tspan class="fn" data-hash="0" hash="7">clear_string</tspan>(<tspan data-hash="4">r3</tspan>); </text>
-        <text class="code" x="20" y="290"> <tspan fill="#AAA">10 </tspan>} </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">7</tspan> </text>
+        <text class="code" x="20" y="230"> <tspan fill="#AAA">8  </tspan> </text>
+        <text class="code" x="20" y="250"> <tspan fill="#AAA">9  </tspan>    let <tspan data-hash="4">r3</tspan> = <tspan data-hash="1">&amp;mut s</tspan>; </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">10  </tspan>    <tspan class="fn" data-hash="0" hash="7">clear_string</tspan>(<tspan data-hash="4">r3</tspan>); </text>
+        <text class="code" x="20" y="290"> <tspan fill="#AAA">11  </tspan>} </text>
     </g>
 
    

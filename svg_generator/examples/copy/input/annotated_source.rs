@@ -1,4 +1,4 @@
-<tspan fill="#AAA">1  </tspan>fn main() {
-<tspan fill="#AAA">2  </tspan>    let <tspan data-hash="1">x</tspan> = 5;
-<tspan fill="#AAA">3  </tspan>    let <tspan data-hash="2">y</tspan> = <tspan data-hash="1">x</tspan>;
-<tspan fill="#AAA">4  </tspan>}
+fn main() {
+    let <tspan data-hash="1">x</tspan> = 5;
+    let <tspan data-hash="2">y</tspan> = <tspan data-hash="1">x</tspan>;
+}

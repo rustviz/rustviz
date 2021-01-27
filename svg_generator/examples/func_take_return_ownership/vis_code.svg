@@ -168,17 +168,17 @@ object.code_panel {
     </g>
 
     <g id="code">
-        <text class="code" x="20" y="90">  </text>
-        <text class="code" x="20" y="110"> <tspan fill="#AAA">1  </tspan>fn <tspan class="fn" data-hash="0" hash="6">take_and_return_ownership</tspan>(<tspan data-hash="2">some_string</tspan> : String) -> String { </text>
-        <text class="code" x="20" y="130"> <tspan fill="#AAA">2  </tspan>    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="2">some_string</tspan>); </text>
-        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>    <tspan data-hash="2">some_string</tspan> </text>
-        <text class="code" x="20" y="170"> <tspan fill="#AAA">4  </tspan>} </text>
-        <text class="code" x="20" y="190"> <tspan fill="#AAA">5  </tspan>   </text>
-        <text class="code" x="20" y="210"> <tspan fill="#AAA">6  </tspan>fn main() { </text>
-        <text class="code" x="20" y="230"> <tspan fill="#AAA">7  </tspan>    let mut <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
-        <text class="code" x="20" y="250"> <tspan fill="#AAA">8  </tspan>    <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="6">take_and_return_ownership</tspan>(<tspan data-hash="1">s</tspan>); </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">9  </tspan>    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="1">s</tspan>);   // OK </text>
-        <text class="code" x="20" y="290"> <tspan fill="#AAA">10 </tspan>} </text>
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan> </text>
+        <text class="code" x="20" y="110"> <tspan fill="#AAA">2  </tspan>fn <tspan class="fn" data-hash="0" hash="6">take_and_return_ownership</tspan>(<tspan data-hash="2">some_string</tspan> : String) -> String { </text>
+        <text class="code" x="20" y="130"> <tspan fill="#AAA">3  </tspan>    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="2">some_string</tspan>); </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">4  </tspan>    <tspan data-hash="2">some_string</tspan> </text>
+        <text class="code" x="20" y="170"> <tspan fill="#AAA">5  </tspan>} </text>
+        <text class="code" x="20" y="190"> <tspan fill="#AAA">6  </tspan>   </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">7  </tspan>fn main() { </text>
+        <text class="code" x="20" y="230"> <tspan fill="#AAA">8  </tspan>    let mut <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
+        <text class="code" x="20" y="250"> <tspan fill="#AAA">9  </tspan>    <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="6">take_and_return_ownership</tspan>(<tspan data-hash="1">s</tspan>); </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">10  </tspan>    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="1">s</tspan>);   // OK </text>
+        <text class="code" x="20" y="290"> <tspan fill="#AAA">11  </tspan>} </text>
     </g>
 
    
