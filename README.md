@@ -1,7 +1,7 @@
 # RustViz
 [![Build Status](https://travis-ci.org/joemccann/dillinger.svg?branch=master)](https://travis-ci.org/joemccann/dillinger)
 
-*RustViz* is a tool written in Rust that generate visualization from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
+*RustViz* is a tool written in Rust that generates visualizations from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
 ## What does it look like?
 
@@ -49,3 +49,49 @@ Great! Now you've know how to generate and view the visualization that you could
 
 ## Usage (advanced)
 Yet to be finished....
+
+## Modules
+1. [mdbook_plugin](mdbook_plugin)
+
+    a. [book.js](mdbook_plugin/book.js):
+
+    | Relevant Lines | Purpose |
+    | ---            | :---    |
+    | 18-42   | `adjust_visualization_size()`: Responsible for automatically resizing visualization flexboxes on page load. |
+    | 228-283 | Responsible for adding toggle buttons to every code block that contains a corresponding visualization. |
+
+    b. [helpers.js](mdbook_plugin/helpers.js): responsible for dynamic/interactive portions of the visualization, from hover messages to word highlighting.
+
+    c. [visualization.css](mdbook_plugin/visualization.css.js): defines page's flexbox styling
+
+2. [svg_generator](svg_generator)
+
+    a. [examples](svg_generator/examples): contains all examples to be rendered
+
+        Folder structure for new examples:
+            <example_name>
+            ├── input
+            │   └── annotated_source.rs
+            ├── main.rs
+            ├── source.rs
+            ├── vis_code.svg
+            └── vis_timeline.svg
+
+    | File                  | Purpose   |
+    | :----:                | :-----    |
+    | `annotated_source.rs` | Adds styling to code panel with the use of &lt;tspan&gt; tags<br>Properties of Variables: `data-hash`<br>Properties of Functions: `hash`, `data-hash="0"`, `class="fn"`     |
+    | `main.rs`             | Defines all ResourceAccessPoint types and events |
+    | `source.rs`           | Contains original, source code that will be rendered into SVG  |
+    | `vis_code.svg`         | (1/2) Final rendered SVG code panel   |
+    | `vis_timeline.svg`     | (2/2) Final rendered SVG timeline panel with arrows, dots, etc |
+
+    b. [src](svg_generator/src)
+
+    | File                  | Purpose   |
+    | :----:                | :-----    |
+    | [data.rs](svg_generator/data.rs) | Defines all ResourceAccessPoint types and is responsible for calculating transition between states |
+    | [hover_messages.rs](svg_generator/hover_messages.rs) | Contains all hover message templates |
+    | [code_panel.rs](svg_generator/src/code_panel.rs)<br>[code_template.svg](svg_generator/src/code_template.svg) | Defines template for code panel and builds corresponding SVG renderings |
+    | [timeline_panel.rs](svg_generator/src/timeline_panel.rs)<br>[timeline_template.svg](svg_generator/src/timeline_template.svg) | Defines template for timeline panel and builds corresponding SVG renderings |
+    | [svg_generation.rs](svg_generator/src/svg_generation.rs) | Renders source code to SVG images and saves them under respective directory in `svg_generator/examples/` |
+    | [line_styles.rs](svg_generator/src/line_styles.rs) | Unused |
