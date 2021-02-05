@@ -56,7 +56,7 @@ string_from_move_print
 ├── main.rs
 └── source.rs
 ```
-let's first take a look at the [source.rs](), which is simply the rust source code that we are generating visulization from:
+let's first take a look at the [source.rs](svg_generator/examples/string_from_move_print/source.rs), which is simply the rust source code that we are generating visulization from:
 ```
 fn main() {
     let x = String::from("hello");
@@ -66,7 +66,7 @@ fn main() {
 ```
 In this example, the string `hello`'s resource is first moved from `String::from()` to `x`, then `x`'s resource is moved to `y`. Lastly, we print the value by taking `y` as an input to `println!()` but the resource has not been moved. 
 
-Next, let's focus on we need to do in [main.rs](). In this visuliation tool, **we define all possible owners, references or input of any memory resource as a** [Resource Access Point](). In this case, we have the function `String::from()` and two variables `x` and `y` as Resource Access Points. Correspondingly in our implementation, the [Resource Access Point]() is defined as an enum that hold the possible types of Resource Access Points, namely `ResourceAccessPoint::Owner` and `ResourceAccessPoint::Function` in this case. We want to create instance that represent these functions and variables in our main program:
+Next, let's focus on we need to do in [main.rs](svg_generator/examples/string_from_move_print/main.rs). In this visuliation tool, **we define all possible owners, references or input of any memory resource as a** [Resource Access Point](##Data Structures and Function Specifications). In this case, we have the function `String::from()` and two variables `x` and `y` as Resource Access Points. Correspondingly in our implementation, the [Resource Access Point](##Data Structures and Function Specifications) is defined as an enum that hold the possible types of Resource Access Points, namely `ResourceAccessPoint::Owner` and `ResourceAccessPoint::Function` in this case. We want to create instance that represent these functions and variables in our main program:
 ```
 // Variables
     let x = ResourceAccessPoint::Owner(Owner {
@@ -87,7 +87,7 @@ Next, let's focus on we need to do in [main.rs](). In this visuliation tool, **w
         name: String::from("String::from()"),
     });
 ```
-Next we decalre an instance of the [VisualizationData]() struct as a container that holds all the information of [ExternalEvent]() that we will talk about up next:
+Next we decalre an instance of the [VisualizationData]() struct as a container that holds all the information of [ExternalEvent]() that we will talk about up next, all you need is to declare the struct instance without any modification:
 ```
 let mut vd = VisualizationData {
     timelines: BTreeMap::new(),
@@ -133,11 +133,124 @@ string_from_move_print
 ├── vis_code.svg
 └── vis_timeline.svg
 ```
-Congratulations! You have Successfully generated the visulizations! Add the name of your example folder to */test_example/test_examples.sh* and see them in action.
+Congratulations! You have Successfully generated the visulizations! Add the name of your example folder to */test_example/test_examples.sh* and see them in your browser.
 
 ## Data Structures and Function Specifications
-Yet to be finished....
-
+- [ResourceAccessPoint](svg_generator/src/data.rs)
+ResourceAccessPoint is an enum that define all possible owner, references or creator of any memory resource. For now, the types of ResourceAccessPoint could possibly be an owner of a resource, a mutable reference of a resource, a unmutable referene of a resource or a function:
+    ```
+    pub enum {
+        Owner(Owner),
+        MutRef(MutRef),
+        StaticRef(StaticRef),
+        Function(Function),
+    }
+    ```
+    - Owner
+    For the owner of a resource, we need to define several properties: The name of the variable, the hash number and whether the vairable is mutable. The *lifetime_trait* property is not yet implemented.
+        ```
+        pub struct Owner {
+        pub name: String,
+        pub hash: u64,
+        pub is_mut: bool, // let a = 42; vs let mut a = 42;
+        pub lifetime_trait: LifetimeTrait,
+        ```
+    - Mutable reference and Inmutable reference
+    The defintion for references are similar to that of a Owner, but additionally we need to define the *my_owner_hash*, which refer back to the hash number of its owner. The *lifetime_trait* property is not yet implemented.
+    <!--what's the is_mut doing here?-->
+        ```
+        // a reference of type &mut T
+        #[derive(Clone, Hash, PartialEq, Eq, Debug)]
+        pub struct MutRef {         // let (mut) r1 = &mut a;
+            pub name: String,
+            pub hash: u64,
+            pub my_owner_hash: Option<u64>,
+            pub is_mut: bool,
+            pub lifetime_trait: LifetimeTrait,
+        }
+    
+        // a reference of type & T
+        #[derive(Clone, Hash, PartialEq, Eq, Debug)]
+        pub struct StaticRef {                // let (mut) r1 = & a;
+            pub name: String,
+            pub hash: u64,
+            pub my_owner_hash: Option<u64>,
+            pub is_mut: bool,
+            pub lifetime_trait: LifetimeTrait,
+        }
+        ```
+    - Functions
+    For each function, we only need to specify its name and hash number.
+        ```
+        pub struct Function {
+            pub name: String,
+            pub hash: u64,
+        }
+        ```
+    
+- [ExternalEvents](svg_generator/src/data.rs)
+ExternalEvents is an enum that hold all the movements of a the resource, here is the list of all the possible movements are avaliable for visualization:
+    - Duplicate
+        The Duplicate event represent the copy of one variable to the other that does not involve the move of resource.
+        ```
+        Duplicate {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>,
+        },
+        ```
+        User case:
+    <!--source initialization?-->
+        ```
+        let y = 5; // Duplicate from None to y 
+        // set from Option to None to represent initialization
+        let x = y; // Duplicate from y to x
+        ```
+    - Move
+    The Move event represent the tranferring of resource from one detination to the other.
+        ```
+        Move {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>,
+        },
+        ```
+        User case:
+        ```
+        let x = String::from("Hello"); // Move from String::from() to x
+        let y = x; // Move from x to y
+        ```
+    - StaticBorrow
+    The StaticBorrow event represent the immutable borrowing in rust
+        ```
+        StaticBorrow {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>,
+        },
+        ```
+        User case:
+        ```
+        let x = String::from("hello");
+        let y = &x; // immutable borrow from x to y
+        ```
+    - MutableBorrow
+    The MutableBorrow event represent the mutable borrowing in rust
+        ```
+        MutableBorrow {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>,
+        },
+        ```
+        User case:
+        ```
+        let mut x = String::from("Hello");
+        let y = &mut x; // mutable borrow from x to y
+        ```
+    TODO:
+    - StaticReturn
+    - MutableReturn
+    - PassByStaticReference
+    - PassByMutableReference
+    - GoOutOfScope
+    - InitializeParam
 ## Modules
 1. [mdbook_plugin](mdbook_plugin)
 
