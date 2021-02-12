@@ -243,7 +243,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         let y = &mut x; // mutable borrow from x to y
         ```
     - StaticReturn
-    The StaticReturn represent return of a unmutably borrowed source.
+    The StaticReturn event represent return of a unmutably borrowed source.
         ```
         StaticReturn {
             from: Option<ResourceAccessPoint>,
@@ -261,7 +261,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         }
         ```
     - MutableReturn
-    The StaticReturn represent return of a mutably borrowed source.
+    The StaticReturn event represent return of a mutably borrowed source.
         ```
         MutableReturn {
             from: Option<ResourceAccessPoint>,
@@ -281,7 +281,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         }
         ```
     - PassByStaticReference
-    The PassByStaticReference represent passing an inmutable reference to a function.
+    The PassByStaticReference event represent passing an inmutable reference to a function.
         ```
         PassByStaticReference {
             from: Option<ResourceAccessPoint>,
@@ -299,7 +299,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         } 
         ```
     - PassByMutableReference
-    The PassByMutableReference represent passing a mutable reference to a function.
+    The PassByMutableReference event represent passing a mutable reference to a function.
         ```
         PassByMutableReference {
             from: Option<ResourceAccessPoint>,
@@ -315,6 +315,33 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         fn world(s : &mut String) { 
             s.push_str(", world")
         }
+        ```
+    - GoOutOfScope
+    The GoOutOfScope event represent a variable go out of scope.
+        ```
+        GoOutOfScope {
+            ro: ResourceAccessPoint // must be a variable
+        },
+        ```
+        User case:
+        ```
+        fn main() { 
+            let x = 5; 
+            let y = x; // x and y both go out of scope
+        } 
+        ```
+    - InitializeParam
+    The InitializeParam event represent initialization of the parameters within a function
+        ```
+        InitializeParam {
+            param: ResourceAccessPoint, // the parameter in function
+        }
+        ```
+        User case:
+        ```
+        fn takes_ownership(some_string: String) { // initialize some_string
+            println!("{}", some_string) 
+        } 
         ```
 ## Modules
 1. [mdbook_plugin](mdbook_plugin)
