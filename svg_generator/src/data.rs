@@ -46,6 +46,7 @@ pub enum ResourceAccessPoint {
     MutRef(MutRef),
     StaticRef(StaticRef),
     Function(Function),
+    Struct(Struct),
 }
 
 // when something is not a reference
@@ -55,6 +56,16 @@ pub struct Owner {
     pub hash: u64,
     pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
     pub lifetime_trait: LifetimeTrait,
+}
+
+// when something is a struct
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub struct Struct {
+    pub name: String,
+    pub hash: u64,
+    pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
+    pub lifetime_trait: LifetimeTrait,
+    pub size: u64,
 }
 
 // a reference of type &mut T
@@ -89,6 +100,7 @@ impl ResourceAccessPoint {
     pub fn hash(&self) -> &u64 {
         match self {
             ResourceAccessPoint::Owner(Owner{hash, ..}) => hash,
+            ResourceAccessPoint::Struct(Struct{hash, ..}) => hash,
             ResourceAccessPoint::MutRef(MutRef{hash, ..}) => hash,
             ResourceAccessPoint::StaticRef(StaticRef{hash, ..}) => hash,
             ResourceAccessPoint::Function(Function{hash, ..}) => hash,
@@ -99,6 +111,7 @@ impl ResourceAccessPoint {
     pub fn name(&self) -> &String {
         match self {
             ResourceAccessPoint::Owner(Owner{name, ..}) => name,
+            ResourceAccessPoint::Struct(Struct{name, ..}) => name,
             ResourceAccessPoint::MutRef(MutRef{name, ..}) => name,
             ResourceAccessPoint::StaticRef(StaticRef{name, ..}) => name,
             ResourceAccessPoint::Function(Function{name, ..}) => name,
@@ -109,6 +122,7 @@ impl ResourceAccessPoint {
     pub fn is_mut(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(Owner{is_mut, ..}) => is_mut.to_owned(),
+            ResourceAccessPoint::Struct(Struct{is_mut, ..}) => is_mut.to_owned(),
             ResourceAccessPoint::MutRef(MutRef{is_mut, ..}) => is_mut.to_owned(),
             ResourceAccessPoint::StaticRef(StaticRef{is_mut, ..}) => is_mut.to_owned(),
             ResourceAccessPoint::Function(_) => false,
@@ -118,6 +132,7 @@ impl ResourceAccessPoint {
     pub fn is_ref(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Struct(_) => false,
             ResourceAccessPoint::MutRef(_) => true,
             ResourceAccessPoint::StaticRef(_) => true,
             ResourceAccessPoint::Function(_) => false,
@@ -127,6 +142,7 @@ impl ResourceAccessPoint {
     pub fn get_trait(&self) -> Option<&LifetimeTrait> {
         match self {
             ResourceAccessPoint::Owner(Owner{lifetime_trait, ..}) => Some(lifetime_trait),
+            ResourceAccessPoint::Struct(Struct{lifetime_trait, ..}) => Some(lifetime_trait),
             ResourceAccessPoint::MutRef(MutRef{lifetime_trait, ..}) => Some(lifetime_trait),
             ResourceAccessPoint::StaticRef(StaticRef{lifetime_trait, ..}) => Some(lifetime_trait),
             ResourceAccessPoint::Function(Function{..}) => None,
@@ -577,6 +593,9 @@ impl Visualizable for VisualizationData {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::MutRef(..) => {
                         State::FullPrivilege
                     },
+                    ResourceAccessPoint::Struct(..) | ResourceAccessPoint::MutRef(..) => {
+                        State::FullPrivilege
+                    },
                     ResourceAccessPoint::StaticRef(..) => {
                         State::PartialPrivilege {
                             borrow_count: 1,
@@ -838,6 +857,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::GoOutOfScope{ro} => {
                 match ro {
                     ResourceAccessPoint::Owner(..) => {
+                        maybe_append_event(self, &Some(ro), Event::OwnerGoOutOfScope, &line_number);
+                    },
+                    ResourceAccessPoint::Struct(..) => {
                         maybe_append_event(self, &Some(ro), Event::OwnerGoOutOfScope, &line_number);
                     },
                     ResourceAccessPoint::MutRef(..) => {
