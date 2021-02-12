@@ -65,6 +65,16 @@ struct FunctionLogoData {
     title: String
 }
 
+#[derive(Serialize)]
+struct BoxData {
+    hash: u64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    title: String
+}
+
 #[derive(Serialize, Clone)]
 struct VerticalLineData {
     line_class: String,
@@ -145,6 +155,9 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let hollow_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
+    let box_template =
+        "        <rect x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" />\n";
+    
     assert!(
         registry.register_template_string("timeline_panel_template", timeline_panel_template).is_ok()
     );
@@ -175,6 +188,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     assert!(
         registry.register_template_string("hollow_ref_line_template", hollow_ref_line_template).is_ok()
     );
+    assert!(
+        registry.register_template_string("box_template", box_template).is_ok()
+    );
 }
 
 // Returns: a hashmap from the hash of the ResourceOwner to its Column information
@@ -187,7 +203,7 @@ fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (Hash
             ResourceAccessPoint::Function(_) => {
                 /* do nothing */
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let name = match visualization_data.get_name_from_hash(hash) {
                     Some(_name) => _name,
@@ -259,7 +275,7 @@ fn render_dots_string(
             ResourceAccessPoint::Function(_) => {
                 // nothing to be done
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let mut resource_hold = false;
                 for (line_number, event) in timeline.history.iter() {
@@ -360,6 +376,7 @@ fn render_arrows_string_external_events_version(
         if let Some(some_from) = from {
             let from_string = match some_from {
                 ResourceAccessPoint::Owner(owner) => owner.name.to_owned(),
+                ResourceAccessPoint::Struct(stru) => stru.name.to_owned(),
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
                 ResourceAccessPoint::Function(func) => func.name.to_owned(),
@@ -370,6 +387,7 @@ fn render_arrows_string_external_events_version(
         if let Some(some_to) = to {
             let to_string = match some_to {
                 ResourceAccessPoint::Owner(owner) => owner.name.to_owned(),
+                ResourceAccessPoint::Struct(stru) => stru.name.to_owned(),
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
                 ResourceAccessPoint::Function(func) => func.name.to_owned(),
@@ -742,7 +760,7 @@ fn render_timelines(
                 ResourceAccessPoint::Function(_) => {
                     // Don't do anything
                 },
-                ResourceAccessPoint::Owner(_) => {
+                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
                     output.push_str(
                         // the unwrap is safe as long as data is built in this branch. 
                         &create_owner_line_string(rap, state, &mut data.unwrap(), registry)
@@ -775,7 +793,7 @@ fn render_ref_line(
             ResourceAccessPoint::Function(_) => {
                 /* do nothing */
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let ro = timeline.resource_access_point.to_owned();
                 // verticle state lines

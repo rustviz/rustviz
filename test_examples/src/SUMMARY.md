@@ -20,3 +20,4 @@
 - [copy](./copy.md)
 - [function](./function.md)
 - [printing](./printing.md)
+- [struct_string](./struct_string.md)
