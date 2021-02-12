@@ -156,8 +156,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         pub lifetime_trait: LifetimeTrait,
         ```
     - Mutable reference and Inmutable reference
-    The defintion for references are similar to that of a Owner, but additionally we need to define the *my_owner_hash*, which refer back to the hash number of its owner. The *lifetime_trait* property is not yet implemented.
-    <!--what's the is_mut doing here?-->
+    The defintion for references are similar to that of a Owner, but additionally we need to define the *my_owner_hash*, which refer back to the hash number of its owner. We also need to define *is_mut*, which represent the mutability of the reference. The *lifetime_trait* property is not yet implemented.
         ```
         // a reference of type &mut T
         #[derive(Clone, Hash, PartialEq, Eq, Debug)]
@@ -199,7 +198,6 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         },
         ```
         User case:
-    <!--source initialization?-->
         ```
         let y = 5; // Duplicate from None to y 
         // set from Option to None to represent initialization
@@ -244,13 +242,80 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         let mut x = String::from("Hello");
         let y = &mut x; // mutable borrow from x to y
         ```
-    TODO:
     - StaticReturn
+    The StaticReturn represent return of a unmutably borrowed source.
+        ```
+        StaticReturn {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>,
+        },
+        ```
+        User case:
+        ```
+        fn main() {
+            let z = &mut x;
+            world(z); // return mutably borrowed source from z to x since z is no longer used
+        }
+        fn world(s : &mut String) { 
+            s.push_str(", world")
+        }
+        ```
     - MutableReturn
+    The StaticReturn represent return of a mutably borrowed source.
+        ```
+        MutableReturn {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>,
+        },
+        ```
+        User case:
+        ```
+        fn main() {
+            let y = &x
+            let z = &x;
+            f(y, z); // return immutably borrowed source from z to x since z is no longer used
+            // also return immutably borrowed source from y to x since y is no longer used
+        }
+        fn f(s1 : &String, s2 : &String) { 
+            println!("{} and {}", s1, s2)
+        }
+        ```
     - PassByStaticReference
+    The PassByStaticReference represent passing an inmutable reference to a function.
+        ```
+        PassByStaticReference {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>, // must be a function
+        },
+        ```
+        User case:
+        ```
+        fn main() {
+            let x = String::from("hello"); 
+            f(&x); // f() could only read from x
+        }
+        fn f(s : &String) { 
+            println!("{}", s) 
+        } 
+        ```
     - PassByMutableReference
-    - GoOutOfScope
-    - InitializeParam
+    The PassByMutableReference represent passing a mutable reference to a function.
+        ```
+        PassByMutableReference {
+            from: Option<ResourceAccessPoint>,
+            to: Option<ResourceAccessPoint>, // must be a function
+        },
+        ```
+        User case:
+        ```
+        fn main() {
+            let z = &mut x;
+            world(z); // world() could read from/write to z
+        }
+        fn world(s : &mut String) { 
+            s.push_str(", world")
+        }
+        ```
 ## Modules
 1. [mdbook_plugin](mdbook_plugin)
 
