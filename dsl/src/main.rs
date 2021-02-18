@@ -22,17 +22,71 @@ fn main() {
         return;
     }
 
+    // TODO: use std::path
     let filename = format!("../svg_generator/examples/{}/main.rs" , &args[1]);
-    let contents = utils::read_file_to_string(filename)
+    let contents = utils::read_file_to_string(filename) // read to single string
         .expect("Something went wrong reading the file!");
 
     /* ******************************************
             --- Parse main.rs file ---
     ****************************************** */
-    // TODO: extract ResourceAccessPoints
-    // either
-    //      1) use lazy regex
-    //      2) assume properly declared
+    // Extract ResourceAccessPoints with regex
+    let re_vars = Regex::new(r"/\*(?s:.)*?!\[{1}(?P<variables>(?s:.)[^]/\*]*)\]?")
+        .expect("Something went wrong with the regex.");
+    
+    // capture text between ![ ]
+    let mut vars: Vec<String> =
+        re_vars.captures_iter(&contents)
+            .map(|caps| caps["variables"].to_string())
+            .collect();
+
+    let vars: Vec<String> = vars.iter()
+            .flat_map(move |s| s.split("\n")) // split by newline
+            .map(|s| s.trim().to_string()) // trim whitespace
+            .filter(|s| !s.is_empty()) // remove empty strings
+            .collect();
+
+    // TODO: set defined fields, check for invalid fields
+    let vars: Vec<ResourceAccessPoint> = vars.iter().enumerate()
+        .map(|(hash, v)| {
+            // format = ResourceAccessPoint name{field1,field2}
+            // fields = [type, name, Option<field1>, Option<field2>]
+            let fields: Vec<&str> = v
+                .split(|c| c == ' ' || c == '{' || c == ',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            
+            // match type with possible ResourceAccessPoints
+            match fields[0] {
+                "Owner" => ResourceAccessPoint::Owner(Owner {
+                    hash: hash as u64 + 1,
+                    name: String::from(fields[1]),
+                    is_mut: false,
+                    lifetime_trait: LifetimeTrait::Copy,
+                }),
+                "MutRef" => ResourceAccessPoint::MutRef(MutRef {
+                    hash: hash as u64 + 1,
+                    name: String::from(fields[1]),
+                    my_owner_hash: Some(1),
+                    is_mut: false,
+                    lifetime_trait: LifetimeTrait::Copy,
+                }),
+                "StaticRef" => ResourceAccessPoint::StaticRef(StaticRef {
+                    hash: hash as u64 + 1,
+                    name: String::from(fields[1]),
+                    my_owner_hash: Some(1),
+                    is_mut: false,
+                    lifetime_trait: LifetimeTrait::Copy,
+                }),
+                "Function" => ResourceAccessPoint::Function(Function {
+                    hash: hash as u64 + 1,
+                    name: String::from(fields[1]),
+                }),
+                _ => panic!("Invalid ResourceAccessPoint \"{}\"", fields[0])
+            }
+        })
+        .collect();
 
     // Extract groups of "!{<events>}"
     let re = Regex::new(r"(//|/\*)(?s:.)*?!\{{1}(?P<events>(?s:.)[^}/\*]*)\}?")

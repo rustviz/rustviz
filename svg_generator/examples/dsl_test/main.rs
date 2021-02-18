@@ -1,6 +1,8 @@
 /* --- Variable Definitions ---
-Owner x{_, Copy},
+![
+Owner x{_, Copy}
 Owner y{_, Copy}
+]
 */
 fn main() {
     let x = 5; // !{ Duplicate(None->x) }
