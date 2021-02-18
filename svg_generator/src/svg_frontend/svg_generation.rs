@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::data::{VisualizationData, Visualizable, ExternalEvent, ResourceAccessPoint_extract};
+use crate::data::{ExternalEvent, ResourceAccessPoint_extract, Visualizable, VisualizationData};
 use crate::svg_frontend::{code_panel, timeline_panel, utils};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -18,37 +18,54 @@ struct SvgData {
     height: i32,
 }
 
-pub fn render_svg(input_path: &String, output_path: &String, visualization_data: & mut VisualizationData) {
+pub fn render_svg(
+    input_path: &String,
+    output_path: &String,
+    visualization_data: &mut VisualizationData,
+) {
     //------------------------sort HashMap<usize, Vec<ExternalEvent>>----------------------
     // first by sorting "to" from small to large number then sort by "from" from small to large number
     // Q: does for loop do the "move"?
     // Q: how is this okay??
-    for (line_number, event_vec) in & mut visualization_data.event_line_map{
-        event_vec.sort_by(|a, b| 
-            ResourceAccessPoint_extract(a).1.as_ref().unwrap().hash().cmp(&ResourceAccessPoint_extract(b).1.as_ref().unwrap().hash())
-            .then(ResourceAccessPoint_extract(a).0.as_ref().unwrap().hash().cmp(&ResourceAccessPoint_extract(b).0.as_ref().unwrap().hash())));
+    for (line_number, event_vec) in &mut visualization_data.event_line_map {
+        event_vec.sort_by(|a, b| {
+            ResourceAccessPoint_extract(a)
+                .1
+                .as_ref()
+                .unwrap()
+                .hash()
+                .cmp(&ResourceAccessPoint_extract(b).1.as_ref().unwrap().hash())
+                .then(
+                    ResourceAccessPoint_extract(a)
+                        .0
+                        .as_ref()
+                        .unwrap()
+                        .hash()
+                        .cmp(&ResourceAccessPoint_extract(b).0.as_ref().unwrap().hash()),
+                )
+        });
     }
 
     // Q: is this a copy?
     //-----------------------update line number for external events------------------
-    for (line_number, event) in visualization_data.preprocess_external_events.clone(){
-        let mut extra_line : usize = 0;
-        for (info_line_number, event_vec) in &visualization_data.event_line_map{
+    for (line_number, event) in visualization_data.preprocess_external_events.clone() {
+        let mut extra_line: usize = 0;
+        for (info_line_number, event_vec) in &visualization_data.event_line_map {
             if info_line_number < &line_number {
-                extra_line += (event_vec.len()-1);
+                extra_line += (event_vec.len() - 1);
             } else {
                 break;
             }
         }
-        let final_line_num = line_number.clone()+extra_line;
+        let final_line_num = line_number.clone() + extra_line;
         visualization_data.append_processed_external_event(event, final_line_num);
     }
     //-----------------------update event_line_map line number------------------
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut extra_line_sum = 0;
     for (line_number, event_vec) in &visualization_data.event_line_map {
-        event_line_map_replace.insert(line_number+extra_line_sum, event_vec.clone());
-        extra_line_sum += event_vec.len()-1;
+        event_line_map_replace.insert(line_number + extra_line_sum, event_vec.clone());
+        extra_line_sum += event_vec.len() - 1;
     }
     visualization_data.event_line_map = event_line_map_replace;
     //---------------------------------------------------------------------------
@@ -58,7 +75,6 @@ pub fn render_svg(input_path: &String, output_path: &String, visualization_data:
     // debug!("{:?}", visualization_data.external_events);
     // debug!("-------------------------visualization data.event_line_map------------------");
     // debug!("{:?}", visualization_data.event_line_map);
-
 
     // let example_dir_path = format!("examples/book_{}_{}/", listing_id, description);
     // let code_image_file_path = format!("rustBook/src/img/vis_{}_code.svg", listing_id);
@@ -71,9 +87,9 @@ pub fn render_svg(input_path: &String, output_path: &String, visualization_data:
 
     let svg_code_template = utils::read_file_to_string("src/svg_frontend/code_template.svg")
         .unwrap_or("Reading template.svg failed.".to_owned());
-    let svg_timeline_template = utils::read_file_to_string("src/svg_frontend/timeline_template.svg")
-        .unwrap_or("Reading template.svg failed.".to_owned());
-    
+    let svg_timeline_template =
+        utils::read_file_to_string("src/svg_frontend/timeline_template.svg")
+            .unwrap_or("Reading template.svg failed.".to_owned());
 
     let mut handlebars = Handlebars::new();
     // We want to preserve the inputs `as is`, and want to make no changes based on html escape.
@@ -93,14 +109,16 @@ pub fn render_svg(input_path: &String, output_path: &String, visualization_data:
 
     // data for code panel
     if let Ok(lines) = utils::read_lines(input_path.to_owned() + "annotated_source.rs") {
-        let (output, line_of_code) = code_panel::render_code_panel(lines, &visualization_data.event_line_map);
+        let (output, line_of_code) =
+            code_panel::render_code_panel(lines, &visualization_data.event_line_map);
         code_panel_string = output;
         num_lines = line_of_code;
     }
-        
+
     // data for tl panel
-    let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
-        
+    let (timeline_panel_string, max_width) =
+        timeline_panel::render_timeline_panel(visualization_data);
+
     let svg_data = SvgData {
         visualization_name: input_path.to_owned(),
         css: css_string,
@@ -112,7 +130,9 @@ pub fn render_svg(input_path: &String, output_path: &String, visualization_data:
     };
 
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();
-    let final_timeline_svg_content = handlebars.render("timeline_svg_template", &svg_data).unwrap();
+    let final_timeline_svg_content = handlebars
+        .render("timeline_svg_template", &svg_data)
+        .unwrap();
 
     // print for debugging
     // println!("{}", final_code_svg_content);

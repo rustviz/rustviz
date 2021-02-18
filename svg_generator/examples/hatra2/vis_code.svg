@@ -102,7 +102,7 @@ object.code_panel {
 }
 
 .tooltip-trigger {
-    cursor: help;
+    cursor: default;
 }
 
 .tooltip-trigger:hover{

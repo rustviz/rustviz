@@ -57,6 +57,7 @@ fn main() {
     //      r3 : 4
     // functions: 1
     // Event 1: give s the resource and make it the owner
+
     vd.append_external_event(ExternalEvent::Move{from: string_ctor.clone(),
         to: Some(s.clone())}, &(2 as usize));
     // Mark event: "r1" borrows immutable reference from "s"
