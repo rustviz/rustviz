@@ -508,6 +508,7 @@ pub struct VisualizationData {
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
 }
 
+#[allow(non_snake_case)]
 pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option<ResourceAccessPoint>, &Option<ResourceAccessPoint>){
     let (from, to) = match external_event {
         ExternalEvent::Duplicate{ from: from_ro, to: to_ro} => {

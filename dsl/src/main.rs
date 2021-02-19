@@ -13,17 +13,17 @@ use rustviz_lib::data::{
 };
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
     // verify usage
+    let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
-        println!(r"Usage Error: cargo run <filename>"); 
+        println!("Usage Error: cargo run <filename>"); 
         return;
     }
 
     let filename = format!("../svg_generator/examples/{}/main.rs", &args[1]);
     if !Path::new(&filename).is_file() {
-        panic!("Example source file not found in {}!", &filename);
+        println!("Example source file not found in {}!", &filename);
+        return;
     }
     let contents = utils::read_file_to_string(filename).unwrap(); // read to single string
 
@@ -32,6 +32,7 @@ fn main() {
     ****************************************** */
     let var_map = parse::extract_vars_to_map(&contents);
     let events = parse::extract_events_to_string(&contents);
+
     /* ******************************************
             --- Build VisualizationData ---
     ****************************************** */
@@ -41,9 +42,8 @@ fn main() {
         preprocess_external_events: Vec::new(),
         event_line_map: BTreeMap::new()
     };
-
-    // TODO: match events to ExternalEvents and implement line numbers
     parse::add_events(&mut vd, var_map, events);
+    // println!("{:?}", vd.external_events);
 
     /* ******************************************
             --- Render SVG images ---

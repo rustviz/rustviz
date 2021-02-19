@@ -52,7 +52,7 @@ pub fn render_svg(
         let mut extra_line: usize = 0;
         for (info_line_number, event_vec) in &visualization_data.event_line_map {
             if info_line_number < &line_number {
-                extra_line += (event_vec.len() - 1);
+                extra_line += event_vec.len() - 1;
             } else {
                 break;
             }
