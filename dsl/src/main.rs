@@ -43,7 +43,7 @@ fn main() {
     };
 
     // TODO: match events to ExternalEvents and implement line numbers
-    parse::add_events(&mut vd, events);
+    parse::add_events(&mut vd, var_map, events);
 
     /* ******************************************
             --- Render SVG images ---
