@@ -4,13 +4,11 @@
 *RustViz* is a tool written in Rust that generates visualizations from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
 ## Documentation
-* [Example Usage](##Example-Usage)
+* [Example Usage](#Example-Usage)
 * [User Define Usage](#User-Define-Usage)
 * [Data Structure and Function Specifications](#Data-Structures-and-Function-Specifications)
 * [Modules](#Modules)
 * [Visulization Limitations](#Visualization-Limitations)
-
-### A Heading in this SO entry! <a name="head1234"></a>
 
 ## What does it look like? 
 
@@ -145,6 +143,21 @@ string_from_move_print
 Congratulations! You have Successfully generated the visulizations! Add the name of your example folder to */test_example/test_examples.sh* and see them in your browser.
 
 ## Data Structures and Function Specifications
+* Resource Access Point
+    * [Owner](#Owner)
+    * Mutable reference and Inmutable reference
+    * Functions
+* External Events
+    * Duplicate
+    * Move
+    * Static Borrow
+    * Mutable Borrow
+    * Static Return
+    * Mutable Return
+    * Pass By Static Reference
+    * Pass By Mutable Reference
+    * Go Out Of Scope
+    * Initialize Param
 - [ResourceAccessPoint](svg_generator/src/data.rs)
 ResourceAccessPoint is an enum that define all possible owner, references or creator of any memory resource. For now, the types of ResourceAccessPoint could possibly be an owner of a resource, a mutable reference of a resource, a unmutable referene of a resource or a function:
     ```
@@ -155,7 +168,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         Function(Function),
     }
     ```
-    - Owner
+    - Owner<a name="Owner"></a>
     For the owner of a resource, we need to define several properties: The name of the variable, the hash number and whether the vairable is mutable. The *lifetime_trait* property is not yet implemented.
         ```
         pub struct Owner {
