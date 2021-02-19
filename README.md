@@ -4,13 +4,15 @@
 *RustViz* is a tool written in Rust that generates visualizations from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
 ## Documentation
-* [Example Usage](#ExampleUsage)
-* [User Define Usage](#UserDefineUsage)
-* [Data Structure and Function Specifications](#DataStructuresandFunctionSpecifications)
+* [Example Usage](##Example-Usage)
+* [User Define Usage](#User-Define-Usage)
+* [Data Structure and Function Specifications](#Data-Structures-and-Function-Specifications)
 * [Modules](#Modules)
-* [Visulization Limitations](#VisualizationLimitations)
+* [Visulization Limitations](#Visualization-Limitations)
 
-## What does it look like?
+### A Heading in this SO entry! <a name="head1234"></a>
+
+## What does it look like? 
 
 *RustViz* generates *.svg* files of graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to generate visualization over user-defined rust code examples. Here's a sample view of what the visualization looks like:
 
