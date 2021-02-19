@@ -68,27 +68,22 @@ pub fn render_svg(
         extra_line_sum += event_vec.len() - 1;
     }
     visualization_data.event_line_map = event_line_map_replace;
-    //---------------------------------------------------------------------------
-    // debug!("-------------------------visualization data.timelines------------------");
-    // debug!("{:?}", visualization_data.timelines);
-    // debug!("-------------------------visualization data.external_events------------------");
-    // debug!("{:?}", visualization_data.external_events);
-    // debug!("-------------------------visualization data.event_line_map------------------");
-    // debug!("{:?}", visualization_data.event_line_map);
 
-    // let example_dir_path = format!("examples/book_{}_{}/", listing_id, description);
-    // let code_image_file_path = format!("rustBook/src/img/vis_{}_code.svg", listing_id);
-    // let timeline_image_file_path = format!("rustBook/src/img/vis_{}_timeline.svg", listing_id);
     let code_image_file_path = format!("{}vis_code.svg", output_path);
     let timeline_image_file_path = format!("{}vis_timeline.svg", output_path);
+    // allow function call from other folders
+    let call_path = match input_path.find("/svg_generator") {
+        Some(i) => input_path[..i+15].to_string(), // outside folder, path + /svg_generator
+        None => "".to_string() // within svg_generator folder, root = ""
+    };
 
     let mut code_panel_string = String::new();
     let mut num_lines = 0;
 
-    let svg_code_template = utils::read_file_to_string("src/svg_frontend/code_template.svg")
+    let svg_code_template = utils::read_file_to_string(call_path.to_owned()+"src/svg_frontend/code_template.svg")
         .unwrap_or("Reading template.svg failed.".to_owned());
     let svg_timeline_template =
-        utils::read_file_to_string("src/svg_frontend/timeline_template.svg")
+        utils::read_file_to_string(call_path.to_owned()+"src/svg_frontend/timeline_template.svg")
             .unwrap_or("Reading template.svg failed.".to_owned());
 
     let mut handlebars = Handlebars::new();
@@ -104,7 +99,7 @@ pub fn render_svg(
         .register_template_string("timeline_svg_template", tl_svg_template)
         .is_ok());
 
-    let css_string = utils::read_file_to_string("src/svg_frontend/book_svg_style.css")
+    let css_string = utils::read_file_to_string(call_path+"src/svg_frontend/book_svg_style.css")
         .unwrap_or("Reading book_svg_style.css failed.".to_owned());
 
     // data for code panel
@@ -134,13 +129,7 @@ pub fn render_svg(
         .render("timeline_svg_template", &svg_data)
         .unwrap();
 
-    // print for debugging
-    // println!("{}", final_code_svg_content);
-    // println!("{}", final_timeline_svg_content);
-
     // write to file
-    // utils::create_and_write_to_file(&final_code_svg_content, example_dir_path.clone() + "rendering_code.svg"); // write svg to /examples
-    // utils::create_and_write_to_file(&final_timeline_svg_content, example_dir_path.clone() + "rendering_timeline.svg"); // write svg to /examples
     utils::create_and_write_to_file(&final_code_svg_content, code_image_file_path); // write svg code
     utils::create_and_write_to_file(&final_timeline_svg_content, timeline_image_file_path); // write svg timeline
 }
