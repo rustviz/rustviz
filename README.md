@@ -3,13 +3,20 @@
 
 *RustViz* is a tool written in Rust that generates visualizations from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
+## Documentation
+* [Example Usage](#ExampleUsage)
+* [User Define Usage](#UserDefineUsage)
+* [Data Structure and Function Specifications](#DataStructuresandFunctionSpecifications)
+* [Modules](#Modules)
+* [Visulization Limitations](#VisualizationLimitations)
+
 ## What does it look like?
 
 *RustViz* generates *.svg* files of graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to generate visualization over user-defined rust code examples. Here's a sample view of what the visualization looks like:
 
 ![alt tag](https://github.com/rustviz/rustviz/blob/master/example.png)
 
-## Usage (example)
+## Example Usage
 *RustViz* is capable of visualizing simple rust codes (refer to the restriction section) via user definition. In this section we'll showcase how to generate some default visulization example that has been provided by us.
 
 *RustViz* requires [Rust](https://www.rust-lang.org/), Cargo and [mdbook](https://github.com/rust-lang/mdBook) to be installed. Once you have installed all the above prerequisites, direct into the */test_example* folder and run *test_examples.sh*
@@ -47,12 +54,12 @@ If you observed this output, then you have successfully generated the rust visul
 
 Great! Now you've know how to generate and view the visualization that you could create by using *RustViz*, Now let's create one of your own!
 
-## Usage (advanced)
+## User Define Usage
 In this section, we'll take a look into how to create example by using our example [string_from_move_print](svg_generator/examples/string_from_move_print). let's first take a look at the file structure you need for the example to run:
 ```
 string_from_move_print
 ├── input
-│   └── annotated_source.rs
+│   └── annotated_source.rs
 ├── main.rs
 └── source.rs
 ```
@@ -87,7 +94,7 @@ Next, let's focus on we need to do in [main.rs](svg_generator/examples/string_fr
         name: String::from("String::from()"),
     });
 ```
-Next we decalre an instance of the [VisualizationData]() struct as a container that holds all the information of [ExternalEvent]() that we will talk about up next, all you need is to declare the struct instance without any modification:
+Next we decalre an instance of the VisualizationData struct as a container that holds all the information of [ExternalEvent]() that we will talk about up next, all you need is to declare the struct instance without any modification:
 ```
 let mut vd = VisualizationData {
     timelines: BTreeMap::new(),
@@ -102,7 +109,7 @@ The [ExternalEvent]() **is an enum that hold all the movement, borrowing and dro
 3. Resource of `x` is dropped
 4. Resource of `y` is dropped
 
-We then add these events information to the [VisualizationData]() instance we declared before by using the `append_external_event()` function:
+We then add these events information to the VisualizationData instance we declared before by using the `append_external_event()` function:
 ```
 // Resource was moved from `String::from()` to `x`
     vd.append_external_event(ExternalEvent::Move{from: Some(from_func.clone()),
@@ -115,7 +122,7 @@ We then add these events information to the [VisualizationData]() instance we de
 // Resource of `y` is dropped
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: y }, &(5 as usize));
 ```
-Now the final step is to activte the rendering function that generate the [vis_code.svg]() and [vis_timeline.svg]() that are visulization SVG files for the code section and timeline section using the `svg_generation::render_svg()` function:
+Now the final step is to activte the rendering function that generate the vis_code.svg and vis_timeline.svg that are visulization SVG files for the code section and timeline section using the `svg_generation::render_svg()` function:
 ```
 svg_generation::render_svg(&"examples/string_from_move_print/input/".to_owned().to_owned(), &"examples/string_from_move_print/".to_owned(), & mut vd);
 ```
@@ -127,7 +134,7 @@ Now your folder should look like this:
 ```
 string_from_move_print
 ├── input
-│   └── annotated_source.rs
+│   └── annotated_source.rs
 ├── main.rs
 ├── source.rs
 ├── vis_code.svg
