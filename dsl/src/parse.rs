@@ -9,6 +9,11 @@ use rustviz_lib::data::{
 // crates.io
 use regex::Regex;
 
+// Requires: Well-formatted, non-empty file contents
+//           Variables should be specified within '![' and ']'
+// Modifies: Nothing, unchanged
+// Effects: Uses Regex to parse DSL variable definitions into HashMap with
+//          {key, value} pair = {name, ResourceAccessPoint}
 pub fn extract_vars_to_map(fin: &String) -> HashMap<String, ResourceAccessPoint> {
     // Extract ResourceAccessPoints with regex
     let re_vars = Regex::new(r"/\*(?s:.)*?!\[{1}(?P<variables>(?s:.)[^]/\*]*)\]?")
@@ -21,7 +26,6 @@ pub fn extract_vars_to_map(fin: &String) -> HashMap<String, ResourceAccessPoint>
     let cap = cap["variables"].to_string();
 
     let vars: Vec<String> = cap.split("\n")
-        // .flat_map(move |s| s.split("\n")) // split by newline
         .map(|s| s.trim().to_string()) // trim whitespace
         .filter(|s| !s.is_empty()) // remove empty strings
         .collect();
@@ -29,10 +33,14 @@ pub fn extract_vars_to_map(fin: &String) -> HashMap<String, ResourceAccessPoint>
     vec_to_map(vars) // return HashMap
 }
 
+// Requires: Well-formatted variable definitions in the form:
+//           ResourceAccessPoint name{field1,field2}
+// Modifies: Nothing, unchanged
+// Effects: Uses strings to build HashMap with
+//          {key, value} pair = {name, ResourceAccessPoint}
 fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
     // TODO: set defined fields, check for invalid fields
     vars.iter().enumerate().map(|(hash, v)| {
-        // fmt = ResourceAccessPoint name{field1,field2}
         // fields = [type, name, Option<field1>, Option<field2>]
         let fields: Vec<&str> = v
             .split(|c| c == ' ' || c == '{' || c == ',')
@@ -74,6 +82,10 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
     .collect()
 }
 
+// Requires: Non-empty file contents
+// Modifies: Nothing, unchanged
+// Effects: Uses Regex to parse DSL events in file,
+//          compiles Vec<(line_num, event_string)>
 pub fn extract_events_to_string(fin: &String) -> Vec<(u64, String)> {
     // Extract groups of "!{<events>}"
     let re = Regex::new(r"(//|/\*)(?s:.)*?!\[(?P<line>[0-9]+)\]\{{1}(?P<events>(?s:.)[^}/\*]*)\}?")
@@ -100,6 +112,9 @@ pub fn extract_events_to_string(fin: &String) -> Vec<(u64, String)> {
         .collect() // collect into Vec<(u64, String)>
 }
 
+// Requires: Well-formatted events, HashMap of ResourceAccessPoints
+// Modifies: VisualizationData
+// Effects: Creates ExternalEvents and appends to VisualizationData
 pub fn add_events(
     vd: &mut VisualizationData,
     vars: HashMap<String, ResourceAccessPoint>,
@@ -205,6 +220,9 @@ pub fn add_events(
     }
 }
 
+// Requires: Valid, existant ResourceAccessPoint name
+// Modifies: Nothing, unchanged
+// Effects: Returns clone of ResourceAccessPoint
 fn get_resource(
     vars: &HashMap<String, ResourceAccessPoint>, name: &str
 ) -> Option<ResourceAccessPoint> {

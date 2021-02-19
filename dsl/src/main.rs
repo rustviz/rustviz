@@ -20,9 +20,15 @@ fn main() {
         return;
     }
 
-    let filename = format!("../svg_generator/examples/{}/main.rs", &args[1]);
+    let path_to_ex = Path::new("../svg_generator/examples").join(&args[1]);
+    if !path_to_ex.is_dir() {
+        println!("Error: no corresponding directory exists in svg_generator/examples/!");
+        return;
+    }
+
+    let filename = path_to_ex.join("main.rs");
     if !Path::new(&filename).is_file() {
-        println!("Example source file not found in {}!", &filename);
+        println!("Example source file (main.rs) not found in {:?}!", &filename);
         return;
     }
     let contents = utils::read_file_to_string(filename).unwrap(); // read to single string
@@ -43,12 +49,15 @@ fn main() {
         event_line_map: BTreeMap::new()
     };
     parse::add_events(&mut vd, var_map, events);
-    // println!("{:?}", vd.external_events);
 
     /* ******************************************
             --- Render SVG images ---
     ****************************************** */
-    let input_path = format!("../svg_generator/examples/{}/input/", &args[1]);
-    let output_path = format!("../svg_generator/examples/{}/", &args[1]);
-    svg_generation::render_svg(&input_path, &output_path, &mut vd);
+    let input_path = path_to_ex.join("input/")
+        .into_os_string().into_string()
+        .expect("Error in input file path!");
+    let output_path = path_to_ex
+        .into_os_string().into_string()
+        .expect("Error in output file path!");
+    svg_generation::render_svg(&input_path, &(output_path+"/"), &mut vd);
 }
