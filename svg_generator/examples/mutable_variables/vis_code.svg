@@ -1,4 +1,4 @@
-<svg height="230px" 
+<svg height="280px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
     <desc>examples/mutable_variables/input/</desc>
@@ -169,9 +169,9 @@ object.code_panel {
 
     <g id="code">
         <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn main() { </text>
-        <text class="code" x="20" y="110"> <tspan fill="#AAA">2  </tspan>    let mut <tspan data-hash="1">x</tspan> = 5; </text>
-        <text class="code" x="20" y="130"> <tspan fill="#AAA">3  </tspan>    <tspan data-hash="1">x</tspan> = 6; //OK </text>
-        <text class="code" x="20" y="150"> <tspan fill="#AAA">4  </tspan>} </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    let mut <tspan data-hash="1">x</tspan> = 5; </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>    <tspan data-hash="1">x</tspan> = 6; //OK </text>
+        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>} </text>
     </g>
 
    

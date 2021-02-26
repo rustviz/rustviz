@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::data::{ExternalEvent, ResourceAccessPoint_extract, Visualizable, VisualizationData};
+use crate::data::{ExternalEvent, ResourceAccessPoint_extract, Visualizable, VisualizationData, line_space};
 use crate::svg_frontend::{code_panel, timeline_panel, utils};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -119,6 +119,7 @@ pub fn render_svg(
     let (timeline_panel_string, max_width) =
         timeline_panel::render_timeline_panel(visualization_data);
 
+        
     let svg_data = SvgData {
         visualization_name: input_path.to_owned(),
         css: css_string,
@@ -126,7 +127,7 @@ pub fn render_svg(
         diagram: timeline_panel_string,
         tl_id: "tl_".to_owned() + input_path,
         tl_width: cmp::max(max_width, 200),
-        height: (num_lines * 20 + 80) + 50,
+        height: (num_lines * line_space as i32 + 80) + 50,
     };
 
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();

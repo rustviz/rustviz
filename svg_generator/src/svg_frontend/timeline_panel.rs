@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::data::{VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event};
+use crate::data::{VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event, line_space};
 use crate::svg_frontend::line_styles::{RefDataLine, RefValueLine, OwnerLine};
 use handlebars::Handlebars;
 use std::collections::HashMap;
@@ -155,8 +155,8 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let hollow_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
-    let box_template =
-        "        <rect x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" />\n";
+    // let box_template =
+        // "        <rect x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" />\n";
     
     assert!(
         registry.register_template_string("timeline_panel_template", timeline_panel_template).is_ok()
@@ -188,9 +188,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     assert!(
         registry.register_template_string("hollow_ref_line_template", hollow_ref_line_template).is_ok()
     );
-    assert!(
-        registry.register_template_string("box_template", box_template).is_ok()
-    );
+    // assert!(
+    //     registry.register_template_string("box_template", box_template).is_ok()
+    // );
 }
 
 // Returns: a hashmap from the hash of the ResourceOwner to its Column information
@@ -297,7 +297,7 @@ fn render_dots_string(
                     let mut data = EventDotData {
                         hash: *hash as u64,
                         dot_x: resource_owners_layout[hash].x_val,
-                        dot_y: get_y_axis_pos(line_number),
+                        dot_y: get_y_axis_pos(*line_number),
                         title: "Unknown Resource Owner Value".to_owned()        // default value if the 
                                                                                 // print_message_with_name() fails
                     };
@@ -422,8 +422,8 @@ fn render_arrows_string_external_events_version(
                 // arrow go from (x2, y2) -> (x1, y1)
                 let x1 = resource_owners_layout[to_variable.hash()].x_val + 3; // adjust arrow head pos
                 let x2 = x1 + arrow_length;
-                let y1 = get_y_axis_pos(line_number);
-                let y2 = get_y_axis_pos(line_number);
+                let y1 = get_y_axis_pos(*line_number);
+                let y2 = get_y_axis_pos(*line_number);
                 data.coordinates.push((x1 as f64, y1 as f64));
                 data.coordinates.push((x2 as f64, y2 as f64));
                 let function_data = FunctionLogoData {
@@ -442,7 +442,7 @@ fn render_arrows_string_external_events_version(
                 
                 let function_dot_data = FunctionDotData {
                     x: resource_owners_layout[from_variable.hash()].x_val,
-                    y: get_y_axis_pos(line_number),
+                    y: get_y_axis_pos(*line_number),
                     title: styled_fn_name + " reads from " + &styled_from_name,
                     hash: from_variable.hash().to_owned() as u64,
                 };
@@ -456,7 +456,7 @@ fn render_arrows_string_external_events_version(
 
                 let function_dot_data = FunctionDotData {
                 x: resource_owners_layout[from_variable.hash()].x_val,
-                y: get_y_axis_pos(line_number),
+                y: get_y_axis_pos(*line_number),
                 title: styled_fn_name + " reads from/writes to " + &styled_from_name,
                 hash: from_variable.hash().to_owned() as u64,
                 };
@@ -467,8 +467,8 @@ fn render_arrows_string_external_events_version(
                 //  ro1 (to_function) <- ro2 (from_variable)
                 let x2 = resource_owners_layout[from_variable.hash()].x_val - 5;
                 let x1 = x2 - arrow_length;
-                let y1 = get_y_axis_pos(line_number);
-                let y2 = get_y_axis_pos(line_number);
+                let y1 = get_y_axis_pos(*line_number);
+                let y2 = get_y_axis_pos(*line_number);
                 data.coordinates.push((x1 as f64, y1 as f64));
                 data.coordinates.push((x2 as f64, y2 as f64));
                 let function_data = FunctionLogoData {
@@ -488,14 +488,14 @@ fn render_arrows_string_external_events_version(
 
                 let x1 = resource_owners_layout[to_variable.hash()].x_val;
                 let x2 = resource_owners_layout[from_variable.hash()].x_val;
-                let y1 = get_y_axis_pos(line_number);
-                let y2 = get_y_axis_pos(line_number);
+                let y1 = get_y_axis_pos(*line_number);
+                let y2 = get_y_axis_pos(*line_number);
                 // if the arrow is pointing from left to right
                 if arrow_order > 0 && x2 <= x1{
                     let x3 = resource_owners_layout[from_variable.hash()].x_val + 20;
                     let x4 = resource_owners_layout[to_variable.hash()].x_val - 20;
-                    let y3 = get_y_axis_pos(line_number)+20*arrow_order;
-                    let y4 = get_y_axis_pos(line_number)+20*arrow_order;
+                    let y3 = get_y_axis_pos(*line_number)+line_space*arrow_order;
+                    let y4 = get_y_axis_pos(*line_number)+line_space*arrow_order;
 
                     data.coordinates.push((x1 as f64, y1 as f64));
                     data.coordinates.push((x4 as f64, y4 as f64));
@@ -506,8 +506,8 @@ fn render_arrows_string_external_events_version(
                 } else if arrow_order > 0 && x2 > x1 {
                     let x3 = resource_owners_layout[from_variable.hash()].x_val - 20;
                     let x4 = resource_owners_layout[to_variable.hash()].x_val + 20;
-                    let y3 = get_y_axis_pos(line_number)+20*arrow_order;
-                    let y4 = get_y_axis_pos(line_number)+20*arrow_order;
+                    let y3 = get_y_axis_pos(*line_number)+line_space*arrow_order;
+                    let y4 = get_y_axis_pos(*line_number)+line_space*arrow_order;
 
                     data.coordinates.push((x1 as f64, y1 as f64));
                     data.coordinates.push((x4 as f64, y4 as f64));
@@ -748,9 +748,9 @@ fn render_timelines(
                             line_class: String::new(),
                             hash: *hash,
                             x1: resource_owners_layout[hash].x_val as f64,
-                            y1: get_y_axis_pos(line_start),
+                            y1: get_y_axis_pos(*line_start),
                             x2: resource_owners_layout[hash].x_val,
-                            y2: get_y_axis_pos(line_end),
+                            y2: get_y_axis_pos(*line_end),
                             title: state.print_message_with_name(rap.name())
                         }
                     )
@@ -820,8 +820,8 @@ fn render_ref_line(
                             if alive {
                                 // finish line template
                                 data.x2 = data.x1.clone();
-                                data.y2 = get_y_axis_pos(line_start);
-                                let dv = get_y_axis_pos(line_start)-data.y1;
+                                data.y2 = get_y_axis_pos(*line_start);
+                                let dv = get_y_axis_pos(*line_start)-data.y1;
                                 data.v = dv - 2*dv/5;
                                 data.dy = dv/5;
 
@@ -843,7 +843,7 @@ fn render_ref_line(
                                 // set known vals
                                 data.hash = *hash;
                                 data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = get_y_axis_pos(line_start);
+                                data.y1 = get_y_axis_pos(*line_start);
 
                                 data.title = String::from(
                                     format!("can mutate *{}", visualization_data.get_name_from_hash(hash).unwrap())
@@ -857,7 +857,7 @@ fn render_ref_line(
                                 // set known vals
                                 data.hash = *hash;
                                 data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = get_y_axis_pos(line_start);
+                                data.y1 = get_y_axis_pos(*line_start);
 
                                 data.title = String::from(
                                     format!("cannot mutate *{}",visualization_data.get_name_from_hash(hash).unwrap())
@@ -875,6 +875,6 @@ fn render_ref_line(
     output
 }
 
-fn get_y_axis_pos(line_number : &usize) -> i64 {
-    (65 + 20 * line_number) as i64
+fn get_y_axis_pos(line_number : usize) -> i64 {
+    85 - line_space + line_space * line_number as i64
 }
