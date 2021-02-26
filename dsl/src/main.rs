@@ -5,12 +5,8 @@ use std::{
 };
 // svg_generator
 mod parse;
-use rustviz_lib::svg_frontend::{
-    svg_generation, utils
-};
-use rustviz_lib::data::{
-    VisualizationData
-};
+use rustviz_lib::svg_frontend::svg_generation;
+use rustviz_lib::data::VisualizationData;
 
 fn main() {
     // verify usage
@@ -31,14 +27,11 @@ fn main() {
         println!("Example source file (main.rs) not found in {:?}!", &filename);
         return;
     }
-    let contents = utils::read_file_to_string(filename).unwrap(); // read to single string
-
     /* ******************************************
             --- Parse main.rs file ---
     ****************************************** */
-    let var_map = parse::extract_vars_to_map(&contents);
-    let events = parse::extract_events_to_string(&contents);
-
+    let (contents, var_map) = parse::parse_vars_to_map(filename);
+    let events = parse::extract_events(contents);
     /* ******************************************
             --- Build VisualizationData ---
     ****************************************** */
@@ -49,7 +42,6 @@ fn main() {
         event_line_map: BTreeMap::new()
     };
     parse::add_events(&mut vd, var_map, events);
-
     /* ******************************************
             --- Render SVG images ---
     ****************************************** */

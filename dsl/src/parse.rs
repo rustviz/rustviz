@@ -1,36 +1,55 @@
-use core::panic;
 // rust lib
+use core::panic;
 use std::collections::HashMap;
+type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
 use rustviz_lib::data::{
     ExternalEvent, Function, LifetimeTrait, MutRef, Owner,
     ResourceAccessPoint, StaticRef, VisualizationData, Visualizable
 };
-// crates.io
-use regex::Regex;
 
-// Requires: Well-formatted, non-empty file contents
-//           Variables should be specified within '![' and ']'
+// Requires: Valid file path
+//           Variables specified within BEGIN and END statements
 // Modifies: Nothing, unchanged
-// Effects: Uses Regex to parse DSL variable definitions into HashMap with
+// Effects: Parses variable definitions into HashMap with
 //          {key, value} pair = {name, ResourceAccessPoint}
-pub fn extract_vars_to_map(fin: &String) -> HashMap<String, ResourceAccessPoint> {
-    // Extract ResourceAccessPoints with regex
-    let re_vars = Regex::new(r"/\*(?s:.)*?!\[{1}(?P<variables>(?s:.)[^]/\*]*)\]?")
-        .expect("Something went wrong with the regex.");
-    
-    // capture text between ![ ]
-    let cap =
-        re_vars.captures(&fin)
-            .expect("Variables not declared properly!");
-    let cap = cap["variables"].to_string();
+//          Returns std::io::Line iterator to file
+pub fn parse_vars_to_map<P>(fpath: P) -> (
+    Lines, HashMap<String, ResourceAccessPoint>
+) where
+    P: AsRef<std::path::Path>,
+{
+    // read file
+    let mut lines =  rustviz_lib::svg_frontend::utils::read_lines(fpath)
+        .expect("Unable to read file!");
 
-    let vars: Vec<String> = cap.split("\n")
+    // check for unchanged template
+    let mut line = lines.next()
+        .expect("Oops, could not read. Empty file maybe?")
+        .expect("Unable to read first line!");
+    if line != "/* --- BEGIN Variable Definitions ---" {
+        panic!("Uh oh! Do not change the first line!");
+    }
+
+    // parse variables definitions to string
+    let mut vars_string = String::new();
+    while {
+        line = lines.next()
+            .expect("Something went wrong! Do not remove BEGIN and END statements!")
+            .expect("Unable to read file!");
+        line != " --- END Variable Definitions --- */"
+    } {
+        vars_string.push_str(&line); // get vars to string
+    }
+
+    // split string into individual variables
+    let vars: Vec<String> = vars_string.split(",")
         .map(|s| s.trim().to_string()) // trim whitespace
         .filter(|s| !s.is_empty()) // remove empty strings
         .collect();
 
-    vec_to_map(vars) // return HashMap
+    // return Lines iterator
+    (lines, vec_to_map(vars))
 }
 
 // Requires: Well-formatted variable definitions in the form:
@@ -86,30 +105,44 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
 // Modifies: Nothing, unchanged
 // Effects: Uses Regex to parse DSL events in file,
 //          compiles Vec<(line_num, event_string)>
-pub fn extract_events_to_string(fin: &String) -> Vec<(u64, String)> {
-    // Extract groups of "!{<events>}"
-    let re = Regex::new(r"(//|/\*)(?s:.)*?!\[(?P<line>[0-9]+)\]\{{1}(?P<events>(?s:.)[^}/\*]*)\}?")
-        .expect("Something went wrong with the regex.");
-
-    // collect groups into vector
-    let events: Vec<(u64, String)> =
-        re.captures_iter(&fin)
-            .map(|caps|
-                (caps["line"].parse::<u64>().expect("Error: Check line numbers!"),
-                caps["events"].to_string())
-            )
-            .collect();
-    
-
-    // extract and format into individual events
-    events.iter()
-        .flat_map(|pair| // flatten nested Vec<(u64, String)> into (u64, String)
-            pair.1.split(",") // split events
-                .map(|s| s.trim().to_string()) // trim whitespace
-                .map(|s| (pair.0, s)) // make pair (line_num, event)
-                .collect::<Vec<(u64, String)>>()
-        ) // split around commas
-        .collect() // collect into Vec<(u64, String)>
+pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
+    let mut events: Vec<(u64, String)> = Vec::new();
+    let (mut block_str, mut line_begin, mut block) = (String::new(), 0, false); // contents, parsing_block_or_not
+    for (lnum, line) in fin_lines.enumerate() {
+        let line_string = line.expect(&format!("Unable to read line number {} from file!", lnum+1));
+        if block { // if searching inside block comment
+            if let Some(j) = line_string.find("}") {
+                block_str.push_str(&line_string[..j]); // append line to contents
+                // extract all comma-separated events and format into tuple
+                for s in block_str.split(',') {
+                    events.push((line_begin, s.trim().to_string()));
+                }
+                // clear
+                block_str.clear();
+                block = false;
+            }
+            else { // append line to contents
+                block_str += line_string.trim();
+            }
+        }
+        else {
+            if let Some(i) = line_string.rfind("!{") {
+                if let Some(j) = line_string[i..].rfind("}") {
+                    let evt_str = &line_string[
+                        i+2.. // i+2: skip !{
+                        i+j // i+j: capture str from !{ to }
+                    ].trim();
+                    events.push((lnum as u64 + 1, evt_str.to_string()));
+                }
+                else { //try next line
+                    block = true;
+                    line_begin = lnum as u64 + 1;
+                    block_str += &line_string[i+2..];
+                }
+            }
+        }
+    }
+    events
 }
 
 // Requires: Well-formatted events, HashMap of ResourceAccessPoints
