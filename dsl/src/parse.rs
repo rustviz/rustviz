@@ -4,7 +4,7 @@ use std::collections::HashMap;
 type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
 use rustviz_lib::data::{
-    ExternalEvent, Function, LifetimeTrait, MutRef, Owner,
+    ExternalEvent, Function, MutRef, Owner,
     ResourceAccessPoint, StaticRef, VisualizationData, Visualizable
 };
 
@@ -58,44 +58,51 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
 // Effects: Uses strings to build HashMap with
 //          {key, value} pair = {name, ResourceAccessPoint}
 fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
-    // TODO: set defined fields, check for invalid fields
+    // iterate over all parsed strings
     vars.iter().enumerate().map(|(hash, v)| {
-        // fields = [type, name, Option<field1>, Option<field2>]
+        // fields = [type, is_mut, name] or [type, name]
         let fields: Vec<&str> = v
-            .split(|c| c == ' ' || c == '{' || c == ',')
+            .split(' ')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
-        
+
+        // type and name are required fields
+        if fields.is_empty() || fields.len() < 2 {
+            print_usage_error(&fields);
+            std::process::exit(1);
+        }
+
         // returns tuple (key, item) : (String, ResourceAccessPoint)
-        (fields[1].to_string(), 
+        let name = if fields.len() > 2 { fields[2] } else { fields[1] };
+        (name.to_string(), 
             // match type with possible ResourceAccessPoints
-            match fields[0] {
-                "Owner" => ResourceAccessPoint::Owner(Owner {
+            match (fields[0], fields.len()) {
+                ("Owner", 2) | ("Owner", 3) => ResourceAccessPoint::Owner(Owner {
                     hash: hash as u64 + 1,
-                    name: String::from(fields[1]),
-                    is_mut: false,
-                    lifetime_trait: LifetimeTrait::Copy,
+                    name: get_name_field(&fields),
+                    is_mut: get_mut_qualifier(&fields),
                 }),
-                "MutRef" => ResourceAccessPoint::MutRef(MutRef {
+                ("MutRef", 2) | ("MutRef", 3) => ResourceAccessPoint::MutRef(MutRef {
                     hash: hash as u64 + 1,
-                    name: String::from(fields[1]),
-                    my_owner_hash: Some(1),
-                    is_mut: false,
-                    lifetime_trait: LifetimeTrait::Copy,
+                    name: get_name_field(&fields),
+                    is_mut: get_mut_qualifier(&fields),
                 }),
-                "StaticRef" => ResourceAccessPoint::StaticRef(StaticRef {
+                ("StaticRef", 2) | ("StaticRef", 3) => ResourceAccessPoint::StaticRef(StaticRef {
                     hash: hash as u64 + 1,
-                    name: String::from(fields[1]),
-                    my_owner_hash: Some(1),
-                    is_mut: false,
-                    lifetime_trait: LifetimeTrait::Copy,
+                    name: get_name_field(&fields),
+                    is_mut: get_mut_qualifier(&fields),
                 }),
-                "Function" => ResourceAccessPoint::Function(Function {
+                ("Function", 1) => ResourceAccessPoint::Function(Function {
                     hash: hash as u64 + 1,
                     name: String::from(fields[1]),
                 }),
-                _ => panic!("Invalid ResourceAccessPoint \"{}\"", fields[0])
+                // default if invalid ResourceAccessPoint type
+                // or incorrect number of qualifiers/fields
+                _ => {
+                    print_usage_error(&fields);
+                    std::process::exit(1);
+                }
         })
     })
     .collect()
@@ -177,10 +184,15 @@ pub fn add_events(
             panic!("Incorrect formatting!\n\tUsage: <Event>(<from>-><to>)")
         }
 
-        // println!("{:?}", field);
         match field.0 {
-            "Duplicate" => vd.append_external_event(
-                ExternalEvent::Duplicate{
+            "Bind" => vd.append_external_event(
+                ExternalEvent::Bind{
+                    from: get_resource(&vars, field.1),
+                    to: get_resource(&vars, field.2)
+                }, &(event.0 as usize)
+            ),
+            "Copy" => vd.append_external_event(
+                ExternalEvent::Copy{
                     from: get_resource(&vars, field.1),
                     to: get_resource(&vars, field.2)
                 }, &(event.0 as usize)
@@ -248,7 +260,10 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
-            _ => println!("{} is not a valid event.", field.0)
+            _ => {
+                eprintln!("{} is not a valid event.", field.0);
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -268,4 +283,42 @@ fn get_resource(
             None => panic!("Variable {} does not exist!", name)
         }
     }
+}
+
+// Requires: Nothing
+// Modifies: Nothing, unchanged
+// Effects: Returns name string from field vector
+fn get_name_field(fields: &Vec<&str>) -> String {
+    (if fields.len() == 2 { fields[1] }
+    else { fields[2] }).to_string()
+}
+
+// Requires: Nothing
+// Modifies: Nothing, unchanged
+// Effects: Returns mut bool from field vector
+//          If qualifier not recognized, exit program
+fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
+    if fields.len() == 2 { false }
+    else if fields[1] == "mut" { true }
+    else { 
+        eprintln!(
+            "Did not understand qualifier '{}' of variable '{}'!",
+            fields[1], fields[2]
+        );
+        std::process::exit(1);
+    }
+}
+
+// Requires: Nothing
+// Modifies: Nothing
+// Effects: Prints usage message to io::stderr
+fn print_usage_error(fields: &Vec<&str>) {
+    eprintln!("Incorrect variable formatting '{}'!\n{}{}{}{}{}",
+        fields.join(" "),
+        "Usage (':' denotes optional field) --",
+        "\n\tOwner <:mut> <name>",
+        "\n\tMutRef <:mut> <name>{<my_owner_name>}",
+        "\n\tStaticRef <:mut> <name>{<my_owner_name>}",
+        "\n\tFunction"
+    );
 }

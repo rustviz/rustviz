@@ -16,9 +16,9 @@ fn main() {
         return;
     }
 
-    let path_to_ex = Path::new("../svg_generator/examples").join(&args[1]);
+    let path_to_ex = Path::new("../svg_generator/examples_dsl").join(&args[1]);
     if !path_to_ex.is_dir() {
-        println!("Error: no corresponding directory exists in svg_generator/examples/!");
+        println!("Error: no corresponding directory exists in svg_generator/examples_dsl/!");
         return;
     }
 

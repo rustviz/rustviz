@@ -71,7 +71,7 @@ pub struct Struct {
 pub struct MutRef {         // let (mut) r1 = &mut a;
     pub name: String,
     pub hash: u64,
-    pub my_owner_hash: Option<u64>,
+    // pub my_owner_hash: Option<u64>,
     pub is_mut: bool,
 }
 
@@ -80,7 +80,7 @@ pub struct MutRef {         // let (mut) r1 = &mut a;
 pub struct StaticRef {                // let (mut) r1 = & a;
     pub name: String,
     pub hash: u64,
-    pub my_owner_hash: Option<u64>,
+    // pub my_owner_hash: Option<u64>,
     pub is_mut: bool,
 }
 
