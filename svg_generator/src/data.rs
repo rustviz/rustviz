@@ -55,7 +55,6 @@ pub struct Owner {
     pub name: String,
     pub hash: u64,
     pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
-    pub lifetime_trait: LifetimeTrait,
 }
 
 // when something is a struct
@@ -64,7 +63,6 @@ pub struct Struct {
     pub name: String,
     pub hash: u64,
     pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
-    pub lifetime_trait: LifetimeTrait,
     pub size: u64,
 }
 
@@ -75,7 +73,6 @@ pub struct MutRef {         // let (mut) r1 = &mut a;
     pub hash: u64,
     pub my_owner_hash: Option<u64>,
     pub is_mut: bool,
-    pub lifetime_trait: LifetimeTrait,
 }
 
 // a reference of type & T
@@ -85,7 +82,6 @@ pub struct StaticRef {                // let (mut) r1 = & a;
     pub hash: u64,
     pub my_owner_hash: Option<u64>,
     pub is_mut: bool,
-    pub lifetime_trait: LifetimeTrait,
 }
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
@@ -138,26 +134,18 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::Function(_) => false,
         }
     }
-
-    pub fn get_trait(&self) -> Option<&LifetimeTrait> {
-        match self {
-            ResourceAccessPoint::Owner(Owner{lifetime_trait, ..}) => Some(lifetime_trait),
-            ResourceAccessPoint::Struct(Struct{lifetime_trait, ..}) => Some(lifetime_trait),
-            ResourceAccessPoint::MutRef(MutRef{lifetime_trait, ..}) => Some(lifetime_trait),
-            ResourceAccessPoint::StaticRef(StaticRef{lifetime_trait, ..}) => Some(lifetime_trait),
-            ResourceAccessPoint::Function(Function{..}) => None,
-        }
-    }
 }
 
-/* let binding is either Duplicate (let _ = 1;)
-or move (let a = String::from("");) */
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
-    // copy / clone
-    Duplicate {
+    /* let binding, e.g.: let x = 1 */
+    Bind {
         from: Option<ResourceAccessPoint>,
-        to: Option<ResourceAccessPoint>,
+        to: Option<ResourceAccessPoint>
+    },
+    Copy {
+        from: Option<ResourceAccessPoint>,
+        to: Option<ResourceAccessPoint>
     },
     Move {
         from: Option<ResourceAccessPoint>,
@@ -289,15 +277,6 @@ pub enum Event {
         param: ResourceAccessPoint
     }
 
-}
-
-// Trait of a resource owner that might impact the way lifetime visualization
-// behaves
-#[derive(Hash, PartialEq, Eq, Clone, Debug)]
-pub enum LifetimeTrait {
-    Copy,
-    Move,
-    None,
 }
 
 // A State is a description of a ResourceAccessPoint IMMEDIATELY AFTER a specific line.
@@ -511,30 +490,15 @@ pub struct VisualizationData {
 #[allow(non_snake_case)]
 pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option<ResourceAccessPoint>, &Option<ResourceAccessPoint>){
     let (from, to) = match external_event {
-        ExternalEvent::Duplicate{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        },
-        ExternalEvent::Move{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        },
-        ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        },
-        ExternalEvent::StaticReturn{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        },
-        ExternalEvent::MutableBorrow{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        },
-        ExternalEvent::MutableReturn{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        },
-        ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        }
-        ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro} => {
-            (from_ro, to_ro)
-        }
+        ExternalEvent::Bind{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::Copy{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::Move{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::StaticBorrow{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::StaticReturn{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::MutableBorrow{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::MutableReturn{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro} => (from_ro, to_ro),
         _ => (&None, &None),
     };
     (from, to)
@@ -594,7 +558,7 @@ impl Visualizable for VisualizationData {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::MutRef(..) => {
                         State::FullPrivilege
                     },
-                    ResourceAccessPoint::Struct(..) | ResourceAccessPoint::MutRef(..) => {
+                    ResourceAccessPoint::Struct(..) => {
                         State::FullPrivilege
                     },
                     ResourceAccessPoint::StaticRef(..) => {
@@ -615,7 +579,7 @@ impl Visualizable for VisualizationData {
             (State::FullPrivilege, Event::MutableReturn{ .. }) =>
                 State::OutOfScope,
 
-            (State::FullPrivilege, Event::Acquire{ from: from_ro }) | (State::FullPrivilege, Event::Copy{ from: from_ro }) => {
+            (State::FullPrivilege, Event::Acquire{ from: _ }) | (State::FullPrivilege, Event::Copy{ from: _ }) => {
                 if self.is_mut(hash) {
                     State::FullPrivilege
                 }
@@ -716,27 +680,27 @@ impl Visualizable for VisualizationData {
             (Some(ResourceAccessPoint::Function(_)), Some(ResourceAccessPoint::Function(_)), _) => {
                 // do nothing case
             },
-            (Some(ResourceAccessPoint::Function(from_function)), Some(to_variable), _) => {  
+            (Some(ResourceAccessPoint::Function(_from_function)), Some(_to_variable), _) => {  
                 // (Some(function), Some(variable), _)
             },
-            (Some(from_variable), Some(ResourceAccessPoint::Function(function)), 
+            (Some(_from_variable), Some(ResourceAccessPoint::Function(_function)), 
              ExternalEvent::PassByStaticReference{..}) => { 
                  // (Some(variable), Some(function), PassByStatRef)
             },
-            (Some(from_variable), Some(ResourceAccessPoint::Function(function)), 
+            (Some(_from_variable), Some(ResourceAccessPoint::Function(_function)), 
              ExternalEvent::PassByMutableReference{..}) => {  
                  // (Some(variable), Some(function), PassByMutRef)
             },
-            (Some(from_variable), Some(ResourceAccessPoint::Function(to_function)), _) => { 
+            (Some(_from_variable), Some(ResourceAccessPoint::Function(_to_function)), _) => { 
                 // (Some(variable), Some(function), _)
             },
-            (Some(from_variable), Some(to_variable), _) => {
+            (Some(_from_variable), Some(_to_variable), _) => {
                 if let Some(event_vec) = self.event_line_map.get_mut(&line_number) {
                     // Q: do I have to dereference here? Only derefernece case is Box<>
                     // Q: do I have to clone this? like store reference?
                     event_vec.push(event);
                 } else {
-                    let mut vec = vec![event];
+                    let vec = vec![event];
                     self.event_line_map.insert(line_number.clone(), vec);
                 }
             },
@@ -793,22 +757,14 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro, Event::Acquire{from : from_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &from_ro, Event::Move{to : to_ro.to_owned()}, &line_number);
             },
-            // eg let ro_to = 5;
-            ExternalEvent::Duplicate{from: from_ro, to: to_ro} => {
-                if let Some(from) = from_ro.clone() {
-                    match from.get_trait() {
-                        Some(LifetimeTrait::Copy) => {  // if RO has Move trait, use Copy
-                            maybe_append_event(self, &to_ro, Event::Copy{from : from_ro.to_owned()}, &line_number);
-                        },
-                        Some(LifetimeTrait::Move) => { // if RO has Move trait, use Acquire
-                            maybe_append_event(self, &to_ro, Event::Acquire{from : from_ro.to_owned()}, &line_number);
-                        },
-                        _ => {}
-                    }
-                }
-                else {
-                    maybe_append_event(self, &to_ro, Event::Acquire{from : from_ro.to_owned()}, &line_number);
-                }
+            // eg: let ro_to = 5;
+            ExternalEvent::Bind{from: from_ro, to: to_ro} => {
+                maybe_append_event(self, &to_ro, Event::Acquire{from : from_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &from_ro, Event::Duplicate{to : to_ro.to_owned()}, &line_number);
+            },
+            // eg: let x : i64 = y as i64;
+            ExternalEvent::Copy{from: from_ro, to: to_ro} => {
+                maybe_append_event(self, &to_ro, Event::Copy{from : from_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &from_ro, Event::Duplicate{to : to_ro.to_owned()}, &line_number);
             },
             ExternalEvent::StaticBorrow{from: from_ro, to: to_ro} => {

@@ -1,4 +1,5 @@
-use rustviz_lib::data::{ExternalEvent, LifetimeTrait, ResourceAccessPoint, Owner, MutRef, StaticRef, Function, VisualizationData, Visualizable};
+#[allow(unused_imports)]
+use rustviz_lib::data::{ExternalEvent, ResourceAccessPoint, Owner, MutRef, StaticRef, Function, VisualizationData, Visualizable};
 use rustviz_lib::svg_frontend::svg_generation;
 use std::collections::BTreeMap;
 fn main() {
@@ -6,13 +7,11 @@ fn main() {
         hash: 1,
         name: String::from("x"),
         is_mut: false,
-        lifetime_trait: LifetimeTrait::Copy,
     });
     let y = ResourceAccessPoint::Owner(Owner {
         hash: 2,
         name: String::from("y"),
         is_mut: false,
-        lifetime_trait: LifetimeTrait::Copy,
     });
     let mut vd = VisualizationData {
         timelines: BTreeMap::new(),
@@ -21,9 +20,9 @@ fn main() {
         event_line_map: BTreeMap::new()
     };
 
-    vd.append_external_event(ExternalEvent::Duplicate{from: None,
+    vd.append_external_event(ExternalEvent::Bind{from: None,
         to: Some(x.clone())}, &(2 as usize));
-    vd.append_external_event(ExternalEvent::Duplicate{from: Some(x.clone()),
+    vd.append_external_event(ExternalEvent::Copy{from: Some(x.clone()),
         to: Some(y.clone())}, &(3 as usize));
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro : x.clone() }, 
         &(4 as usize));

@@ -1,6 +1,5 @@
-use std::error::Error;
-use std::fs::File;
 use std::io::{self, prelude::*};
+use std::fs::File;
 use std::path::Path;
 
 /* File handling helper functions. */
@@ -47,13 +46,13 @@ where
 
     // Open a file in write-only mode, returns `io::Result<File>`
     let mut file = match File::create(file_path.as_ref()) {
-        Err(why) => panic!("couldn't create {}: {}", display, why.description()),
+        Err(why) => panic!("couldn't create {}: {}", display, why),
         Ok(file) => file,
     };
 
     // Write the content string to `file`, returns `io::Result<()>`
     match file.write_all(content.as_bytes()) {
-        Err(why) => panic!("couldn't write to {}: {}", display, why.description()),
+        Err(why) => panic!("couldn't write to {}: {}", display, why),
         Ok(_) => println!("successfully wrote to {}", display),
     }
 }

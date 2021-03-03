@@ -27,7 +27,7 @@ pub fn render_svg(
     // first by sorting "to" from small to large number then sort by "from" from small to large number
     // Q: does for loop do the "move"?
     // Q: how is this okay??
-    for (line_number, event_vec) in &mut visualization_data.event_line_map {
+    for (_, event_vec) in &mut visualization_data.event_line_map {
         event_vec.sort_by(|a, b| {
             ResourceAccessPoint_extract(a)
                 .1
