@@ -97,13 +97,11 @@ Each Event is defined on the line where it occurs and within delimiters `!{` and
 > Events can be annotated within block comments; however, the block **_must_** start on the line in which the events occur. Additionally, all Events within a `!{}` delimitation **_must_** be separated by a singular comma and must each follow the format:
 
 ```rust
-ExternalEvents Usage: <name>(<from>-><to>)
-    e.g.:
-        // !{ StaticBorrow(a->b), ... }
-        or
-        /* !{
-            PassByMutableReference(a->Some_Function()), ...
-        } */
+ExternalEvents Usage:
+    Format: <event_name>(<from>-><to>)
+        e.g.: // !{ PassByMutableReference(a->Some_Function()), ... }
+    Note: GoOutOfScope and InitializeParam require only the <from> parameter
+        e.g.: // !{ GoOutOfScope(x) }
 ```
 > Refer to the [Appendix](#Appendix) for a list of usable `ExternalEvent`'s.
 
@@ -138,8 +136,11 @@ Congratulations! You have successfully generated your first visualization! As a 
 - `PassByMutableReference`
     - used for Functions, not to be confused with MutableBorrow
 - `GoOutOfScope`
-- `InitializeParam `
+- `InitializeParam`
     - only use this event to initialize `function parameters
+
+> Note: `GoOutOfScope` and `InitializeParam` require only one parameter.
+e.g.: // !{ GoOutOfScope(x) }
 
 ## Visualization Limitations
 Yet to be finished....

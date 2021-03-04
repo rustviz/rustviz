@@ -30,8 +30,8 @@ fn main() {
     /* ******************************************
             --- Parse main.rs file ---
     ****************************************** */
-    let (contents, var_map) = parse::parse_vars_to_map(filename);
-    let events = parse::extract_events(contents);
+    let (contents, line_num, var_map) = parse::parse_vars_to_map(filename);
+    let events = parse::extract_events(contents, line_num);
     /* ******************************************
             --- Build VisualizationData ---
     ****************************************** */

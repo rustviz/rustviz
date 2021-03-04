@@ -15,16 +15,16 @@ use rustviz_lib::data::{
 //          {key, value} pair = {name, ResourceAccessPoint}
 //          Returns std::io::Line iterator to file
 pub fn parse_vars_to_map<P>(fpath: P) -> (
-    Lines, HashMap<String, ResourceAccessPoint>
+    Lines, u64, HashMap<String, ResourceAccessPoint>
 ) where
     P: AsRef<std::path::Path>,
 {
     // read file
-    let mut lines =  rustviz_lib::svg_frontend::utils::read_lines(fpath)
+    let mut fin_lines =  rustviz_lib::svg_frontend::utils::read_lines(fpath)
         .expect("Unable to read file!");
 
     // check for unchanged template
-    let mut line = lines.next()
+    let mut line = fin_lines.next()
         .expect("Oops, could not read. Empty file maybe?")
         .expect("Unable to read first line!");
     if line != "/* --- BEGIN Variable Definitions ---" {
@@ -34,12 +34,14 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
 
     // parse variables definitions to string
     let mut vars_string = String::new();
+    let mut num_lines = 2; // tracks curr line num
     while {
-        line = lines.next()
+        line = fin_lines.next()
             .expect("Something went wrong! Do not remove BEGIN and END statements!")
             .expect("Unable to read file!");
         line != " --- END Variable Definitions --- */"
     } {
+        num_lines += 1;
         vars_string.push_str(&line); // get vars to string
     }
 
@@ -50,7 +52,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
         .collect();
 
     // return Lines iterator
-    (lines, vec_to_map(vars))
+    (fin_lines, num_lines, vec_to_map(vars))
 }
 
 // Requires: Well-formatted variable definitions in the form:
@@ -70,7 +72,7 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
 
         // type and name are required fields
         if fields.is_empty() || fields.len() < 2 {
-            print_usage_error(&fields);
+            print_var_usage_error(&fields);
             exit(1);
         }
 
@@ -101,7 +103,7 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
                 // default to error if invalid ResourceAccessPoint type
                 // or incorrect number of qualifiers/fields
                 _ => {
-                    print_usage_error(&fields);
+                    print_var_usage_error(&fields);
                     exit(1);
                 }
         })
@@ -113,7 +115,10 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
 // Modifies: Nothing, unchanged
 // Effects: Uses Regex to parse DSL events in file,
 //          compiles Vec<(line_num, event_string)>
-pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
+pub fn extract_events(
+    fin_lines: Lines,
+    main_line: u64,
+) -> Vec<(u64, String)> {
     let mut events: Vec<(u64, String)> = Vec::new();
     let (mut block_str, mut block) = (String::new(), false); // contents, parsing_block_or_not
     let (mut line_begin, mut line_end) = (0, 0); // used for block comments
@@ -121,6 +126,10 @@ pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
     for (lnum, line) in fin_lines.enumerate() {
         let line_string = line.expect(&format!("Unable to read line number {} from file!", lnum+1));
         if block { // if searching inside block comment
+            // if '!{' found before '}', print error msg
+            if let Some(_) = line_string.find("!{") {
+                delimitation_err(line_begin+main_line);
+            }
             if let Some(j) = line_string.find("}") {
                 block_str.push_str(&line_string[..j]); // append line to contents
                 // extract all comma-separated events and format into tuple
@@ -156,6 +165,8 @@ pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
             }
         }
     }
+    // if block is still true, closing '}' was never found
+    if block { delimitation_err(line_begin+main_line); }
 
     // separate all events in same line
     events.iter()
@@ -186,102 +197,111 @@ pub fn add_events(
             .filter(|s| !s.is_empty())
             .collect();
 
-        let mut field = ("","",""); // (name, from, to)
+        let mut field = Vec::new();
         if split.len() == 1 { // no "->"
-            let idx = split[0].find("(").expect("Incorrect event formatting!");
-            field.0 = &split[0][..idx]; // event
-            field.1 = &split[0][idx+1..split[0].len()-1]; // name
+            let idx = split[0].find("(").expect(&event_usage_err());
+            field.push(&split[0][..idx]); // event
+            field.push(&split[0][idx+1..split[0].len()-1]); // name
         }
         else if split.len() == 2 { // has "->"
-            // (event, name1, name2)
-            let idx = split[0].find("(").expect("Incorrect event formatting!");
-            field.0 = &split[0][..idx]; // event
-            field.1 = &split[0][idx+1..]; // from
-            field.2 = &split[1][..split[1].len()-1]; // to
+            // [event, name1, name2]
+            let idx = split[0].find("(").expect(&event_usage_err());
+            field.push(&split[0][..idx]); // event
+            field.push(&split[0][idx+1..]); // from
+            field.push(&split[1][..split[1].len()-1]); // to
         }
         else { // uh oh, wrong
-            eprintln!("Incorrect formatting!\n\tUsage: <Event>(<from>-><to>)");
+            eprintln!("{}", event_usage_err());
             exit(1);
         }
 
-        match field.0 {
+        // check for any empty fields
+        for f in &field {
+            if f.is_empty() {
+                eprintln!("{}", event_usage_err());
+                exit(1);
+            }
+        };
+
+        match field[0] {
             "Bind" => vd.append_external_event(
                 ExternalEvent::Bind{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 }, &(event.0 as usize)
             ),
             "Copy" => vd.append_external_event(
                 ExternalEvent::Copy{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 }, &(event.0 as usize)
             ),
             "Move" => vd.append_external_event(
                 ExternalEvent::Move{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
             "StaticBorrow" => vd.append_external_event(
                 ExternalEvent::StaticBorrow{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
             "MutableBorrow" => vd.append_external_event(
                 ExternalEvent::MutableBorrow{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
             "StaticReturn" => vd.append_external_event(
                 ExternalEvent::StaticReturn{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
             "MutableReturn" => vd.append_external_event(
                 ExternalEvent::MutableReturn{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
             "PassByStaticReference" => vd.append_external_event(
                 ExternalEvent::PassByStaticReference{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
             "PassByMutableReference" => vd.append_external_event(
                 ExternalEvent::PassByMutableReference{
-                    from: get_resource(&vars, field.1),
-                    to: get_resource(&vars, field.2)
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
             "InitializeParam" => vd.append_external_event(
                 ExternalEvent::InitializeParam{
-                    param: get_resource(&vars, field.1)
+                    param: get_resource(&vars, field[1])
                         .expect("Expected Some variable, found None!")
                 },
                 &(event.0 as usize)
             ),
             "GoOutOfScope" => vd.append_external_event(
                 ExternalEvent::GoOutOfScope{
-                    ro: get_resource(&vars, field.1)
+                    ro: get_resource(&vars, field[1])
                         .expect("Expected Some variable, found None!")
                 },
                 &(event.0 as usize)
             ),
             _ => {
-                eprintln!("{} is not a valid event.", field.0);
+                eprintln!("{} is not a valid event.", field[0]);
+                println!("{}", event_usage_err());
                 exit(1);
             }
         }
@@ -294,14 +314,15 @@ pub fn add_events(
 fn get_resource(
     vars: &HashMap<String, ResourceAccessPoint>, name: &str
 ) -> Option<ResourceAccessPoint> {
-    if name == "None" {
-        None
-    }
+    if name == "None" { None }
     else {
         match vars.get(name) {
             Some(res) => Some(res.clone()),
             None => {
-                eprintln!("Variable {} does not exist!", name);
+                eprintln!(
+                    "Variable '{}' does not exist! \
+                    Name must match definition.", name
+                );
                 exit(1);
             }
         }
@@ -325,7 +346,8 @@ fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
     else if fields[1] == "mut" { true }
     else { 
         eprintln!(
-            "Did not understand qualifier '{}' of variable '{}'!",
+            "Did not understand qualifier '{}' of variable '{}'! \
+            Field must either be empty or 'mut'.",
             fields[1], fields[2]
         );
         exit(1);
@@ -334,14 +356,39 @@ fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
 
 // Requires: Nothing
 // Modifies: Nothing
-// Effects: Prints usage message to io::stderr
-fn print_usage_error(fields: &Vec<&str>) {
-    eprintln!("Incorrect variable formatting '{}'!\n{}{}{}{}{}",
-        fields.join(" "),
-        "Usage (':' denotes optional field) --",
-        "\n\tOwner <:mut> <name>",
-        "\n\tMutRef <:mut> <name>",
-        "\n\tStaticRef <:mut> <name>",
-        "\n\tFunction <name>"
+// Effects: Prints variable usage message to io::stderr
+fn print_var_usage_error(fields: &Vec<&str>) {
+    eprintln!("Incorrect variable formatting '{}'!\
+        \nUsage (':' denotes optional field):\
+        \n\tOwner <:mut> <name>\
+        \n\tMutRef <:mut> <name>\
+        \n\tStaticRef <:mut> <name>\
+        \n\tFunction <name>",
+        fields.join(" ")
     );
+}
+
+// Requires: Nothing
+// Modifies: Nothing
+// Effects: Returns event usage message as String
+fn event_usage_err() -> String {
+    String::from(
+        "ExternalEvents Usage:\
+        \n\tFormat: <event_name>(<from> -> <to>)\
+        \n\t    e.g.: // !{ PassByMutableReference(a->Some_Function()), ... }\
+        \n\tNote: GoOutOfScope and InitializeParam require only the <from> parameter\
+        \n\t    e.g.: // !{ GoOutOfScope(x) }"
+    )
+}
+
+// Requires: Nothing
+// Modifies: Nothing
+// Effects: Prints delimitation error message and exits with code 1
+fn delimitation_err(line_num: u64) {
+    eprintln!(
+        "Found unterminated delimitation on line {}! \
+        Please close with }}.",
+        line_num
+    );
+    exit(1);
 }
