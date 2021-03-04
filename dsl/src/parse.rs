@@ -340,8 +340,8 @@ fn print_usage_error(fields: &Vec<&str>) {
         fields.join(" "),
         "Usage (':' denotes optional field) --",
         "\n\tOwner <:mut> <name>",
-        "\n\tMutRef <:mut> <name>{<my_owner_name>}",
-        "\n\tStaticRef <:mut> <name>{<my_owner_name>}",
-        "\n\tFunction"
+        "\n\tMutRef <:mut> <name>",
+        "\n\tStaticRef <:mut> <name>",
+        "\n\tFunction <name>"
     );
 }
