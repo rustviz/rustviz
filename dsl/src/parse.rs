@@ -93,7 +93,7 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
                     name: get_name_field(&fields),
                     is_mut: get_mut_qualifier(&fields),
                 }),
-                ("Function", 1) => ResourceAccessPoint::Function(Function {
+                ("Function", 2) => ResourceAccessPoint::Function(Function {
                     hash: hash as u64 + 1,
                     name: String::from(fields[1]),
                 }),
@@ -114,7 +114,9 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
 //          compiles Vec<(line_num, event_string)>
 pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
     let mut events: Vec<(u64, String)> = Vec::new();
-    let (mut block_str, mut line_begin, mut block) = (String::new(), 0, false); // contents, parsing_block_or_not
+    let (mut block_str, mut block) = (String::new(), false); // contents, parsing_block_or_not
+    let (mut line_begin, mut line_end) = (0, 0); // used for block comments
+
     for (lnum, line) in fin_lines.enumerate() {
         let line_string = line.expect(&format!("Unable to read line number {} from file!", lnum+1));
         if block { // if searching inside block comment
@@ -127,6 +129,7 @@ pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
                 // clear
                 block_str.clear();
                 block = false;
+                line_end = lnum as u64 + 1;
             }
             else { // append line to contents
                 block_str += line_string.trim();
@@ -139,7 +142,10 @@ pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
                         i+2.. // i+2: skip !{
                         i+j // i+j: capture str from !{ to }
                     ].trim();
-                    events.push((lnum as u64 + 1, evt_str.to_string()));
+
+                    // do not count block comments towards valid lines of code
+                    let diff = line_end - line_begin;
+                    events.push((lnum as u64 - diff + 1, evt_str.to_string()));
                 }
                 else { //try next line
                     block = true;
@@ -149,7 +155,19 @@ pub fn extract_events(fin_lines: Lines) -> Vec<(u64, String)> {
             }
         }
     }
-    events
+
+    // separate all events in same line
+    events.iter()
+        .flat_map(|(lnum, evts)| { // flatten nested Vec<(u64, String)> into (u64, String)
+            evts.split(',') // split all comma-separated events
+                .map(|s| // make pair {line_num, event_string}
+                    (lnum.to_owned(),
+                    s.trim().to_string()) // trim whitespace
+                )
+                .filter(|e| !e.1.is_empty()) // remove empty cells
+                .collect::<Vec<(u64, String)>>() // collect vec
+        }
+    ).collect::<Vec<(u64, String)>>() // return vec<(line_num, event_string)>
 }
 
 // Requires: Well-formatted events, HashMap of ResourceAccessPoints
