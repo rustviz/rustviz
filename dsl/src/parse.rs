@@ -1,5 +1,5 @@
 // rust lib
-use core::panic;
+use std::process::exit;
 use std::collections::HashMap;
 type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
@@ -28,7 +28,8 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
         .expect("Oops, could not read. Empty file maybe?")
         .expect("Unable to read first line!");
     if line != "/* --- BEGIN Variable Definitions ---" {
-        panic!("Uh oh! Do not change the first line!");
+        eprintln!("Uh oh! Do not change the first line!");
+        exit(1);
     }
 
     // parse variables definitions to string
@@ -70,7 +71,7 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
         // type and name are required fields
         if fields.is_empty() || fields.len() < 2 {
             print_usage_error(&fields);
-            std::process::exit(1);
+            exit(1);
         }
 
         // returns tuple (key, item) : (String, ResourceAccessPoint)
@@ -97,11 +98,11 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
                     hash: hash as u64 + 1,
                     name: String::from(fields[1]),
                 }),
-                // default if invalid ResourceAccessPoint type
+                // default to error if invalid ResourceAccessPoint type
                 // or incorrect number of qualifiers/fields
                 _ => {
                     print_usage_error(&fields);
-                    std::process::exit(1);
+                    exit(1);
                 }
         })
     })
@@ -199,7 +200,8 @@ pub fn add_events(
             field.2 = &split[1][..split[1].len()-1]; // to
         }
         else { // uh oh, wrong
-            panic!("Incorrect formatting!\n\tUsage: <Event>(<from>-><to>)")
+            eprintln!("Incorrect formatting!\n\tUsage: <Event>(<from>-><to>)");
+            exit(1);
         }
 
         match field.0 {
@@ -280,7 +282,7 @@ pub fn add_events(
             ),
             _ => {
                 eprintln!("{} is not a valid event.", field.0);
-                std::process::exit(1);
+                exit(1);
             }
         }
     }
@@ -298,7 +300,10 @@ fn get_resource(
     else {
         match vars.get(name) {
             Some(res) => Some(res.clone()),
-            None => panic!("Variable {} does not exist!", name)
+            None => {
+                eprintln!("Variable {} does not exist!", name);
+                exit(1);
+            }
         }
     }
 }
@@ -323,7 +328,7 @@ fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
             "Did not understand qualifier '{}' of variable '{}'!",
             fields[1], fields[2]
         );
-        std::process::exit(1);
+        exit(1);
     }
 }
 
