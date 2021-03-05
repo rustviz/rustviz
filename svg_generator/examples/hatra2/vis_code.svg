@@ -1,4 +1,4 @@
-<svg height="370px" 
+<svg height="490px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
     <desc>examples/hatra2/input/</desc>
@@ -169,16 +169,16 @@ object.code_panel {
 
     <g id="code">
         <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn main(){ </text>
-        <text class="code" x="20" y="110"> <tspan fill="#AAA">2  </tspan>    let mut <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
-        <text class="code" x="20" y="130"> <tspan fill="#AAA">3  </tspan> </text>
-        <text class="code" x="20" y="150"> <tspan fill="#AAA">4  </tspan>    let <tspan data-hash="2">r1</tspan> = <tspan data-hash="1">&amp;s</tspan>; </text>
-        <text class="code" x="20" y="170"> <tspan fill="#AAA">5  </tspan>    let <tspan data-hash="3">r2</tspan> = <tspan data-hash="1">&amp;s</tspan>; </text>
-        <text class="code" x="20" y="190"> <tspan fill="#AAA">6  </tspan>    assert!(<tspan class="fn" data-hash="0" hash="6">compare_strings</tspan>(<tspan data-hash="2">r1</tspan>, <tspan data-hash="3">r2</tspan>)); </text>
-        <text class="code" x="20" y="210"> <tspan fill="#AAA">7</tspan> </text>
-        <text class="code" x="20" y="230"> <tspan fill="#AAA">8  </tspan> </text>
-        <text class="code" x="20" y="250"> <tspan fill="#AAA">9  </tspan>    let <tspan data-hash="4">r3</tspan> = <tspan data-hash="1">&amp;mut s</tspan>; </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">10  </tspan>    <tspan class="fn" data-hash="0" hash="7">clear_string</tspan>(<tspan data-hash="4">r3</tspan>); </text>
-        <text class="code" x="20" y="290"> <tspan fill="#AAA">11  </tspan>} </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    let mut <tspan data-hash="1">s</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("hello"); </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan> </text>
+        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>    let <tspan data-hash="2">r1</tspan> = <tspan data-hash="1">&amp;s</tspan>; </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>    let <tspan data-hash="3">r2</tspan> = <tspan data-hash="1">&amp;s</tspan>; </text>
+        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    assert!(<tspan class="fn" data-hash="0" hash="6">compare_strings</tspan>(<tspan data-hash="2">r1</tspan>, <tspan data-hash="3">r2</tspan>)); </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7</tspan> </text>
+        <text class="code" x="20" y="290"> <tspan fill="#AAA">8  </tspan> </text>
+        <text class="code" x="20" y="320"> <tspan fill="#AAA">9  </tspan>    let <tspan data-hash="4">r3</tspan> = <tspan data-hash="1">&amp;mut s</tspan>; </text>
+        <text class="code" x="20" y="350"> <tspan fill="#AAA">10  </tspan>    <tspan class="fn" data-hash="0" hash="7">clear_string</tspan>(<tspan data-hash="4">r3</tspan>); </text>
+        <text class="code" x="20" y="380"> <tspan fill="#AAA">11  </tspan>} </text>
     </g>
 
    

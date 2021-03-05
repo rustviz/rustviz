@@ -38,7 +38,8 @@ pub fn render_code_panel(
             );
             data.insert("LINE".to_string(), fmt_line);
             output.push_str(&handlebars.render("code_line_template", &data).unwrap());
-            y = y + 20;
+            // change line spacing
+            y = y + 30;
         }
         let mut extra_line_num = 0;
         match event_line_map.get(&(line_of_code as usize)) {

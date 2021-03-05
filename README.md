@@ -3,13 +3,20 @@
 
 *RustViz* is a tool written in Rust that generates visualizations from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
-## What does it look like?
+## Documentation
+* [Example Usage](#Example-Usage)
+* [User Define Usage](#User-Define-Usage)
+* [Data Structure and Function Specifications](#Data-Structures-and-Function-Specifications)
+* [Modules](#Modules)
+* [Visulization Limitations](#Visualization-Limitations)
+
+## What does it look like? 
 
 *RustViz* generates *.svg* files of graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to generate visualization over user-defined rust code examples. Here's a sample view of what the visualization looks like:
 
 ![alt tag](https://github.com/rustviz/rustviz/blob/master/example.png)
 
-## Usage (example)
+## Example Usage
 *RustViz* is capable of visualizing simple rust codes (refer to the restriction section) via user definition. In this section we'll showcase how to generate some default visulization example that has been provided by us.
 
 *RustViz* requires [Rust](https://www.rust-lang.org/), Cargo and [mdbook](https://github.com/rust-lang/mdBook) to be installed. Once you have installed all the above prerequisites, direct into the */test_example* folder and run *test_examples.sh*
@@ -47,12 +54,12 @@ If you observed this output, then you have successfully generated the rust visul
 
 Great! Now you've know how to generate and view the visualization that you could create by using *RustViz*, Now let's create one of your own!
 
-## Usage (advanced)
+## User Define Usage
 In this section, we'll take a look into how to create example by using our example [string_from_move_print](svg_generator/examples/string_from_move_print). let's first take a look at the file structure you need for the example to run:
 ```
 string_from_move_print
 ├── input
-│   └── annotated_source.rs
+│   └── annotated_source.rs
 ├── main.rs
 └── source.rs
 ```
@@ -66,7 +73,7 @@ fn main() {
 ```
 In this example, the string `hello`'s resource is first moved from `String::from()` to `x`, then `x`'s resource is moved to `y`. Lastly, we print the value by taking `y` as an input to `println!()` but the resource has not been moved. 
 
-Next, let's focus on we need to do in [main.rs](svg_generator/examples/string_from_move_print/main.rs). In this visuliation tool, **we define all possible owners, references or input of any memory resource as a** [Resource Access Point](##Data Structures and Function Specifications). In this case, we have the function `String::from()` and two variables `x` and `y` as Resource Access Points. Correspondingly in our implementation, the [Resource Access Point](##Data Structures and Function Specifications) is defined as an enum that hold the possible types of Resource Access Points, namely `ResourceAccessPoint::Owner` and `ResourceAccessPoint::Function` in this case. We want to create instance that represent these functions and variables in our main program:
+Next, let's focus on we need to do in [main.rs](svg_generator/examples/string_from_move_print/main.rs). In this visuliation tool, **we define all possible owners, references or input of any memory resource as a** [Resource Access Point](#ResourceAccessPoint). In this case, we have the function `String::from()` and two variables `x` and `y` as Resource Access Points. Correspondingly in our implementation, the [Resource Access Point](#ResourceAccessPoint) is defined as an enum that hold the possible types of Resource Access Points, namely `ResourceAccessPoint::Owner` and `ResourceAccessPoint::Function` in this case. We want to create instance that represent these functions and variables in our main program:
 ```
 // Variables
     let x = ResourceAccessPoint::Owner(Owner {
@@ -87,7 +94,7 @@ Next, let's focus on we need to do in [main.rs](svg_generator/examples/string_fr
         name: String::from("String::from()"),
     });
 ```
-Next we decalre an instance of the [VisualizationData]() struct as a container that holds all the information of [ExternalEvent]() that we will talk about up next, all you need is to declare the struct instance without any modification:
+Next we decalre an instance of the VisualizationData struct as a container that holds all the information of [ExternalEvent](#ExternalEvents) that we will talk about up next, all you need is to declare the struct instance without any modification:
 ```
 let mut vd = VisualizationData {
     timelines: BTreeMap::new(),
@@ -96,13 +103,13 @@ let mut vd = VisualizationData {
     event_line_map: BTreeMap::new()
 };
 ```
-The [ExternalEvent]() **is an enum that hold all the movement, borrowing and dropping of a resource.** In our case, we have four of such event: 
+The [ExternalEvent](#ExternalEvents) **is an enum that hold all the movement, borrowing and dropping of a resource.** In our case, we have four of such event: 
 1. Resource was moved from `String::from()` to `x`
 2. Resource was moved from `y` to `x`
 3. Resource of `x` is dropped
 4. Resource of `y` is dropped
 
-We then add these events information to the [VisualizationData]() instance we declared before by using the `append_external_event()` function:
+We then add these events information to the VisualizationData instance we declared before by using the `append_external_event()` function:
 ```
 // Resource was moved from `String::from()` to `x`
     vd.append_external_event(ExternalEvent::Move{from: Some(from_func.clone()),
@@ -115,7 +122,7 @@ We then add these events information to the [VisualizationData]() instance we de
 // Resource of `y` is dropped
     vd.append_external_event(ExternalEvent::GoOutOfScope{ ro: y }, &(5 as usize));
 ```
-Now the final step is to activte the rendering function that generate the [vis_code.svg]() and [vis_timeline.svg]() that are visulization SVG files for the code section and timeline section using the `svg_generation::render_svg()` function:
+Now the final step is to activte the rendering function that generate the vis_code.svg and vis_timeline.svg that are visulization SVG files for the code section and timeline section using the `svg_generation::render_svg()` function:
 ```
 svg_generation::render_svg(&"examples/string_from_move_print/input/".to_owned().to_owned(), &"examples/string_from_move_print/".to_owned(), & mut vd);
 ```
@@ -127,7 +134,7 @@ Now your folder should look like this:
 ```
 string_from_move_print
 ├── input
-│   └── annotated_source.rs
+│   └── annotated_source.rs
 ├── main.rs
 ├── source.rs
 ├── vis_code.svg
@@ -136,7 +143,22 @@ string_from_move_print
 Congratulations! You have Successfully generated the visulizations! Add the name of your example folder to */test_example/test_examples.sh* and see them in your browser.
 
 ## Data Structures and Function Specifications
-- [ResourceAccessPoint](svg_generator/src/data.rs)
+* [Resource Access Point](#ResourceAccessPoint)
+    * [Owner](#Owner)
+    * [Mutable reference and Inmutable reference](#mutablereferenceandinmutablereference)
+    * [Functions](#Functions)
+* [External Events](#ExternalEvents)
+    * [Duplicate](#Duplicate)
+    * [Move](#Move)
+    * [Static Borrow](#StaticBorrow)
+    * [Mutable Borrow](#MutableBorrow)
+    * [Static Return](#StaticReturn)
+    * [Mutable Return](#MutableReturn)
+    * [Pass By Static Reference](#PassByStaticReference)
+    * [Pass By Mutable Reference](#PassByMutableReference)
+    * [Go Out Of Scope](#GoOutOfScope)
+    * [Initialize Param](#InitializeParam)
+- [ResourceAccessPoint](svg_generator/src/data.rs) <a name="ResourceAccessPoint"></a>
 ResourceAccessPoint is an enum that define all possible owner, references or creator of any memory resource. For now, the types of ResourceAccessPoint could possibly be an owner of a resource, a mutable reference of a resource, a unmutable referene of a resource or a function:
     ```
     pub enum {
@@ -146,7 +168,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         Function(Function),
     }
     ```
-    - Owner
+    - Owner<a name="Owner"></a>
     For the owner of a resource, we need to define several properties: The name of the variable, the hash number and whether the vairable is mutable. The *lifetime_trait* property is not yet implemented.
         ```
         pub struct Owner {
@@ -155,7 +177,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         pub is_mut: bool, // let a = 42; vs let mut a = 42;
         pub lifetime_trait: LifetimeTrait,
         ```
-    - Mutable reference and Inmutable reference
+    - Mutable reference and Inmutable reference<a name="mutablereferenceandinmutablereference"></a>
     The defintion for references are similar to that of a Owner, but additionally we need to define the *my_owner_hash*, which refer back to the hash number of its owner. We also need to define *is_mut*, which represent the mutability of the reference. The *lifetime_trait* property is not yet implemented.
         ```
         // a reference of type &mut T
@@ -178,7 +200,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
             pub lifetime_trait: LifetimeTrait,
         }
         ```
-    - Functions
+    - Functions<a name="Functions"></a> 
     For each function, we only need to specify its name and hash number.
         ```
         pub struct Function {
@@ -187,9 +209,9 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         }
         ```
     
-- [ExternalEvents](svg_generator/src/data.rs)
+- [ExternalEvents](svg_generator/src/data.rs) <a name="ExternalEvents"></a>
 ExternalEvents is an enum that hold all the movements of a the resource, here is the list of all the possible movements are avaliable for visualization:
-    - Duplicate
+    - Duplicate <a name="Duplicate"></a>
         The Duplicate event represent the copy of one variable to the other that does not involve the move of resource.
         ```
         Duplicate {
@@ -203,7 +225,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         // set from Option to None to represent initialization
         let x = y; // Duplicate from y to x
         ```
-    - Move
+    - Move <a name="Move"></a>
     The Move event represent the tranferring of resource from one detination to the other.
         ```
         Move {
@@ -216,7 +238,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         let x = String::from("Hello"); // Move from String::from() to x
         let y = x; // Move from x to y
         ```
-    - StaticBorrow
+    - StaticBorrow <a name="StaticBorrow"></a>
     The StaticBorrow event represent the immutable borrowing in rust
         ```
         StaticBorrow {
@@ -229,7 +251,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         let x = String::from("hello");
         let y = &x; // immutable borrow from x to y
         ```
-    - MutableBorrow
+    - MutableBorrow <a name="MutableBorrow"></a>
     The MutableBorrow event represent the mutable borrowing in rust
         ```
         MutableBorrow {
@@ -242,7 +264,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         let mut x = String::from("Hello");
         let y = &mut x; // mutable borrow from x to y
         ```
-    - StaticReturn
+    - StaticReturn <a name="StaticReturn"></a>
     The StaticReturn event represent return of a unmutably borrowed source.
         ```
         StaticReturn {
@@ -260,7 +282,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             s.push_str(", world")
         }
         ```
-    - MutableReturn
+    - MutableReturn <a name="MutableReturn"></a>
     The StaticReturn event represent return of a mutably borrowed source.
         ```
         MutableReturn {
@@ -280,7 +302,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             println!("{} and {}", s1, s2)
         }
         ```
-    - PassByStaticReference
+    - PassByStaticReference <a name="PassByStaticReference"></a>
     The PassByStaticReference event represent passing an inmutable reference to a function.
         ```
         PassByStaticReference {
@@ -298,7 +320,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             println!("{}", s) 
         } 
         ```
-    - PassByMutableReference
+    - PassByMutableReference <a name="PassByMutableReference"></a>
     The PassByMutableReference event represent passing a mutable reference to a function.
         ```
         PassByMutableReference {
@@ -316,7 +338,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             s.push_str(", world")
         }
         ```
-    - GoOutOfScope
+    - GoOutOfScope <a name="GoOutOfScope"></a>
     The GoOutOfScope event represent a variable go out of scope.
         ```
         GoOutOfScope {
@@ -330,7 +352,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             let y = x; // x and y both go out of scope
         } 
         ```
-    - InitializeParam
+    - InitializeParam <a name="InitializeParam"></a>
     The InitializeParam event represent initialization of the parameters within a function
         ```
         InitializeParam {
