@@ -63,7 +63,7 @@ pub struct Owner {
 pub struct Struct {
     pub name: String,
     pub hash: u64,
-    pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
+    pub is_mut: bool,                     
     pub lifetime_trait: LifetimeTrait,
     pub size: u64,
 }
@@ -198,7 +198,11 @@ pub enum ExternalEvent {
     // only use this event to initialize fn parameters
     InitializeParam {
         param: ResourceAccessPoint,
-    }
+    },
+    StructBox {
+        from: Option<ResourceAccessPoint>,
+        to: Option<ResourceAccessPoint>,
+    },
 }
 
 
@@ -287,8 +291,10 @@ pub enum Event {
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     InitializeParam {
         param: ResourceAccessPoint
-    }
-
+    },
+    StructBox{
+        from: Option<ResourceAccessPoint>
+    },
 }
 
 // Trait of a resource owner that might impact the way lifetime visualization
@@ -411,7 +417,8 @@ impl Display for Event {
             Event::StaticReacquire{ from } => { from_ro = from.to_owned(); "Partially reacquires resource" },
             Event::InitializeParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
-            Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" }
+            Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
+            Event::StructBox{ from } => { from_ro = from.to_owned(); "The components in the box belong to a struct" },
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -476,7 +483,10 @@ impl Event {
             MutableReacquire{ from } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
-        }
+            StructBox{ from } => {
+                hover_messages::structure(my_name)
+            }
+        } 
     }
 }
 
@@ -508,6 +518,7 @@ pub struct VisualizationData {
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
 }
 
+//extract the source and destination Option of an external event
 pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option<ResourceAccessPoint>, &Option<ResourceAccessPoint>){
     let (from, to) = match external_event {
         ExternalEvent::Duplicate{ from: from_ro, to: to_ro} => {
@@ -532,6 +543,9 @@ pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option
             (from_ro, to_ro)
         }
         ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro} => {
+            (from_ro, to_ro)
+        }
+        ExternalEvent::StructBox{ from: from_ro, to: to_ro} => {
             (from_ro, to_ro)
         }
         _ => (&None, &None),
@@ -851,6 +865,9 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro, Event::MutableReacquire{from : to_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &to_ro, Event::MutableReturn{to : from_ro.to_owned()}, &line_number);
             },
+            ExternalEvent::StructBox{ from:from_ro, to:to_ro } => {
+                maybe_append_event(self, &from_ro, Event::StructBox{from : from_ro.to_owned()}, &line_number);
+            }
             ExternalEvent::InitializeParam{param: ro} => {
                 maybe_append_event(self, &Some(ro.clone()), Event::InitializeParam{param : ro.to_owned()}, &line_number);
             },

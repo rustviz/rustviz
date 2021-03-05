@@ -507,3 +507,13 @@ pub fn state_invalid(my_name: &String) -> String {
         my_name_fmt
     )
 }
+
+pub fn structure(my_name: &String) -> String {
+    // update styling
+    let my_name_fmt = fmt_style(my_name);
+    
+    format!(
+        "the components in the box belong to struct {0}",
+        my_name_fmt
+    )
+}

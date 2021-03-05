@@ -156,7 +156,7 @@ fn prepare_registry(registry: &mut Handlebars) {
     let hollow_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
-        "        <rect x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" />\n";
+        "        <rect x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
     
     assert!(
         registry.register_template_string("timeline_panel_template", timeline_panel_template).is_ok()
@@ -370,6 +370,10 @@ fn render_arrows_string_external_events_version(
                 title = String::from("Pass by immutable reference");
                 (from_ro, to_ro)
             }
+            ExternalEvent::StructBox{ from: from_ro, to: to_ro } => {
+                title = String::from("Struct Box");
+                (from_ro, to_ro)
+            }
             _ => (&None, &None),
         };
         // complete title
@@ -479,6 +483,22 @@ fn render_arrows_string_external_events_version(
                     title: styled_fn_name,
                 };
                 fn_timeline.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+            },
+            (Some(from_variable), Some(to_variable), ExternalEvent::StructBox{..}) => {
+                let mut box_data = BoxData {
+                    hash: 0,
+                    x: 0,
+                    y: 65,
+                    w: 0,
+                    h: 0,
+                    title: String::new(),
+                };
+                let max_line = line_number.clone() as i64;
+                box_data.x = resource_owners_layout[from_variable.hash()].x_val - 20;
+                box_data.w = resource_owners_layout[to_variable.hash()].x_val 
+                            - resource_owners_layout[from_variable.hash()].x_val + 40;
+                box_data.h =  max_line * 20 + 10;
+                output.push_str(&registry.render("box_template", &box_data).unwrap());
             },
             (Some(from_variable), Some(to_variable), _) => {
                 // Only place to address overlay arrows
@@ -789,11 +809,12 @@ fn render_ref_line(
 
     let mut output = String::new();
     for (hash, timeline) in timelines{
+        
         match timeline.resource_access_point {
             ResourceAccessPoint::Function(_) => {
                 /* do nothing */
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let ro = timeline.resource_access_point.to_owned();
                 // verticle state lines
@@ -813,7 +834,6 @@ fn render_ref_line(
                     dy: 0,
                     title: String::new(),
                 };
-
                 for (line_start, _line_end, state) in states.iter() {
                     match state { // consider removing .clone()
                         State::OutOfScope | State::ResourceMoved{ .. } => {
@@ -869,7 +889,7 @@ fn render_ref_line(
                         _ => (),
                     }
                 }
-            }
+            },  
         }
     }
     output
