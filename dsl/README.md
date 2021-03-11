@@ -123,24 +123,27 @@ Congratulations! You have successfully generated your first visualization! As a 
 
 ## Appendix
 
-**Usable `ExternalEvent`'s:**
-- `Bind` // let binding, e.g.: let x = 1
-- `Copy`
-- `Move`
-- `StaticBorrow`
-- `MutableBorrow`
-- `StaticReturn`
-- `MutableReturn`
-- `PassByStaticReference`
+**`ExternalEvent` Usage:**
+- `Bind(a->b)` // let binding, e.g.: let x = 1
+- `Copy(a->b)`
+- `Move(a->b)`
+- `StaticBorrow(a->b)`
+- `MutableBorrow(a->b)`
+- `StaticReturn(a->b)`
+- `MutableReturn(a->b)`
+- `PassByStaticReference(a->b)`
     - used for Functions, not to be confused with StaticBorrow
-- `PassByMutableReference`
+- `PassByMutableReference(a->b)`
     - used for Functions, not to be confused with MutableBorrow
-- `GoOutOfScope`
-- `InitializeParam`
+- `GoOutOfScope(a)`
+- `InitializeParam(a)`
     - only use this event to initialize `function parameters
 
-> Note: `GoOutOfScope` and `InitializeParam` require only one parameter.
-e.g.: // !{ GoOutOfScope(x) }
+> Note:
+> 1. `GoOutOfScope` and `InitializeParam` require a singular parameter previously defined in the `Variable Definitions` section.
+(e.g.: `// !{ GoOutOfScope(x) }`)
+> 2. All other events require two parameters, `a` and `b`, which can either be defined (e.g.: `Owner a`) or undefined (`None`).
+The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(None->x)`).
 
 ## Visualization Limitations
 Yet to be finished....
