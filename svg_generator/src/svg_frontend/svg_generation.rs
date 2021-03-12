@@ -108,16 +108,19 @@ pub fn render_svg(
         .unwrap_or("Reading book_svg_style.css failed.".to_owned());
 
     // data for code panel
-    if let Ok(lines) = utils::read_lines(input_path.to_owned() + "annotated_source.rs") {
+    let mut max_x_space: i64 = 0;
+    println!("{}", input_path);
+    if let (Ok(annotated_lines),Ok(lines)) = 
+    (utils::read_lines(input_path.to_owned() + "annotated_source.rs"), utils::read_lines(output_path.to_owned() + "source.rs")) {
         let (output, line_of_code) =
-            code_panel::render_code_panel(lines, &visualization_data.event_line_map);
+            code_panel::render_code_panel(annotated_lines, lines, &mut max_x_space, &visualization_data.event_line_map);
         code_panel_string = output;
         num_lines = line_of_code;
     }
 
     // data for tl panel
     let (timeline_panel_string, max_width) =
-        timeline_panel::render_timeline_panel(visualization_data);
+        timeline_panel::render_timeline_panel(visualization_data, max_x_space);
 
         
     let svg_data = SvgData {

@@ -100,13 +100,13 @@ struct RefLineData {
     title: String,
 }
 
-pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String, i32) {
+pub fn render_timeline_panel(visualization_data : &VisualizationData, max_x_space : i64) -> (String, i32) {
     /* Template creation */
     let mut registry = Handlebars::new();
     prepare_registry(&mut registry);
 
     // hash -> TimelineColumnData
-    let (resource_owners_layout, width) = compute_column_layout(visualization_data);
+    let (resource_owners_layout, width) = compute_column_layout(visualization_data, max_x_space);
 
     // render resource owner labels
     let labels_string = render_labels_string(&resource_owners_layout, &registry);
@@ -155,13 +155,8 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let hollow_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
-<<<<<<< HEAD
     let box_template =
         "        <rect x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
-=======
-    // let box_template =
-        // "        <rect x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" />\n";
->>>>>>> 0e68f69e83ec725174bbe8897f2560b8266ebc6d
     
     assert!(
         registry.register_template_string("timeline_panel_template", timeline_panel_template).is_ok()
@@ -199,7 +194,7 @@ fn prepare_registry(registry: &mut Handlebars) {
 }
 
 // Returns: a hashmap from the hash of the ResourceOwner to its Column information
-fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (HashMap<&'a u64, TimelineColumnData>, i32) {
+fn compute_column_layout<'a>(visualization_data: &'a VisualizationData, max_x_space : i64) -> (HashMap<&'a u64, TimelineColumnData>, i32) {
     let mut resource_owners_layout = HashMap::new();
     let mut x = 0;                   // Right-most Column x-offset.
     for (hash, timeline) in visualization_data.timelines.iter() {
@@ -222,6 +217,7 @@ fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (Hash
                 };
                 let mut ref_bool = false;
 
+                // render reference label
                 if timeline.resource_access_point.is_ref() {
                     let temp_name = name.clone() + "|*" + &name; // used for calculating x_space
                     x = x - x_space; // reset
@@ -232,12 +228,12 @@ fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (Hash
 
                 let styled_name = SPAN_BEGIN.to_string() + &name + SPAN_END;
                 resource_owners_layout.insert(hash, TimelineColumnData
-                    { 
-                        name: name.clone(), 
-                        x_val: x, 
-                        title: styled_name.clone() + ", " + &title,
-                        is_ref: ref_bool,
-                    });
+                { 
+                    name: name.clone(), 
+                    x_val: x, 
+                    title: styled_name.clone() + ", " + &title,
+                    is_ref: ref_bool,
+                });
             }
         }
     }
