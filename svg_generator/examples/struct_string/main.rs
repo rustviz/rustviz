@@ -5,22 +5,27 @@ fn main() {
 	
 	let f = ResourceAccessPoint::Struct(Struct {
         hash: 1,
+        owner: 1,
         name: String::from("f"),
         is_mut: false,
         lifetime_trait: LifetimeTrait::Move,
-        size: 3,
+        is_member: false,
 	});
-    let x = ResourceAccessPoint::Owner(Owner {
+    let x = ResourceAccessPoint::Struct(Struct {
         hash: 2,
+        owner: 1,
         name: String::from("f.x"),
         is_mut: false,
         lifetime_trait: LifetimeTrait::Move,
+        is_member: true,
     });
-    let y = ResourceAccessPoint::Owner(Owner {
+    let y = ResourceAccessPoint::Struct(Struct {
         hash: 3,
+        owner: 1,
         name: String::from("f.y"),
         is_mut: false,
         lifetime_trait: LifetimeTrait::Move,
+        is_member: true,
     });
 	let _y = ResourceAccessPoint::Owner(Owner {
         hash: 4,
@@ -60,6 +65,7 @@ fn main() {
 
 	vd.append_external_event(ExternalEvent::Move{from: f_func.clone(),
 		to: Some(f.clone())}, &(8 as usize));
+    vd.append_external_event(ExternalEvent::InitializeParam{param: f.clone()}, &(8 as usize));
 	vd.append_external_event(ExternalEvent::InitializeParam{param: x.clone()}, &(8 as usize));
     vd.append_external_event(ExternalEvent::PassByStaticReference{from: Some(x.clone()),
         to: print_func.clone()}, &(9 as usize));

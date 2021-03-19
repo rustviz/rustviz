@@ -58,14 +58,16 @@ pub struct Owner {
     pub lifetime_trait: LifetimeTrait,
 }
 
-// when something is a struct
+// when something is a struct member
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Struct {
     pub name: String,
     pub hash: u64,
+    pub owner: u64,
     pub is_mut: bool,                     
     pub lifetime_trait: LifetimeTrait,
-    pub size: u64,
+    // pub size: u64,
+    pub is_member: bool,
 }
 
 // a reference of type &mut T
@@ -136,6 +138,46 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::MutRef(_) => true,
             ResourceAccessPoint::StaticRef(_) => true,
             ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn is_struct_group(&self) -> bool {
+        match self {
+            ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Struct(_) => true,
+            ResourceAccessPoint::MutRef(_) => false,
+            ResourceAccessPoint::StaticRef(_) => false,
+            ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn is_struct(&self) -> bool {
+        match self {
+            ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Struct(Struct{is_member, ..}) => !is_member.to_owned(),
+            ResourceAccessPoint::MutRef(_) => false,
+            ResourceAccessPoint::StaticRef(_) => false,
+            ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn is_member(&self) -> bool {
+        match self {
+            ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Struct(Struct{is_member, ..}) => is_member.to_owned(),
+            ResourceAccessPoint::MutRef(_) => false,
+            ResourceAccessPoint::StaticRef(_) => false,
+            ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn get_owner(&self) -> u64 {
+        match self {
+            ResourceAccessPoint::Owner(Owner{hash, ..}) => hash.to_owned(),
+            ResourceAccessPoint::Struct(Struct{owner, ..}) => owner.to_owned(),
+            ResourceAccessPoint::MutRef(MutRef{hash, ..}) => hash.to_owned(),
+            ResourceAccessPoint::StaticRef(StaticRef{hash, ..}) => hash.to_owned(),
+            ResourceAccessPoint::Function(Function{hash, ..}) => hash.to_owned(),
         }
     }
 
