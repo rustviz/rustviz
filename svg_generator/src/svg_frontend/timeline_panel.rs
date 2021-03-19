@@ -188,9 +188,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     assert!(
         registry.register_template_string("hollow_ref_line_template", hollow_ref_line_template).is_ok()
     );
-    // assert!(
-    //     registry.register_template_string("box_template", box_template).is_ok()
-    // );
+    assert!(
+        registry.register_template_string("box_template", box_template).is_ok()
+    );
 }
 
 // Returns: a hashmap from the hash of the ResourceOwner to its Column information
@@ -498,7 +498,7 @@ fn render_arrows_string_external_events_version(
                 box_data.x = resource_owners_layout[from_variable.hash()].x_val - 20;
                 box_data.w = resource_owners_layout[to_variable.hash()].x_val 
                             - resource_owners_layout[from_variable.hash()].x_val + 40;
-                box_data.h =  max_line * 20 + 10;
+                box_data.h =  max_line * 30 + 20;
                 output.push_str(&registry.render("box_template", &box_data).unwrap());
             },
             (Some(from_variable), Some(to_variable), _) => {
