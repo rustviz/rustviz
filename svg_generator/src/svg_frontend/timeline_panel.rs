@@ -29,6 +29,7 @@ struct TimelinePanelData {
     ref_line: String,
     arrows: String,
 }
+
 #[derive(Serialize)]
 struct ResourceAccessPointLabelData {
     x_val: i64,
@@ -110,6 +111,13 @@ struct RefLineData {
     title: String,
 }
 
+#[derive(Serialize)]
+struct OutputStringData {
+    struct_name: String,
+    struct_instance: String,
+    struct_members: String,
+}
+
 pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String, i32) {
     /* Template creation */
     let mut registry = Handlebars::new();
@@ -119,13 +127,16 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     let (resource_owners_layout, width) = compute_column_layout(visualization_data);
 
     let mut output : HashMap<i64, (TimelinePanelData, TimelinePanelData)> = HashMap::new();
-    // output.insert(-1, (TimelinePanelData{_}, TimelinePanelData)); TODO: see what's wrong
+    output.insert(-1, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
+        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
+            timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
     // Note: key {-1} = non-struct timelines
     
     // render resource owner labels
+    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_labels_string(&mut output, &resource_owners_layout, &registry);
     render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry);
-    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry);
+    // render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &registry);
     // let timeline_panel_data = TimelinePanelData {
@@ -148,7 +159,12 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
         }
         let timelinepanel_string = registry.render("timeline_panel_template", &timelinepanel).unwrap();
         let member_timelinepanel_string = registry.render("timeline_panel_template", &member_timelinepanel).unwrap();
-        output_string.push_str(&registry.render("struct_template", &(struct_name, timelinepanel_string, member_timelinepanel_string)).unwrap());
+        let output_data = OutputStringData{
+            struct_name: struct_name,
+            struct_instance: timelinepanel_string,
+            struct_members: member_timelinepanel_string,
+        };
+        output_string.push_str(&registry.render("struct_template", &output_data).unwrap());
     }
 
     (output_string, width)
@@ -192,7 +208,7 @@ fn prepare_registry(registry: &mut Handlebars) {
 
     let struct_template  = 
         "    <g id=\"{{struct_name}}\">\n\
-        <g class=\"struct_instance\">{{ struct_instance }}</g>\n\
+        <g class=\"struct_instance\">\n{{ struct_instance }}</g>\n\
         <g class=\"struct_members\">\n{{ struct_members }}</g>\n\
         </g>\n    ";
     // let struct_instance_template = 
@@ -340,13 +356,15 @@ fn render_labels_string(
         // let t = &ResourceAccessPoint //TODO: fix this
         if column_data.is_struct_group {
             if column_data.is_member {
-                output[&(column_data.owner.to_owned() as i64)].1.labels.push_str(&registry.render("label_template", &data).unwrap());
+                // output[&(column_data.owner.to_owned() as i64)].1.labels.push_str(&registry.render("label_template", &data).unwrap());
+                output.get_mut(&(column_data.owner.to_owned() as i64)).unwrap().1.labels.push_str(&registry.render("label_template", &data).unwrap());
             } else {
-                output[&(column_data.owner.to_owned() as i64)].0.labels.push_str(&registry.render("label_template", &data).unwrap());
+                // output[&(column_data.owner.to_owned() as i64)].0.labels.push_str(&registry.render("label_template", &data).unwrap());
+                output.get_mut(&(column_data.owner.to_owned() as i64)).unwrap().0.labels.push_str(&registry.render("label_template", &data).unwrap());
             }
         }
         else {
-            output[&-1].0.labels.push_str(&registry.render("label_template", &data).unwrap());
+            output.get_mut(&-1).unwrap().0.labels.push_str(&registry.render("label_template", &data).unwrap());
         }
     }
 }
@@ -411,16 +429,16 @@ fn render_dots_string(
                         }
                     }
                     // push to individual timelines
-                    let column = resource_owners_layout[hash];
+                    let column = &resource_owners_layout[hash];
                     if column.is_struct_group {
                         if column.is_member {
-                            output[&(column.owner.to_owned() as i64)].1.dots.push_str(&registry.render("dot_template", &data).unwrap());
+                            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("dot_template", &data).unwrap());
                         } else {
-                            output[&(column.owner.to_owned() as i64)].0.dots.push_str(&registry.render("dot_template", &data).unwrap());
+                            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("dot_template", &data).unwrap());
                         }
                     }
                     else {
-                        output[&-1].0.dots.push_str(&registry.render("dot_template", &data).unwrap());
+                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("dot_template", &data).unwrap());
                     }
                 }
             },
@@ -542,13 +560,13 @@ fn render_arrows_string_external_events_version(
                 // fn_timeline.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                 if resource_owners_layout[to_variable.hash()].is_struct_group {
                     if resource_owners_layout[to_variable.hash()].is_member {
-                        output[&(resource_owners_layout[to_variable.hash()].owner as i64)].1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[to_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     } else {
-                        output[&(resource_owners_layout[to_variable.hash()].owner as i64)].0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[to_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     }
                 }
                 else {
-                    output[&-1].0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                 }
             },
             (Some(from_variable), Some(ResourceAccessPoint::Function(function)), 
@@ -566,13 +584,13 @@ fn render_arrows_string_external_events_version(
                 // fn_timeline.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
                     if resource_owners_layout[from_variable.hash()].is_member {
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                     } else {
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                     }
                 }
                 else {
-                    output[&-1].0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                    output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                 }
             },
             (Some(from_variable), Some(ResourceAccessPoint::Function(function)), 
@@ -589,13 +607,13 @@ fn render_arrows_string_external_events_version(
                 };
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
                     if resource_owners_layout[from_variable.hash()].is_member {
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                     } else {
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                     }
                 }
                 else {
-                    output[&-1].0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                    output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                 }
                 // fn_timeline.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
             },
@@ -618,13 +636,13 @@ fn render_arrows_string_external_events_version(
                 // fn_timeline.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
                     if resource_owners_layout[from_variable.hash()].is_member {
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     } else {
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     }
                 }
                 else {
-                    output[&-1].0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                 }
             },
             (Some(from_variable), Some(to_variable), ExternalEvent::StructBox{..}) => {
@@ -645,13 +663,13 @@ fn render_arrows_string_external_events_version(
                 // push_to_output(&registry, &resource_owners_layout[from_variable.hash()], "box_template", &data, &mut output);
                 if from_variable.is_struct_group() {
                     if from_variable.is_member(){
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].1.arrows.push_str(&registry.render("box_template", &data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
                     } else {
-                        output[&(resource_owners_layout[from_variable.hash()].owner as i64)].0.arrows.push_str(&registry.render("box_template", &data).unwrap());
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().0.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
                     }
                 }
                 else {
-                    output[&-1].0.arrows.push_str(&registry.render("box_template", &data).unwrap());
+                    output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
                 }
                 // output.push_str(&registry.render("box_template", &box_data).unwrap());
             },
@@ -742,15 +760,15 @@ fn render_arrows_string_external_events_version(
             }
 
             if let Some(ro) = from {
-                if resource_owners_layout[ro.hash()].is_struct_group {
+                if resource_owners_layout.contains_key(ro.hash()) && resource_owners_layout[ro.hash()].is_struct_group {
                     if resource_owners_layout[ro.hash()].is_member {
-                        output[&(resource_owners_layout[ro.hash()].owner.to_owned() as i64)].1.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+                        output.get_mut(&(resource_owners_layout[ro.hash()].owner.to_owned() as i64)).unwrap().1.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                     } else {
-                        output[&(resource_owners_layout[ro.hash()].owner.to_owned() as i64)].0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+                        output.get_mut(&(resource_owners_layout[ro.hash()].owner.to_owned() as i64)).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                     }
                 }
                 else {
-                    output[&-1].0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+                    output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                 }
                 // push_to_output(&registry, &resource_owners_ layout[ro.hash()], "arrow_template", &data, &mut output);
             }
@@ -949,14 +967,19 @@ fn render_timelines(
                     //     &create_owner_line_string(rap, state, &mut data.unwrap(), registry)
                     // );
                     if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
+                        if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
+                            output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
+                                ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
+                                    timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+                        }
                         if resource_owners_layout[hash].is_member {
-                            output[&(resource_owners_layout[hash].owner as i64)].1.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
+                            output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
                         } else {
-                            output[&(resource_owners_layout[hash].owner as i64)].0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
+                            output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
                         }
                     }
                     else {
-                        output[&-1].0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
+                        output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
                     }
                 },
                 ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
@@ -964,7 +987,7 @@ fn render_timelines(
                     //     // the unwrap is safe as long as data is built in this branch. 
                     //     &create_reference_line_string(rap, state, &mut data.unwrap(), registry)
                     // );
-                    output[&-1].0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
+                    output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
                 },
             }
         }
@@ -1022,10 +1045,10 @@ fn render_ref_line(
 
                                 match ro {
                                     ResourceAccessPoint::MutRef(_) => {
-                                        output[&-1].0.ref_line.push_str(&registry.render("solid_ref_line_template", &data).unwrap());
+                                        output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("solid_ref_line_template", &data).unwrap());
                                     },
                                     ResourceAccessPoint::StaticRef(_) => {
-                                        output[&-1].0.ref_line.push_str(&registry.render("hollow_ref_line_template", &data).unwrap());
+                                        output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("hollow_ref_line_template", &data).unwrap());
                                     },
                                     _ => (),
                                 }
