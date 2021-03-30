@@ -199,56 +199,7 @@ object.code_panel {
         </filter>
     </defs>
 
-    <g id="non-struct">
-	<g class="struct_instance">
-    <g id="labels">
-        <text x="280" y="90" style="text-anchor:middle" data-hash="4" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;, immutable">_y</text>
-    </g>
-
-    <g id="timelines">
-        <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 278.2,265 V 295 h 3.5 V 265 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
-    </g>
-
-    <g id="ref_line">
-    </g>
-
-    <g id="events">
-        <circle cx="280" cy="265" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; acquires ownership of a resource"/>
-        <circle cx="280" cy="295" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;'s resource is moved"/>
-        <circle cx="280" cy="385" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; goes out of scope. No resource is dropped."/>
-        <text x="306" y="270" data-hash="6" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
-    </g>
-
-    <g id="arrows">
-        <polyline stroke-width="5px" stroke="gray" points="303 265 293 265 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;" style="fill: none;"/> 
-        <polyline stroke-width="5px" stroke="gray" points="280 295 220 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt;" style="fill: none;"/> 
-        <polyline stroke-width="5px" stroke="gray" points="93 295 83 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;struct Foo{}&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;" style="fill: none;"/> 
-    </g></g>
-	<g class="struct_members">
-    <g id="labels">
-    </g>
-
-    <g id="timelines">
-    </g>
-
-    <g id="ref_line">
-    </g>
-
-    <g id="events">
-    </g>
-
-    <g id="arrows">
-    </g></g>
-	</g>
-        <g id="f">
+    <g id="f">
 	<g class="struct_instance">
     <g id="labels">
         <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;, immutable">f</text>
@@ -336,6 +287,55 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt; goes out of scope. Its resource is dropped."/>
         <use xlink:href="#functionDot" data-hash="2" x="140" y="325" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!()&lt;/span&gt; reads from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt;"/>
         <use xlink:href="#functionDot" data-hash="3" x="210" y="355" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!()&lt;/span&gt; reads from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt;"/>
+    </g>
+
+    <g id="arrows">
+    </g></g>
+	</g>
+        <g id="non-struct">
+	<g class="struct_instance">
+    <g id="labels">
+        <text x="280" y="90" style="text-anchor:middle" data-hash="4" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;, immutable">_y</text>
+    </g>
+
+    <g id="timelines">
+        <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 278.2,265 V 295 h 3.5 V 265 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
+    </g>
+
+    <g id="ref_line">
+    </g>
+
+    <g id="events">
+        <circle cx="280" cy="265" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; acquires ownership of a resource"/>
+        <circle cx="280" cy="295" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;'s resource is moved"/>
+        <circle cx="280" cy="385" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; goes out of scope. No resource is dropped."/>
+        <text x="306" y="270" data-hash="6" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
+    </g>
+
+    <g id="arrows">
+        <polyline stroke-width="5px" stroke="gray" points="303 265 293 265 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;" style="fill: none;"/> 
+        <polyline stroke-width="5px" stroke="gray" points="280 295 220 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt;" style="fill: none;"/> 
+        <polyline stroke-width="5px" stroke="gray" points="93 295 83 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;struct Foo{}&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;" style="fill: none;"/> 
+    </g></g>
+	<g class="struct_members">
+    <g id="labels">
+    </g>
+
+    <g id="timelines">
+    </g>
+
+    <g id="ref_line">
+    </g>
+
+    <g id="events">
     </g>
 
     <g id="arrows">
