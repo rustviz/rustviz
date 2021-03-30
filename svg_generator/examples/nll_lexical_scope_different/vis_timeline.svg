@@ -200,11 +200,11 @@ object.code_panel {
     </defs>
 
     <g id="non-struct">
-<g class="struct_instance">
+	<g class="struct_instance">
     <g id="labels">
-        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;, mutable">x</text>
-        <text x="160" y="90" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;y&lt;/span&gt;, immutable">y<tspan stroke="none" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;y&lt;/span&gt;, immutable">|</tspan>*y</text>
         <text x="250" y="90" style="text-anchor:middle" data-hash="3" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;z&lt;/span&gt;, immutable">z<tspan stroke="none" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;z&lt;/span&gt;, immutable">|</tspan>*z</text>
+        <text x="160" y="90" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;y&lt;/span&gt;, immutable">y<tspan stroke="none" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;y&lt;/span&gt;, immutable">|</tspan>*y</text>
+        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;, mutable">x</text>
         <text x="340" y="90" style="text-anchor:middle" data-hash="4" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;z&lt;/span&gt;, immutable">z<tspan stroke="none" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;z&lt;/span&gt;, immutable">|</tspan>*z</text>
     </g>
 
@@ -329,7 +329,7 @@ object.code_panel {
         <polyline stroke-width="5px" stroke="gray" points="70 205 240 205 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Mutable borrow from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;z&lt;/span&gt;" style="fill: none;"/> 
         <polyline stroke-width="5px" stroke="gray" points="250 235 80 235 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Return mutably borrowed resource from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;z&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;" style="fill: none;"/> 
     </g></g>
-<g class="struct_members">
+	<g class="struct_members">
     <g id="labels">
     </g>
 
@@ -344,7 +344,7 @@ object.code_panel {
 
     <g id="arrows">
     </g></g>
-</g>
+	</g>
     
 
 </svg>

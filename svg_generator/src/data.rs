@@ -334,9 +334,10 @@ pub enum Event {
     InitializeParam {
         param: ResourceAccessPoint
     },
-    StructBox{
-        from: Option<ResourceAccessPoint>
-    },
+    StructBox
+    // {
+        // from: Option<ResourceAccessPoint>
+    // },
 }
 
 // Trait of a resource owner that might impact the way lifetime visualization
@@ -460,7 +461,7 @@ impl Display for Event {
             Event::InitializeParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
-            Event::StructBox{ from } => { from_ro = from.to_owned(); "The components in the box belong to a struct" },
+            Event::StructBox => { "The components in the box belong to a struct" },
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -525,7 +526,7 @@ impl Event {
             MutableReacquire{ from } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
-            StructBox{ from } => {
+            StructBox => {
                 hover_messages::structure(my_name)
             }
         } 
@@ -908,7 +909,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro, Event::MutableReturn{to : from_ro.to_owned()}, &line_number);
             },
             ExternalEvent::StructBox{ from:from_ro, to:to_ro } => {
-                maybe_append_event(self, &from_ro, Event::StructBox{from : from_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &from_ro, Event::StructBox, &line_number);
             }
             ExternalEvent::InitializeParam{param: ro} => {
                 maybe_append_event(self, &Some(ro.clone()), Event::InitializeParam{param : ro.to_owned()}, &line_number);

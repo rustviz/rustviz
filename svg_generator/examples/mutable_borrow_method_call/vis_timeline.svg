@@ -200,10 +200,10 @@ object.code_panel {
     </defs>
 
     <g id="non-struct">
-<g class="struct_instance">
+	<g class="struct_instance">
     <g id="labels">
-        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s1&lt;/span&gt;, mutable">s1</text>
         <text x="140" y="90" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s2&lt;/span&gt;, immutable">s2</text>
+        <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s1&lt;/span&gt;, mutable">s1</text>
     </g>
 
     <g id="timelines">
@@ -298,7 +298,7 @@ object.code_panel {
         <polyline stroke-width="5px" stroke="gray" points="93 115 83 115 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s1&lt;/span&gt;" style="fill: none;"/> 
         <polyline stroke-width="5px" stroke="gray" points="163 145 153 145 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s2&lt;/span&gt;" style="fill: none;"/> 
     </g></g>
-<g class="struct_members">
+	<g class="struct_members">
     <g id="labels">
     </g>
 
@@ -313,7 +313,7 @@ object.code_panel {
 
     <g id="arrows">
     </g></g>
-</g>
+	</g>
     
 
 </svg>

@@ -200,7 +200,7 @@ object.code_panel {
     </defs>
 
     <g id="non-struct">
-<g class="struct_instance">
+	<g class="struct_instance">
     <g id="labels">
         <text x="280" y="90" style="text-anchor:middle" data-hash="4" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;, immutable">_y</text>
     </g>
@@ -221,10 +221,10 @@ object.code_panel {
         <circle cx="280" cy="295" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;'s resource is moved"/>
-        <circle cx="280" cy="325" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <circle cx="280" cy="385" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; goes out of scope. No resource is dropped."/>
-        <text x="306" y="270" data-hash="5" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
+        <text x="306" y="270" data-hash="6" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
     </g>
 
     <g id="arrows">
@@ -232,7 +232,7 @@ object.code_panel {
         <polyline stroke-width="5px" stroke="gray" points="280 295 220 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt;" style="fill: none;"/> 
         <polyline stroke-width="5px" stroke="gray" points="93 295 83 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;struct Foo{}&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;" style="fill: none;"/> 
     </g></g>
-<g class="struct_members">
+	<g class="struct_members">
     <g id="labels">
     </g>
 
@@ -247,39 +247,39 @@ object.code_panel {
 
     <g id="arrows">
     </g></g>
-</g>
+	</g>
         <g id="f">
-<g class="struct_instance">
+	<g class="struct_instance">
     <g id="labels">
         <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;, immutable">f</text>
     </g>
 
     <g id="timelines">
+        <path data-hash="1" class="hollow tooltip-trigger" style="fill:transparent;" d="M 68.2,295 V 385 h 3.5 V 295 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;f&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
     </g>
 
     <g id="ref_line">
     </g>
 
     <g id="events">
-        <circle cx="70" cy="385" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="the components in the box belong to struct &lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;f&lt;/span&gt;"/>
         <circle cx="70" cy="295" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;f&lt;/span&gt; acquires ownership of a resource"/>
-        <circle cx="70" cy="295" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <circle cx="70" cy="385" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="the components in the box belong to struct &lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;f&lt;/span&gt; is initialized as the function argument"/>
+        monospace, monospace !important;&quot;&gt;f&lt;/span&gt;"/>
         <circle cx="70" cy="385" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;f&lt;/span&gt; goes out of scope. Its resource is dropped."/>
-        <text x="96" y="300" data-hash="6" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;struct Foo{}&lt;/span&gt;">f</text>
+        monospace, monospace !important;&quot;&gt;f&lt;/span&gt;'s resource is moved"/>
+        <text x="96" y="300" data-hash="5" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;struct Foo{}&lt;/span&gt;">f</text>
     </g>
 
     <g id="arrows">
         <rect id="1" x="50" y="65" rx="20" ry="20" width="180" height="340" style="fill:white;stroke:black;stroke-width:3;opacity:0.1" pointer-events="none" />
     </g></g>
-<g class="struct_members">
+	<g class="struct_members">
     <g id="labels">
         <text x="140" y="90" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt;, immutable">f.x</text>
         <text x="210" y="90" style="text-anchor:middle" data-hash="3" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt;, immutable">f.y</text>
@@ -312,7 +312,7 @@ object.code_panel {
     <g id="events">
         <circle cx="140" cy="295" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt; is initialized as the function argument"/>
+        monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt; acquires ownership of a resource"/>
         <circle cx="140" cy="325" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt;'s resource is immutably borrowed"/>
@@ -321,7 +321,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt;'s resource is no longer immutably borrowed"/>
         <circle cx="140" cy="385" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt; goes out of scope. No resource is dropped."/>
+        monospace, monospace !important;&quot;&gt;f.x&lt;/span&gt; goes out of scope. Its resource is dropped."/>
         <circle cx="210" cy="295" r="5" data-hash="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt; acquires ownership of a resource"/>
@@ -340,7 +340,7 @@ object.code_panel {
 
     <g id="arrows">
     </g></g>
-</g>
+	</g>
     
 
 </svg>

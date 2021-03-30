@@ -263,6 +263,25 @@ function toggleAll(turn_on) {
     }
 }
 
+/* --------------- TOGGLE ALL SVGS --------------- */
+function toggleStruct(turn_on) {
+    var evt = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    });
+
+    var arr = document.getElementsByClassName('non-struct');
+    for (const obj of arr) {
+        if (turn_on && obj.classList.contains('fa-toggle-off')) {
+            obj.dispatchEvent(evt);
+        }
+        else if (!turn_on && obj.classList.contains('fa-toggle-on')) {
+            obj.dispatchEvent(evt);
+        }
+    }
+}
+
 window.onload = function () {
     var correct_doc = (document.getElementsByClassName('active')[0].attributes.href.value == 'ch04-01-what-is-ownership.html'
             || document.getElementsByClassName('active')[0].attributes.href.value == 'ch04-02-references-and-borrowing.html');
@@ -271,6 +290,7 @@ window.onload = function () {
         var top_btns = document.getElementsByClassName('left-buttons');
 
         var eye = document.getElementById('viz-toggle');
+        var struct_eye = document.getElementById('viz-struct-toggle')
 
         if (!eye) {
             eye = document.createElement('button');
@@ -293,6 +313,30 @@ window.onload = function () {
                 e.target.classList.add('fa-eye');
 
                 toggleAll(false);
+            }
+        });
+
+        if (!struct_eye) {
+            struct_eye = document.createElement('button');
+            struct_eye.id = 'viz-struct-toggle';
+            struct_eye.className = 'icon-button fa fa-eye';
+            struct_eye.title = 'Toggle non struct visualizations';
+            top_btns[0].insertBefore(eye, top_btns[0].lastElementChild);
+        }
+
+        struct_eye.addEventListener('click', function (e) {
+            if (e.target.classList.contains('fa-eye')) {
+                // on button click, show all visualizations
+                e.target.classList.remove('fa-eye');
+                e.target.classList.add('fa-eye-slash');
+
+                toggleStruct(true);
+            } else if (e.target.classList.contains('fa-eye-slash')) {
+                // on button click, hide all visualizations
+                e.target.classList.remove('fa-eye-slash');
+                e.target.classList.add('fa-eye');
+
+                toggleStruct(false);
             }
         });
     }

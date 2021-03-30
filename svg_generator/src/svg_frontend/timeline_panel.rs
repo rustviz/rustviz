@@ -208,9 +208,9 @@ fn prepare_registry(registry: &mut Handlebars) {
 
     let struct_template  = 
         "    <g id=\"{{struct_name}}\">\n\
-        <g class=\"struct_instance\">\n{{ struct_instance }}</g>\n\
-        <g class=\"struct_members\">\n{{ struct_members }}</g>\n\
-        </g>\n    ";
+             \t<g class=\"struct_instance\">\n{{ struct_instance }}</g>\n\
+             \t<g class=\"struct_members\">\n{{ struct_members }}</g>\n\
+             \t</g>\n    ";
     // let struct_instance_template = 
     //     "    <g class=\"struct_instance\">\n{{ struct_members }}    </g>\n\n    ";
     // let struct_member_template = 

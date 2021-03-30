@@ -200,7 +200,7 @@ object.code_panel {
     </defs>
 
     <g id="non-struct">
-<g class="struct_instance">
+	<g class="struct_instance">
     <g id="labels">
         <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;six&lt;/span&gt;, immutable">six</text>
     </g>
@@ -227,7 +227,7 @@ object.code_panel {
     <g id="arrows">
         <polyline stroke-width="5px" stroke="gray" points="93 115 83 115 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;plus_one()&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;six&lt;/span&gt;" style="fill: none;"/> 
     </g></g>
-<g class="struct_members">
+	<g class="struct_members">
     <g id="labels">
     </g>
 
@@ -242,7 +242,7 @@ object.code_panel {
 
     <g id="arrows">
     </g></g>
-</g>
+	</g>
     
 
 </svg>
