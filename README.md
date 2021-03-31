@@ -145,6 +145,7 @@ Congratulations! You have Successfully generated the visulizations! Add the name
 ## Data Structures and Function Specifications
 * [Resource Access Point](#ResourceAccessPoint)
     * [Owner](#Owner)
+    * [Struct](#Struct)
     * [Mutable reference and Inmutable reference](#mutablereferenceandinmutablereference)
     * [Functions](#Functions)
 * [External Events](#ExternalEvents)
@@ -158,6 +159,7 @@ Congratulations! You have Successfully generated the visulizations! Add the name
     * [Pass By Mutable Reference](#PassByMutableReference)
     * [Go Out Of Scope](#GoOutOfScope)
     * [Initialize Param](#InitializeParam)
+    * [Struct Box](#StructBox)
 - [ResourceAccessPoint](svg_generator/src/data.rs) <a name="ResourceAccessPoint"></a>
 ResourceAccessPoint is an enum that define all possible owner, references or creator of any memory resource. For now, the types of ResourceAccessPoint could possibly be an owner of a resource, a mutable reference of a resource, a unmutable referene of a resource or a function:
     ```
@@ -172,10 +174,23 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
     For the owner of a resource, we need to define several properties: The name of the variable, the hash number and whether the vairable is mutable. The *lifetime_trait* property is not yet implemented.
         ```
         pub struct Owner {
-        pub name: String,
-        pub hash: u64,
-        pub is_mut: bool, // let a = 42; vs let mut a = 42;
-        pub lifetime_trait: LifetimeTrait,
+            pub name: String,
+            pub hash: u64,
+            pub is_mut: bool, // let a = 42; vs let mut a = 42;
+            pub lifetime_trait: LifetimeTrait,
+        }
+        ```
+    - Struct<a name="Struct"></a>
+    For the owner and members of a struct, we need to define several properties: The name of the variable, the hash number of itself and its owner, if it is a member and whether the vairable is mutable. The *lifetime_trait* property is not yet implemented.
+        ```
+        pub struct Owner {
+            pub name: String,
+            pub hash: u64,
+            pub owner: u64, // if it is the owner, then keep it the same as hash of itself
+            pub is_mut: bool, // let a = 42; vs let mut a = 42;
+            pub lifetime_trait: LifetimeTrait,
+            pub is_member: bool, 
+        }
         ```
     - Mutable reference and Inmutable reference<a name="mutablereferenceandinmutablereference"></a>
     The defintion for references are similar to that of a Owner, but additionally we need to define the *my_owner_hash*, which refer back to the hash number of its owner. We also need to define *is_mut*, which represent the mutability of the reference. The *lifetime_trait* property is not yet implemented.
@@ -364,6 +379,21 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         fn takes_ownership(some_string: String) { // initialize some_string
             println!("{}", some_string) 
         } 
+        ```
+    - SturctBox <a name="StructBox"></a>
+    The StructBox event represent a struct owner and its members as a group
+        ```
+        StructBox{ 
+            from: Option<ResourceAccessPoint>, // the owner of the struct
+            to: Option<ResourceAccessPoint>, // the member with the largest hash 
+        }
+        ```
+        User case:
+        ```
+        Struct Position { // take Position as from and y as to
+            x: u32,
+            y: u32,
+        }
         ```
 ## Modules
 1. [mdbook_plugin](mdbook_plugin)

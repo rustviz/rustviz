@@ -315,29 +315,5 @@ window.onload = function () {
                 toggleAll(false);
             }
         });
-
-        if (!struct_eye) {
-            struct_eye = document.createElement('button');
-            struct_eye.id = 'viz-struct-toggle';
-            struct_eye.className = 'icon-button fa fa-eye';
-            struct_eye.title = 'Toggle non struct visualizations';
-            top_btns[0].insertBefore(eye, top_btns[0].lastElementChild);
-        }
-
-        struct_eye.addEventListener('click', function (e) {
-            if (e.target.classList.contains('fa-eye')) {
-                // on button click, show all visualizations
-                e.target.classList.remove('fa-eye');
-                e.target.classList.add('fa-eye-slash');
-
-                toggleStruct(true);
-            } else if (e.target.classList.contains('fa-eye-slash')) {
-                // on button click, hide all visualizations
-                e.target.classList.remove('fa-eye-slash');
-                e.target.classList.add('fa-eye');
-
-                toggleStruct(false);
-            }
-        });
     }
 };

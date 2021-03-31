@@ -252,10 +252,10 @@ function adjust_visualization_size(flexbox) {
             toggleButton.title = 'Toggle visualization';
             toggleButton.setAttribute('aria-label', toggleButton.title);
 
-            let anotherButton = toggleButton.cloneNode(true);
+            // let anotherButton = toggleButton.cloneNode(true);
     
             buttons.insertBefore(toggleButton, buttons.firstChild);
-            buttons.insertBefore(anotherButton, buttons.firstChild);
+            // buttons.insertBefore(anotherButton, buttons.firstChild);
             block.style.display = 'block'; // initialize display to original code
 
             var resize_done = false;
