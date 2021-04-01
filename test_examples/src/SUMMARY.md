@@ -18,4 +18,5 @@
 - [mutable_borrow_method_call](./mutable_borrow_method_call.md)
 - [immutable_variable](./immutable_variable.md)
 - [mutable_variables](./mutable_variables.md)
+- [function](./function.md)
 - [printing](./printing.md)

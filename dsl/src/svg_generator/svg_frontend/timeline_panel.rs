@@ -3,7 +3,7 @@ extern crate handlebars;
 use crate::data::{VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event};
 use crate::svg_frontend::line_styles::{RefDataLine, RefValueLine, OwnerLine};
 use handlebars::Handlebars;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use serde::Serialize;
 use std::cmp;
 
@@ -192,9 +192,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     );
 }
 
-// Returns: a hashmap from the hash of the ResourceOwner to its Column information
-fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (HashMap<&'a u64, TimelineColumnData>, i32) {
-    let mut resource_owners_layout = HashMap::new();
+// Returns: a binary tree map from the hash of the ResourceOwner to its Column information
+fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (BTreeMap<&'a u64, TimelineColumnData>, i32) {
+    let mut resource_owners_layout = BTreeMap::new();
     let mut x = 0;                   // Right-most Column x-offset.
     for (hash, timeline) in visualization_data.timelines.iter() {
         // only put variable in the column layout
@@ -239,7 +239,7 @@ fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (Hash
 }
 
 fn render_labels_string(
-    resource_owners_layout: &HashMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ) -> String {
     let mut output = String::new();
@@ -262,7 +262,7 @@ fn render_labels_string(
 
 fn render_dots_string(
     visualization_data: &VisualizationData,
-    resource_owners_layout: &HashMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ) -> String {
 
@@ -329,7 +329,7 @@ fn render_dots_string(
 // render arrows that support function
 fn render_arrows_string_external_events_version(
     visualization_data: &VisualizationData,
-    resource_owners_layout: &HashMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ) -> (String, String) {
 
@@ -731,7 +731,7 @@ fn create_reference_line_string(
 // render timelines (states) for RAPs using vertical lines
 fn render_timelines(
     visualization_data: &VisualizationData,
-    resource_owners_layout: &HashMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ) -> String {
     let mut output = String::new();
@@ -785,7 +785,7 @@ fn render_timelines(
 // (iff it's a MutRef && it has FullPrivilege)
 fn render_ref_line(
     visualization_data: &VisualizationData,
-    resource_owners_layout: &HashMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ) -> String {
     let timelines = &visualization_data.timelines;

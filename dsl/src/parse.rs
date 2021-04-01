@@ -46,7 +46,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
     }
 
     // split string into individual variables
-    let vars: Vec<String> = vars_string.split(",")
+    let vars: Vec<String> = vars_string.split(',')
         .map(|s| s.trim().to_string()) // trim whitespace
         .filter(|s| !s.is_empty()) // remove empty strings
         .collect();
