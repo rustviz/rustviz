@@ -5,7 +5,7 @@ Function String::from(),
 Function String::push_str(),
 Function push_str(),
 Function println!()
- --- END Variable Definitions --- */
+--- END Variable Definitions --- */
 fn main() { 
     let mut s1 = String::from("Hello"); // !{ Move(String::from()->s1) }
     let s2 = String::from(", world"); // !{ Move(String::from()->s2) }

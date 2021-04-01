@@ -39,7 +39,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
         line = fin_lines.next()
             .expect("Something went wrong! Do not remove BEGIN and END statements!")
             .expect("Unable to read file!");
-        line != " --- END Variable Definitions --- */"
+        line != "--- END Variable Definitions --- */"
     } {
         num_lines += 1;
         vars_string.push_str(&line); // get vars to string

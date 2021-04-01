@@ -4,7 +4,7 @@ Owner some_string,
 Function String::from(),
 Function takes_ownership(),
 Function println!()
- --- END Variable Definitions --- */
+--- END Variable Definitions --- */
 fn main() {
     let s = String::from("hello"); // !{ Move(String::from()->s) }
     takes_ownership(s); // !{ Move(s->takes_ownership()) }

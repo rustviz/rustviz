@@ -7,7 +7,7 @@ StaticRef s2,
 Function String::from(),
 Function f(),
 Function println!()
- --- END Variable Definitions --- */
+--- END Variable Definitions --- */
 fn main() {
     let x = String::from("hello"); // !{ Move(String::from()->x) }
     let y = &x; // !{ StaticBorrow(x->y) }

@@ -5,7 +5,7 @@ Function String::from(),
 Function world(),
 Function println!(),
 Function push_str()
- --- END Variable Definitions --- */
+--- END Variable Definitions --- */
 fn main() {
     let mut x = String::from("Hello"); // !{ Move(String::from()->x) }
     world(&mut x); // !{ PassByMutableReference(x->world()) }

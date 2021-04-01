@@ -3,7 +3,7 @@ Owner mut s, StaticRef r1, StaticRef r2, MutRef r3,
 Function String::from(),
 Function compare_strings(),
 Function clear_string()
- --- END Variable Definitions --- */
+--- END Variable Definitions --- */
 fn main(){
     let mut s = String::from("hello"); // !{ Move(String::from()->s) }
 

@@ -55,10 +55,10 @@ Next, let's familiarize ourselves with the syntax used in [main.rs](../svg_gener
 
 In [main.rs](../svg_generator/examples/string_from_move_print/main.rs), we define these RAPs between the `BEGIN` and `END` comments on lines 1 and 2:
 ```rust
-/* --- BEGIN Variable Definitions ---
+/*--- BEGIN Variable Definitions ---
 Owner x, Owner y,
 Function String::from()
- --- END Variable Definitions --- */
+--- END Variable Definitions ---*/
 ```
 The format for each `ResourceAccessPoint` enum is shown below, where fields preceded by `':'` denote an optional field:
 ```rust
@@ -78,7 +78,7 @@ Next, we annotate the code with the use of `ExternalEvent`s that **describe move
 3. Drop of resource binded to `x`
 4. Drop of resource binded to `y`
 
-We can use specify Events in structured comments like so:
+We can specify Events in structured comments like so:
 ```rust
 /* --- BEGIN Variable Definitions ---
 Owner x, Owner y,
@@ -124,20 +124,19 @@ Congratulations! You have successfully generated your first visualization! As a 
 ## Appendix
 
 **`ExternalEvent` Usage:**
-- `Bind(a->b)` // let binding, e.g.: let x = 1
-- `Copy(a->b)`
-- `Move(a->b)`
-- `StaticBorrow(a->b)`
-- `MutableBorrow(a->b)`
-- `StaticReturn(a->b)`
-- `MutableReturn(a->b)`
-- `PassByStaticReference(a->b)`
-    - used for Functions, not to be confused with StaticBorrow
-- `PassByMutableReference(a->b)`
-    - used for Functions, not to be confused with MutableBorrow
-- `GoOutOfScope(a)`
-- `InitializeParam(a)`
-    - only use this event to initialize `function parameters
+| Event |   Usage   |
+| :---  |   :----   |
+| `Bind(a->b)` | Let binding or assignment.<br>e.g.: `let a = 1;` |
+| `Copy(a->b)` | Copies the resource of `a` to variable `b`. Here, `a` implements the `Copy` trait. |
+| `Move(a->b)` | Moves the resource of `a` to variable `b`. Here, `a` implements the `Move` trait. |
+| `StaticBorrow(a->b)` | Assigns an immutable reference of `a` to `b`.<br>e.g.: `let b = &a;` |
+| `MutableBorrow(a->b)` | Assigns a mutable reference of `a` to `b`.<br>e.g.: `let b = &mut a;` |
+| `StaticReturn(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
+| `MutableReturn(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
+| `PassByStaticReference(a->b)` | Passes an immutable reference of variable `a` to function `b`. Not to be confused with StaticBorrow. |
+| `PassByMutableReference(a->b)` | Passes a mutable reference of variable `a` to function `b`. Not to be confused with MutableBorrow. |
+| `GoOutOfScope(a)` | Ends the lexical lifetime of variable `a`. |
+| `InitializeParam(a)` | Initializes the parameter `a` of some function.<br>e.g.: `some_fn(a: String) {..}` |
 
 > Note:
 > 1. `GoOutOfScope` and `InitializeParam` require a singular parameter previously defined in the `Variable Definitions` section.

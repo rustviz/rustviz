@@ -6,7 +6,7 @@ Function String::from(),
 Function String::len(),
 Function len(),
 Function println!()
- --- END Variable Definitions --- */
+--- END Variable Definitions --- */
 fn main() {
     let s = String::from("hello"); // !{ Move(String::from()->s)  }
     let len1 = String::len(&s); // !{ PassByStaticReference(s->String::len()), Move(String::len()->len1) }

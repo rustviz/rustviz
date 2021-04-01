@@ -4,7 +4,7 @@ Owner s,
 Function String::from(),
 Function f(),
 Function println!()
- --- END Variable Definitions --- */
+--- END Variable Definitions --- */
 fn f() {
     let x = String::from("hello"); // !{ Move(String::from()->x) }
     // ...
