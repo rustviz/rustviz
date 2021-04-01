@@ -105,7 +105,7 @@ function displayTooltip(tooltip, classname) {
         tooltip.style.display = "block";
 
         // var text = e.target.getAttribute("data-tooltip-text");
-        var text = e.target.getAttributeNS(null, "data-tooltip-text");
+        var text = e.currentTarget.getAttributeNS(null, "data-tooltip-text");
         tooltip.innerHTML = text;
 
         // if out of bounds, break text into two lines

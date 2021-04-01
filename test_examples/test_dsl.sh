@@ -19,21 +19,21 @@ declare -a targetExamples=(
     "hatra2"
     "func_take_ownership"
     "func_take_return_ownership"
-    # "string_from_print"
-    # "string_from_move_print"
-    # "immutable_borrow"
-    # "multiple_immutable_borrow"
-    # "mutable_borrow"
-    # "nll_lexical_scope_different"
-    # "move_different_scope"
-    # "move_assignment"
-    # "move_func_return"
-    # "immutable_borrow_method_call"
-    # "mutable_borrow_method_call"
-    # "immutable_variable"
-    # "mutable_variables"
-    # "function"
-    # "printing"
+    "string_from_print"
+    "string_from_move_print"
+    "immutable_borrow"
+    "multiple_immutable_borrow"
+    "mutable_borrow"
+    "nll_lexical_scope_different"
+    "move_different_scope"
+    "move_assignment"
+    "move_func_return"
+    "immutable_borrow_method_call"
+    "mutable_borrow_method_call"
+    "immutable_variable"
+    "mutable_variables"
+    "function"
+    "printing"
     # "struct_string"
     #"error_use_after_move" # The "error_" examples are for visualizing Rust code with errors. This is not yet supported by RustViz.
     #"error_reassign_immutably_borrowed"
@@ -46,15 +46,15 @@ for target in ${targetExamples[@]}; do
     printf "building %s..." $target
     
     # Check if required files are there
-    if [[ -f  "../svg_generator/examples_dsl/$target/input/annotated_source.rs" && \
-        -f "../svg_generator/examples_dsl/$target/main.rs" && -f "../svg_generator/examples_dsl/$target/source.rs" ]]
+    if [[ -f  "../dsl/examples_dsl/$target/input/annotated_source.rs" && \
+        -f "../dsl/examples_dsl/$target/main.rs" && -f "../dsl/examples_dsl/$target/source.rs" ]]
     then
         cd ../dsl
         # Run svg generation for example
         cargo run $target >/dev/null 2>&1
 
         # If if the svg generation exited with an error or the required SVGs weren't created, report failure and continue
-        if [[ $? -ne 0 || !(-f "../svg_generator/examples_dsl/$target/vis_code.svg") || !(-f "../svg_generator/examples_dsl/$target/vis_timeline.svg") ]]; then
+        if [[ $? -ne 0 || !(-f "../dsl/examples_dsl/$target/vis_code.svg") || !(-f "../dsl/examples_dsl/$target/vis_timeline.svg") ]]; then
             printf "${red}FAILED${end} on SVG generation.\n"
             cd ../test_examples
             continue
@@ -63,9 +63,9 @@ for target in ${targetExamples[@]}; do
 
         # Copy files to mdbook directory
         mkdir -p "./src/assets/$target"
-        cp "../svg_generator/examples_dsl/$target/source.rs" "./src/assets/$target/source.rs"
-        cp "../svg_generator/examples_dsl/$target/vis_code.svg" "./src/assets/$target/vis_code.svg"
-        cp "../svg_generator/examples_dsl/$target/vis_timeline.svg" "./src/assets/$target/vis_timeline.svg"
+        cp "../dsl/examples_dsl/$target/source.rs" "./src/assets/$target/source.rs"
+        cp "../dsl/examples_dsl/$target/vis_code.svg" "./src/assets/$target/vis_code.svg"
+        cp "../dsl/examples_dsl/$target/vis_timeline.svg" "./src/assets/$target/vis_timeline.svg"
         
         # Add append corresponding line to SUMMARY.md
         echo "- [$target](./$target.md)" >> src/SUMMARY.md
@@ -81,4 +81,4 @@ mdbook build
 
 # Run HTTP server on docs directory
 cd book
-python3 -m http.server
+python3 -m http.server 8080

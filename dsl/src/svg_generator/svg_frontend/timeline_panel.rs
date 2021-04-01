@@ -252,7 +252,7 @@ fn render_labels_string(
         };
 
         if column_data.is_ref {
-            let new_name = column_data.name.to_owned() + "<tspan stroke=\"none\" data-tooltip-text=\""+&column_data.title+"\">|</tspan>*" + &column_data.name;
+            let new_name = column_data.name.to_owned() + "<tspan stroke=\"none\">|</tspan>*" + &column_data.name;
             data.name = new_name;
         }
         output.push_str(&registry.render("label_template", &data).unwrap());

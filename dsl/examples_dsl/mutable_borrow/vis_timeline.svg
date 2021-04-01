@@ -1,8 +1,8 @@
 <svg width="260px" height="330px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-        id="tl_../svg_generator/examples_dsl/mutable_borrow/input/">
+        id="tl_examples_dsl/mutable_borrow/input/">
 
-    <desc>../svg_generator/examples_dsl/mutable_borrow/input/</desc>
+    <desc>examples_dsl/mutable_borrow/input/</desc>
 
     <defs>
         <style type="text/css">
@@ -200,7 +200,7 @@ object.code_panel {
     </defs>
 
     <g id="labels">
-        <text x="160" y="70" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, immutable">s<tspan stroke="none" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, immutable">|</tspan>*s</text>
+        <text x="160" y="70" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, immutable">s<tspan stroke="none">|</tspan>*s</text>
         <text x="70" y="70" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;, mutable">x</text>
     </g>
 
