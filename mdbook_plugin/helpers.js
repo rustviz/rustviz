@@ -119,61 +119,55 @@ function displayTooltip(tooltip, classname) {
 
     /* ---- SHOW RELEVANT LINES ---- */
     function insertCaret(e) {
-        let doc = document.getElementsByClassName(classname + ' code_panel')[0].contentDocument; //code_panelcc
+        let doc = document.getElementsByClassName(classname + ' code_panel')[0].contentDocument; //code_panel
+        let begin = 0, end = 0;
         if (e.currentTarget.tagName == 'path') {
             let arr = e.currentTarget.getAttribute('d').split(' ');
-            let begin, end;
             if (e.currentTarget.parentNode.id == 'ref_line') {
-                begin = arr[2];
+                begin = parseInt(arr[2]);
                 end = parseInt(begin) + 2*parseInt(arr[5]) + parseInt(arr[7]) + 5; // + 5 to include last line
             }
             else {
-                begin = arr[7];
-                end = arr[3];
-            }
-            for (let i=0; i < (end-begin)/20; ++i) {
-                let caret = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-                caret.setAttribute('class', 'code caret');
-                caret.setAttribute('x', '15');
-                caret.setAttribute('y', parseInt(begin) + 20*i + 5);
-                caret.innerHTML = '>';
-                doc.getElementById('code').appendChild(caret);
+                begin = parseInt(arr[7]);
+                end = parseInt(arr[3]);
             }
         }
         else if (e.currentTarget.tagName == 'line') {
-            let begin = e.currentTarget.getAttribute('y1');
-            let end = e.currentTarget.getAttribute('y2');
-            for (let i=0; i < (end-begin)/20; ++i) {
-                let caret = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-                caret.setAttribute('class', 'code caret');
-                caret.setAttribute('x', '15');
-                caret.setAttribute('y', parseInt(begin) + 20*i + 5);
-                caret.innerHTML = '>';
-                doc.getElementById('code').appendChild(caret);
-            }
+            begin = e.currentTarget.getAttribute('y1');
+            end = e.currentTarget.getAttribute('y2');
         }
         else {
             let pos;
             if (e.currentTarget.tagName == 'circle') {
-                pos = parseInt(e.currentTarget.getAttribute('cy')) + 5;
+                begin = end = parseInt(e.currentTarget.getAttribute('cy')) + 5;
             }
             else if (e.currentTarget.tagName == 'use') {
-                pos = parseInt(e.currentTarget.getAttribute('y')) + 5;
+                begin = end = parseInt(e.currentTarget.getAttribute('y')) + 5;
             }
             else if (e.currentTarget.tagName == 'polyline') {
-                var arr = e.currentTarget.getAttribute('points').split(' ');
-                pos = parseInt(arr[1]) + 5;
+                let arr = e.currentTarget.getAttribute('points').split(' ');
+                begin = end = parseInt(arr[1]) + 5;
             }
             else { // e.currentTarget.tagName == 'text'
-                pos = parseInt(e.currentTarget.getAttribute('y'));
+                begin = end = parseInt(e.currentTarget.getAttribute('y'));
             }
+        }
 
-            let caret = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-            caret.setAttribute('class', 'code caret');
-            caret.setAttribute('x', '15');
-            caret.setAttribute('y', pos);
-            caret.innerHTML = '>';
-            doc.getElementById('code').appendChild(caret);
+        // add underlining to every relevant line
+        let lines = doc.getElementById('code').children;
+        let len = lines.length; // prevent len from changing
+        for (let i=0; i<len; ++i) {
+            let ly = parseInt(lines[i].getAttribute('y'));
+            if (ly >= begin && ly <= end) { // only underline relevant code
+                let emph = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+                emph.setAttribute('class', 'code emph');
+                emph.setAttribute('x', '25');
+                emph.setAttribute('y', ly + 3); // +3 to hang just under text
+                emph.innerHTML = new Array(
+                    Math.floor(lines[i].getBBox().width/8) // size of '_' = 8
+                ).join('_'); // string with all underscores
+                doc.getElementById('code').appendChild(emph);
+            }
         }
     }
 }
@@ -192,7 +186,7 @@ function mousePos(evt, obj) {
 
 function removeCaret(e, classname) {
     let doc = document.getElementsByClassName(classname + ' code_panel')[0].contentDocument; //code_panel
-    let arr = doc.getElementsByClassName('caret');
+    let arr = doc.getElementsByClassName('emph');
     for (let i = arr.length-1; i >= 0; --i) {
         arr[i].remove();
     }
