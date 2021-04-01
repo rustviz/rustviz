@@ -1,12 +1,16 @@
 [package]
 name = "rustviz-svg"
 version = "0.1.0"
-authors = ["Gabriel Luo <luogm@umich.edu>", "Ke Du <madoka@umich.edu>", "Yingying Zhu <zyy@umich.edu>", "Marcelo Almeida <mgba@umich.edu>", "Haochen Zhang <haochenz@umich.edu>", "Vishnu Reddy <reddyvis@umich.edu>"]
+authors = [
+    "Gabriel Luo <luogm@umich.edu>", "Ke Du <madoka@umich.edu>",
+    "Yingying Zhu <zyy@umich.edu>", "Marcelo Almeida <mgba@umich.edu>",
+    "Haochen Zhang <haochenz@umich.edu>", "Vishnu Reddy <reddyvis@umich.edu>"
+]
 edition = "2018"
 
 [lib]
 name = "rustviz_lib"
-path = "src/lib.rs"
+path = "lib.rs"
 
 # The development profile, used for `cargo build`
 [profile.dev]

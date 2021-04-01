@@ -12,6 +12,7 @@ license = "Apache-2.0"
 description = "A tool that allows teachers to generate an interactive timeline depicting ownership and borrowing events for each variable in a Rut code example"
 readme = "README.md"
 repository = "https://github.com/rustviz/rustviz"
+exclude = ["src/svg_generator/examples"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -75,11 +75,11 @@ pub fn render_svg(
     let mut code_panel_string = String::new();
     let mut num_lines = 0;
 
-    let relative_path = "src/svg_generator/src/svg_frontend/";
-    let svg_code_template = utils::read_file_to_string(relative_path.to_string()+"code_template.svg")
+    let template_path = "src/svg_generator/templates/";
+    let svg_code_template = utils::read_file_to_string(template_path.to_string()+"code_template.svg")
         .unwrap_or("Reading template.svg failed.".to_owned());
     let svg_timeline_template =
-        utils::read_file_to_string(relative_path.to_string()+"timeline_template.svg")
+        utils::read_file_to_string(template_path.to_string()+"timeline_template.svg")
             .unwrap_or("Reading template.svg failed.".to_owned());
 
     let mut handlebars = Handlebars::new();
@@ -95,7 +95,7 @@ pub fn render_svg(
         .register_template_string("timeline_svg_template", tl_svg_template)
         .is_ok());
 
-    let css_string = utils::read_file_to_string(relative_path.to_string()+"book_svg_style.css")
+    let css_string = utils::read_file_to_string(template_path.to_string()+"book_svg_style.css")
         .unwrap_or("Reading book_svg_style.css failed.".to_owned());
 
     // data for code panel
