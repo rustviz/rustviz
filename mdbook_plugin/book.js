@@ -16,22 +16,30 @@ function playpen_text(playpen) {
 }
 
 function adjust_visualization_size(flexbox) {
+    // console.log(flexbox)
     /* resize the dimension of the object tag to match the internal svg; this needs to be triggered everytime each panel resizes */
     // compute how wide the text sections should be
+    console.log(document.documentElement)
     let text_width = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--content-max-width'));
     let flex_border_size = parseInt('5px');                              // this parsing in intentional as a hint for the text_width
     
     let timeline_doc = flexbox.querySelector('object[class*="tl_panel"]').contentDocument.querySelector('svg');
     let timeline_width = parseInt(timeline_doc.width.baseVal.value);
+    console.log(timeline_width);
     let desired_height = parseInt(timeline_doc.height.baseVal.value);
     let code_panel_doc = flexbox.querySelector('object[class*="code_panel"]').contentDocument.querySelector('svg');
     let code_panel_width = parseInt(code_panel_doc.width.baseVal.value);
+    console.log(code_panel_width)
     // update the div block that surround them with the new width
     // Rule: if the two panels combined are narrower than the main text, simply set to the text width
     // Otherwise, do a "center" effect.
+    var butt = document.getElementsByClassName("buttons")[0];
+    let margin = 0;
     if (text_width >= timeline_width + code_panel_width) {
         flexbox.style.marginLeft = "0px";
-        flexbox.style.marginRight = "0px";
+        margin = text_width-timeline_width-code_panel_width;
+        flexbox.style.marginRight = margin + "px";
+        butt.setAttribute("style", "position: absolute; right: " + margin + "px;");
     } else {
         let wiggle_room = parseInt("3px");                      // manually tweak this to prevent subpixel splitting
         let margin_shrink = (timeline_width + code_panel_width + flex_border_size + wiggle_room - text_width) / 2;
@@ -39,6 +47,7 @@ function adjust_visualization_size(flexbox) {
         flexbox.style.marginRight = -margin_shrink + "px";
     }
     flexbox.style.height = desired_height + "px";
+    return margin;
 }
 
 (function codeSnippets() {
@@ -251,14 +260,13 @@ function adjust_visualization_size(flexbox) {
             toggleButton.className = 'fa fa-toggle-off toggle-button';
             toggleButton.title = 'Toggle visualization';
             toggleButton.setAttribute('aria-label', toggleButton.title);
-
-            // let anotherButton = toggleButton.cloneNode(true);
     
             buttons.insertBefore(toggleButton, buttons.firstChild);
-            // buttons.insertBefore(anotherButton, buttons.firstChild);
             block.style.display = 'block'; // initialize display to original code
 
             var resize_done = false;
+            var butt = document.getElementsByClassName("buttons")[0];
+            var resized_butt_right = 0;
             pre_block.querySelector('.buttons').addEventListener('click', function (e) {
                 if (e.target.classList.contains('fa-toggle-on')) {
                     // on button click, show visualization and hide code
@@ -267,6 +275,8 @@ function adjust_visualization_size(flexbox) {
 
                     pre_block.querySelector('.language-rust').style.display = 'block';
                     pre_block.parentElement.nextElementSibling.style.display = 'none';
+
+                    butt.style.right = "0px"
                 } else if (e.target.classList.contains('fa-toggle-off')) {
                     e.target.classList.remove('fa-toggle-off');
                     e.target.classList.add('fa-toggle-on');
@@ -276,9 +286,13 @@ function adjust_visualization_size(flexbox) {
 
                     // resize code block only once
                     if (resize_done == false) {
+                        console.log(pre_block.parentElement.nextElementSibling.firstElementChild)
                         sizeToFit(pre_block.parentElement.nextElementSibling.firstElementChild);
                         resize_done = true;
-                        adjust_visualization_size(pre_block.parentElement.nextElementSibling);
+                        console.log(pre_block.parentElement.nextElementSibling)
+                        resized_butt_right = adjust_visualization_size(pre_block.parentElement.nextElementSibling);
+                    } else {
+                        butt.style.right = resized_butt_right + "px"
                     }
                 }
             });
