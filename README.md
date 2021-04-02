@@ -296,7 +296,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         }
         ```
     - MutableReturn <a name="MutableReturn"></a>
-    The StaticReturn event represent return of a mutably borrowed source.
+    The MutableReturn event represent return of a mutably borrowed source.
         ```
         MutableReturn {
             from: Option<ResourceAccessPoint>,
