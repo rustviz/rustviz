@@ -1,8 +1,8 @@
 /* --- BEGIN Variable Definitions ---
-Owner x,
-Owner s,
-Function String::from(),
-Function f(),
+Owner x;
+Owner s;
+Function String::from();
+Function f();
 Function println!()
 --- END Variable Definitions --- */
 fn f() {
@@ -13,5 +13,5 @@ fn f() {
   
 fn main() {
     let s = f(); // !{ Move(f()->s) }
-    println!("{}", s) // !{ PassByStaticReference(s->println!()) }
+    println!("{}", s); // !{ PassByStaticReference(s->println!()) }
 } // !{ GoOutOfScope(s) }

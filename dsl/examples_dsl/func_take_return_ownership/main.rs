@@ -1,8 +1,8 @@
 /* --- BEGIN Variable Definitions ---
-Owner mut s,
-Owner some_string,
-Function String::from(),
-Function take_and_return_ownership(),
+Owner mut s;
+Owner some_string;
+Function String::from();
+Function take_and_return_ownership();
 Function println!()
 --- END Variable Definitions --- */
 fn take_and_return_ownership(some_string : String) -> String { // !{ InitializeParam(some_string) }

@@ -1,8 +1,8 @@
 /* --- BEGIN Variable Definitions ---
-Owner s,
-Owner some_string,
-Function String::from(),
-Function takes_ownership(),
+Owner s;
+Owner some_string;
+Function String::from();
+Function takes_ownership();
 Function println!()
 --- END Variable Definitions --- */
 fn main() {
@@ -12,5 +12,5 @@ fn main() {
 } // !{ GoOutOfScope(s) }
 
 fn takes_ownership(some_string: String) { // !{ InitializeParam(some_string) }
-    println!("{}", some_string)
+    println!("{}", some_string);
 } // !{ GoOutOfScope(some_string) }

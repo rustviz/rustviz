@@ -1,9 +1,9 @@
 fn main() {
     let x = String::from("hello");
     f(&x); 
-    println!("{}", x)
+    println!("{}", x);
 }
 
 fn f(s : &String) {
-    println!("{}", *s)
+    println!("{}", *s);
 }

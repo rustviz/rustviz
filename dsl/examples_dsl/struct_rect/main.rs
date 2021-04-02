@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-Struct r{mut w, mut h}; StaticRef rect;
+Struct r{w, h}; StaticRef rect;
 Function area(); Function Rect(); Function println!()
 --- END Variable Definitions --- */
 struct Rect {
@@ -20,5 +20,5 @@ fn main() {
 } // !{ StructBox(r->h), GoOutOfScope(w), GoOutOfScope(h), GoOutOfScope(r) }
 
 fn area(rect: &Rect) -> u32 { // !{ InitializeParam(rect) }
-    rect.w * rect.h // !{  }
+    rect.w * rect.h
 } // !{ GoOutOfScope(rect) }

@@ -1,6 +1,6 @@
 /* --- BEGIN Variable Definitions ---
-Owner six,
-Owner x,
+Owner six;
+Owner x;
 Function plus_one()
 --- END Variable Definitions --- */
 fn main() {

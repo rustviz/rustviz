@@ -294,17 +294,17 @@ object.code_panel {
     </g></g>
 	<g class="struct_members">
     <g id="labels">
-        <text x="140" y="70" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt;, mutable">w</text>
-        <text x="210" y="70" style="text-anchor:middle" data-hash="3" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt;, mutable">h</text>
+        <text x="140" y="70" style="text-anchor:middle" data-hash="2" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt;, immutable">w</text>
+        <text x="210" y="70" style="text-anchor:middle" data-hash="3" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt;, immutable">h</text>
     </g>
 
     <g id="timelines">
-        <line data-hash="2" class="solid tooltip-trigger" x1="140" x2="140" y1="295" y2="535" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 138.2,295 V 535 h 3.5 V 295 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;w&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
-        <line data-hash="3" class="solid tooltip-trigger" x1="210" x2="210" y1="325" y2="535" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        monospace, monospace !important;&quot;&gt;w&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
+        <path data-hash="3" class="hollow tooltip-trigger" style="fill:transparent;" d="M 208.2,325 V 535 h 3.5 V 325 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;h&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
+        monospace, monospace !important;&quot;&gt;h&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
     </g>
 
     <g id="ref_line">

@@ -426,6 +426,7 @@ fn get_structs(
                 fields[idx]
             }
         ).to_string();
+
         // begin new def
         vars_map.insert(
             v_name.clone(),

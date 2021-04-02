@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-Owner x, Owner y, Function println!()
+Owner x; Owner y; Function println!()
 --- END Variable Definitions --- */
 fn main() {
     let x = 1; // !{ Bind(None->x) }

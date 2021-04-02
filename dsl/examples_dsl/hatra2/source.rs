@@ -6,5 +6,5 @@ fn main(){
     assert!(compare_strings(r1, r2));
 
     let r3 = &mut s;
-    clear_string(r3)
+    clear_string(r3);
 }

@@ -1,11 +1,11 @@
 /* --- BEGIN Variable Definitions ---
-Owner mut x,
-MutRef y,
-MutRef z,
-MutRef s,
-Function String::from(),
-Function world(),
-Function push_str(),
+Owner mut x;
+MutRef y;
+MutRef z;
+MutRef s;
+Function String::from();
+Function world();
+Function push_str();
 Function println!()
 --- END Variable Definitions --- */
 fn main() {
@@ -15,7 +15,7 @@ fn main() {
     let z = &mut x; // OK, because y's lifetime has ended (last use was on previous line), !{ MutableBorrow(x->z) }
     world(z); // !{ PassByMutableReference(z->world()), MutableReturn(z->x) }
     x.push_str("!!"); // Also OK, because y and z's lifetimes have ended, !{ PassByMutableReference(x->push_str()) }
-    println!("{}", x) // !{ PassByStaticReference(x->println!()) }
+    println!("{}", x); // !{ PassByStaticReference(x->println!()) }
 } // !{ GoOutOfScope(x), GoOutOfScope(y), GoOutOfScope(z) }
 
 fn world(s : &mut String) { // !{ InitializeParam(s) }

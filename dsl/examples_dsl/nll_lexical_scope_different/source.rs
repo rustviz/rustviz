@@ -5,9 +5,9 @@ fn main() {
     let z = &mut x; // OK, because y's lifetime has ended (last use was on previous line)
     world(z);
     x.push_str("!!"); // Also OK, because y and z's lifetimes have ended
-    println!("{}", x)
+    println!("{}", x);
 }
 
 fn world(s : &mut String) {
-    s.push_str(", world")
+    s.push_str(", world");
 }

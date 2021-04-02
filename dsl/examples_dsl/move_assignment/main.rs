@@ -1,6 +1,6 @@
 /* --- BEGIN Variable Definitions ---
-Owner x,
-Owner mut y,
+Owner x;
+Owner mut y;
 Function String::from()
 --- END Variable Definitions --- */
 fn main() {

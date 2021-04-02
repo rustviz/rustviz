@@ -6,5 +6,5 @@ fn f() {
   
 fn main() {
     let s = f();
-    println!("{}", s)
+    println!("{}", s);
 }

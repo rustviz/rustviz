@@ -1,8 +1,8 @@
 /* --- BEGIN Variable Definitions ---
-Owner x,
-Owner y,
-Owner z,
-Function String::from(),
+Owner x;
+Owner y;
+Owner z;
+Function String::from();
 Function println!()
 --- END Variable Definitions --- */
 fn main() {

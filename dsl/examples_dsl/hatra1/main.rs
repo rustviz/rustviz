@@ -1,7 +1,7 @@
 /* --- BEGIN Variable Definitions ---
-Owner s, Owner mut x, Owner y, Owner some_string,
-Function String::from(),
-Function takes_ownership(),
+Owner s; Owner mut x; Owner y; Owner some_string;
+Function String::from();
+Function takes_ownership();
 Function println!()
 --- END Variable Definitions --- */
  fn main() {
@@ -9,9 +9,9 @@ Function println!()
     takes_ownership(s); // !{ Move(s->takes_ownership()) }
     let mut x = 5; // !{ Bind(None->x) }
     let y = x; // !{ Copy(x->y) }
-    x = 6 // !{ Bind(None->x) }
+    x = 6; // !{ Bind(None->x) }
 } // !{ GoOutOfScope(s), GoOutOfScope(x), GoOutOfScope(y) }
 
 fn takes_ownership(some_string: String) { // !{ InitializeParam(some_string) }
-    println!("{}", some_string) // !{ PassByStaticReference(some_string->println!()) }
+    println!("{}", some_string); // !{ PassByStaticReference(some_string->println!()) }
 } // !{ GoOutOfScope(some_string) }

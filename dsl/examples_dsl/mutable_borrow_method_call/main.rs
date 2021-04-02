@@ -1,9 +1,9 @@
 /* --- BEGIN Variable Definitions ---
-Owner mut s1,
-Owner s2,
-Function String::from(),
-Function String::push_str(),
-Function push_str(),
+Owner mut s1;
+Owner s2;
+Function String::from();
+Function String::push_str();
+Function push_str();
 Function println!()
 --- END Variable Definitions --- */
 fn main() { 

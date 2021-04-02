@@ -3,9 +3,9 @@ fn main() {
     takes_ownership(s);
     let mut x = 5;
     let y = x;
-    x = 6
+    x = 6;
 }
 
 fn takes_ownership(some_string: String) {
-    println!("{}", some_string)
+    println!("{}", some_string);
 }

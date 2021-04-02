@@ -5,5 +5,5 @@ fn main() {
 }
 
 fn takes_ownership(some_string: String) {
-    println!("{}", some_string)
+    println!("{}", some_string);
 }
