@@ -56,7 +56,7 @@ Next, let's familiarize ourselves with the syntax used in [main.rs](../svg_gener
 In [main.rs](../svg_generator/examples/string_from_move_print/main.rs), we define these RAPs between the `BEGIN` and `END` comments on lines 1 and 2:
 ```rust
 /*--- BEGIN Variable Definitions ---
-Owner x, Owner y,
+Owner x; Owner y;
 Function String::from()
 --- END Variable Definitions ---*/
 ```
@@ -66,11 +66,20 @@ ResourceAccessPoint Usage --
     Owner <:mut> <name>
     MutRef <:mut> <name>
     StaticRef <:mut> <name>
+    Struct <:mut> <name>{<:mut> <member_1>, <:mut> <member_2>, ... }
     Function <name>
 ```
-As another example, some code `let mut a = 5;` and `let b = &a;` would correspond to `Owner mut a` and `StaticRef b`, respectively.
+Alternatively, some code `let mut a = 5;` and `let b = &a;` would correspond to `Owner mut a` and `StaticRef b`, respectively.
+An immutable instance of some struct with member variables `x` and `mut y`, on the other hand, may be annotated as `Struct a{x, mut y}`.
 
-> It is important to note all definitions **_must_** lie between `BEGIN` and `END`, **_must_** be separated by a singular comma, and each field within a RAP definition **_must_** be separated by a whitespace.
+> It is important to note:
+> <ol>
+> <li>all definitions <strong><em>must</em></strong> lie between <code>BEGIN</code> and <code>END</code></li>
+> <li>all definitions <strong><em>must</em></strong> be defined in the same order by which they were declared in the source code</li>
+> <li>all definitions <strong><em>must</em></strong> be separated by a singular semicolon</li>
+> <li>each field within a RAP definition <strong><em>must</em></strong> be separated by a whitespace</li>
+> </ol>
+<br>
 
 Next, we annotate the code with the use of `ExternalEvent`s that **describe move, borrow, and drop semantics** of Rust. In [string_from_move_print](../svg_generator/examples/string_from_move_print), we have four such events:
 1. Move of resource from `String::from()` to `x`
@@ -81,7 +90,7 @@ Next, we annotate the code with the use of `ExternalEvent`s that **describe move
 We can specify Events in structured comments like so:
 ```rust
 /* --- BEGIN Variable Definitions ---
-Owner x, Owner y,
+Owner x; Owner y;
 Function String::from()
  --- END Variable Definitions --- */
 fn main() {
@@ -135,6 +144,7 @@ Congratulations! You have successfully generated your first visualization! As a 
 | `MutableReturn(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
 | `PassByStaticReference(a->b)` | Passes an immutable reference of variable `a` to function `b`. Not to be confused with StaticBorrow. |
 | `PassByMutableReference(a->b)` | Passes a mutable reference of variable `a` to function `b`. Not to be confused with MutableBorrow. |
+| `StructBox(a->b)` | Creates a struct instance `a` whose last member variable is `b`.<br>Notes:<br>(1) This event should be specified on the _same line_ the struct instance, `a`, goes out of lexical scope.<br>(2) A struct's member variables should always be defined in the same order they are declared in. |
 | `GoOutOfScope(a)` | Ends the lexical lifetime of variable `a`. |
 | `InitializeParam(a)` | Initializes the parameter `a` of some function.<br>e.g.: `some_fn(a: String) {..}` |
 

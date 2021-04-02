@@ -378,7 +378,7 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             println!("{}", some_string) 
         } 
         ```
-    - SturctBox <a name="StructBox"></a>
+    - StructBox <a name="StructBox"></a>
     The StructBox event represent a struct owner and its members as a group
         ```
         StructBox{ 

@@ -1,6 +1,6 @@
 /* --- BEGIN Variable Definitions ---
 Struct r{w, h}; StaticRef rect;
-Function area(); Function Rect(); Function println!()
+Function area(); Function println!()
 --- END Variable Definitions --- */
 struct Rect {
     w: u32,
@@ -8,7 +8,7 @@ struct Rect {
 }
 
 fn main() {
-    let r = Rect { // !{ Move(Rect()->r) }
+    let r = Rect { // !{ Bind(None->r) }
         w: 30, // !{ Bind(None->w) }
         h: 50 // !{ Bind(None->h) }
     };
