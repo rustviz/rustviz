@@ -1,7 +1,7 @@
 <svg height="760px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
-    <desc>examples/struct_rect/input/</desc>
+    <desc>examples_dsl/struct_rect/input/</desc>
 
     <defs>
         <style type="text/css">

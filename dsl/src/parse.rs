@@ -4,7 +4,7 @@ use std::collections::HashMap;
 type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
 use rustviz_lib::data::{
-    ExternalEvent, Function, MutRef, Owner,
+    ExternalEvent, Function, MutRef, Owner, Struct,
     ResourceAccessPoint, StaticRef, VisualizationData, Visualizable
 };
 
@@ -46,7 +46,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
     }
 
     // split string into individual variables
-    let vars: Vec<String> = vars_string.split(',')
+    let vars: Vec<String> = vars_string.split(';')
         .map(|s| s.trim().to_string()) // trim whitespace
         .filter(|s| !s.is_empty()) // remove empty strings
         .collect();
@@ -60,12 +60,15 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
 // Modifies: Nothing, unchanged
 // Effects: Uses strings to build HashMap with
 //          {key, value} pair = {name, ResourceAccessPoint}
-fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
+fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
     // iterate over all parsed strings
-    vars.iter().enumerate().map(|(hash, v)| {
+    let mut vars_map = HashMap::<String, ResourceAccessPoint>::new();
+
+    let mut hash : u64 = 1;
+    for v in vars_str.iter() {
         // fields = [type, is_mut, name] or [type, name]
         let fields: Vec<&str> = v
-            .split(' ')
+            .split(|c| c == ' ' || c == ',' || c == '{' || c == '}')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
@@ -77,38 +80,61 @@ fn vec_to_map(vars: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
         }
 
         // returns tuple (key, item) : (String, ResourceAccessPoint)
-        let name = if fields.len() > 2 { fields[2] } else { fields[1] };
-        (name.to_string(), 
-            // match type with possible ResourceAccessPoints
-            match (fields[0], fields.len()) {
-                ("Owner", 2) | ("Owner", 3) => ResourceAccessPoint::Owner(Owner {
-                    hash: hash as u64 + 1,
-                    name: get_name_field(&fields),
-                    is_mut: get_mut_qualifier(&fields),
-                }),
-                ("MutRef", 2) | ("MutRef", 3) => ResourceAccessPoint::MutRef(MutRef {
-                    hash: hash as u64 + 1,
-                    name: get_name_field(&fields),
-                    is_mut: get_mut_qualifier(&fields),
-                }),
-                ("StaticRef", 2) | ("StaticRef", 3) => ResourceAccessPoint::StaticRef(StaticRef {
-                    hash: hash as u64 + 1,
-                    name: get_name_field(&fields),
-                    is_mut: get_mut_qualifier(&fields),
-                }),
-                ("Function", 2) => ResourceAccessPoint::Function(Function {
-                    hash: hash as u64 + 1,
-                    name: String::from(fields[1]),
-                }),
-                // default to error if invalid ResourceAccessPoint type
-                // or incorrect number of qualifiers/fields
-                _ => {
-                    print_var_usage_error(&fields);
-                    exit(1);
-                }
-        })
-    })
-    .collect()
+        let name = (if fields.len() > 2 { fields[2] } else { fields[1] }).to_string();
+        // match type with possible ResourceAccessPoints
+        match (fields[0], fields.len()) {
+            ("Owner", 2) | ("Owner", 3) => {
+                vars_map.insert(
+                    name,
+                    ResourceAccessPoint::Owner(Owner {
+                        hash: hash,
+                        name: get_name_field(&fields),
+                        is_mut: get_mut_qualifier(&fields),
+                    })
+                );
+            },
+            ("MutRef", 2) | ("MutRef", 3) => {
+                vars_map.insert(
+                    name,
+                    ResourceAccessPoint::MutRef(MutRef {
+                        hash: hash,
+                        name: get_name_field(&fields),
+                        is_mut: get_mut_qualifier(&fields),
+                    })
+                );
+            },
+            ("StaticRef", 2) | ("StaticRef", 3) => {
+                vars_map.insert(
+                    name,
+                    ResourceAccessPoint::StaticRef(StaticRef {
+                        hash: hash,
+                        name: get_name_field(&fields),
+                        is_mut: get_mut_qualifier(&fields),
+                    })
+                );
+            },
+            ("Function", 2) => {
+                vars_map.insert(
+                    name,
+                    ResourceAccessPoint::Function(Function {
+                        hash: hash,
+                        name: String::from(fields[1]),
+                    })
+                );
+            },
+            ("Struct", _) => get_structs(&mut hash, &fields, &mut vars_map),
+            // default to error if invalid ResourceAccessPoint type
+            // or incorrect number of qualifiers/fields
+            _ => {
+                print_var_usage_error(&fields);
+                exit(1);
+            }
+        }
+
+        hash += 1;
+    }
+
+    vars_map
 }
 
 // Requires: Non-empty file contents
@@ -299,6 +325,13 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
+            "StructBox" => vd.append_external_event(
+                ExternalEvent::StructBox{
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
+                },
+                &(event.0 as usize)
+            ),
             _ => {
                 eprintln!("{} is not a valid event.", field[0]);
                 println!("{}", event_usage_err());
@@ -351,6 +384,61 @@ fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
             fields[1], fields[2]
         );
         exit(1);
+    }
+}
+
+fn get_structs(
+    hash: &mut u64,
+    fields: &Vec<&str>,
+    vars_map: &mut HashMap<String, ResourceAccessPoint>
+) {
+    let b = fields[1] == "mut"; // mut declared for owner struct
+
+    // assumption: mut qualifier immediately followed by name
+    let mut v_name = (if b {fields[2]} else {fields[1]}).to_string();
+    // push owner struct
+    vars_map.insert(
+        v_name.clone(), // key
+        ResourceAccessPoint::Struct(Struct { // value
+            owner: *hash,
+            hash: *hash,
+            name: v_name,
+            is_mut: if b {true} else {false},
+            is_member: false
+        })
+    );
+
+    // push all member variables
+    // TODO: error checking
+    let owner_hash = *hash;
+    let mut idx = if b {3} else {2}; // members start at index 2,3
+    while idx < fields.len() {
+        *hash += 1;
+        let cond = fields[idx] == "mut";
+        v_name = (
+            if cond {
+                if idx+1 >= fields.len() {
+                    eprintln!("Expected variable name after 'mut' qualifier, found nothing!");
+                    exit(1);
+                }
+                fields[idx+1]
+            } else {
+                fields[idx]
+            }
+        ).to_string();
+        // begin new def
+        vars_map.insert(
+            v_name.clone(),
+            ResourceAccessPoint::Struct(Struct {
+                owner: owner_hash,
+                hash: *hash,
+                name: v_name,
+                is_mut: if cond {true} else {false},
+                is_member: true
+            })
+        );
+        
+        idx = if cond {idx+2} else {idx+1};
     }
 }
 
