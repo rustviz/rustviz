@@ -21,3 +21,4 @@
 - [function](./function.md)
 - [printing](./printing.md)
 - [struct_string](./struct_string.md)
+- [struct_rect](./struct_rect.md)

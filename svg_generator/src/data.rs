@@ -57,14 +57,16 @@ pub struct Owner {
     pub lifetime_trait: LifetimeTrait,
 }
 
-// when something is a struct
+// when something is a struct member
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Struct {
     pub name: String,
     pub hash: u64,
+    pub owner: u64,
     pub is_mut: bool,                     
     pub lifetime_trait: LifetimeTrait,
-    pub size: u64,
+    // pub size: u64,
+    pub is_member: bool,
 }
 
 // a reference of type &mut T
@@ -135,6 +137,46 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::MutRef(_) => true,
             ResourceAccessPoint::StaticRef(_) => true,
             ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn is_struct_group(&self) -> bool {
+        match self {
+            ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Struct(_) => true,
+            ResourceAccessPoint::MutRef(_) => false,
+            ResourceAccessPoint::StaticRef(_) => false,
+            ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn is_struct(&self) -> bool {
+        match self {
+            ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Struct(Struct{is_member, ..}) => !is_member.to_owned(),
+            ResourceAccessPoint::MutRef(_) => false,
+            ResourceAccessPoint::StaticRef(_) => false,
+            ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn is_member(&self) -> bool {
+        match self {
+            ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Struct(Struct{is_member, ..}) => is_member.to_owned(),
+            ResourceAccessPoint::MutRef(_) => false,
+            ResourceAccessPoint::StaticRef(_) => false,
+            ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn get_owner(&self) -> u64 {
+        match self {
+            ResourceAccessPoint::Owner(Owner{hash, ..}) => hash.to_owned(),
+            ResourceAccessPoint::Struct(Struct{owner, ..}) => owner.to_owned(),
+            ResourceAccessPoint::MutRef(MutRef{hash, ..}) => hash.to_owned(),
+            ResourceAccessPoint::StaticRef(StaticRef{hash, ..}) => hash.to_owned(),
+            ResourceAccessPoint::Function(Function{hash, ..}) => hash.to_owned(),
         }
     }
 
@@ -291,9 +333,10 @@ pub enum Event {
     InitializeParam {
         param: ResourceAccessPoint
     },
-    StructBox{
-        from: Option<ResourceAccessPoint>
-    },
+    StructBox
+    // {
+        // from: Option<ResourceAccessPoint>
+    // },
 }
 
 // Trait of a resource owner that might impact the way lifetime visualization
@@ -417,7 +460,7 @@ impl Display for Event {
             Event::InitializeParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
-            Event::StructBox{ from } => { from_ro = from.to_owned(); "The components in the box belong to a struct" },
+            Event::StructBox => { "The components in the box belong to a struct" },
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -482,7 +525,7 @@ impl Event {
             MutableReacquire{ from } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
-            StructBox{ from } => {
+            StructBox => {
                 hover_messages::structure(my_name)
             }
         } 
@@ -865,7 +908,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro, Event::MutableReturn{to : from_ro.to_owned()}, &line_number);
             },
             ExternalEvent::StructBox{ from:from_ro, to:to_ro } => {
-                maybe_append_event(self, &from_ro, Event::StructBox{from : from_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &from_ro, Event::StructBox, &line_number);
             }
             ExternalEvent::InitializeParam{param: ro} => {
                 maybe_append_event(self, &Some(ro.clone()), Event::InitializeParam{param : ro.to_owned()}, &line_number);

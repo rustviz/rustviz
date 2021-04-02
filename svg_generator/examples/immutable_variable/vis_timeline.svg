@@ -199,6 +199,8 @@ object.code_panel {
         </filter>
     </defs>
 
+    <g id="non-struct">
+	<g class="struct_instance">
     <g id="labels">
         <text x="70" y="90" style="text-anchor:middle" data-hash="1" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;, immutable">x</text>
     </g>
@@ -222,6 +224,23 @@ object.code_panel {
     </g>
 
     <g id="arrows">
+    </g></g>
+	<g class="struct_members">
+    <g id="labels">
     </g>
+
+    <g id="timelines">
+    </g>
+
+    <g id="ref_line">
+    </g>
+
+    <g id="events">
+    </g>
+
+    <g id="arrows">
+    </g></g>
+	</g>
+    
 
 </svg>
