@@ -33,7 +33,7 @@ If you observed this output, then you have successfully generated the Rust visua
 Great, this is how you can generate and view visualizations created using *RustViz*. Now let's create one from scratch!
 
 ## Step-By-Step Guide
-In this section, we'll dive into creating an example, [string_from_move_print](../svg_generator/examples/string_from_move_print). First, take note of the file structure we'll need to run the example:
+In this section, we'll dive into creating an example, [string_from_move_print](examples/string_from_move_print). First, take note of the file structure we'll need to run the example:
 ```shell
 string_from_move_print
 ├── input
@@ -41,7 +41,7 @@ string_from_move_print
 ├── main.rs
 └── source.rs
 ```
-[source.rs](../svg_generator/examples/string_from_move_print/source.rs) contains the untouched source code we wish to render into an image:
+[source.rs](examples/string_from_move_print/source.rs) contains the untouched source code we wish to render into an image:
 ```rust
 fn main() {
     let x = String::from("hello");
@@ -51,9 +51,9 @@ fn main() {
 ```
 In this example, `String::from()` moves a string (`"hello"`) to `x`, then `x`'s resource is moved to `y`. Subsequently, `println!()` outputs a message to `io::stdout` without moving the resource.
 
-Next, let's familiarize ourselves with the syntax used in [main.rs](../svg_generator/examples/string_from_move_print/main.rs). The RustViz tool **defines all possible owners, references or input of any memory resource** as a [ResourceAccessPoint](#Data_Structures_and_Function_Specifications). In this case, we consider the function `String::from()` and two variables, `x` and `y`, as Resource Access Points (RAPs). Each of `String::from()` and `x`/`y` corresponds to RAPs `ResourceAccessPoint::Function` and `ResourceAccessPoint::Owner`, respectively.
+Next, let's familiarize ourselves with the syntax used in [main.rs](examples/string_from_move_print/main.rs). The RustViz tool **defines all possible owners, references or input of any memory resource** as a [ResourceAccessPoint](#Data_Structures_and_Function_Specifications). In this case, we consider the function `String::from()` and two variables, `x` and `y`, as Resource Access Points (RAPs). Each of `String::from()` and `x`/`y` corresponds to RAPs `ResourceAccessPoint::Function` and `ResourceAccessPoint::Owner`, respectively.
 
-In [main.rs](../svg_generator/examples/string_from_move_print/main.rs), we define these RAPs between the `BEGIN` and `END` comments on lines 1 and 2:
+In [main.rs](examples/string_from_move_print/main.rs), we define these RAPs between the `BEGIN` and `END` comments on lines 1 and 2:
 ```rust
 /*--- BEGIN Variable Definitions ---
 Owner x; Owner y;
@@ -81,7 +81,7 @@ An immutable instance of some struct with member variables `x` and `mut y`, on t
 > </ol>
 <br>
 
-Next, we annotate the code with the use of `ExternalEvent`s that **describe move, borrow, and drop semantics** of Rust. In [string_from_move_print](../svg_generator/examples/string_from_move_print), we have four such events:
+Next, we annotate the code with the use of `ExternalEvent`s that **describe move, borrow, and drop semantics** of Rust. In [string_from_move_print](examples/string_from_move_print), we have four such events:
 1. Move of resource from `String::from()` to `x`
 2. Move of resource from `y` to `x`
 3. Drop of resource binded to `x`
@@ -128,7 +128,7 @@ string_from_move_print
 ├── vis_code.svg
 └── vis_timeline.svg
 ```
-Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](../rustviz_mdbook/view_examples.sh) and run the script to see it in your browser.
+Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script to see it in your browser.
 
 ## Appendix
 
