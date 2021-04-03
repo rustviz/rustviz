@@ -1,0 +1,10 @@
+[book]
+authors = ["Vishnu Reddy"]
+language = "en"
+multilingual = false
+src = "src"
+title = "test_examples"
+
+[output.html]
+additional-css = ["mdbook_plugin/visualization.css"]
+additional-js = ["mdbook_plugin/helpers.js"]
