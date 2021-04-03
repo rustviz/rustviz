@@ -18,7 +18,7 @@ struct TimelineColumnData {
     is_ref: bool,
     is_struct_group: bool,
     is_member: bool,
-    owner: u64,
+    owner: u64
 }
 
 #[derive(Serialize)]
@@ -27,7 +27,7 @@ struct TimelinePanelData {
     dots: String,
     timelines: String,
     ref_line: String,
-    arrows: String,
+    arrows: String
 }
 
 #[derive(Serialize)]
@@ -35,7 +35,7 @@ struct ResourceAccessPointLabelData {
     x_val: i64,
     hash: String,
     name: String,
-    title: String,
+    title: String
 }
 
 #[derive(Serialize)]
@@ -83,7 +83,7 @@ struct BoxData {
 #[derive(Serialize)]
 struct StructTimelinePanelData {
     struct_name: String,
-    struct_members: String,
+    struct_members: String
 }
 
 #[derive(Serialize, Clone)]
@@ -94,7 +94,7 @@ struct VerticalLineData {
     x2: i64,
     y1: i64,
     y2: i64,
-    title: String,
+    title: String
 }
 
 #[derive(Serialize, Clone)]
@@ -108,14 +108,14 @@ struct RefLineData {
     dx: i64,
     dy: i64,
     v: i64,
-    title: String,
+    title: String
 }
 
 #[derive(Serialize)]
 struct OutputStringData {
     struct_name: String,
     struct_instance: String,
-    struct_members: String,
+    struct_members: String
 }
 
 pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String, i32) {
@@ -136,16 +136,9 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_labels_string(&mut output, &resource_owners_layout, &registry);
     render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry);
-    // render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &registry);
-    // let timeline_panel_data = TimelinePanelData {
-    //     labels: labels_string,
-    //     dots: dots_string + &fn_string,
-    //     timelines: timelines_string,
-    //     ref_line: ref_line_string,
-    //     arrows: arrows_string
-    // };
+    
     let mut output_string : String = String::new();
     for (hash, (timelinepanel, member_timelinepanel)) in output{
         let struct_name;
@@ -182,39 +175,11 @@ fn prepare_registry(registry: &mut Handlebars) {
         <g id=\"events\">\n{{ dots }}    </g>\n\n    \
         <g id=\"arrows\">\n{{ arrows }}    </g>";
 
-    /*
-        strucct {
-            struct_name: String,
-            struct_instance: _, // timeline_panel_template
-            struct_members:  // timeline_panel_template
-        }
-        <g id="struct1">
-            <g class="struct_instance">
-                 "    <g id=\"labels\">\n{{ labels }}    </g>\n\n    \
-                <g id=\"timelines\">\n{{ timelines }}    </g>\n\n    \
-                <g id=\"ref_line\">\n{{ ref_line }}    </g>\n\n    \
-                <g id=\"events\">\n{{ dots }}    </g>\n\n    \
-                <g id=\"arrows\">\n{{ arrows }}    </g>";
-            </g>
-            <g class="struct_members">
-                "    <g id=\"labels\">\n{{ labels }}    </g>\n\n    \
-                <g id=\"timelines\">\n{{ timelines }}    </g>\n\n    \
-                <g id=\"ref_line\">\n{{ ref_line }}    </g>\n\n    \
-                <g id=\"events\">\n{{ dots }}    </g>\n\n    \
-                <g id=\"arrows\">\n{{ arrows }}    </g>";
-            </g>
-        </g>
-    */
-
     let struct_template  = 
         "    <g id=\"{{struct_name}}\">\n\
              \t<g class=\"struct_instance\">\n{{ struct_instance }}</g>\n\
              \t<g class=\"struct_members\">\n{{ struct_members }}</g>\n\
              \t</g>\n    ";
-    // let struct_instance_template = 
-    //     "    <g class=\"struct_instance\">\n{{ struct_members }}    </g>\n\n    ";
-    // let struct_member_template = 
-    //     "    <g class=\"struct_members\">\n{{ struct_members }}    </g>\n\n    ";
     
     let label_template =
         "        <text x=\"{{x_val}}\" y=\"70\" style=\"text-anchor:middle\" data-hash=\"{{hash}}\" class=\"label tooltip-trigger\" data-tooltip-text=\"{{title}}\">{{name}}</text>\n";
@@ -236,20 +201,13 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
-    // TODO: button_template
 
     assert!(
         registry.register_template_string("struct_template", struct_template).is_ok()
     );
-    // assert!(
-    //     registry.register_template_string("struct_instance_template", timeline_panel_template).is_ok()
-    // );
     assert!(
         registry.register_template_string("timeline_panel_template", timeline_panel_template).is_ok()
     );
-    // assert!(
-    //     registry.register_template_string("struct_member_template", struct_member_template).is_ok()
-    // );
     assert!(
         registry.register_template_string("label_template", label_template).is_ok()
     );
@@ -285,7 +243,7 @@ fn prepare_registry(registry: &mut Handlebars) {
 // Returns: a binary tree map from the hash of the ResourceOwner to its Column information
 fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (BTreeMap<&'a u64, TimelineColumnData>, i32) {
     let mut resource_owners_layout = BTreeMap::new();
-    let mut x = 0;                   // Right-most Column x-offset.
+    let mut x = 0; // Right-most Column x-offset.
     for (hash, timeline) in visualization_data.timelines.iter() {
         // only put variable in the column layout
         match timeline.resource_access_point {
@@ -352,14 +310,10 @@ fn render_labels_string(
         }
 
         // push to individual timelines
-        
-        // let t = &ResourceAccessPoint //TODO: fix this
         if column_data.is_struct_group {
             if column_data.is_member {
-                // output[&(column_data.owner.to_owned() as i64)].1.labels.push_str(&registry.render("label_template", &data).unwrap());
                 output.get_mut(&(column_data.owner.to_owned() as i64)).unwrap().1.labels.push_str(&registry.render("label_template", &data).unwrap());
             } else {
-                // output[&(column_data.owner.to_owned() as i64)].0.labels.push_str(&registry.render("label_template", &data).unwrap());
                 output.get_mut(&(column_data.owner.to_owned() as i64)).unwrap().0.labels.push_str(&registry.render("label_template", &data).unwrap());
             }
         }
@@ -397,16 +351,14 @@ fn render_dots_string(
                         Event::Move{..} => {
                             resource_hold = false;
                         },
-                        _ => {
-                            //do nothing
-                        }
+                        _ => {} //do nothing
                     }
                     let mut data = EventDotData {
                         hash: *hash as u64,
                         dot_x: resource_owners_layout[hash].x_val,
                         dot_y: get_y_axis_pos(*line_number),
-                        title: "Unknown Resource Owner Value".to_owned()        // default value if the 
-                                                                                // print_message_with_name() fails
+                        // default value if print_message_with_name() fails
+                        title: "Unknown Resource Owner Value".to_owned()
                     };
                     if let Some(name) = visualization_data.get_name_from_hash(hash) {
                         match event {
@@ -442,7 +394,6 @@ fn render_dots_string(
             },
         }
     }
-    // output
 }
 
 // render arrows that support function
@@ -452,8 +403,6 @@ fn render_arrows_string_external_events_version(
     resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ){
-
-    // let (mut output, mut fn_timeline) = (String::new(), String::new());
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
         let (from, to) = match external_event {
@@ -522,13 +471,6 @@ fn render_arrows_string_external_events_version(
             let styled_to_string = SPAN_BEGIN.to_string() + &to_string + SPAN_END;
             title = format!("{} to {}", title, styled_to_string);
         };
-        // Old structure for data
-        // calc arrow data and function logo data
-        // x1: 0,
-        // y1: get_y_axis_pos(line_number),
-        // x2: 0,
-        // y2: get_y_axis_pos(line_number),
-        // Q: can I replace mut with simply Vec::new()?
 
         // order of points is to -> from
         let mut data = ArrowData {
@@ -553,13 +495,14 @@ fn render_arrows_string_external_events_version(
                 let y2 = get_y_axis_pos(*line_number);
                 data.coordinates.push((x1 as f64, y1 as f64));
                 data.coordinates.push((x2 as f64, y2 as f64));
+
                 let function_data = FunctionLogoData {
                     x: x2 + 3,
                     y: y2 + 5,
                     hash: from_function.hash.to_owned() as u64,
                     title: SPAN_BEGIN.to_string() + &from_function.name + SPAN_END,
                 };
-                // fn_timeline.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+
                 if resource_owners_layout[to_variable.hash()].is_struct_group {
                     if resource_owners_layout[to_variable.hash()].is_member {
                         output.get_mut(&(resource_owners_layout[to_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
@@ -583,7 +526,7 @@ fn render_arrows_string_external_events_version(
                     title: styled_fn_name + " reads from " + &styled_from_name,
                     hash: from_variable.hash().to_owned() as u64,
                 };
-                // fn_timeline.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
                     if resource_owners_layout[from_variable.hash()].is_member {
                         output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
@@ -617,7 +560,6 @@ fn render_arrows_string_external_events_version(
                 else {
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                 }
-                // fn_timeline.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
             },
             (Some(from_variable), Some(ResourceAccessPoint::Function(to_function)), _) => { // (Some(variable), Some(function), _)
                 let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
@@ -628,6 +570,7 @@ fn render_arrows_string_external_events_version(
                 let y2 = get_y_axis_pos(*line_number);
                 data.coordinates.push((x1 as f64, y1 as f64));
                 data.coordinates.push((x2 as f64, y2 as f64));
+
                 let function_data = FunctionLogoData {
                     // adjust Function logo pos
                     x: x1 - 10,  
@@ -635,7 +578,7 @@ fn render_arrows_string_external_events_version(
                     hash: to_function.hash.to_owned() as u64,
                     title: styled_fn_name,
                 };
-                // fn_timeline.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
                     if resource_owners_layout[from_variable.hash()].is_member {
                         output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
@@ -662,7 +605,7 @@ fn render_arrows_string_external_events_version(
                 box_data.w = resource_owners_layout[to_variable.hash()].x_val 
                             - resource_owners_layout[from_variable.hash()].x_val + 40;
                 box_data.h =  max_line * 30 + 10;
-                // push_to_output(&registry, &resource_owners_layout[from_variable.hash()], "box_template", &data, &mut output);
+        
                 if from_variable.is_struct_group() {
                     if from_variable.is_member(){
                         output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
@@ -673,12 +616,8 @@ fn render_arrows_string_external_events_version(
                 else {
                     output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
                 }
-                // output.push_str(&registry.render("box_template", &box_data).unwrap());
             },
             (Some(from_variable), Some(to_variable), _) => {
-                // Only place to address overlay arrows
-                // Q : can I do * to dereference?
-                // Q : why we have reference stored in variables and vectors AKA containers?
                 let arrow_order = visualization_data.event_line_map.get(line_number).unwrap().iter().position(|x| x == external_event).unwrap() as i64;
 
                 let x1 = resource_owners_layout[to_variable.hash()].x_val;
@@ -718,9 +657,6 @@ fn render_arrows_string_external_events_version(
         }
         // draw arrow only if data.x1 is not default value
         if !data.coordinates.is_empty() {
-            // adjust arrow head pos
-            // Q : better way to do this?
-            // if arrow is straight
             let last_index = data.coordinates.len() - 1;
 
             if data.coordinates.len() == 2 {
@@ -772,15 +708,10 @@ fn render_arrows_string_external_events_version(
                 else {
                     output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                 }
-                // push_to_output(&registry, &resource_owners_ layout[ro.hash()], "arrow_template", &data, &mut output);
             }
-            // output.push_str(&registry.render("arrow_template", &data).unwrap()); 
         }
     }
-    // output[hash].dots += fn_timeline
-    // (output, fn_timeline)
 }
-
 
 fn determine_owner_line_styles(
     rap: &ResourceAccessPoint,
@@ -790,7 +721,7 @@ fn determine_owner_line_styles(
         (State::FullPrivilege, true) => OwnerLine::Solid,
         (State::FullPrivilege, false) => OwnerLine::Hollow,
         (State::PartialPrivilege{..}, _) => OwnerLine::Hollow, // let (mut) a = 5;
-        _ => OwnerLine::Empty,              // Otherwise its empty
+        _ => OwnerLine::Empty, // Otherwise its empty
     }
 }
 
@@ -850,7 +781,7 @@ fn create_owner_line_string(
 ) -> String {
     let style = determine_owner_line_styles(rap, state);
     match (state, style) {
-        (State::FullPrivilege, OwnerLine::Solid) | (State::PartialPrivilege { .. }, OwnerLine::Solid) => {
+        (State::FullPrivilege, OwnerLine::Solid) | (State::PartialPrivilege{ .. }, OwnerLine::Solid) => {
             data.line_class = String::from("solid");
             data.title += ". The binding can be reassigned.";
             registry.render("vertical_line_template", &data).unwrap()
@@ -859,7 +790,7 @@ fn create_owner_line_string(
             let mut hollow_line_data = data.clone();
             hollow_line_data.title += ". The binding cannot be reassigned.";
             hollow_line_data.x1 -= 1.8; // center middle of path to center of event dot
-            
+
             registry.render("hollow_line_template", &hollow_line_data).unwrap()
         },
         (State::FullPrivilege, OwnerLine::Dotted) => {
@@ -921,9 +852,7 @@ fn create_reference_line_string(
             registry.render("vertical_line_template", &data).unwrap()
         }
         // do nothing when the case is (RevokedPrivilege, false), (OutofScope, _), (ResourceMoved, false)
-        _ => (
-            "".to_owned()
-        ),
+        _ => "".to_owned(),
     }
 }
 
@@ -934,7 +863,6 @@ fn render_timelines(
     resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ){
-    // let mut output = String::new();
     let timelines = &visualization_data.timelines;
     for (hash, timeline) in timelines {
         let rap = &timeline.resource_access_point;
@@ -942,32 +870,20 @@ fn render_timelines(
         for (line_start, line_end, state) in rap_states.iter() {
             // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
             let data = match rap {
-                ResourceAccessPoint::Function(_) => {
-                    None
-                },
-                _ => {
-                    Some (
-                        VerticalLineData {
-                            line_class: String::new(),
-                            hash: *hash,
-                            x1: resource_owners_layout[hash].x_val as f64,
-                            y1: get_y_axis_pos(*line_start),
-                            x2: resource_owners_layout[hash].x_val,
-                            y2: get_y_axis_pos(*line_end),
-                            title: state.print_message_with_name(rap.name())
-                        }
-                    )
-                }
+                ResourceAccessPoint::Function(_) => None,
+                _ => Some(VerticalLineData {
+                    line_class: String::new(),
+                    hash: *hash,
+                    x1: resource_owners_layout[hash].x_val as f64,
+                    y1: get_y_axis_pos(*line_start),
+                    x2: resource_owners_layout[hash].x_val,
+                    y2: get_y_axis_pos(*line_end),
+                    title: state.print_message_with_name(rap.name())
+                })
             };
             match rap {
-                ResourceAccessPoint::Function(_) => {
-                    // Don't do anything
-                },
+                ResourceAccessPoint::Function(_) => {}, // Don't do anything
                 ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
-                    // output.push_str(
-                    //     // the unwrap is safe as long as data is built in this branch. 
-                    //     &create_owner_line_string(rap, state, &mut data.unwrap(), registry)
-                    // );
                     if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
                         if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
                             output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
@@ -985,16 +901,11 @@ fn render_timelines(
                     }
                 },
                 ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
-                    // output.push_str(
-                    //     // the unwrap is safe as long as data is built in this branch. 
-                    //     &create_reference_line_string(rap, state, &mut data.unwrap(), registry)
-                    // );
-                    output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
+                    output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, state, &mut data.unwrap(), registry));
                 },
             }
         }
     }
-    // output
 }
 
 // vertical lines indicating whether a reference can mutate its resource(deref as many times)
@@ -1007,13 +918,9 @@ fn render_ref_line(
 ){
     let timelines = &visualization_data.timelines;
 
-    // let mut output = String::new();
     for (hash, timeline) in timelines{
-        
         match timeline.resource_access_point {
-            ResourceAccessPoint::Function(_) => {
-                /* do nothing */
-            },
+            ResourceAccessPoint::Function(_) => (), /* do nothing */
             ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let ro = timeline.resource_access_point.to_owned();
@@ -1092,7 +999,6 @@ fn render_ref_line(
             },  
         }
     }
-    // output
 }
 
 fn get_y_axis_pos(line_number : usize) -> i64 {

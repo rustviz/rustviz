@@ -227,33 +227,33 @@ object.code_panel {
         <line data-hash="1" class="solid tooltip-trigger" x1="70" x2="70" y1="355" y2="385" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
-        <line data-hash="2" class="solid tooltip-trigger" x1="160" x2="160" y1="175" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 158.2,175 V 235 h 3.5 V 175 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r1&lt;/span&gt;'s resource is being shared by one or more variables"/>
-        <line data-hash="2" class="solid tooltip-trigger" x1="160" x2="160" y1="235" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        monospace, monospace !important;&quot;&gt;r1&lt;/span&gt;'s resource is being shared by one or more variables; can only read data"/>
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 158.2,235 V 235 h 3.5 V 235 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r1&lt;/span&gt;'s resource is being shared by one or more variables"/>
-        <line data-hash="2" class="solid tooltip-trigger" x1="160" x2="160" y1="235" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        monospace, monospace !important;&quot;&gt;r1&lt;/span&gt;'s resource is being shared by one or more variables; can only read data"/>
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 158.2,235 V 235 h 3.5 V 235 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r1&lt;/span&gt;'s resource is being shared by one or more variables"/>
-        <line data-hash="3" class="solid tooltip-trigger" x1="250" x2="250" y1="205" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        monospace, monospace !important;&quot;&gt;r1&lt;/span&gt;'s resource is being shared by one or more variables; can only read data"/>
+        <path data-hash="3" class="hollow tooltip-trigger" style="fill:transparent;" d="M 248.2,205 V 235 h 3.5 V 205 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r2&lt;/span&gt;'s resource is being shared by one or more variables"/>
-        <line data-hash="3" class="solid tooltip-trigger" x1="250" x2="250" y1="235" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        monospace, monospace !important;&quot;&gt;r2&lt;/span&gt;'s resource is being shared by one or more variables; can only read data"/>
+        <path data-hash="3" class="hollow tooltip-trigger" style="fill:transparent;" d="M 248.2,235 V 235 h 3.5 V 235 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r2&lt;/span&gt;'s resource is being shared by one or more variables"/>
-        <line data-hash="3" class="solid tooltip-trigger" x1="250" x2="250" y1="235" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        monospace, monospace !important;&quot;&gt;r2&lt;/span&gt;'s resource is being shared by one or more variables; can only read data"/>
+        <path data-hash="3" class="hollow tooltip-trigger" style="fill:transparent;" d="M 248.2,235 V 235 h 3.5 V 235 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r2&lt;/span&gt;'s resource is being shared by one or more variables"/>
+        monospace, monospace !important;&quot;&gt;r2&lt;/span&gt;'s resource is being shared by one or more variables; can only read data"/>
         <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 338.2,325 V 355 h 3.5 V 325 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r3&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
-        <line data-hash="4" class="solid tooltip-trigger" x1="340" x2="340" y1="355" y2="355" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r3&lt;/span&gt;'s resource is being shared by one or more variables"/>
+        monospace, monospace !important;&quot;&gt;r3&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data"/>
         <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 338.2,355 V 355 h 3.5 V 355 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r3&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
+        monospace, monospace !important;&quot;&gt;r3&lt;/span&gt;'s resource is being shared by one or more variables; can only read data"/>
+        <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 338.2,355 V 355 h 3.5 V 355 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;r3&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data"/>
     </g>
 
     <g id="ref_line">

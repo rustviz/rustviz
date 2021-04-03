@@ -221,7 +221,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
         <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 158.2,265 V 295 h 3.5 V 265 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
+        monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data"/>
     </g>
 
     <g id="ref_line">
