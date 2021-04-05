@@ -3,6 +3,29 @@
 // Fix back button cache problem
 window.onunload = function () {};
 
+(function addAnalytics() {
+    let s = document.createComment(" Global site tag (gtag.js) - Google Analytics for RustViz ");
+    document.head.append(s);
+
+    s = document.createElement('script');
+    s.setAttribute("src", "https://www.googletagmanager.com/gtag/js?id=G-W8JP8LHES3");
+    s.async = true;
+    document.head.append(s);
+
+    s = document.createElement('script');
+    s.innerHTML = "window.dataLayer = window.dataLayer || [];\
+        function gtag(){dataLayer.push(arguments);}\
+        gtag('js', new Date());\
+        gtag('config', 'G-W8JP8LHES3');";
+    document.head.append(s);
+
+    // page viewed
+    gtag('event', 'page_view', {
+        page_path: location.pathname,
+        page_title: document.title
+    });
+})();
+
 // Global variable, shared between modules
 function playpen_text(playpen) {
     let code_block = playpen.querySelector("code");
