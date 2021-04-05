@@ -41,19 +41,21 @@ declare -a targetExamples=(
     #"error_borrow_mutably_borrowed"
 )
 
+EX="../src/examples"
 # Loop through the specified examples
 for target in ${targetExamples[@]}; do
     printf "building %s..." $target
     
     # Check if required files are there
-    if [[ -f  "../examples/$target/input/annotated_source.rs" && \
-        -f "../examples/$target/main.rs" && -f "../examples/$target/source.rs" ]]
+    if [[ -f  "$EX/$target/input/annotated_source.rs" && \
+        -f "$EX/$target/main.rs" && -f "$EX/$target/source.rs" ]]
     then
+        cd ../src # switch to appropriate folder
         # Run svg generation for example
         cargo run $target >/dev/null 2>&1
 
         # If if the svg generation exited with an error or the required SVGs weren't created, report failure and continue
-        if [[ $? -ne 0 || !(-f "../examples/$target/vis_code.svg") || !(-f "../examples/$target/vis_timeline.svg") ]]; then
+        if [[ $? -ne 0 || !(-f "examples/$target/vis_code.svg") || !(-f "examples/$target/vis_timeline.svg") ]]; then
             printf "${red}FAILED${end} on SVG generation.\n"
             cd ../rustviz_mdbook
             continue
@@ -62,13 +64,13 @@ for target in ${targetExamples[@]}; do
 
         # Copy files to mdbook directory
         mkdir -p "./src/assets/$target"
-        cp "../examples/$target/source.rs" "./src/assets/$target/source.rs"
-        cp "../examples/$target/vis_code.svg" "./src/assets/$target/vis_code.svg"
-        cp "../examples/$target/vis_timeline.svg" "./src/assets/$target/vis_timeline.svg"
+        cp "$EX/$target/source.rs" "./src/assets/$target/source.rs"
+        cp "$EX/$target/vis_code.svg" "./src/assets/$target/vis_code.svg"
+        cp "$EX/$target/vis_timeline.svg" "./src/assets/$target/vis_timeline.svg"
         
         # Add append corresponding line to SUMMARY.md
         echo "- [$target](./$target.md)" >> src/SUMMARY.md
-        printf "\n"
+        echo "done"
     else
         # Report failure if required files aren't there
         printf "${red}FAILED${end}. The required files are not in the examples dir.\n"

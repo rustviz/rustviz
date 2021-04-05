@@ -75,7 +75,7 @@ pub fn render_svg(
     let mut code_panel_string = String::new();
     let mut num_lines = 0;
 
-    let template_path = "src/svg_generator/templates/";
+    let template_path = "svg_generator/templates/";
     let svg_code_template = utils::read_file_to_string(template_path.to_string()+"code_template.svg")
         .unwrap_or("Reading template.svg failed.".to_owned());
     let svg_timeline_template =
