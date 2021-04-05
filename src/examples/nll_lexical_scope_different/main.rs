@@ -19,5 +19,5 @@ fn main() {
 } // !{ GoOutOfScope(x), GoOutOfScope(y), GoOutOfScope(z) }
 
 fn world(s : &mut String) { // !{ InitializeParam(s) }
-    s.push_str(", world") // !{ PassByMutableReference(s->push_str()) }
+    s.push_str(", world"); // !{ PassByMutableReference(s->push_str()) }
 } // !{ GoOutOfScope(s) }

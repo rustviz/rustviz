@@ -16,5 +16,5 @@ fn main(){
     } */
 
     let r3 = &mut s; // !{ MutableBorrow(s->r3) }
-    clear_string(r3); // !{ PassByStaticReference(r3->clear_string()), MutableReturn(r3->s) }
+    clear_string(r3); // !{ PassByMutableReference(r3->clear_string()), MutableReturn(r3->s) }
 } // !{ GoOutOfScope(s), GoOutOfScope(r1), GoOutOfScope(r2), GoOutOfScope(r3) }

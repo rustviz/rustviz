@@ -82,6 +82,7 @@ pub fn render_svg(
         utils::read_file_to_string(template_path.to_string()+"timeline_template.svg")
             .unwrap_or("Reading template.svg failed.".to_owned());
 
+
     let mut handlebars = Handlebars::new();
     // We want to preserve the inputs `as is`, and want to make no changes based on html escape.
     handlebars.register_escape_fn(handlebars::no_escape);
@@ -111,7 +112,6 @@ pub fn render_svg(
     // data for tl panel
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
 
-        
     let svg_data = SvgData {
         visualization_name: input_path.to_owned(),
         css: css_string,

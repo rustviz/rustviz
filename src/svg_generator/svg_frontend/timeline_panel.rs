@@ -720,6 +720,8 @@ fn determine_owner_line_styles(
     match (state, rap.is_mut()) {
         (State::FullPrivilege, true) => OwnerLine::Solid,
         (State::FullPrivilege, false) => OwnerLine::Hollow,
+        // cannot assign to to variable because it is borrowed
+        // partialprivilege ~= immutable, otherwise it would be an error
         (State::PartialPrivilege{..}, _) => OwnerLine::Hollow, // let (mut) a = 5;
         _ => OwnerLine::Empty, // Otherwise its empty
     }
@@ -779,6 +781,7 @@ fn create_owner_line_string(
     data: &mut VerticalLineData,
     registry: &Handlebars,
 ) -> String {
+    // TODO: prevent creating line when function dot already exists
     let style = determine_owner_line_styles(rap, state);
     match (state, style) {
         (State::FullPrivilege, OwnerLine::Solid) | (State::PartialPrivilege{ .. }, OwnerLine::Solid) => {
@@ -786,20 +789,12 @@ fn create_owner_line_string(
             data.title += ". The binding can be reassigned.";
             registry.render("vertical_line_template", &data).unwrap()
         },
-        (State::FullPrivilege, OwnerLine::Hollow) => {
+        (State::FullPrivilege, OwnerLine::Hollow) | (State::PartialPrivilege{..}, OwnerLine::Hollow) => {
             let mut hollow_line_data = data.clone();
             hollow_line_data.title += ". The binding cannot be reassigned.";
             hollow_line_data.x1 -= 1.8; // center middle of path to center of event dot
 
             registry.render("hollow_line_template", &hollow_line_data).unwrap()
-        },
-        // (State::FullPrivilege, OwnerLine::Dotted) => {
-        //     // cannot read nor write the data from this RAP temporarily (borrowed away by a mut reference)
-        //     "".to_owned()
-        // }
-        (State::PartialPrivilege{..}, _) => {
-            data.line_class = String::from("solid");
-            registry.render("vertical_line_template", &data).unwrap()
         },
         (State::OutOfScope, _) => "".to_owned(),
         // do nothing when the case is (RevokedPrivilege, false), (OutofScope, _), (ResourceMoved, false)

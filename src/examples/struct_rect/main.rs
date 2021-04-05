@@ -15,7 +15,7 @@ fn main() {
 
     println!(
         "The area of the rectangle is {} square pixels.",
-        area(&r) // !{ PassByStaticReference(r->area()), StaticReturn(area()->r) }
+        area(&r) // !{ PassByStaticReference(r->area()) }
     );
 } // !{ StructBox(r->h), GoOutOfScope(w), GoOutOfScope(h), GoOutOfScope(r) }
 

@@ -598,13 +598,16 @@ impl Visualizable for VisualizationData {
         if event_invalid(event) { return State::Invalid; }
 
         match (previous_state, event) {
-            (State::Invalid, _) => State::Invalid,
+            (State::Invalid, _) =>
+                State::Invalid,
 
-            (State::OutOfScope, Event::Acquire{ .. })  => State::FullPrivilege,
+            (State::OutOfScope, Event::Acquire{ .. }) =>
+                State::FullPrivilege,
 
-            (State::OutOfScope, Event::Copy{ .. })  => State::FullPrivilege,
+            (State::OutOfScope, Event::Copy{ .. }) =>
+                State::FullPrivilege,
 
-            (State::OutOfScope, Event::StaticBorrow{ from: ro })  =>
+            (State::OutOfScope, Event::StaticBorrow{ from: ro }) =>
                 State::PartialPrivilege {
                     borrow_count: 1,
                     borrow_to: [ro.to_owned()].iter().cloned().collect()
@@ -633,7 +636,18 @@ impl Visualizable for VisualizationData {
                 }
             },
 
-            (State::FullPrivilege, Event::Move{to: to_ro}) => State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line },
+            (State::FullPrivilege, Event::Move{to: to_ro}) =>
+                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line },
+
+            (State::ResourceMoved{ .. }, Event::Acquire{ .. }) => {
+                if self.is_mut(hash) {
+                    State::FullPrivilege
+                }
+                else { // immut variables cannot reacquire resource
+                    eprintln!("Immutable variable {} cannot reacquire resources!", self.get_name_from_hash(hash).unwrap());
+                    std::process::exit(1);
+                }
+            },
 
             (State::FullPrivilege, Event::MutableLend{ to: to_ro }) => {
             // Assumption: variables can lend mutably if
@@ -659,9 +673,11 @@ impl Visualizable for VisualizationData {
                 }
             },
 
-            (State::FullPrivilege, Event::OwnerGoOutOfScope) => State::OutOfScope,
+            (State::FullPrivilege, Event::OwnerGoOutOfScope) =>
+                State::OutOfScope,
 
-            (State::FullPrivilege, Event::RefGoOutOfScope) => State::OutOfScope,
+            (State::FullPrivilege, Event::RefGoOutOfScope) =>
+                State::OutOfScope,
 
             (State::FullPrivilege, Event::StaticLend{ to: to_ro }) =>
                 State::PartialPrivilege {
@@ -669,7 +685,8 @@ impl Visualizable for VisualizationData {
                     borrow_to: [(to_ro.to_owned().unwrap())].iter().cloned().collect() // we assume there is no borrow_to:None
                 },
 
-            (State::PartialPrivilege{ .. }, Event::MutableLend{ .. }) => State::Invalid,
+            (State::PartialPrivilege{ .. }, Event::MutableLend{ .. }) =>
+                State::Invalid,
 
             (State::PartialPrivilege{ borrow_count: current, borrow_to }, Event::StaticLend{ to: to_ro }) => {
                 let mut new_borrow_to = borrow_to.clone();
@@ -682,7 +699,8 @@ impl Visualizable for VisualizationData {
             }
                 
             // self statically borrowed resource, and it returns; TODO what about references to self?
-            (State::PartialPrivilege{ .. }, Event::StaticReturn{ .. }) => State::OutOfScope,
+            (State::PartialPrivilege{ .. }, Event::StaticReturn{ .. }) =>
+                State::OutOfScope,
 
             (State::PartialPrivilege{ borrow_count, borrow_to }, Event::StaticReacquire{ from: ro }) => {
                 let new_borrow_count = borrow_count - 1;
@@ -701,11 +719,14 @@ impl Visualizable for VisualizationData {
                     }
                 }
 
-            (State::PartialPrivilege{ .. }, Event::OwnerGoOutOfScope) => State::OutOfScope,
+            (State::PartialPrivilege{ .. }, Event::OwnerGoOutOfScope) =>
+                State::OutOfScope,
 
-            (State::PartialPrivilege{ .. }, Event::RefGoOutOfScope) => State::OutOfScope,
+            (State::PartialPrivilege{ .. }, Event::RefGoOutOfScope) =>
+                State::OutOfScope,
 
-            (State::RevokedPrivilege{ .. }, Event::MutableReacquire{ .. }) => State::FullPrivilege,
+            (State::RevokedPrivilege{ .. }, Event::MutableReacquire{ .. }) =>
+                State::FullPrivilege,
 
             (_, Event::Duplicate { .. }) =>
                 (*previous_state).clone(),
@@ -864,7 +885,8 @@ impl Visualizable for VisualizationData {
                 if let Some(some_from_ro) = from_ro.to_owned() {
                     maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : some_from_ro.to_owned()}, &line_number);
                 } else {
-                    panic!("Must pass a function to PassByStaticReference.to!");
+                    eprintln!("Must pass a function to PassByStaticReference.to!");
+                    std::process::exit(1);
                 }
                 maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &to_ro, Event::StaticReturn{to : from_ro.to_owned()}, &line_number);
@@ -874,7 +896,8 @@ impl Visualizable for VisualizationData {
                 if let Some(some_from_ro) = from_ro.to_owned() {
                     maybe_append_event(self, &to_ro, Event::MutableBorrow{from : some_from_ro.to_owned()}, &line_number);
                 } else {
-                    panic!("Must pass a function to PassByMutableReference.to!");
+                    eprintln!("Must pass a function to PassByMutableReference.to!");
+                    std::process::exit(1);
                 }
                 maybe_append_event(self, &from_ro, Event::MutableReacquire{from : to_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &to_ro, Event::MutableReturn{to : from_ro.to_owned()}, &line_number);

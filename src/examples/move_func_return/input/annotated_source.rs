@@ -6,5 +6,5 @@ fn <tspan class="fn" data-hash="0" hash="6">f</tspan>() {
   
 fn main() {
     let <tspan data-hash="2">s</tspan> = <tspan class="fn" data-hash="0" hash="6">f</tspan>();
-    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="2">s</tspan>)
+    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="2">s</tspan>);
 }
