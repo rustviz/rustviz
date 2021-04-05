@@ -30,6 +30,8 @@ pub trait Visualizable {
     fn append_external_event(&mut self, event: ExternalEvent, line_number: &usize);
     // if resource_access_point with hash is mutable
     fn is_mut(&self, hash: &u64 ) -> bool;
+    // if resource_access_point with hash is a function
+    fn is_mutref(&self, hash: &u64) -> bool;
 
     fn calc_state(&self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State;
 }
@@ -130,6 +132,13 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::MutRef(_) => true,
             ResourceAccessPoint::StaticRef(_) => true,
             ResourceAccessPoint::Function(_) => false,
+        }
+    }
+
+    pub fn is_mutref(&self) -> bool {
+        match self {
+            ResourceAccessPoint::MutRef(_) => true,
+            _ => false
         }
     }
 
@@ -564,8 +573,13 @@ impl Visualizable for VisualizationData {
     }
 
     // if the ResourceAccessPoint is declared mutable
-    fn is_mut(&self, hash: &u64 ) -> bool {
+    fn is_mut(&self, hash: &u64) -> bool {
         self.timelines[hash].resource_access_point.is_mut()
+    }
+
+    // if the ResourceAccessPoint is a function
+    fn is_mutref(&self, hash: &u64) -> bool {
+        self.timelines[hash].resource_access_point.is_mutref()
     }
 
     // a Function does not have a State, so we assume previous_state is always for Variables
@@ -621,8 +635,16 @@ impl Visualizable for VisualizationData {
 
             (State::FullPrivilege, Event::Move{to: to_ro}) => State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line },
 
-            (State::FullPrivilege, Event::MutableLend{ to: to_ro }) =>
-                if self.is_mut(hash) { State::RevokedPrivilege{ to: None, borrow_to: to_ro.to_owned() } } else { State::Invalid },
+            (State::FullPrivilege, Event::MutableLend{ to: to_ro }) => {
+            // Assumption: variables can lend mutably if
+            // 1) variable instance is mutable or 2) variable is a mutable reference
+            // Use cases: 'mutable_borrow' & 'nll_lexical_scope_different'
+                if self.is_mut(hash) | self.is_mutref(hash) {
+                    State::RevokedPrivilege{ to: None, borrow_to: to_ro.to_owned() }
+                } else {
+                    State::Invalid
+                }
+            },
             
             // happends when a mutable reference returns, invalid otherwise
             (State::FullPrivilege, Event::MutableReturn{ .. }) =>

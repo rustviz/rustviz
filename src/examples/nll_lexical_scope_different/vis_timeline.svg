@@ -230,15 +230,27 @@ object.code_panel {
         <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 158.2,145 V 175 h 3.5 V 145 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;y&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data."/>
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 158.2,175 V 175 h 3.5 V 175 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;y&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data."/>
         <path data-hash="3" class="hollow tooltip-trigger" style="fill:transparent;" d="M 248.2,205 V 235 h 3.5 V 205 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;z&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data."/>
+        <path data-hash="3" class="hollow tooltip-trigger" style="fill:transparent;" d="M 248.2,235 V 235 h 3.5 V 235 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;z&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data."/>
         <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 338.2,385 V 415 h 3.5 V 385 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data."/>
+        <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 338.2,415 V 445 h 3.5 V 415 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource; can read and write data; cannot point to another piece of data."/>
     </g>
 
     <g id="ref_line">
+        <path data-hash="2" class="mutref solid tooltip-trigger" style="fill:transparent; stroke-width: 2px !important;" d="M 160 145 l 15 6 v 18 l -15 6" data-tooltip-text="can mutate *y"/>
+        <path data-hash="3" class="mutref solid tooltip-trigger" style="fill:transparent; stroke-width: 2px !important;" d="M 250 205 l 15 6 v 18 l -15 6" data-tooltip-text="can mutate *z"/>
+        <path data-hash="4" class="mutref solid tooltip-trigger" style="fill:transparent; stroke-width: 2px !important;" d="M 340 385 l 15 12 v 36 l -15 12" data-tooltip-text="can mutate *s"/>
     </g>
 
     <g id="events">
