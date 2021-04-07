@@ -155,4 +155,8 @@ Congratulations! You have successfully generated your first visualization! As a 
 The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(None->x)`).
 
 ## Visualization Limitations
-Yet to be finished....
+
+Some features are still being built. As of now, we are limited to:
+- No branching logic
+- No looping
+- No explicit lifetime annotation

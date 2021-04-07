@@ -595,7 +595,7 @@ fn render_arrows_string_external_events_version(
                     name: from_variable.hash().clone(),
                     hash: 0,
                     x: 0,
-                    y: 65,
+                    y: 50,
                     w: 0,
                     h: 0,
                     title: String::new(),
@@ -604,7 +604,7 @@ fn render_arrows_string_external_events_version(
                 box_data.x = resource_owners_layout[from_variable.hash()].x_val - 20;
                 box_data.w = resource_owners_layout[to_variable.hash()].x_val 
                             - resource_owners_layout[from_variable.hash()].x_val + 40;
-                box_data.h =  max_line * LINE_SPACE + 10;
+                box_data.h =  max_line * LINE_SPACE + 20;
         
                 if from_variable.is_struct_group() {
                     if from_variable.is_member(){

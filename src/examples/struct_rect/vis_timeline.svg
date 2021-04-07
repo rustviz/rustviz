@@ -283,7 +283,7 @@ object.code_panel {
     </g>
 
     <g id="arrows">
-        <rect id="1" x="50" y="65" rx="20" ry="20" width="180" height="490" style="fill:white;stroke:black;stroke-width:3;opacity:0.1" pointer-events="none" />
+        <rect id="1" x="50" y="50" rx="20" ry="20" width="180" height="500" style="fill:white;stroke:black;stroke-width:3;opacity:0.1" pointer-events="none" />
     </g></g>
 	<g class="struct_members">
     <g id="labels">

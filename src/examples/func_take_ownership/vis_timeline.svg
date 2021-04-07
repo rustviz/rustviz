@@ -210,7 +210,13 @@ object.code_panel {
         <path data-hash="1" class="hollow tooltip-trigger" style="fill:transparent;" d="M 68.2,115 V 145 h 3.5 V 115 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
-        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 198.2,265 V 325 h 3.5 V 265 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 198.2,265 V 295 h 3.5 V 265 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 198.2,295 V 295 h 3.5 V 295 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is being shared by one or more variables. The binding cannot be reassigned."/>
+        <path data-hash="2" class="hollow tooltip-trigger" style="fill:transparent;" d="M 198.2,295 V 325 h 3.5 V 295 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
     </g>
@@ -231,11 +237,18 @@ object.code_panel {
         <circle cx="200" cy="265" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; is initialized as the function argument"/>
+        <circle cx="200" cy="295" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is immutably borrowed"/>
+        <circle cx="200" cy="295" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is no longer immutably borrowed"/>
         <circle cx="200" cy="325" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; goes out of scope. No resource is dropped."/>
         <text x="96" y="120" data-hash="3" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
         <text x="35" y="150" data-hash="4" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;takes_ownership()&lt;/span&gt;">f</text>
+        <use xlink:href="#functionDot" data-hash="2" x="200" y="295" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!()&lt;/span&gt; reads from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;"/>
     </g>
 
     <g id="arrows">
