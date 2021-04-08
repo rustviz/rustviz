@@ -13,5 +13,5 @@ fn take_and_return_ownership(some_string : String) -> String { // !{ InitializeP
 fn main() {
     let mut s = String::from("hello"); // !{ Move(String::from()->s) }
     s = take_and_return_ownership(s); // !{ Move(s->take_and_return_ownership()), Move(take_and_return_ownership()->s) }
-    println!("{}", s);   // OK
+    println!("{}", s);   // OK !{ PassByStaticReference(s->println!()) }
 } // !{ GoOutOfScope(s) }

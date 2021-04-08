@@ -168,24 +168,24 @@ object.code_panel {
     </g>
 
     <g id="code">
-        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>struct <tspan class="fn" data-hash="0" hash="5">Rect</tspan> { </text>
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>struct Rect { </text>
         <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    <tspan data-hash="2">w</tspan>: u32, </text>
         <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>    <tspan data-hash="3">h</tspan>: u32, </text>
         <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>} </text>
         <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan> </text>
         <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>fn main() { </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let <tspan data-hash="1">r</tspan> = <tspan class="fn" data-hash="0" hash="5">Rect</tspan> { </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let <tspan data-hash="1">r</tspan> = Rect { </text>
         <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>        <tspan data-hash="2">w</tspan>: 30, </text>
         <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>        <tspan data-hash="3">h</tspan>: 50, </text>
         <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>    }; </text>
         <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan> </text>
-        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>( </text>
+        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>    <tspan class="fn" data-hash="0" hash="6">println!</tspan>( </text>
         <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>        "The area of the rectangle is {} square pixels.", </text>
-        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>        <tspan class="fn" data-hash="0" hash="7">area</tspan>(<tspan data-hash="1">&amp;r</tspan>) </text>
+        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>        <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="1">&amp;r</tspan>) </text>
         <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>    ); </text>
         <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>} </text>
         <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan> </text>
-        <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>fn <tspan class="fn" data-hash="0" hash="7">area</tspan>(<tspan data-hash="4">rect</tspan>: <tspan class="fn" data-hash="0" hash="5">&amp;Rect</tspan>) -> u32 { </text>
+        <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>fn <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="4">rect</tspan>: &amp;Rect) -> u32 { </text>
         <text class="code" x="20" y="630"> <tspan fill="#AAA">19  </tspan>    <tspan data-hash="4">rect</tspan>.<tspan data-hash="2">w</tspan> * <tspan data-hash="4">rect</tspan>.<tspan data-hash="3">h</tspan> </text>
         <text class="code" x="20" y="660"> <tspan fill="#AAA">20  </tspan>} </text>
     </g>
