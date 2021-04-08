@@ -251,7 +251,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is no longer immutably borrowed"/>
         <circle cx="200" cy="145" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is moved"/>
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is moved to the caller"/>
         <circle cx="200" cy="175" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; goes out of scope. No resource is dropped."/>

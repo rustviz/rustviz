@@ -99,6 +99,21 @@ pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
     )
 }
 
+// def fn(p):
+//  p
+//  |
+//  *-->   the return event
+//
+pub fn event_dot_move_to_caller(my_name: &String, _target_name: &String) -> String {
+    // update styling
+    let my_name_fmt = fmt_style(my_name);
+    
+    format!(
+        "{0}'s resource is moved to the caller",
+        my_name_fmt
+    )
+}
+
 // 1   0
 //     |
 // o<--*   the star event (&)
