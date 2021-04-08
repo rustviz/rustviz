@@ -7,8 +7,8 @@ Function println!()
 --- END Variable Definitions --- */
 fn take_and_return_ownership(some_string : String) -> String { // !{ InitializeParam(some_string) }
     println!("{}", some_string); // !{ PassByStaticReference(some_string->println!()) }
-    some_string
-} // !{ Move(some_string->None) }
+    some_string // !{ Move(some_string->None) }
+} // !{ GoOutOfScope(some_string) }
   
 fn main() {
     let mut s = String::from("hello"); // !{ Move(String::from()->s) }
