@@ -1,97 +1,162 @@
 # RustViz
 [![Build Status](https://travis-ci.org/joemccann/dillinger.svg?branch=master)](https://travis-ci.org/joemccann/dillinger)
 
-*RustViz* is a tool written in Rust that generates visualizations from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
+*RustViz* is a tool that generates visualizations from simple Rust programs to assist users in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
 ## What does it look like?
 
-*RustViz* generates *.svg* files of graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to generate visualization over user-defined rust code examples. Here's a sample view of what the visualization looks like:
+*RustViz* generates [SVG](https://developer.mozilla.org/en-US/docs/Web/SVG) files with graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to render visualizations of data-flow in Rust programs. Here's a sample view of what a visualization can look like:
 
 ![alt tag](https://github.com/rustviz/rustviz/blob/master/example.png)
 
-## Usage (example)
-*RustViz* is capable of visualizing simple rust codes (refer to the restriction section) via user definition. In this section we'll showcase how to generate some default visulization example that has been provided by us.
+## Usage
+*RustViz* is capable of visualizing simple Rust programs (albeit with certain limitations) via user definition. In this section, we'll showcase how to generate SVG renderings of examples provided by us.
 
-*RustViz* requires [Rust](https://www.rust-lang.org/), Cargo and [mdbook](https://github.com/rust-lang/mdBook) to be installed. Once you have installed all the above prerequisites, direct into the */test_example* folder and run *test_examples.sh*
+*RustViz* requires [Rust](https://www.rust-lang.org/), [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) and [mdbook](https://github.com/rust-lang/mdBook) to be installed. Once you have installed all the above prerequisites, direct into [/rustviz_mdbook](rustviz_mdbook) and run the script:
+```shell
+~/rustviz/rustviz_mdbook$ ./view_examples.sh
 ```
-./test_examples.sh
-```
-You may have the following output:
-```
-Generating visualizations for the following examples: 
+You may have an output similar to this:
+```shell
+Generating visualizations for the following examples:
+building copy...
 building hatra1...
 building hatra2...
-building string_from_print...
-building string_from_move_print...
 building func_take_ownership...
-building immutable_borrow...
-building multiple_immutable_borrow...
-building mutable_borrow...
-building nll_lexical_scope_different...
-building move_different_scope...
-building move_assignment...
-building move_func_return...
 building func_take_return_ownership...
-building immutable_borrow_method_call...
-building mutable_borrow_method_call...
-building immutable_variable...
-building mutable_variables...
-building copy...
-building function...
-building printing...
 2021-01-19 12:36:13 [INFO] (mdbook::book): Book building has started
 2021-01-19 12:36:13 [INFO] (mdbook::book): Running the html backend
 Serving HTTP on :: port 8000 (http://[::]:8000/) ...
 ```
-If you observed this output, then you have successfully generated the rust visulization examples! Now open your brower and browse into *http://localhost:8000/*. You should be able to view all the examples by selecting each from the list bar on the left. To enable visulization, toggle the swtich that is included in the code section.
+If you observed this output, then you have successfully generated the Rust visualization examples! Now open your browser and navigate to [http://localhost:8000/](http://localhost:8000/). You should be able to view the examples individually by selecting them from the left side bar. To view the visualization, click the toggle button on the top right corner of the code block.
 
-Great! Now you've know how to generate and view the visualization that you could create by using *RustViz*, Now let's create one of your own!
+Great, this is how you can generate and view visualizations created using *RustViz*. Now let's create one from scratch!
 
-## Usage (advanced)
-Yet to be finished....
+## Step-By-Step Guide
+In this section, we'll dive into creating an example, [string_from_move_print](src/examples/string_from_move_print). First, take note of the file structure we'll need to run the example:
+```shell
+string_from_move_print
+├── input
+│   └── annotated_source.rs
+├── main.rs
+└── source.rs
+```
+[source.rs](src/examples/string_from_move_print/source.rs) contains the untouched source code we wish to render into an image:
+```rust
+fn main() {
+    let x = String::from("hello");
+    let y = x;
+    println!("{}", y);
+}
+```
+In this example, `String::from()` moves a string (`"hello"`) to `x`, then `x`'s resource is moved to `y`. Subsequently, `println!()` outputs a message to `io::stdout` without moving the resource.
 
-## Modules
-1. [mdbook_plugin](mdbook_plugin)
+Next, let's familiarize ourselves with the syntax used in [main.rs](src/examples/string_from_move_print/main.rs). The RustViz tool **defines all possible owners, references or input of any memory resource** as a [ResourceAccessPoint](#Data_Structures_and_Function_Specifications). In this case, we consider the function `String::from()` and two variables, `x` and `y`, as Resource Access Points (RAPs). Each of `String::from()` and `x`/`y` corresponds to RAPs `ResourceAccessPoint::Function` and `ResourceAccessPoint::Owner`, respectively.
 
-    a. [book.js](mdbook_plugin/book.js):
+In [main.rs](src/examples/string_from_move_print/main.rs), we define these RAPs between the `BEGIN` and `END` comments on lines 1 and 2:
+```rust
+/*--- BEGIN Variable Definitions ---
+Owner x; Owner y;
+Function String::from()
+--- END Variable Definitions ---*/
+```
+The format for each `ResourceAccessPoint` enum is shown below, where fields preceded by `':'` denote an optional field:
+```rust
+ResourceAccessPoint Usage --
+    Owner <:mut> <name>
+    MutRef <:mut> <name>
+    StaticRef <:mut> <name>
+    Struct <:mut> <name>{<:mut> <member_1>, <:mut> <member_2>, ... }
+    Function <name>
+```
+Alternatively, some code `let mut a = 5;` and `let b = &a;` would correspond to `Owner mut a` and `StaticRef b`, respectively.
+An immutable instance of some struct with member variables `x` and `mut y`, on the other hand, may be annotated as `Struct a{x, mut y}`.
 
-    | Relevant Lines | Purpose |
-    | ---            | :---    |
-    | 18-42   | `adjust_visualization_size()`: Responsible for automatically resizing visualization flexboxes on page load. |
-    | 228-283 | Responsible for adding toggle buttons to every code block that contains a corresponding visualization. |
+> It is important to note:
+> <ol>
+> <li>all definitions <strong><em>must</em></strong> lie between <code>BEGIN</code> and <code>END</code></li>
+> <li>all definitions <strong><em>must</em></strong> be defined in the same order by which they were declared in the source code</li>
+> <li>all definitions <strong><em>must</em></strong> be separated by a singular semicolon</li>
+> <li>each field within a RAP definition <strong><em>must</em></strong> be separated by a whitespace</li>
+> </ol>
+<br>
 
-    b. [helpers.js](mdbook_plugin/helpers.js): responsible for dynamic/interactive portions of the visualization, from hover messages to word highlighting.
+Next, we annotate the code with the use of `ExternalEvent`s that **describe move, borrow, and drop semantics** of Rust. In [string_from_move_print](src/examples/string_from_move_print), we have four such events:
+1. Move of resource from `String::from()` to `x`
+2. Move of resource from `y` to `x`
+3. Drop of resource binded to `x`
+4. Drop of resource binded to `y`
 
-    c. [visualization.css](mdbook_plugin/visualization.css.js): defines page's flexbox styling
+We can specify Events in structured comments like so:
+```rust
+/* --- BEGIN Variable Definitions ---
+Owner x; Owner y;
+Function String::from()
+ --- END Variable Definitions --- */
+fn main() {
+    let x = String::from("hello"); // !{ Move(String::from()->x) }
+    let y = x; // !{ Move(x->y) }
+    println!("{}", y); // print to stdout!
+} /* !{
+    GoOutOfScope(x),
+    GoOutOfScope(y)
+} */
+```
+Each Event is defined on the line where it occurs and within delimiters `!{` and `}`.
+> Events can be annotated within block comments; however, the block **_must_** start on the line in which the events occur. Additionally, all Events within a `!{}` delimitation **_must_** be separated by a singular comma and must each follow the format:
 
-2. [svg_generator](svg_generator)
+```rust
+ExternalEvents Usage:
+    Format: <event_name>(<from>-><to>)
+        e.g.: // !{ PassByMutableReference(a->Some_Function()), ... }
+    Note: GoOutOfScope and InitializeParam require only the <from> parameter
+        e.g.: // !{ GoOutOfScope(x) }
+```
+> Refer to the [Appendix](#Appendix) for a list of usable `ExternalEvent`'s.
 
-    a. [examples](svg_generator/examples): contains all examples to be rendered
+Phew! All that's left is running the program. Simply run:
+```shell
+cargo run string_from_move_print
+```
+Now your folder should look like this:
+```
+string_from_move_print
+├── input
+│   └── annotated_source.rs
+├── main.rs
+├── source.rs
+├── vis_code.svg
+└── vis_timeline.svg
+```
+Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script to see it in your browser.
 
-        Folder structure for new examples:
-            <example_name>
-            ├── input
-            │   └── annotated_source.rs
-            ├── main.rs
-            ├── source.rs
-            ├── vis_code.svg
-            └── vis_timeline.svg
+## Appendix
 
-    | File                  | Purpose   |
-    | :----:                | :-----    |
-    | `annotated_source.rs` | Adds styling to code panel with the use of &lt;tspan&gt; tags<br>Properties of Variables: `data-hash`<br>Properties of Functions: `hash`, `data-hash="0"`, `class="fn"`     |
-    | `main.rs`             | Defines all ResourceAccessPoint types and events |
-    | `source.rs`           | Contains original, source code that will be rendered into SVG  |
-    | `vis_code.svg`         | (1/2) Final rendered SVG code panel   |
-    | `vis_timeline.svg`     | (2/2) Final rendered SVG timeline panel with arrows, dots, etc |
+**`ExternalEvent` Usage:**
+| Event |   Usage   |
+| :---  |   :----   |
+| `Bind(a->b)` | Let binding or assignment.<br>e.g.: `let a = 1;` |
+| `Copy(a->b)` | Copies the resource of `a` to variable `b`. Here, `a` implements the `Copy` trait. |
+| `Move(a->b)` | Moves the resource of `a` to variable `b`. Here, `a` implements the `Move` trait. |
+| `StaticBorrow(a->b)` | Assigns an immutable reference of `a` to `b`.<br>e.g.: `let b = &a;` |
+| `MutableBorrow(a->b)` | Assigns a mutable reference of `a` to `b`.<br>e.g.: `let b = &mut a;` |
+| `StaticReturn(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
+| `MutableReturn(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
+| `PassByStaticReference(a->b)` | Passes an immutable reference of variable `a` to function `b`. Not to be confused with StaticBorrow. |
+| `PassByMutableReference(a->b)` | Passes a mutable reference of variable `a` to function `b`. Not to be confused with MutableBorrow. |
+| `StructBox(a->b)` | Creates a struct instance `a` whose last member variable is `b`.<br>Notes:<br>(1) This event should be specified on the _same line_ the struct instance, `a`, goes out of lexical scope.<br>(2) A struct's member variables should always be defined in the same order they are declared in. |
+| `GoOutOfScope(a)` | Ends the lexical lifetime of variable `a`. |
+| `InitializeParam(a)` | Initializes the parameter `a` of some function.<br>e.g.: `some_fn(a: String) {..}` |
 
-    b. [src](svg_generator/src)
+> Note:
+> 1. `GoOutOfScope` and `InitializeParam` require a singular parameter previously defined in the `Variable Definitions` section.
+(e.g.: `// !{ GoOutOfScope(x) }`)
+> 2. All other events require two parameters, `a` and `b`, which can either be defined (e.g.: `Owner a`) or undefined (`None`).
+The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(None->x)`).
 
-    | File                  | Purpose   |
-    | :----:                | :-----    |
-    | [data.rs](svg_generator/data.rs) | Defines all ResourceAccessPoint types and is responsible for calculating transition between states |
-    | [hover_messages.rs](svg_generator/hover_messages.rs) | Contains all hover message templates |
-    | [code_panel.rs](svg_generator/src/code_panel.rs)<br>[code_template.svg](svg_generator/src/code_template.svg) | Defines template for code panel and builds corresponding SVG renderings |
-    | [timeline_panel.rs](svg_generator/src/timeline_panel.rs)<br>[timeline_template.svg](svg_generator/src/timeline_template.svg) | Defines template for timeline panel and builds corresponding SVG renderings |
-    | [svg_generation.rs](svg_generator/src/svg_generation.rs) | Renders source code to SVG images and saves them under respective directory in `svg_generator/examples/` |
-    | [line_styles.rs](svg_generator/src/line_styles.rs) | Unused |
+## Visualization Limitations
+
+Some features are still being built. As of now, we are limited to:
+- No branching logic
+- No looping
+- No explicit lifetime annotation

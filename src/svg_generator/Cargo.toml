@@ -1,0 +1,26 @@
+[package]
+name = "rustviz-svg"
+version = "0.1.0"
+authors = [
+    "Gabriel Luo <luogm@umich.edu>", "Ke Du <madoka@umich.edu>",
+    "Yingying Zhu <zyy@umich.edu>", "Marcelo Almeida <mgba@umich.edu>",
+    "Haochen Zhang <haochenz@umich.edu>", "Vishnu Reddy <reddyvis@umich.edu>"
+]
+edition = "2018"
+
+[lib]
+name = "rustviz_lib"
+path = "lib.rs"
+
+# The development profile, used for `cargo build`
+[profile.dev]
+opt-level = 0  # Controls the --opt-level the compiler builds with
+debug = true   # Controls whether the compiler passes `-g`
+# The release profile, used for `cargo build --release`
+[profile.release]
+opt-level = 3
+debug = false
+
+[dependencies]
+handlebars = "3.0.1"
+serde = { version = "1.0", features = ["derive"] }
