@@ -13,6 +13,8 @@ fn main() {
         "The area of the rectangle is {} square pixels.",
         area(&r)
     );
+    
+    println!("The height of that is {}.", r.h);
 }
 
 fn area(rect: &Rect) -> u32 {

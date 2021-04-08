@@ -17,6 +17,8 @@ fn main() {
         "The area of the rectangle is {} square pixels.",
         area(&r) // !{ PassByStaticReference(r->area()) }
     );
+
+    println!("The height of that is {}.", r.h); // !{ PassByStaticReference(h->println!()) }
 } // !{ StructBox(r->h), GoOutOfScope(w), GoOutOfScope(h), GoOutOfScope(r) }
 
 fn area(rect: &Rect) -> u32 { // !{ InitializeParam(rect) }

@@ -33,7 +33,9 @@ declare -a targetExamples=(
     "printing"
     "string_from_move_print"
     "string_from_print"
+    "struct_lifetime"
     "struct_rect"
+    "struct_rect2"
 )
 
 EX="../src/examples"
