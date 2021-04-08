@@ -77,4 +77,4 @@ mdbook build
 
 # Run HTTP server on docs directory
 cd book
-python3 -m http.server 8080
+python3 -m http.server

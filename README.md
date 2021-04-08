@@ -7,7 +7,7 @@
 
 *RustViz* generates [SVG](https://developer.mozilla.org/en-US/docs/Web/SVG) files with graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to render visualizations of data-flow in Rust programs. Here's a sample view of what a visualization can look like:
 
-![alt tag](https://github.com/rustviz/rustviz/blob/master/example.png)
+![alt tag](https://github.com/rustviz/rustviz/blob/master/src/svg_generator/example.png)
 
 ## Usage
 *RustViz* is capable of visualizing simple Rust programs (albeit with certain limitations) via user definition. In this section, we'll showcase how to generate SVG renderings of examples provided by us.
