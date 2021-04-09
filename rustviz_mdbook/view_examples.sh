@@ -36,6 +36,7 @@ declare -a targetExamples=(
     "struct_lifetime"
     "struct_rect"
     "struct_rect2"
+    "struct_string"
 )
 
 EX="../src/examples"
