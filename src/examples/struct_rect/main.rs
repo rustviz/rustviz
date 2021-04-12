@@ -9,8 +9,8 @@ struct Rect {
 
 fn main() {
     let r = Rect { // !{ Bind(None->r) }
-        w: 30, // !{ Bind(None->w) }
-        h: 50 // !{ Bind(None->h) }
+        w: 30, // !{ Bind(None->r.w) }
+        h: 50 // !{ Bind(None->r.h) }
     };
 
     println!(
@@ -18,8 +18,8 @@ fn main() {
         area(&r) // !{ PassByStaticReference(r->area()) }
     );
 
-    println!("The height of that is {}.", r.h); // !{ PassByStaticReference(h->println!()) }
-} // !{ StructBox(r->h), GoOutOfScope(w), GoOutOfScope(h), GoOutOfScope(r) }
+    println!("The height of that is {}.", r.h); // !{ PassByStaticReference(r.h->println!()) }
+} // !{ StructBox(r->r.h), GoOutOfScope(r.w), GoOutOfScope(r.h), GoOutOfScope(r) }
 
 fn area(rect: &Rect) -> u32 { // !{ InitializeParam(rect) }
     rect.w * rect.h

@@ -1,4 +1,4 @@
-<svg height="550px" 
+<svg height="730px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
     <desc>examples/struct_lifetime/input/</desc>
@@ -169,18 +169,24 @@ object.code_panel {
 
     <g id="code">
         <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>struct Excerpt&lt;'a&gt; { </text>
-        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    <tspan data-hash="2">p</tspan>: &lt;'a&gt; str, </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    <tspan data-hash="2">p</tspan>: &amp;'a str, </text>
         <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>} </text>
         <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan> </text>
-        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>fn main() { </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>fn some_function() { </text>
         <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    let <tspan data-hash="4">n</tspan> = <tspan class="fn" data-hash="0" hash="5">String::from</tspan>("Ok. I'm fine."); </text>
         <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let <tspan data-hash="3">first</tspan> = <tspan data-hash="4">n</tspan>.split('.').next().expect("Could not find a '.'"); </text>
         <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let <tspan data-hash="1">i</tspan> = Excerpt { </text>
         <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>        <tspan data-hash="2">p</tspan>: <tspan data-hash="3">first</tspan>, </text>
         <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>    }; </text>
-        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>} </text>
-        <text class="code" x="20" y="420"> <tspan fill="#AAA">12</tspan> </text>
-        <text class="code" x="20" y="450"> <tspan fill="#AAA">13</tspan> </text>
+        <text class="code" x="20" y="390"> <tspan fill="#AAA">11</tspan> </text>
+        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>    // 'i' cannot be returned be returned </text>
+        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>    // because the struct outlives 'n' </text>
+        <text class="code" x="20" y="480"> <tspan fill="#AAA">14</tspan> </text>
+        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>} </text>
+        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan> </text>
+        <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>fn main() { </text>
+        <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>    some_function(); </text>
+        <text class="code" x="20" y="630"> <tspan fill="#AAA">19  </tspan>} </text>
     </g>
 
    
