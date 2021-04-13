@@ -1,6 +1,4 @@
 # RustViz
-[![Build Status](https://travis-ci.org/joemccann/dillinger.svg?branch=master)](https://travis-ci.org/joemccann/dillinger)
-
 *RustViz* is a tool that generates visualizations from simple Rust programs to assist users in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
 ## What does it look like?
@@ -137,14 +135,14 @@ Congratulations! You have successfully generated your first visualization! As a 
 | :---  |   :----   |
 | `Bind(a->b)` | Let binding or assignment.<br>e.g.: `let a = 1;` |
 | `Copy(a->b)` | Copies the resource of `a` to variable `b`. Here, `a` implements the `Copy` trait. |
-| `Move(a->b)` | Moves the resource of `a` to variable `b`. Here, `a` implements the `Move` trait. |
+| `Move(a->b)` | Moves the resource of `a` to variable `b`. Here, `a` implements the `Move` trait.<br>Note: Moving to `None` (i.e.: `Move(a->None)`) is used to express a move to the caller function. |
 | `StaticBorrow(a->b)` | Assigns an immutable reference of `a` to `b`.<br>e.g.: `let b = &a;` |
 | `MutableBorrow(a->b)` | Assigns a mutable reference of `a` to `b`.<br>e.g.: `let b = &mut a;` |
 | `StaticReturn(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
 | `MutableReturn(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
 | `PassByStaticReference(a->b)` | Passes an immutable reference of variable `a` to function `b`. Not to be confused with StaticBorrow. |
 | `PassByMutableReference(a->b)` | Passes a mutable reference of variable `a` to function `b`. Not to be confused with MutableBorrow. |
-| `StructBox(a->b)` | Creates a struct instance `a` whose last member variable is `b`.<br>Notes:<br>(1) This event should be specified on the _same line_ the struct instance, `a`, goes out of lexical scope.<br>(2) A struct's member variables should always be defined in the same order they are declared in. |
+| `StructBox(a->a.b)` | Creates a struct instance `a` whose last member variable is `b`.<br>Notes:<br>(1) This event should be specified on the _same line_ the struct instance, `a`, goes out of lexical scope.<br>(2) A struct's member variables should always be defined in the same order they are declared in. |
 | `GoOutOfScope(a)` | Ends the lexical lifetime of variable `a`. |
 | `InitializeParam(a)` | Initializes the parameter `a` of some function.<br>e.g.: `some_fn(a: String) {..}` |
 
@@ -152,7 +150,8 @@ Congratulations! You have successfully generated your first visualization! As a 
 > 1. `GoOutOfScope` and `InitializeParam` require a singular parameter previously defined in the `Variable Definitions` section.
 (e.g.: `// !{ GoOutOfScope(x) }`)
 > 2. All other events require two parameters, `a` and `b`, which can either be defined (e.g.: `Owner a`) or undefined (`None`).
-The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(None->x)`).
+The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(None->x)`). The `None` type can also used as the `<to>` parameter (e.g.: `Move(a->None)`) to specify a move to the function caller.
+> 3. All uses of `Struct` fields must be preceded by its parent struct's name. (e.g.: `a.b = 1;` can be annotated as `Move(None->a.b)`, where `a` is the parent and `b` is the field.)
 
 ## Visualization Limitations
 

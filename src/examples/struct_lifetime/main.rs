@@ -1,21 +1,26 @@
 /* --- BEGIN Variable Definitions ---
 Struct i{p};
 StaticRef first;
-Owner n;
+StaticRef n;
 Function String::from();
 --- END Variable Definitions --- */
 struct Excerpt<'a> {
     p: &'a str,
 }
 
-fn main() {
+fn some_function() {
     let n = String::from("Ok. I'm fine."); // !{ Move(String::from()->n) }
     let first = n.split('.').next().expect("Could not find a '.'"); // !{ StaticBorrow(n->first) }
     let i = Excerpt { // !{ Bind(None->i) }
-        p: first, // !{ StaticBorrow(first->p) }
+        p: first, /* reference &str is copied to p
+                    !{ Copy(first->i.p), StaticReturn(first->n) } */
     };
 } /* !{
-    StaticReturn(p->first), StaticReturn(first->n),
-    GoOutOfScope(first), StructBox(i->p),
-    GoOutOfScope(i),GoOutOfScope(p), GoOutOfScope(n)
+    StaticReturn(i.p->n),
+    GoOutOfScope(first), StructBox(i->i.p),
+    GoOutOfScope(i), GoOutOfScope(i.p), GoOutOfScope(n)
 } */
+
+fn main() {
+    some_function();
+}

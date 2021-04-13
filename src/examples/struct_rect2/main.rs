@@ -1,6 +1,7 @@
 /* --- BEGIN Variable Definitions ---
 Struct r{width, height};
 StaticRef rect;
+StaticRef self;
 Function area();
 Function print_area();
 --- END Variable Definitions --- */
@@ -10,9 +11,9 @@ struct Rectangle {
 }
 
 impl Rectangle {
-    fn area(&self) -> u32 { // !{ InitializeParam(rect) }
+    fn area(&self) -> u32 { // !{ InitializeParam(self) }
         self.width * self.height
-    } // !{ GoOutOfScope(rect) }
+    } // !{ GoOutOfScope(self) }
 }
 
 fn print_area(rect: &Rectangle) { // !{ InitializeParam(rect) }
@@ -24,9 +25,9 @@ fn print_area(rect: &Rectangle) { // !{ InitializeParam(rect) }
 
 fn main() {
     let r = Rectangle { // !{ Bind(None->r) }
-        width: 30, // !{ Bind(None->width) }
-        height: 50, // !{ Bind(None->height) }
+        width: 30, // !{ Bind(None->r.width) }
+        height: 50, // !{ Bind(None->r.height) }
     };
     
    	print_area(&r); // !{ PassByStaticReference(r->print_area()) }
-} // !{ StructBox(r->height), GoOutOfScope(r), GoOutOfScope(width), GoOutOfScope(height) }
+} // !{ StructBox(r->r.height), GoOutOfScope(r), GoOutOfScope(r.width), GoOutOfScope(r.height) }

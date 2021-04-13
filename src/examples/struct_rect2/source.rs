@@ -22,5 +22,5 @@ fn main() {
         height: 50,
     };
 
-   	print_area(&r);
+    print_area(&r);
 }

@@ -399,14 +399,14 @@ fn get_structs(
     let b = fields[1] == "mut"; // mut declared for owner struct
 
     // assumption: mut qualifier immediately followed by name
-    let mut v_name = (if b {fields[2]} else {fields[1]}).to_string();
+    let parent_name = (if b {fields[2]} else {fields[1]}).to_string();
     // push owner struct
     vars_map.insert(
-        v_name.clone(), // key
+        parent_name.clone(), // key
         ResourceAccessPoint::Struct(Struct { // value
             owner: *hash,
             hash: *hash,
-            name: v_name,
+            name: parent_name.clone(),
             is_mut: if b {true} else {false},
             is_member: false
         })
@@ -419,7 +419,7 @@ fn get_structs(
     while idx < fields.len() {
         *hash += 1;
         let cond = fields[idx] == "mut";
-        v_name = (
+        let v_name = parent_name.clone() + "." + (
             if cond {
                 if idx+1 >= fields.len() {
                     eprintln!("Expected variable name after 'mut' qualifier, found nothing!");
@@ -429,7 +429,7 @@ fn get_structs(
             } else {
                 fields[idx]
             }
-        ).to_string();
+        );
 
         // begin new def
         vars_map.insert(
