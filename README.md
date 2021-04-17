@@ -55,7 +55,7 @@ In [main.rs](src/examples/string_from_move_print/main.rs), we define these RAPs 
 ```rust
 /*--- BEGIN Variable Definitions ---
 Owner x; Owner y;
-Function String::from()
+Function String::from();
 --- END Variable Definitions ---*/
 ```
 The format for each `ResourceAccessPoint` enum is shown below, where fields preceded by `':'` denote an optional field:
@@ -89,7 +89,7 @@ We can specify Events in structured comments like so:
 ```rust
 /* --- BEGIN Variable Definitions ---
 Owner x; Owner y;
-Function String::from()
+Function String::from();
  --- END Variable Definitions --- */
 fn main() {
     let x = String::from("hello"); // !{ Move(String::from()->x) }
@@ -112,7 +112,7 @@ ExternalEvents Usage:
 ```
 > Refer to the [Appendix](#Appendix) for a list of usable `ExternalEvent`'s.
 
-Phew! All that's left is running the program. Simply run:
+Phew! All that's left is running the program. Simply navigate into [src](src) and run:
 ```shell
 cargo run string_from_move_print
 ```
@@ -126,7 +126,7 @@ string_from_move_print
 ├── vis_code.svg
 └── vis_timeline.svg
 ```
-Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script to see it in your browser.
+Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script from [rustviz_mdbook](rustviz_mdbook) to see it in your browser.
 
 ## Appendix
 
