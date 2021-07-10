@@ -1,16 +1,18 @@
 # RustViz
 [![Build Status](https://travis-ci.org/joemccann/dillinger.svg?branch=master)](https://travis-ci.org/joemccann/dillinger)
 
-*RustViz* is a tool that generates visualizations from simple Rust programs to assist users in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
+*RustViz* is a tool that generates interactive visualizations from simple Rust programs to assist users in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
 ## What does it look like?
 
-*RustViz* generates [SVG](https://developer.mozilla.org/en-US/docs/Web/SVG) files with graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to render visualizations of data-flow in Rust programs. Here's a sample view of what a visualization can look like:
+*RustViz* generates [SVG](https://developer.mozilla.org/en-US/docs/Web/SVG) files with graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to render interactive visualizations of ownership and borrowing related events in a Rust program. Here's a sample view of what a visualization can look like:
 
 ![alt tag](https://github.com/rustviz/rustviz/blob/master/src/svg_generator/example.png)
 
+You can read more about it in [our draft paper](https://web.eecs.umich.edu/~comar/rustviz-hatra20.pdf). Note that the section on generating visualizations is out of date, see below.
+
 ## Usage
-*RustViz* is capable of visualizing simple Rust programs (albeit with certain limitations) via user definition. In this section, we'll showcase how to generate SVG renderings of examples provided by us.
+*RustViz* is capable of generating visualizations for simple Rust programs (albeit with certain limitations) that have been annotated by the user. We are not currently attempting to generate visualizations automatically. In this section, we'll showcase how to generate SVG renderings of examples provided by us.
 
 *RustViz* requires [Rust](https://www.rust-lang.org/), [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) and [mdbook](https://github.com/rust-lang/mdBook) to be installed. Once you have installed all the above prerequisites, direct into [/rustviz_mdbook](rustviz_mdbook) and run the script:
 ```shell
