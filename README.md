@@ -3,6 +3,8 @@
 
 *RustViz* is a tool that generates interactive visualizations from simple Rust programs to assist users in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
 
+RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/) at the University of Michigan.
+
 ## What does it look like?
 
 *RustViz* generates [SVG](https://developer.mozilla.org/en-US/docs/Web/SVG) files with graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to render interactive visualizations of ownership and borrowing related events in a Rust program. Here's a sample view of what a visualization can look like:
