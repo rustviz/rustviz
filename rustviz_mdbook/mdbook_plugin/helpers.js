@@ -58,7 +58,7 @@ function displayFn(classname) {
 
         for (let i = 0; i < functions.length; i++) {
             // if hashes match, temporarily change color
-            if (functions[i].getAttribute('hash') == evt_hash) {
+            if (functions[i].getAttribute('hash') === evt_hash) {
                 functions[i].dataset.hash = evt_hash;
             }
         }

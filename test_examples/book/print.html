@@ -1,0 +1,573 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js light">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>test_examples</title>
+        
+        <meta name="robots" content="noindex" />
+        
+        
+
+
+        <!-- Custom HTML head -->
+        
+
+
+        <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        
+        <link rel="icon" href="favicon.svg">
+        
+        
+        <link rel="shortcut icon" href="favicon.png">
+        
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        
+        <link rel="stylesheet" href="css/print.css" media="print">
+        
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        
+        <link rel="stylesheet" href="fonts/fonts.css">
+        
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        
+        <link rel="stylesheet" href="visualization.css">
+        
+
+        
+    </head>
+    <body>
+        <!-- Provide site root to javascript -->
+        <script type="text/javascript">
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script type="text/javascript">
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script type="text/javascript">
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('no-js')
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add('js');
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script type="text/javascript">
+            var html = document.querySelector('html');
+            var sidebar = 'hidden';
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="hatra1.html"><strong aria-hidden="true">1.</strong> hatra1</a></li><li class="chapter-item expanded "><a href="hatra2.html"><strong aria-hidden="true">2.</strong> hatra2</a></li><li class="chapter-item expanded "><a href="string_from_print.html"><strong aria-hidden="true">3.</strong> string_from_print</a></li><li class="chapter-item expanded "><a href="string_from_move_print.html"><strong aria-hidden="true">4.</strong> string_from_move_print</a></li><li class="chapter-item expanded "><a href="func_take_ownership.html"><strong aria-hidden="true">5.</strong> func_take_ownership</a></li><li class="chapter-item expanded "><a href="immutable_borrow.html"><strong aria-hidden="true">6.</strong> immutable_borrow</a></li><li class="chapter-item expanded "><a href="multiple_immutable_borrow.html"><strong aria-hidden="true">7.</strong> multiple_immutable_borrow</a></li><li class="chapter-item expanded "><a href="mutable_borrow.html"><strong aria-hidden="true">8.</strong> mutable_borrow</a></li><li class="chapter-item expanded "><a href="nll_lexical_scope_different.html"><strong aria-hidden="true">9.</strong> nll_lexical_scope_different</a></li><li class="chapter-item expanded "><a href="move_different_scope.html"><strong aria-hidden="true">10.</strong> move_different_scope</a></li><li class="chapter-item expanded "><a href="move_assignment.html"><strong aria-hidden="true">11.</strong> move_assignment</a></li><li class="chapter-item expanded "><a href="move_func_return.html"><strong aria-hidden="true">12.</strong> move_func_return</a></li><li class="chapter-item expanded "><a href="func_take_return_ownership.html"><strong aria-hidden="true">13.</strong> func_take_return_ownership</a></li><li class="chapter-item expanded "><a href="immutable_borrow_method_call.html"><strong aria-hidden="true">14.</strong> immutable_borrow_method_call</a></li><li class="chapter-item expanded "><a href="mutable_borrow_method_call.html"><strong aria-hidden="true">15.</strong> mutable_borrow_method_call</a></li><li class="chapter-item expanded "><a href="immutable_variable.html"><strong aria-hidden="true">16.</strong> immutable_variable</a></li><li class="chapter-item expanded "><a href="mutable_variables.html"><strong aria-hidden="true">17.</strong> mutable_variables</a></li><li class="chapter-item expanded "><a href="copy.html"><strong aria-hidden="true">18.</strong> copy</a></li><li class="chapter-item expanded "><a href="function.html"><strong aria-hidden="true">19.</strong> function</a></li><li class="chapter-item expanded "><a href="printing.html"><strong aria-hidden="true">20.</strong> printing</a></li><li class="chapter-item expanded "><a href="struct_string.html"><strong aria-hidden="true">21.</strong> struct_string</a></li><li class="chapter-item expanded "><a href="struct_rect.html"><strong aria-hidden="true">22.</strong> struct_rect</a></li><li class="chapter-item expanded "><a href="struct_rect2.html"><strong aria-hidden="true">23.</strong> struct_rect2</a></li><li class="chapter-item expanded "><a href="struct_lifetime.html"><strong aria-hidden="true">24.</strong> struct_lifetime</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky bordered">
+                    <div class="left-buttons">
+                        <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </button>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light (default)</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                        
+                    </div>
+
+                    <h1 class="menu-title">test_examples</h1>
+
+                    <div class="right-buttons">
+                        
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        
+                        
+                    </div>
+                </div>
+
+                
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" name="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+                
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script type="text/javascript">
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h3><a class="header" href="#hatra1" id="hatra1">hatra1</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let s = String::from(&quot;hello&quot;);
+    takes_ownership(s);
+    let mut x = 5;
+    let y = x;
+    x = 6
+}
+
+fn takes_ownership(some_string: String) {
+    println!(&quot;{}&quot;, some_string)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="hatra1 code_panel" data="assets/hatra1/vis_code.svg"></object>
+  <object type="image/svg+xml" class="hatra1 tl_panel" data="assets/hatra1/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('hatra1')"></object>
+</div><h3><a class="header" href="#hatra2" id="hatra2">hatra2</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main(){
+    let mut s = String::from(&quot;hello&quot;);
+
+    let r1 = &amp;s;
+    let r2 = &amp;s;
+    assert!(compare_strings(r1, r2));
+
+    let r3 = &amp;mut s;
+    clear_string(r3)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="hatra2 code_panel" data="assets/hatra2/vis_code.svg"></object>
+  <object type="image/svg+xml" class="hatra2 tl_panel" data="assets/hatra2/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('hatra2')"></object>
+</div><h3><a class="header" href="#string_from_print" id="string_from_print">string_from_print</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let s = String::from(&quot;hello&quot;);
+    println!(&quot;{}&quot;, s)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="string_from_print code_panel" data="assets/string_from_print/vis_code.svg"></object>
+  <object type="image/svg+xml" class="string_from_print tl_panel" data="assets/string_from_print/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('string_from_print')"></object>
+</div><h3><a class="header" href="#string_from_move_print" id="string_from_move_print">string_from_move_print</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = String::from(&quot;hello&quot;);
+    let y = x;
+    println!(&quot;{}&quot;, y)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="string_from_move_print code_panel" data="assets/string_from_move_print/vis_code.svg"></object>
+  <object type="image/svg+xml" class="string_from_move_print tl_panel" data="assets/string_from_move_print/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('string_from_move_print')"></object>
+</div><h3><a class="header" href="#func_take_ownership" id="func_take_ownership">func_take_ownership</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let s = String::from(&quot;hello&quot;);
+    takes_ownership(s);
+    // println!(&quot;{}&quot;, s) // won't compile if added
+}
+
+fn takes_ownership(some_string: String) {
+    println!(&quot;{}&quot;, some_string)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="func_take_ownership code_panel" data="assets/func_take_ownership/vis_code.svg"></object>
+  <object type="image/svg+xml" class="func_take_ownership tl_panel" data="assets/func_take_ownership/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('func_take_ownership')"></object>
+</div><h3><a class="header" href="#immutable_borrow" id="immutable_borrow">immutable_borrow</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = String::from(&quot;hello&quot;);
+    f(&amp;x); 
+    println!(&quot;{}&quot;, x)
+}
+
+fn f(s : &amp;String) {
+    println!(&quot;{}&quot;, *s)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="immutable_borrow code_panel" data="assets/immutable_borrow/vis_code.svg"></object>
+  <object type="image/svg+xml" class="immutable_borrow tl_panel" data="assets/immutable_borrow/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('immutable_borrow')"></object>
+</div><h3><a class="header" href="#multiple_immutable_borrow" id="multiple_immutable_borrow">multiple_immutable_borrow</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = String::from(&quot;hello&quot;);
+    let y = &amp;x;
+    let z = &amp;x;
+    f(y, z)
+}
+
+fn f(s1 : &amp;String, s2 : &amp;String) {
+    println!(&quot;{} and {}&quot;, s1, s2)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="multiple_immutable_borrow code_panel" data="assets/multiple_immutable_borrow/vis_code.svg"></object>
+  <object type="image/svg+xml" class="multiple_immutable_borrow tl_panel" data="assets/multiple_immutable_borrow/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('multiple_immutable_borrow')"></object>
+</div><h3><a class="header" href="#mutable_borrow" id="mutable_borrow">mutable_borrow</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let mut x = String::from(&quot;Hello&quot;);
+    world(&amp;mut x);
+    println!(&quot;{}&quot;, x)
+}
+
+fn world(s : &amp;mut String) {
+    s.push_str(&quot;, world&quot;)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="mutable_borrow code_panel" data="assets/mutable_borrow/vis_code.svg"></object>
+  <object type="image/svg+xml" class="mutable_borrow tl_panel" data="assets/mutable_borrow/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('mutable_borrow')"></object>
+</div><h3><a class="header" href="#nll_lexical_scope_different" id="nll_lexical_scope_different">nll_lexical_scope_different</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let mut x = String::from(&quot;Hello&quot;);
+    let y = &amp;mut x;
+    world(y);
+    let z = &amp;mut x; // OK, because y's lifetime has ended (last use was on previous line)
+    world(z);
+    x.push_str(&quot;!!&quot;); // Also OK, because y and z's lifetimes have ended
+    println!(&quot;{}&quot;, x)
+}
+
+fn world(s : &amp;mut String) {
+    s.push_str(&quot;, world&quot;)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="nll_lexical_scope_different code_panel" data="assets/nll_lexical_scope_different/vis_code.svg"></object>
+  <object type="image/svg+xml" class="nll_lexical_scope_different tl_panel" data="assets/nll_lexical_scope_different/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('nll_lexical_scope_different')"></object>
+</div><h3><a class="header" href="#move_different_scope" id="move_different_scope">move_different_scope</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = String::from(&quot;hello&quot;);
+    let z = {
+        let y = x;
+        println(&quot;{}&quot;, y);
+        // ...
+    };
+    println!(&quot;Hello, world!&quot;);
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="move_different_scope code_panel" data="assets/move_different_scope/vis_code.svg"></object>
+  <object type="image/svg+xml" class="move_different_scope tl_panel" data="assets/move_different_scope/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('move_different_scope')"></object>
+</div><h3><a class="header" href="#move_assignment" id="move_assignment">move_assignment</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = String::from(&quot;hello&quot;);
+    let mut y = String::from(&quot;test&quot;);
+    y = x;
+  }
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="move_assignment code_panel" data="assets/move_assignment/vis_code.svg"></object>
+  <object type="image/svg+xml" class="move_assignment tl_panel" data="assets/move_assignment/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('move_assignment')"></object>
+</div><h3><a class="header" href="#move_func_return" id="move_func_return">move_func_return</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn f() {
+    let x = String::from(&quot;hello&quot;);
+    // ...
+    x
+} 
+  
+fn main() {
+    let s = f();
+    println!(&quot;{}&quot;, s)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="move_func_return code_panel" data="assets/move_func_return/vis_code.svg"></object>
+  <object type="image/svg+xml" class="move_func_return tl_panel" data="assets/move_func_return/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('move_func_return')"></object>
+</div><h3><a class="header" href="#func_take_return_ownership" id="func_take_return_ownership">func_take_return_ownership</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn take_and_return_ownership(some_string : String) -&gt; String {
+    println!(&quot;{}&quot;, some_string);
+    some_string
+}
+  
+fn main() {
+    let mut s = String::from(&quot;hello&quot;);
+    s = take_and_return_ownership(s);
+    println!(&quot;{}&quot;, s);   // OK
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="func_take_return_ownership code_panel" data="assets/func_take_return_ownership/vis_code.svg"></object>
+  <object type="image/svg+xml" class="func_take_return_ownership tl_panel" data="assets/func_take_return_ownership/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('func_take_return_ownership')"></object>
+</div><h3><a class="header" href="#immutable_borrow_method_call" id="immutable_borrow_method_call">immutable_borrow_method_call</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let s = String::from(&quot;hello&quot;);
+    let len1 = String::len(&amp;s);
+    let len2 = s.len(); // shorthand for the above
+    println!(&quot;len1 = {} = len2 = {}&quot;, len1, len2)
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="immutable_borrow_method_call code_panel" data="assets/immutable_borrow_method_call/vis_code.svg"></object>
+  <object type="image/svg+xml" class="immutable_borrow_method_call tl_panel" data="assets/immutable_borrow_method_call/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('immutable_borrow_method_call')"></object>
+</div><h3><a class="header" href="#mutable_borrow_method_call" id="mutable_borrow_method_call">mutable_borrow_method_call</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() { 
+    let mut s1 = String::from(&quot;Hello&quot;);
+    let s2 = String::from(&quot;, world&quot;);
+    String::push_str(&amp;mut s1, &amp;s2); 
+    s1.push_str(&amp;s2); // shorthand for the above
+    println!(&quot;{}&quot;, s1); // prints &quot;Hello, world, world&quot;
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="mutable_borrow_method_call code_panel" data="assets/mutable_borrow_method_call/vis_code.svg"></object>
+  <object type="image/svg+xml" class="mutable_borrow_method_call tl_panel" data="assets/mutable_borrow_method_call/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('mutable_borrow_method_call')"></object>
+</div><h3><a class="header" href="#immutable_variable" id="immutable_variable">immutable_variable</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = 5;
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="immutable_variable code_panel" data="assets/immutable_variable/vis_code.svg"></object>
+  <object type="image/svg+xml" class="immutable_variable tl_panel" data="assets/immutable_variable/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('immutable_variable')"></object>
+</div><h3><a class="header" href="#mutable_variables" id="mutable_variables">mutable_variables</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let mut x = 5;
+    x = 6; //OK
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="mutable_variables code_panel" data="assets/mutable_variables/vis_code.svg"></object>
+  <object type="image/svg+xml" class="mutable_variables tl_panel" data="assets/mutable_variables/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('mutable_variables')"></object>
+</div><h3><a class="header" href="#copy" id="copy">copy</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = 5;
+    let y = x;
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="copy code_panel" data="assets/copy/vis_code.svg"></object>
+  <object type="image/svg+xml" class="copy tl_panel" data="assets/copy/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('copy')"></object>
+</div><h3><a class="header" href="#function" id="function">function</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let six = plus_one(5);
+}
+
+fn plus_one(x: i32) -&gt; i32 {
+    x + 1
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="function code_panel" data="assets/function/vis_code.svg"></object>
+  <object type="image/svg+xml" class="function tl_panel" data="assets/function/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('function')"></object>
+</div><h3><a class="header" href="#printing" id="printing">printing</a></h3>
+<pre><pre class="playground"><code class="language-rust">fn main() {
+    let x = 1;
+    let y = 2;
+    println!(&quot;x = {} and y = {}&quot;, x, y);
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="printing code_panel" data="assets/printing/vis_code.svg"></object>
+  <object type="image/svg+xml" class="printing tl_panel" data="assets/printing/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('printing')"></object>
+</div><h3><a class="header" href="#struct_string" id="struct_string">struct_string</a></h3>
+<pre><pre class="playground"><code class="language-rust">struct Foo {
+    x: i32,
+    y: String,
+}
+
+fn main() {
+    let _y = String :: from(&quot;bar&quot;);
+    let f = Foo { x: 5, y: _y };
+    println!(&quot;{}&quot;, f.x);
+    println!(&quot;{}&quot;, f.y);
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="struct_string code_panel" data="assets/struct_string/vis_code.svg"></object>
+  <object type="image/svg+xml" class="struct_string tl_panel" data="assets/struct_string/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('struct_string')"></object>
+</div><h3><a class="header" href="#struct_rect" id="struct_rect">struct_rect</a></h3>
+<pre><pre class="playground"><code class="language-rust">struct Rect {
+    w: u32,
+    h: u32,
+}
+
+fn main() {
+    let r = Rect {
+        w: 30,
+        h: 50,
+    };
+
+    println!(
+        &quot;The area of the rectangle is {} square pixels.&quot;,
+        area(&amp;r)
+    );
+    
+    println!(
+    	&quot;The height of that is {}.&quot;, r.h
+    );
+}
+
+fn area(rect: &amp;Rect) -&gt; u32 {
+    rect.w * rect.h
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="struct_rect code_panel" data="assets/struct_rect/vis_code.svg"></object>
+  <object type="image/svg+xml" class="struct_rect tl_panel" data="assets/struct_rect/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('struct_rect')"></object>
+</div><h3><a class="header" href="#struct_rect2" id="struct_rect2">struct_rect2</a></h3>
+<pre><pre class="playground"><code class="language-rust">struct Rectangle {
+    width: u32,
+    height: u32,
+}
+
+impl Rectangle {
+    fn area(&amp;self) -&gt; u32 {
+        self.width * self.height
+    }
+}
+
+fn print_area(rect: &amp;Rectangle) {
+    println!(
+        &quot;The area of the rectangle is {} square pixels.&quot;,
+       	rect.area() // dot even though it's actually a reference
+    );
+}
+
+fn main() {
+    let r = Rectangle {
+        width: 30,
+        height: 50,
+    };
+   	print_area(&amp;r);
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="struct_rect2 code_panel" data="assets/struct_rect2/vis_code.svg"></object>
+  <object type="image/svg+xml" class="struct_rect2 tl_panel" data="assets/struct_rect2/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('struct_rect2')"></object>
+</div><h3><a class="header" href="#struct_lifetime" id="struct_lifetime">struct_lifetime</a></h3>
+<pre><pre class="playground"><code class="language-rust">struct Excerpt&lt;'a&gt; {
+    p: &amp;'a str,
+}
+
+fn main() {
+    let n = String::from(&quot;Ok. I'm fine.&quot;);
+    let first = n.split('.').next().expect(&quot;Could not find a '.'&quot;);
+    let i = Excerpt {
+        p: first,
+    };
+}
+</code></pre></pre>
+<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">
+  <object type="image/svg+xml" class="struct_lifetime code_panel" data="assets/struct_lifetime/vis_code.svg"></object>
+  <object type="image/svg+xml" class="struct_lifetime tl_panel" data="assets/struct_lifetime/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('struct_lifetime')"></object>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                        
+
+                        
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                
+
+                
+            </nav>
+
+        </div>
+
+        
+
+        
+
+        
+
+        
+        <script type="text/javascript">
+            window.playground_copyable = true;
+        </script>
+        
+
+        
+
+        
+        <script src="elasticlunr.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="mark.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="searcher.js" type="text/javascript" charset="utf-8"></script>
+        
+
+        <script src="clipboard.min.js" type="text/javascript" charset="utf-8"></script>
+        <script src="highlight.js" type="text/javascript" charset="utf-8"></script>
+        <script src="book.js" type="text/javascript" charset="utf-8"></script>
+
+        <!-- Custom JS scripts -->
+        
+        <script type="text/javascript" src="helpers.js"></script>
+        
+
+        
+        
+        <script type="text/javascript">
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+        
+        
+
+    </body>
+</html>

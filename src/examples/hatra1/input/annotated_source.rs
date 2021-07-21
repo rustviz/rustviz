@@ -7,5 +7,5 @@ fn main() {
 }
 
 fn <tspan class="fn" data-hash="0" hash="6">takes_ownership</tspan>(<tspan data-hash="4">some_string</tspan>: String) {
-    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="4">some_string</tspan>);
+    <tspan class="fn" data-hash="0" hash="7">println!</tspan>("{}", <tspan data-hash="4">some_string</tspan>);
 }

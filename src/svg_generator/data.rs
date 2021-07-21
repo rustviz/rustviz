@@ -476,7 +476,12 @@ impl Event {
                 safe_message(hover_messages::event_dot_copy_to, my_name, to)
             }
             Move{ to } => {
-                safe_message(hover_messages::event_dot_move_to, my_name, to)
+                match to {
+                    Some(_) => safe_message(hover_messages::event_dot_move_to, my_name, to),
+                    // a Move to None implies the resource is returned by a function
+                    None => safe_message(hover_messages::event_dot_move_to_caller, my_name, to)
+                }
+                
             }
             StaticLend{ to } => {
                 safe_message(hover_messages::event_dot_static_lend, my_name, to)

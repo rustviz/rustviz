@@ -169,10 +169,10 @@ object.code_panel {
 
     <g id="code">
         <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn main() { </text>
-        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    let <tspan data-hash="1">six</tspan> = plus_one(5); </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    let <tspan data-hash="1">six</tspan> = <tspan class="fn" data-hash="0" hash="3">plus_one</tspan>(5); </text>
         <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>} </text>
         <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan> </text>
-        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>fn <tspan class="fn" data-hash="0" hash="5">plus_one</tspan>(<tspan data-hash="2">x</tspan>: i32) -> i32 { </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>fn <tspan class="fn" data-hash="0" hash="3">plus_one</tspan>(<tspan data-hash="2">x</tspan>: i32) -> i32 { </text>
         <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    <tspan data-hash="2">x</tspan> + 1 </text>
         <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>} </text>
     </g>
