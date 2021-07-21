@@ -1,0 +1,6 @@
+/* --- BEGIN Variable Definitions ---
+Function println!();
+Function compare_two_strings();
+Function compare_string();
+Function same_string();
+--- END Variable Definitions --- */

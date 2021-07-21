@@ -27,9 +27,11 @@ fn main() {
         println!("Example source file (main.rs) not found in {:?}!", &filename);
         return;
     }
+
     /* ******************************************
             --- Parse main.rs file ---
     ****************************************** */
+    println!("{:?}", filename);
     let (contents, line_num, var_map) = parse::parse_vars_to_map(filename);
     let events = parse::extract_events(contents, line_num);
     /* ******************************************

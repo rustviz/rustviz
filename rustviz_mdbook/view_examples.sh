@@ -13,6 +13,7 @@ printf "Generating visualizations for the following examples: \n"
 
 # Uncomment the examples are being tested
 declare -a targetExamples=(
+    "hatra_test"
     "copy"
     "hatra1"
     "hatra2"
@@ -42,9 +43,16 @@ for target in ${targetExamples[@]}; do
     printf "building %s..." $target
     
     # Check if required files are there
-    if [[ -f  "$EX/$target/input/annotated_source.rs" && \
-        -f "$EX/$target/main.rs" && -f "$EX/$target/source.rs" ]]
+    if [[ -f  "$EX/$target/input/annotated_source.rs" && -f "$EX/$target/source.rs" ]]
     then
+        # Check if file headers exist
+        if ! [[ -f "$EX/$target/main.rs" ]]
+        then
+            printf "\ngenerating header for %s..." $target
+            cd ../RustvizParse
+            cargo run "$EX/$target/source.rs" >/dev/null 2>&1
+        fi
+
         cd ../src # switch to appropriate folder
         # Run svg generation for example
         cargo run $target >/dev/null 2>&1
@@ -67,7 +75,7 @@ for target in ${targetExamples[@]}; do
         echo "- [$target](./$target.md)" >> src/SUMMARY.md
         echo "done"
     else
-        # Report failure if required files aren't there
+        # Not Necessary (file double check)
         printf "${red}FAILED${end}. The required files are not in the examples dir.\n"
     fi
 done
