@@ -36,7 +36,6 @@ In this section, we'll dive into creating an example, [string_from_move_print](s
 string_from_move_print
 ├── input
 │   └── annotated_source.rs
-├── main.rs
 └── source.rs
 ```
 [source.rs](src/examples/string_from_move_print/source.rs) contains the untouched source code we wish to render into an image:
@@ -80,6 +79,15 @@ An immutable instance of some struct with member variables `x` and `mut y`, on t
 > <li>each field within a RAP definition <strong><em>must</em></strong> be separated by a whitespace</li>
 > </ol>
 <br>
+
+After running the [view_examples.sh](rustviz_mdbook/view_examples.sh) once we should have the following file structure:
+```shell
+string_from_move_print
+├── input
+│   └── annotated_source.rs
+├── main.rs
+└── source.rs
+```
 
 Next, we annotate the code with the use of `ExternalEvent`s that **describe move, borrow, and drop semantics** of Rust. In [string_from_move_print](src/examples/string_from_move_print), we have four such events:
 1. Move of resource from `String::from()` to `x`
