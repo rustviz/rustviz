@@ -1,8 +1,10 @@
 [package]
 name = "parse"
 version = "0.1.0"
-authors = ["Haochen Zhang <haochenz@Haochens-MacBook-Pro.local>"]
-edition = "2018"
+authors = ["Haochen Zhang <haochenz@umich.edu>", "Yu Pan <panyu@umich.edu>", "Cyrus Omar <comar@umich.edu>"]
+edition = "2021"
+description = "a tool that use syn crate to parse rust code"
+repository = "https://github.com/rustviz/RustvizParse"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
