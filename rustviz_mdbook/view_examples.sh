@@ -13,27 +13,31 @@ printf "Generating visualizations for the following examples: \n"
 
 # Uncomment the examples are being tested
 declare -a targetExamples=(
-    "copy"
-    "func_take_ownership"
-    "func_take_return_ownership"
-    "function"
-    "hatra1"
-    "hatra2"
-    "immutable_borrow"
-    "immutable_borrow_method_call"
-    "immutable_variable"
-    "move_assignment"
-    "move_different_scope"
-    "move_func_return"
-    "multiple_immutable_borrow"
-    "mutable_borrow"
-    "mutable_borrow_method_call"
-    "mutable_variables"
-    "nll_lexical_scope_different"
-    "printing"
-    "string_from_move_print"
-    "string_from_print"
-    "struct_rect"
+    # "copy"
+    # "func_take_ownership"
+    # "func_take_return_ownership"
+    # "function"
+    # "hatra1"
+    # "hatra2"
+    # "immutable_borrow"
+    # "immutable_borrow_method_call"
+    # "immutable_variable"
+    # "move_assignment"
+    # "move_different_scope"
+    # "move_func_return"
+    # "multiple_immutable_borrow"
+    # "mutable_borrow"
+    # "mutable_borrow_method_call"
+    # "mutable_variables"
+    # "nll_lexical_scope_different"
+    # "printing"
+    # "string_from_move_print"
+    # "string_from_print"
+    # "struct_lifetime"
+    # "struct_rect"
+    # "struct_rect2"
+    # "struct_string"
+    "extra_credit"
 )
 
 EX="../src/examples"
@@ -42,9 +46,16 @@ for target in ${targetExamples[@]}; do
     printf "building %s..." $target
     
     # Check if required files are there
-    if [[ -f  "$EX/$target/input/annotated_source.rs" && \
-        -f "$EX/$target/main.rs" && -f "$EX/$target/source.rs" ]]
+    if [[ -f  "$EX/$target/input/annotated_source.rs" && -f "$EX/$target/source.rs" ]]
     then
+        # Check if file headers exist
+        if ! [[ -f "$EX/$target/main.rs" ]]
+        then
+            printf "\ngenerating header for %s..." $target
+            cd ../RustvizParse
+            cargo run "$EX/$target/source.rs" >/dev/null 2>&1
+        fi
+
         cd ../src # switch to appropriate folder
         # Run svg generation for example
         cargo run $target >/dev/null 2>&1
@@ -67,7 +78,7 @@ for target in ${targetExamples[@]}; do
         echo "- [$target](./$target.md)" >> src/SUMMARY.md
         echo "done"
     else
-        # Report failure if required files aren't there
+        # Not Necessary (file double check)
         printf "${red}FAILED${end}. The required files are not in the examples dir.\n"
     fi
 done
@@ -77,4 +88,4 @@ mdbook build
 
 # Run HTTP server on docs directory
 cd book
-python3 -m http.server
+python3 -m http.server 8000

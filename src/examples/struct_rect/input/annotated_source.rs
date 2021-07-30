@@ -13,6 +13,8 @@ fn main() {
         "The area of the rectangle is {} square pixels.",
         <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="1">&amp;r</tspan>)
     );
+
+    <tspan class="fn" data-hash="0" hash="6">println!</tspan>("The height of that is {}.", <tspan data-hash="1">r</tspan>.<tspan data-hash="3">h</tspan>);
 }
 
 fn <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="4">rect</tspan>: &amp;Rect) -> u32 {

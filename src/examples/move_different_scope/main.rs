@@ -7,10 +7,10 @@ Function println!()
 --- END Variable Definitions --- */
 fn main() {
     let x = String::from("hello"); // !{ Move(String::from()->x) }
-    let z = { // !{ Move(None->z) }
+    let z = {
         let y = x; // !{ Move(x->y) }
         println("{}", y); // !{ PassByStaticReference(y->println!()) }
         // ...
-    }; // !{ GoOutOfScope(y) }
+    }; // !{ GoOutOfScope(y) } !{ Move(None->z) }
     println!("Hello, world!");
 } // !{ GoOutOfScope(x), GoOutOfScope(z) }
