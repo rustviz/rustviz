@@ -14,7 +14,7 @@ fn main() {
     let z = &x; // !{ StaticBorrow(x->z) }
     f(y, z); /* !{ PassByStaticReference(y->f()),
         PassByStaticReference(z->f()),
-        StaticReturn(y->x), StaticReturn(z->x)
+        StaticDie(y->x), StaticDie(z->x)
     } */
 } // !{ GoOutOfScope(x), GoOutOfScope(y), GoOutOfScope(z) }
 

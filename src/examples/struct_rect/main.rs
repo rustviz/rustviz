@@ -8,9 +8,9 @@ struct Rect {
 }
 
 fn main() {
-    let r = Rect { // !{ Bind(None->r) }
-        w: 30, // !{ Bind(None->r.w) }
-        h: 50 // !{ Bind(None->r.h) }
+    let r = Rect { // !{ Bind(r) }
+        w: 30, // !{ Bind(r.w) }
+        h: 50 // !{ Bind(r.h) }
     };
 
     println!(

@@ -422,7 +422,7 @@ fn render_arrows_string_external_events_version(
                 title = String::from("Immutable borrow");
                 (from_ro, to_ro)
             },
-            ExternalEvent::StaticReturn{ from: from_ro, to: to_ro } => {
+            ExternalEvent::StaticDie{ from: from_ro, to: to_ro } => {
                 title = String::from("Return immutably borrowed resource");
                 (from_ro, to_ro)
             },
@@ -430,7 +430,7 @@ fn render_arrows_string_external_events_version(
                 title = String::from("Mutable borrow");
                 (from_ro, to_ro)
             },
-            ExternalEvent::MutableReturn{ from: from_ro, to: to_ro } => {
+            ExternalEvent::MutableDie{ from: from_ro, to: to_ro } => {
                 title = String::from("Return mutably borrowed resource");
                 (from_ro, to_ro)
             },
@@ -600,11 +600,10 @@ fn render_arrows_string_external_events_version(
                     h: 0,
                     title: String::new(),
                 };
-                let max_line = line_number.clone() as i64;
                 box_data.x = resource_owners_layout[from_variable.hash()].x_val - 20;
                 box_data.w = resource_owners_layout[to_variable.hash()].x_val 
                             - resource_owners_layout[from_variable.hash()].x_val + 40;
-                box_data.h =  max_line * LINE_SPACE + 20;
+                box_data.h =  30;
         
                 if from_variable.is_struct_group() {
                     if from_variable.is_member(){

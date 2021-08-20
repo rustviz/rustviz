@@ -11,9 +11,9 @@ Function println!()
 fn main() {
     let mut x = String::from("Hello"); // !{ Move(String::from()->x) }
     let y = &mut x; // !{ MutableBorrow(x->y) }
-    world(y); // !{ PassByMutableReference(y->world()), MutableReturn(y->x) }
+    world(y); // !{ PassByMutableReference(y->world()), MutableDie(y->x) }
     let z = &mut x; // OK, because y's lifetime has ended (last use was on previous line), !{ MutableBorrow(x->z) }
-    world(z); // !{ PassByMutableReference(z->world()), MutableReturn(z->x) }
+    world(z); // !{ PassByMutableReference(z->world()), MutableDie(z->x) }
     x.push_str("!!"); // Also OK, because y and z's lifetimes have ended, !{ PassByMutableReference(x->push_str()) }
     println!("{}", x); // !{ PassByStaticReference(x->println!()) }
 } // !{ GoOutOfScope(x), GoOutOfScope(y), GoOutOfScope(z) }

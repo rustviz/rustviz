@@ -209,9 +209,6 @@ object.code_panel {
         <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 278.2,265 V 295 h 3.5 V 265 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
-        <path data-hash="4" class="hollow tooltip-trigger" style="fill:transparent;" d="M 278.2,295 V 295 h 3.5 V 295 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
     </g>
 
     <g id="ref_line">
@@ -223,13 +220,13 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; acquires ownership of a resource"/>
         <circle cx="280" cy="295" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;'s resource is copied"/>
+        monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;'s resource is moved"/>
         <text x="306" y="270" data-hash="5" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
     </g>
 
     <g id="arrows">
         <polyline stroke-width="5px" stroke="gray" points="303 265 293 265 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt;" style="fill: none;"/> 
-        <polyline stroke-width="5px" stroke="gray" points="280 295 220 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Bind from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt;" style="fill: none;"/> 
+        <polyline stroke-width="5px" stroke="gray" points="280 295 220 295 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_y&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f.y&lt;/span&gt;" style="fill: none;"/> 
     </g></g>
 	<g class="struct_members">
     <g id="labels">
@@ -275,7 +272,7 @@ object.code_panel {
     </g>
 
     <g id="arrows">
-        <rect id="1" x="50" y="50" rx="20" ry="20" width="180" height="350" style="fill:white;stroke:black;stroke-width:3;opacity:0.1" pointer-events="none" />
+        <rect id="1" x="50" y="50" rx="20" ry="20" width="180" height="30" style="fill:white;stroke:black;stroke-width:3;opacity:0.1" pointer-events="none" />
     </g></g>
 	<g class="struct_members">
     <g id="labels">

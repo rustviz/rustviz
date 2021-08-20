@@ -151,8 +151,8 @@ Congratulations! You have Successfully generated the visulizations! Add the name
     * [Move](#Move)
     * [Static Borrow](#StaticBorrow)
     * [Mutable Borrow](#MutableBorrow)
-    * [Static Return](#StaticReturn)
-    * [Mutable Return](#MutableReturn)
+    * [Static Return](#StaticDie)
+    * [Mutable Return](#MutableDie)
     * [Pass By Static Reference](#PassByStaticReference)
     * [Pass By Mutable Reference](#PassByMutableReference)
     * [Go Out Of Scope](#GoOutOfScope)
@@ -277,10 +277,10 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         let mut x = String::from("Hello");
         let y = &mut x; // mutable borrow from x to y
         ```
-    - StaticReturn <a name="StaticReturn"></a>
-    The StaticReturn event represent return of a unmutably borrowed source.
+    - StaticDie <a name="StaticDie"></a>
+    The StaticDie event represent return of a unmutably borrowed source.
         ```
-        StaticReturn {
+        StaticDie {
             from: Option<ResourceAccessPoint>,
             to: Option<ResourceAccessPoint>,
         },
@@ -295,10 +295,10 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             s.push_str(", world")
         }
         ```
-    - MutableReturn <a name="MutableReturn"></a>
-    The MutableReturn event represent return of a mutably borrowed source.
+    - MutableDie <a name="MutableDie"></a>
+    The MutableDie event represent return of a mutably borrowed source.
         ```
-        MutableReturn {
+        MutableDie {
             from: Option<ResourceAccessPoint>,
             to: Option<ResourceAccessPoint>,
         },

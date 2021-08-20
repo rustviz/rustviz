@@ -252,8 +252,8 @@ pub fn add_events(
         match field[0] {
             "Bind" => vd.append_external_event(
                 ExternalEvent::Bind{
-                    from: get_resource(&vars, field[1]),
-                    to: get_resource(&vars, field[2])
+                    from: get_resource(&vars, "None"),
+                    to: get_resource(&vars, field[1])
                 }, &(event.0 as usize)
             ),
             "Copy" => vd.append_external_event(
@@ -283,15 +283,15 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
-            "StaticReturn" => vd.append_external_event(
-                ExternalEvent::StaticReturn{
+            "StaticDie" => vd.append_external_event(
+                ExternalEvent::StaticDie{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
-            "MutableReturn" => vd.append_external_event(
-                ExternalEvent::MutableReturn{
+            "MutableDie" => vd.append_external_event(
+                ExternalEvent::MutableDie{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2])
                 },

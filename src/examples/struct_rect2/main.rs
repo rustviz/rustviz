@@ -24,9 +24,9 @@ fn print_area(rect: &Rectangle) { // !{ InitializeParam(rect) }
 } // !{ GoOutOfScope(rect) }
 
 fn main() {
-    let r = Rectangle { // !{ Bind(None->r) }
-        width: 30, // !{ Bind(None->r.width) }
-        height: 50, // !{ Bind(None->r.height) }
+    let r = Rectangle { // !{ Bind(r) }
+        width: 30, // !{ Bind(r.width) }
+        height: 50, // !{ Bind(r.height) }
     };
     
    	print_area(&r); // !{ PassByStaticReference(r->print_area()) }
