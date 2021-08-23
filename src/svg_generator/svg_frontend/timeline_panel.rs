@@ -458,11 +458,11 @@ fn render_arrows_string_external_events_version(
             ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro } => {
                 title = String::from("Pass by mutable reference");
                 (from_ro, to_ro)
-            }
+            },
             ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro } => {
                 title = String::from("Pass by immutable reference");
                 (from_ro, to_ro)
-            }
+            },
             _ => (&None, &None),
         };
         // complete title
@@ -988,7 +988,7 @@ fn render_ref_line(
 
 fn render_struct_box(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    structs_info: & StructsInfo, 
+    structs_info: &StructsInfo, 
     registry: &Handlebars,
 ) {
     for (owner, owner_x, last_x) in structs_info.structs.iter() {
