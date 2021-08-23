@@ -17,7 +17,7 @@ fn some_function() {
     };
 } /* !{
     StaticDie(i.p->n),
-    GoOutOfScope(first), StructBox(i->i.p),
+    GoOutOfScope(first), 
     GoOutOfScope(i), GoOutOfScope(i.p), GoOutOfScope(n)
 } */
 

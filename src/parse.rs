@@ -325,13 +325,6 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
-            "StructBox" => vd.append_external_event(
-                ExternalEvent::StructBox{
-                    from: get_resource(&vars, field[1]),
-                    to: get_resource(&vars, field[2])
-                },
-                &(event.0 as usize)
-            ),
             _ => {
                 eprintln!("{} is not a valid event.", field[0]);
                 println!("{}", event_usage_err());

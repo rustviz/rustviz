@@ -19,7 +19,7 @@ fn main() {
     );
 
     println!("The height of that is {}.", r.h); // !{ PassByStaticReference(r.h->println!()) }
-} // !{ StructBox(r->r.h), GoOutOfScope(r.w), GoOutOfScope(r.h), GoOutOfScope(r) }
+} // !{ GoOutOfScope(r.w), GoOutOfScope(r.h), GoOutOfScope(r) }
 
 fn area(rect: &Rect) -> u32 { // !{ InitializeParam(rect) }
     rect.w * rect.h

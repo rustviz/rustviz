@@ -158,7 +158,6 @@ Congratulations! You have successfully generated your first visualization! As a 
 | `MutableDie(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
 | `PassByStaticReference(a->b)` | Passes an immutable reference of variable `a` to function `b`. Not to be confused with StaticBorrow. |
 | `PassByMutableReference(a->b)` | Passes a mutable reference of variable `a` to function `b`. Not to be confused with MutableBorrow. |
-| `StructBox(a->a.b)` | Creates a struct instance `a` whose last member variable is `b`.<br>Notes:<br>(1) This event should be specified on the _same line_ the struct instance, `a`, goes out of lexical scope.<br>(2) A struct's member variables should always be defined in the same order they are declared in. |
 | `GoOutOfScope(a)` | Ends the lexical lifetime of variable `a`. |
 | `InitializeParam(a)` | Initializes the parameter `a` of some function.<br>e.g.: `some_fn(a: String) {..}` |
 

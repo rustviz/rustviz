@@ -234,10 +234,6 @@ pub enum ExternalEvent {
     InitializeParam {
         param: ResourceAccessPoint,
     },
-    StructBox {
-        from: Option<ResourceAccessPoint>,
-        to: Option<ResourceAccessPoint>,
-    },
 }
 
 
@@ -327,10 +323,6 @@ pub enum Event {
     InitializeParam {
         param: ResourceAccessPoint
     },
-    StructBox
-    // {
-        // from: Option<ResourceAccessPoint>
-    // },
 }
 
 // A State is a description of a ResourceAccessPoint IMMEDIATELY AFTER a specific line.
@@ -445,7 +437,6 @@ impl Display for Event {
             Event::InitializeParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
-            Event::StructBox => { "The components in the box belong to a struct" },
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -514,9 +505,6 @@ impl Event {
             MutableReacquire{ from } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
-            StructBox => {
-                hover_messages::structure(my_name)
-            }
         } 
     }
 }
@@ -529,6 +517,13 @@ pub struct Timeline {
                                 // since Functions don't have a timeline 
     // line number in usize
     pub history: Vec<(usize, Event)>,
+}
+
+// a vector of structs information
+#[derive(Debug)]
+pub struct StructsInfo {
+    //struct owner hash, x val of struct owner, x val of the rightmost member
+    pub structs: Vec<(i64, i64, i64)>,
 }
 
 // VisualizationData supplies all the information we need in the frontend,
@@ -561,7 +556,6 @@ pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option
         ExternalEvent::MutableDie{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro} => (from_ro, to_ro),
-        ExternalEvent::StructBox{ from: from_ro, to: to_ro} => (from_ro, to_ro),
         _ => (&None, &None),
     };
     (from, to)
@@ -907,9 +901,6 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro, Event::MutableReacquire{from : to_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &to_ro, Event::MutableDie{to : from_ro.to_owned()}, &line_number);
             },
-            ExternalEvent::StructBox{from: from_ro, to: _} => {
-                maybe_append_event(self, &from_ro, Event::StructBox, &line_number);
-            }
             ExternalEvent::InitializeParam{param: ro} => {
                 maybe_append_event(self, &Some(ro.clone()), Event::InitializeParam{param : ro.to_owned()}, &line_number);
             },

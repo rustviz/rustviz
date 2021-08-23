@@ -30,4 +30,4 @@ fn main() {
     };
     
    	print_area(&r); // !{ PassByStaticReference(r->print_area()) }
-} // !{ StructBox(r->r.height), GoOutOfScope(r), GoOutOfScope(r.width), GoOutOfScope(r.height) }
+} // !{ GoOutOfScope(r), GoOutOfScope(r.width), GoOutOfScope(r.height) }
