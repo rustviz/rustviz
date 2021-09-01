@@ -23,10 +23,11 @@ pub fn render_svg(
     output_path: &String,
     visualization_data: &mut VisualizationData,
 ) {
+    for i in &visualization_data.preprocess_external_events {
+        println!("{:?}", i);
+    }
     //------------------------sort HashMap<usize, Vec<ExternalEvent>>----------------------
     // first by sorting "to" from small to large number then sort by "from" from small to large number
-    // Q: does for loop do the "move"?
-    // Q: how is this okay??
     for (_, event_vec) in &mut visualization_data.event_line_map {
         event_vec.sort_by(|a, b| {
             ResourceAccessPoint_extract(a)
@@ -46,7 +47,6 @@ pub fn render_svg(
         });
     }
 
-    // Q: is this a copy?
     //-----------------------update line number for external events------------------
     for (line_number, event) in visualization_data.preprocess_external_events.clone() {
         let mut extra_line: usize = 0;
@@ -60,6 +60,7 @@ pub fn render_svg(
         let final_line_num = line_number.clone() + extra_line;
         visualization_data.append_processed_external_event(event, final_line_num);
     }
+
     //-----------------------update event_line_map line number------------------
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut extra_line_sum = 0;

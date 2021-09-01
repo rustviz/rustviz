@@ -21,8 +21,8 @@ declare -a targetExamples=(
     # "func_take_ownership"
     # "func_take_return_ownership"
     # "function"
-    # "hatra1"
-    # "hatra1_test"
+    "hatra1"
+    "hatra1_test"
     # "hatra2"
     # "immutable_borrow"
     # "immutable_borrow_method_call"
@@ -90,7 +90,7 @@ for target in ${targetExamples[@]}; do
         printf "\`\`\`\n" >> src/$target.md
         printf '<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">\n' >> src/$target.md
         printf '\t<object type="image/svg+xml" class="%s code_panel" data="assets/%s/vis_code.svg"></object>\n' "$target" "$target">> src/$target.md
-        printf '\t<object type="image/svg+xml" class="%s tl_panel" data="assets/%s/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('%s')"></object>\n' "$target" "$target" "$target">> src/$target.md
+        printf '\t<object type="image/svg+xml" class="%s tl_panel" data="assets/%s/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('"'"'%s'"'"')"></object>\n' "$target" "$target" "$target">> src/$target.md
         printf "</div>" >> src/$target.md
     else
         # Not Necessary (file double check)

@@ -4,7 +4,7 @@ Function String::from();
 Function takes_ownership();
 Function println!()
 --- END Variable Definitions --- */
- fn main() {
+fn main() {
     let s = String::from("hello"); // !{ Move(String::from()->s) }
     takes_ownership(s); // !{ Move(s->takes_ownership()) }
     let mut x = 5; // !{ Bind(x) }
