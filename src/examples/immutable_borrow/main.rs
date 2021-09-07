@@ -11,6 +11,6 @@ fn main() {
     println!("{}", x); // !{ PassByStaticReference(x->println!()) }
 } // !{ GoOutOfScope(x) }
 
-fn f(s : &String) { // !{ InitializeParam(s) }
+fn f(s : &String) { // !{ InitRefParam(s) }
     println!("{}", *s); // !{ PassByStaticReference(s->println!()) }
 } // !{ GoOutOfScope(s) }

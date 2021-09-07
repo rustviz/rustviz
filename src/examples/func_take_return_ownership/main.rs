@@ -5,7 +5,7 @@ Function String::from();
 Function take_and_return_ownership();
 Function println!()
 --- END Variable Definitions --- */
-fn take_and_return_ownership(some_string : String) -> String { // !{ InitializeParam(some_string) }
+fn take_and_return_ownership(some_string : String) -> String { // !{ InitOwnerParam(some_string) }
     println!("{}", some_string); // !{ PassByStaticReference(some_string->println!()) }
     some_string // !{ Move(some_string->None) }
 } // !{ GoOutOfScope(some_string) }

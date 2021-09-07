@@ -231,7 +231,7 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint
     },
     // only use this event to initialize fn parameters
-    InitializeParam {
+    InitRefParam {
         param: ResourceAccessPoint,
     },
 }
@@ -320,7 +320,7 @@ pub enum Event {
     RefGoOutOfScope,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
-    InitializeParam {
+    InitRefParam {
         param: ResourceAccessPoint
     },
 }
@@ -434,7 +434,7 @@ impl Display for Event {
             Event::StaticBorrow{ from } => { from_ro = Some(from.to_owned()); "Partially borrows resource" },
             Event::StaticDie{ to } => { to_ro = to.to_owned(); "Partially returns resource"},
             Event::StaticReacquire{ from } => { from_ro = from.to_owned(); "Partially reacquires resource" },
-            Event::InitializeParam{ param: _ } => { "Function parameter is initialized" },
+            Event::InitRefParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
         }.to_string();
@@ -459,7 +459,7 @@ impl Event {
             RefGoOutOfScope => {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
             }
-            InitializeParam{ param: _ } => {
+            InitRefParam{ param: _ } => {
                 hover_messages::event_dot_init_param(my_name)
             }
             // arrow going out
@@ -615,7 +615,7 @@ impl Visualizable for VisualizationData {
             (State::OutOfScope, Event::MutableBorrow{ .. }) =>
                 State::FullPrivilege,
 
-            (State::OutOfScope, Event::InitializeParam{ param: ro })  => {
+            (State::OutOfScope, Event::InitRefParam{ param: ro })  => {
                 match ro {
                     ResourceAccessPoint::Function(..) => {
                         panic!("Cannot initialize function as as valid parameter!")
@@ -901,8 +901,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro, Event::MutableReacquire{from : to_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &to_ro, Event::MutableDie{to : from_ro.to_owned()}, &line_number);
             },
-            ExternalEvent::InitializeParam{param: ro} => {
-                maybe_append_event(self, &Some(ro.clone()), Event::InitializeParam{param : ro.to_owned()}, &line_number);
+            ExternalEvent::InitRefParam{param: ro} => {
+                maybe_append_event(self, &Some(ro.clone()), Event::InitRefParam{param : ro.to_owned()}, &line_number);
             },
             ExternalEvent::GoOutOfScope{ro} => {
                 match ro {

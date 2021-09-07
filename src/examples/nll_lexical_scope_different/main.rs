@@ -18,6 +18,6 @@ fn main() {
     println!("{}", x); // !{ PassByStaticReference(x->println!()) }
 } // !{ GoOutOfScope(x), GoOutOfScope(y), GoOutOfScope(z) }
 
-fn world(s : &mut String) { // !{ InitializeParam(s) }
+fn world(s : &mut String) { // !{ InitRefParam(s) }
     s.push_str(", world"); // !{ PassByMutableReference(s->push_str()) }
 } // !{ GoOutOfScope(s) }
