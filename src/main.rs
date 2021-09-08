@@ -8,7 +8,7 @@ use std::{
 mod parse;
 use rustviz_lib::svg_frontend::svg_generation;
 use rustviz_lib::data::VisualizationData;
-use rust_syn_parse_lib::syn_parse::{syn_parse, header_gen_str};
+// use rust_syn_parse_lib::syn_parse::{syn_parse, header_gen_str};
 use std::fs;
 use std::io::{Write, BufReader, BufRead, Error};
 use std::io::prelude::*;
@@ -39,20 +39,20 @@ fn main() -> Result<(), Error> {
     // header is required for timeline order
     // TODO: show all RAPs instead of ones involved in the events
     //TODO: allow the stack_items reference header_info 
-    if let Ok((header_info, color_info)) = syn_parse(&source_fname) {
-        // require main.rs and header to be generated if not provided
-        if !Path::new(&main_fname).exists() {
-            let header_str = header_gen_str(&header_info);
-            //TODO: why is this ????
-            let mut output = fs::File::create(&main_fname)?;
-            let mut buffer = String::new();
-            let mut f = fs::File::open(source_fname)?;
-            let _ = f.read_to_string(&mut buffer)?;
-            //TODO: WTF is this
-            write!(output, "{}", format!("{}", header_str))?;
-            write!(output, "{}", format!("{}", buffer))?;
-        }
-    }
+    // if let Ok((header_info, color_info)) = syn_parse(&source_fname) {
+    //     // require main.rs and header to be generated if not provided
+    //     if !Path::new(&main_fname).exists() {
+    //         let header_str = header_gen_str(&header_info);
+    //         //TODO: why is this ????
+    //         let mut output = fs::File::create(&main_fname)?;
+    //         let mut buffer = String::new();
+    //         let mut f = fs::File::open(source_fname)?;
+    //         let _ = f.read_to_string(&mut buffer)?;
+    //         //TODO: WTF is this
+    //         write!(output, "{}", format!("{}", header_str))?;
+    //         write!(output, "{}", format!("{}", buffer))?;
+    //     }
+    // }
 
     /* ******************************************
             --- Parse main.rs file ---
