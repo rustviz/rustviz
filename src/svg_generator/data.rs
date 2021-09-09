@@ -92,6 +92,34 @@ pub struct Function {
 
 
 impl ResourceAccessPoint {
+    // Acquire header string 
+    pub fn rap_header(&self, struct_store: &mut Vec<Struct>) -> String {
+        let mut header = String::new();
+        match self {
+            ResourceAccessPoint::Owner(Owner) => {
+                if Owner.is_mut {
+                    header.push_str(&format!("Owner mut {};\n", &Owner.name));
+                } else {
+                    header.push_str(&format!("Owner {};\n", &Owner.name));
+                }
+            },
+            ResourceAccessPoint::Struct(Struct) => {
+                struct_store.push(Struct.clone());
+            },
+            ResourceAccessPoint::MutRef(MutRef) => {
+                header.push_str(&format!("MutRef {};\n", &MutRef.name));
+            },
+            ResourceAccessPoint::StaticRef(StaticRef) => {
+                header.push_str(&format!("StaticRef {};\n", &StaticRef.name));
+            },
+            ResourceAccessPoint::Function(Function) => {
+                if Function.name != String::from("main") {
+                    header.push_str(&format!("Function {}();\n", &Function.name));
+                }
+            },
+        }
+        header
+    }
     // get the attribute hash
     pub fn hash(&self) -> &u64 {
         match self {
