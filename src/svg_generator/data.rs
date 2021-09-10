@@ -92,6 +92,16 @@ pub struct Function {
 
 
 impl ResourceAccessPoint {
+    // Change hash
+    pub fn hash_mod(&mut self, id: u64) {
+        match self {
+            ResourceAccessPoint::Owner(Owner) => {Owner.hash=id;},
+            ResourceAccessPoint::Struct(Struct) => {Struct.hash=id;},
+            ResourceAccessPoint::MutRef(MutRef) => {MutRef.hash=id;},
+            ResourceAccessPoint::StaticRef(StaticRef) => {StaticRef.hash=id;},
+            ResourceAccessPoint::Function(Function) => {Function.hash=id;},
+        }
+    }
     // Acquire header string 
     pub fn rap_header(&self, struct_store: &mut Vec<Struct>) -> String {
         let mut header = String::new();
