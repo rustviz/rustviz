@@ -8,7 +8,10 @@ cp mdbook_plugin/book.js theme/book.js
 
 # clear assets and md files to mdbook directory
 rm -f src/*md
-rm -r src/assets
+
+if [ -d "src/assets" ]; then
+    rm -r src/assets
+fi
 
 # Write the first line of SUMMARY.md. This clears anything that was there previously
 printf "# Summary\n\n" > src/SUMMARY.md
@@ -57,8 +60,10 @@ for target in ${targetExamples[@]}; do
         if ! [[ -f "$EX/$target/main.rs" ]]
         then
             printf "\ngenerating header for %s..." $target
-            cd ../RustvizParse
-            cargo run "$EX/$target/source.rs" >/dev/null 2>&1
+            cd ../src/RustvizParse
+            cargo run "../examples/$target/source.rs" >/dev/null 2>&1
+            printf "\nPlease define events and run current script "
+            exit 0
         fi
 
         cd ../src # switch to appropriate folder

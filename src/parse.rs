@@ -61,7 +61,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
 // Effects: Uses strings to build HashMap with
 //          {key, value} pair = {name, ResourceAccessPoint}
 fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
-    println!("{:?}", vars_str);
+    // println!("{:?}", vars_str);
     // iterate over all parsed strings
     let mut vars_map = HashMap::<String, ResourceAccessPoint>::new();
 

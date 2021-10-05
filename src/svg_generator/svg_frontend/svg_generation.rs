@@ -23,9 +23,6 @@ pub fn render_svg(
     output_path: &String,
     visualization_data: &mut VisualizationData,
 ) {
-    for i in &visualization_data.preprocess_external_events {
-        println!("{:?}", i);
-    }
     //------------------------sort HashMap<usize, Vec<ExternalEvent>>----------------------
     // first by sorting "to" from small to large number then sort by "from" from small to large number
     for (_, event_vec) in &mut visualization_data.event_line_map {

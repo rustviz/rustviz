@@ -8,7 +8,7 @@ use std::{
 mod parse;
 use rustviz_lib::svg_frontend::svg_generation;
 use rustviz_lib::data::VisualizationData;
-// use rust_syn_parse_lib::syn_parse::{syn_parse, header_gen_str};
+use rust_syn_parse_lib::syn_parse::{syn_parse, asource_gen};
 use std::fs;
 use std::io::{Write, BufReader, BufRead, Error};
 use std::io::prelude::*;
@@ -34,34 +34,23 @@ fn main() -> Result<(), Error> {
         return Ok(());
     }
     /* ***********************************************************
-            --- Generate RAP Header and stack info ---
+            --- Generate stack info ---
     ************************************************************ */
-    // header is required for timeline order
-    // TODO: show all RAPs instead of ones involved in the events
-    //TODO: allow the stack_items reference header_info 
-    // if let Ok((header_info, color_info)) = syn_parse(&source_fname) {
-    //     // require main.rs and header to be generated if not provided
-    //     if !Path::new(&main_fname).exists() {
-    //         let header_str = header_gen_str(&header_info);
-    //         //TODO: why is this ????
-    //         let mut output = fs::File::create(&main_fname)?;
-    //         let mut buffer = String::new();
-    //         let mut f = fs::File::open(source_fname)?;
-    //         let _ = f.read_to_string(&mut buffer)?;
-    //         //TODO: WTF is this
-    //         write!(output, "{}", format!("{}", header_str))?;
-    //         write!(output, "{}", format!("{}", buffer))?;
-    //     }
-    // }
+    let (_, mut color_info) = syn_parse(&source_fname).unwrap();
 
     /* ******************************************
             --- Parse main.rs file ---
     ****************************************** */
-    let (contents, line_num, var_map) = parse::parse_vars_to_map(main_fname);
-    // println!("{:?}", var_map);
+    let (contents, line_num, mut var_map) = parse::parse_vars_to_map(&main_fname);
+    // hash_correction(&mut color_info, &mut var_map);
+    let asource_str = asource_gen(&source_fname, &color_info, &mut var_map).unwrap();
+    let asource_fname = path_to_ex.join("annotated_source.rs");
+    match fs::write(&asource_fname, asource_str) {
+        Ok(_) => println!("successfully wrote to {:?}", asource_fname),
+        Err(_) => println!("failed to write to {:?}", asource_fname)
+    }
+
     let events = parse::extract_events(contents, line_num);
-    // println!("{:?}", events);
-    // return Ok(());
 
     /* ******************************************
             --- Build VisualizationData ---
