@@ -9,7 +9,7 @@ authors = [
 ]
 edition = "2018"
 license = "MIT"
-description = "A tool that allows teachers to generate an interactive timeline depicting ownership and borrowing events for each variable in a Rut code example"
+description = "A tool that allows teachers to generate an interactive timeline depicting ownership and borrowing events for each variable in a Rust code example"
 readme = "README.md"
 repository = "https://github.com/rustviz/rustviz"
 exclude = ["src/svg_generator/README.md", "src/svg_generator/example.png"]
