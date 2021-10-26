@@ -43,6 +43,8 @@ declare -a targetExamples=(
     # "struct_rect2"
     # "struct_string"
     # "extra_credit"
+    # "closure_test"
+    # "closure_thread"
 )
 
 EX="../src/examples"

@@ -32,6 +32,8 @@ pub trait Visualizable {
     fn is_mut(&self, hash: &u64 ) -> bool;
     // if resource_access_point with hash is a function
     fn is_mutref(&self, hash: &u64) -> bool;
+    // if resource_access_point with hash is in closure 
+    fn is_closure(&self, hash: &u64) -> bool;
 
     fn calc_state(&self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State;
 }
@@ -139,6 +141,14 @@ impl ResourceAccessPoint {
         match self {
             ResourceAccessPoint::MutRef(_) => true,
             _ => false
+        }
+    }
+
+    pub fn is_closure(&self) -> bool {
+        if self.name().chars().nth(0).unwrap() == '|' && self.name().chars().last().unwrap() == '|' {
+            true
+        } else {
+            false
         }
     }
 
@@ -579,6 +589,11 @@ impl Visualizable for VisualizationData {
     // if the ResourceAccessPoint is a function
     fn is_mutref(&self, hash: &u64) -> bool {
         self.timelines[hash].resource_access_point.is_mutref()
+    }
+
+    // if the ResourceAccessPoint is in closure
+    fn is_closure(&self, hash: &u64) -> bool {
+        self.timelines[hash].resource_access_point.is_closure()
     }
 
     // a Function does not have a State, so we assume previous_state is always for Variables

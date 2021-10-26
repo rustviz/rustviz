@@ -169,6 +169,7 @@ Congratulations! You have successfully generated your first visualization! As a 
 <!-- The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(x)`).  -->
 The `None` type can be used as the `<to>` parameter (e.g.: `Move(a->None)`) to specify a move to the function caller.
 > 3. All uses of `Struct` fields must be preceded by its parent struct's name. (e.g.: `a.b = 1;` can be annotated as `Move(None->a.b)`, where `a` is the parent and `b` is the field.)
+> 4. For variable `x` in closure, create a Owner for that as `|x|`.
 
 ## Visualization Limitations
 

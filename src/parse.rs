@@ -213,7 +213,7 @@ pub fn extract_events(
 // Effects: Creates ExternalEvents and appends to VisualizationData
 pub fn add_events(
     vd: &mut VisualizationData,
-    vars: HashMap<String, ResourceAccessPoint>,
+    vars: &mut HashMap<String, ResourceAccessPoint>,
     events: Vec<(u64, String)>
 ) {
     for event in events {

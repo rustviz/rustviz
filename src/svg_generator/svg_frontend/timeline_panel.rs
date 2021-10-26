@@ -267,10 +267,14 @@ fn compute_column_layout<'a>(
                 };
                 let mut x_space = cmp::max(70, (&(name.len() as i64)-1)*13);
                 x = x + x_space;
-                let title = match visualization_data.is_mut(hash) {
+                let mut_title = match visualization_data.is_mut(hash) {
                     true => String::from("mutable"),
                     false => String::from("immutable"),
                 };
+                let mut title = mut_title.clone();
+                if visualization_data.is_closure(hash) {
+                    title = title + " in closure";
+                }
                 let mut ref_bool = false;
 
                 // render reference label
