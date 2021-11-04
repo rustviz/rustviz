@@ -252,8 +252,8 @@ pub fn add_events(
         match field[0] {
             "Bind" => vd.append_external_event(
                 ExternalEvent::Bind{
-                    from: get_resource(&vars, field[1]),
-                    to: get_resource(&vars, field[2])
+                    from: get_resource(&vars, "None"),
+                    to: get_resource(&vars, field[1])
                 }, &(event.0 as usize)
             ),
             "Copy" => vd.append_external_event(
@@ -283,15 +283,15 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
-            "StaticReturn" => vd.append_external_event(
-                ExternalEvent::StaticReturn{
+            "StaticDie" => vd.append_external_event(
+                ExternalEvent::StaticDie{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
-            "MutableReturn" => vd.append_external_event(
-                ExternalEvent::MutableReturn{
+            "MutableDie" => vd.append_external_event(
+                ExternalEvent::MutableDie{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2])
                 },
@@ -311,10 +311,17 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
-            "InitializeParam" => vd.append_external_event(
-                ExternalEvent::InitializeParam{
+            "InitRefParam" => vd.append_external_event(
+                ExternalEvent::InitRefParam{
                     param: get_resource(&vars, field[1])
                         .expect("Expected Some variable, found None!")
+                },
+                &(event.0 as usize)
+            ),
+            "InitOwnerParam" => vd.append_external_event(
+                ExternalEvent::Move{
+                    from: get_resource(&vars, "None"),
+                    to: get_resource(&vars, field[1])
                 },
                 &(event.0 as usize)
             ),
@@ -322,13 +329,6 @@ pub fn add_events(
                 ExternalEvent::GoOutOfScope{
                     ro: get_resource(&vars, field[1])
                         .expect("Expected Some variable, found None!")
-                },
-                &(event.0 as usize)
-            ),
-            "StructBox" => vd.append_external_event(
-                ExternalEvent::StructBox{
-                    from: get_resource(&vars, field[1]),
-                    to: get_resource(&vars, field[2])
                 },
                 &(event.0 as usize)
             ),
@@ -469,7 +469,7 @@ fn event_usage_err() -> String {
         "ExternalEvents Usage:\
         \n\tFormat: <event_name>(<from> -> <to>)\
         \n\t    e.g.: // !{ PassByMutableReference(a->Some_Function()), ... }\
-        \n\tNote: GoOutOfScope and InitializeParam require only the <from> parameter\
+        \n\tNote: GoOutOfScope and InitRefParam require only the <from> parameter\
         \n\t    e.g.: // !{ GoOutOfScope(x) }"
     )
 }

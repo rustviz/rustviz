@@ -273,9 +273,6 @@ object.code_panel {
         <circle cx="70" cy="475" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;r&lt;/span&gt;'s resource is no longer immutably borrowed"/>
-        <circle cx="70" cy="595" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="the components in the box belong to struct &lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;r&lt;/span&gt;"/>
         <circle cx="70" cy="595" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;r&lt;/span&gt; goes out of scope. Its resource is dropped."/>
@@ -283,7 +280,6 @@ object.code_panel {
     </g>
 
     <g id="arrows">
-        <rect id="1" x="50" y="50" rx="20" ry="20" width="180" height="560" style="fill:white;stroke:black;stroke-width:3;opacity:0.1" pointer-events="none" />
     </g></g>
 	<g class="struct_members">
     <g id="labels">
@@ -332,6 +328,7 @@ object.code_panel {
     </g>
 
     <g id="arrows">
+        <rect id="1" x="50" y="50" rx="20" ry="20" width="200" height="30" style="fill:white;stroke:black;stroke-width:3;opacity:0.1" pointer-events="none" />
     </g></g>
 	</g>
     

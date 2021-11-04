@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::data::{VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event, LINE_SPACE};
+use crate::data::{StructsInfo, VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event, LINE_SPACE};
 use crate::svg_frontend::line_styles::{RefDataLine, RefValueLine, OwnerLine};
 use handlebars::Handlebars;
 use std::collections::BTreeMap;
@@ -123,8 +123,10 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     let mut registry = Handlebars::new();
     prepare_registry(&mut registry);
 
+    let mut structs_info = StructsInfo { structs: Vec::new() };
+
     // hash -> TimelineColumnData
-    let (resource_owners_layout, width) = compute_column_layout(visualization_data);
+    let (resource_owners_layout, width) = compute_column_layout(visualization_data, &mut structs_info);
 
     let mut output : BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
     output.insert(-1, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
@@ -138,7 +140,8 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &registry);
-    
+    render_struct_box(&mut output, &structs_info, &registry);
+
     let mut output_string : String = String::new();
     for (hash, (timelinepanel, member_timelinepanel)) in output{
         let struct_name;
@@ -241,9 +244,15 @@ fn prepare_registry(registry: &mut Handlebars) {
 }
 
 // Returns: a binary tree map from the hash of the ResourceOwner to its Column information
-fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (BTreeMap<&'a u64, TimelineColumnData>, i32) {
+fn compute_column_layout<'a>(
+    visualization_data: &'a VisualizationData,
+    structs_info: &'a mut StructsInfo,
+) -> (BTreeMap<&'a u64, TimelineColumnData>, i32) {
     let mut resource_owners_layout = BTreeMap::new();
     let mut x = 0; // Right-most Column x-offset.
+    let mut owner = -1;
+    let mut owner_x = 0;
+    let mut last_x = 0;
     for (hash, timeline) in visualization_data.timelines.iter() {
         // only put variable in the column layout
         match timeline.resource_access_point {
@@ -275,6 +284,18 @@ fn compute_column_layout<'a>(visualization_data: &'a VisualizationData) -> (BTre
 
                 let styled_name = SPAN_BEGIN.to_string() + &name + SPAN_END;
                 
+                if (owner == -1) && timeline.resource_access_point.is_struct_group() && !timeline.resource_access_point.is_member() {
+                    owner = timeline.resource_access_point.hash().clone() as i64;
+                    owner_x = x;
+                } else if (owner != -1) && timeline.resource_access_point.is_struct_group() && timeline.resource_access_point.is_member() {
+                    last_x = x;
+                } else if (owner != -1) && !timeline.resource_access_point.is_struct_group() {
+                    structs_info.structs.push((owner, owner_x, last_x));
+                    owner = -1;
+                    owner_x = 0;
+                    last_x = 0;
+                }
+
                 resource_owners_layout.insert(hash, TimelineColumnData
                     { 
                         name: name.clone(), 
@@ -422,7 +443,7 @@ fn render_arrows_string_external_events_version(
                 title = String::from("Immutable borrow");
                 (from_ro, to_ro)
             },
-            ExternalEvent::StaticReturn{ from: from_ro, to: to_ro } => {
+            ExternalEvent::StaticDie{ from: from_ro, to: to_ro } => {
                 title = String::from("Return immutably borrowed resource");
                 (from_ro, to_ro)
             },
@@ -430,22 +451,18 @@ fn render_arrows_string_external_events_version(
                 title = String::from("Mutable borrow");
                 (from_ro, to_ro)
             },
-            ExternalEvent::MutableReturn{ from: from_ro, to: to_ro } => {
+            ExternalEvent::MutableDie{ from: from_ro, to: to_ro } => {
                 title = String::from("Return mutably borrowed resource");
                 (from_ro, to_ro)
             },
             ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro } => {
                 title = String::from("Pass by mutable reference");
                 (from_ro, to_ro)
-            }
+            },
             ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro } => {
                 title = String::from("Pass by immutable reference");
                 (from_ro, to_ro)
-            }
-            ExternalEvent::StructBox{ from: from_ro, to: to_ro } => {
-                title = String::from("Struct Box");
-                (from_ro, to_ro)
-            }
+            },
             _ => (&None, &None),
         };
         // complete title
@@ -588,33 +605,6 @@ fn render_arrows_string_external_events_version(
                 }
                 else {
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
-                }
-            },
-            (Some(from_variable), Some(to_variable), ExternalEvent::StructBox{..}) => {
-                let mut box_data = BoxData {
-                    name: from_variable.hash().clone(),
-                    hash: 0,
-                    x: 0,
-                    y: 50,
-                    w: 0,
-                    h: 0,
-                    title: String::new(),
-                };
-                let max_line = line_number.clone() as i64;
-                box_data.x = resource_owners_layout[from_variable.hash()].x_val - 20;
-                box_data.w = resource_owners_layout[to_variable.hash()].x_val 
-                            - resource_owners_layout[from_variable.hash()].x_val + 40;
-                box_data.h =  max_line * LINE_SPACE + 20;
-        
-                if from_variable.is_struct_group() {
-                    if from_variable.is_member(){
-                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
-                    } else {
-                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().0.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
-                    }
-                }
-                else {
-                    output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
                 }
             },
             (Some(from_variable), Some(to_variable), _) => {
@@ -993,6 +983,28 @@ fn render_ref_line(
                 }
             },  
         }
+    }
+}
+
+fn render_struct_box(
+    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    structs_info: &StructsInfo, 
+    registry: &Handlebars,
+) {
+    for (owner, owner_x, last_x) in structs_info.structs.iter() {
+        let mut box_data = BoxData {
+            name: owner.clone() as u64,
+            hash: 0,
+            x: 0,
+            y: 50,
+            w: 0,
+            h: 0,
+            title: String::new(),
+        };   
+        box_data.x = owner_x - 20;
+        box_data.w = last_x - owner_x + 60;
+        box_data.h = 30;
+        output.get_mut(owner).unwrap().1.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
     }
 }
 

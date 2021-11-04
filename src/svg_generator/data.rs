@@ -206,12 +206,12 @@ pub enum ExternalEvent {
         from: Option<ResourceAccessPoint>,
         to: Option<ResourceAccessPoint>,
     },
-    StaticReturn {
+    StaticDie {
         // return the resource to "to"
         from: Option<ResourceAccessPoint>,
         to: Option<ResourceAccessPoint>,
     },
-    MutableReturn {
+    MutableDie {
         // return the resource to "to"
         from: Option<ResourceAccessPoint>,
         to: Option<ResourceAccessPoint>,
@@ -231,12 +231,8 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint
     },
     // only use this event to initialize fn parameters
-    InitializeParam {
+    InitRefParam {
         param: ResourceAccessPoint,
-    },
-    StructBox {
-        from: Option<ResourceAccessPoint>,
-        to: Option<ResourceAccessPoint>,
     },
 }
 
@@ -298,7 +294,7 @@ pub enum Event {
     MutableBorrow {
         from: ResourceAccessPoint
     },
-    MutableReturn {
+    MutableDie {
         to: Option<ResourceAccessPoint>
     },
     MutableReacquire {
@@ -310,7 +306,7 @@ pub enum Event {
     StaticBorrow {
         from: ResourceAccessPoint
     },
-    StaticReturn {
+    StaticDie {
         to: Option<ResourceAccessPoint>
     },
     StaticReacquire {
@@ -324,13 +320,9 @@ pub enum Event {
     RefGoOutOfScope,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
-    InitializeParam {
+    InitRefParam {
         param: ResourceAccessPoint
     },
-    StructBox
-    // {
-        // from: Option<ResourceAccessPoint>
-    // },
 }
 
 // A State is a description of a ResourceAccessPoint IMMEDIATELY AFTER a specific line.
@@ -436,16 +428,15 @@ impl Display for Event {
             Event::Move{ to } => { to_ro = to.to_owned(); "Moving resource" },
             Event::MutableLend{ to } => { to_ro = to.to_owned(); "Mutable lend" },
             Event::MutableBorrow{ from } => { from_ro = Some(from.to_owned()); "Fully borrows resource" },
-            Event::MutableReturn{ to } => { to_ro = to.to_owned(); "Fully returns resource"},
+            Event::MutableDie{ to } => { to_ro = to.to_owned(); "Fully returns resource"},
             Event::MutableReacquire{ from } => { from_ro = from.to_owned(); "Fully reacquires resource" },
             Event::StaticLend{ to } => { to_ro = to.to_owned(); "Partially lends resource" },
             Event::StaticBorrow{ from } => { from_ro = Some(from.to_owned()); "Partially borrows resource" },
-            Event::StaticReturn{ to } => { to_ro = to.to_owned(); "Partially returns resource"},
+            Event::StaticDie{ to } => { to_ro = to.to_owned(); "Partially returns resource"},
             Event::StaticReacquire{ from } => { from_ro = from.to_owned(); "Partially reacquires resource" },
-            Event::InitializeParam{ param: _ } => { "Function parameter is initialized" },
+            Event::InitRefParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
-            Event::StructBox => { "The components in the box belong to a struct" },
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -468,7 +459,7 @@ impl Event {
             RefGoOutOfScope => {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
             }
-            InitializeParam{ param: _ } => {
+            InitRefParam{ param: _ } => {
                 hover_messages::event_dot_init_param(my_name)
             }
             // arrow going out
@@ -489,10 +480,10 @@ impl Event {
             MutableLend{ to } => {
                 safe_message(hover_messages::event_dot_mut_lend, my_name, to)
             }
-            StaticReturn{ to } => {
+            StaticDie{ to } => {
                 safe_message(hover_messages::event_dot_static_return, my_name, to)
             }
-            MutableReturn{ to } => {
+            MutableDie{ to } => {
                 safe_message(hover_messages::event_dot_mut_return, my_name, to)
             }
             // arrow going in
@@ -514,9 +505,6 @@ impl Event {
             MutableReacquire{ from } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
-            StructBox => {
-                hover_messages::structure(my_name)
-            }
         } 
     }
 }
@@ -529,6 +517,13 @@ pub struct Timeline {
                                 // since Functions don't have a timeline 
     // line number in usize
     pub history: Vec<(usize, Event)>,
+}
+
+// a vector of structs information
+#[derive(Debug)]
+pub struct StructsInfo {
+    //struct owner hash, x val of struct owner, x val of the rightmost member
+    pub structs: Vec<(i64, i64, i64)>,
 }
 
 // VisualizationData supplies all the information we need in the frontend,
@@ -556,12 +551,11 @@ pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option
         ExternalEvent::Copy{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::Move{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro} => (from_ro, to_ro),
-        ExternalEvent::StaticReturn{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::StaticDie{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::MutableBorrow{from: from_ro, to: to_ro} => (from_ro, to_ro),
-        ExternalEvent::MutableReturn{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::MutableDie{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro} => (from_ro, to_ro),
-        ExternalEvent::StructBox{ from: from_ro, to: to_ro} => (from_ro, to_ro),
         _ => (&None, &None),
     };
     (from, to)
@@ -595,8 +589,8 @@ impl Visualizable for VisualizationData {
             match event {
                 Event::StaticBorrow{ from: ResourceAccessPoint::Function(_) } => true,
                 Event::MutableBorrow{ from: ResourceAccessPoint::Function(_) } => true,
-                Event::StaticReturn{ to: Some(ResourceAccessPoint::Function(_)) } => true,
-                Event::MutableReturn{ to: Some(ResourceAccessPoint::Function(_)) } => true,
+                Event::StaticDie{ to: Some(ResourceAccessPoint::Function(_)) } => true,
+                Event::MutableDie{ to: Some(ResourceAccessPoint::Function(_)) } => true,
                 _ => false,
             }
         }
@@ -621,7 +615,7 @@ impl Visualizable for VisualizationData {
             (State::OutOfScope, Event::MutableBorrow{ .. }) =>
                 State::FullPrivilege,
 
-            (State::OutOfScope, Event::InitializeParam{ param: ro })  => {
+            (State::OutOfScope, Event::InitRefParam{ param: ro })  => {
                 match ro {
                     ResourceAccessPoint::Function(..) => {
                         panic!("Cannot initialize function as as valid parameter!")
@@ -666,7 +660,7 @@ impl Visualizable for VisualizationData {
             },
             
             // happends when a mutable reference returns, invalid otherwise
-            (State::FullPrivilege, Event::MutableReturn{ .. }) =>
+            (State::FullPrivilege, Event::MutableDie{ .. }) =>
                 State::OutOfScope,
 
             (State::FullPrivilege, Event::Acquire{ from: _ }) | (State::FullPrivilege, Event::Copy{ from: _ }) => {
@@ -704,7 +698,7 @@ impl Visualizable for VisualizationData {
             }
                 
             // self statically borrowed resource, and it returns; TODO what about references to self?
-            (State::PartialPrivilege{ .. }, Event::StaticReturn{ .. }) =>
+            (State::PartialPrivilege{ .. }, Event::StaticDie{ .. }) =>
                 State::OutOfScope,
 
             (State::PartialPrivilege{ borrow_count, borrow_to }, Event::StaticReacquire{ from: ro }) => {
@@ -870,9 +864,9 @@ impl Visualizable for VisualizationData {
                     maybe_append_event(self, &to_ro, Event::StaticBorrow{from : some_from_ro.to_owned()}, &line_number);
                 }
             },
-            ExternalEvent::StaticReturn{from: from_ro, to: to_ro} => {
+            ExternalEvent::StaticDie{from: from_ro, to: to_ro} => {
                 maybe_append_event(self, &to_ro, Event::StaticReacquire{from : from_ro.to_owned()}, &line_number);
-                maybe_append_event(self, &from_ro, Event::StaticReturn{to : to_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &from_ro, Event::StaticDie{to : to_ro.to_owned()}, &line_number);
             },
             ExternalEvent::MutableBorrow{from: from_ro, to: to_ro} => {
                 maybe_append_event(self, &from_ro, Event::MutableLend{to : to_ro.to_owned()}, &line_number);
@@ -880,9 +874,9 @@ impl Visualizable for VisualizationData {
                     maybe_append_event(self, &to_ro, Event::MutableBorrow{from : some_from_ro.to_owned()}, &line_number);
                 }
             },
-            ExternalEvent::MutableReturn{from: from_ro, to: to_ro} => {
+            ExternalEvent::MutableDie{from: from_ro, to: to_ro} => {
                 maybe_append_event(self, &to_ro, Event::MutableReacquire{from : from_ro.to_owned()}, &line_number);
-                maybe_append_event(self, &from_ro, Event::MutableReturn{to : to_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &from_ro, Event::MutableDie{to : to_ro.to_owned()}, &line_number);
             },
             // TODO do we really need to add these events, since pass by ref does not change the state?
             ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro} => {
@@ -894,7 +888,7 @@ impl Visualizable for VisualizationData {
                     std::process::exit(1);
                 }
                 maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned()}, &line_number);
-                maybe_append_event(self, &to_ro, Event::StaticReturn{to : from_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &to_ro, Event::StaticDie{to : from_ro.to_owned()}, &line_number);
             },
             ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro} => {
                 maybe_append_event(self, &from_ro, Event::MutableLend{to : to_ro.to_owned()}, &line_number);
@@ -905,13 +899,10 @@ impl Visualizable for VisualizationData {
                     std::process::exit(1);
                 }
                 maybe_append_event(self, &from_ro, Event::MutableReacquire{from : to_ro.to_owned()}, &line_number);
-                maybe_append_event(self, &to_ro, Event::MutableReturn{to : from_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &to_ro, Event::MutableDie{to : from_ro.to_owned()}, &line_number);
             },
-            ExternalEvent::StructBox{from: from_ro, to: _} => {
-                maybe_append_event(self, &from_ro, Event::StructBox, &line_number);
-            }
-            ExternalEvent::InitializeParam{param: ro} => {
-                maybe_append_event(self, &Some(ro.clone()), Event::InitializeParam{param : ro.to_owned()}, &line_number);
+            ExternalEvent::InitRefParam{param: ro} => {
+                maybe_append_event(self, &Some(ro.clone()), Event::InitRefParam{param : ro.to_owned()}, &line_number);
             },
             ExternalEvent::GoOutOfScope{ro} => {
                 match ro {

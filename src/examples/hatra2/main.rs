@@ -12,9 +12,9 @@ fn main(){
     assert!(compare_strings(r1, r2)); /* !{
         PassByStaticReference(r1->compare_strings()),
         PassByStaticReference(r2->compare_strings()),
-        StaticReturn(r1->s), StaticReturn(r2->s)
+        StaticDie(r1->s), StaticDie(r2->s)
     } */
 
     let r3 = &mut s; // !{ MutableBorrow(s->r3) }
-    clear_string(r3); // !{ PassByMutableReference(r3->clear_string()), MutableReturn(r3->s) }
+    clear_string(r3); // !{ PassByMutableReference(r3->clear_string()), MutableDie(r3->s) }
 } // !{ GoOutOfScope(s), GoOutOfScope(r1), GoOutOfScope(r2), GoOutOfScope(r3) }
