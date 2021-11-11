@@ -1,4 +1,4 @@
-/* --- BEGIN Variable Definitions ---
+    /* --- BEGIN Variable Definitions ---
 --- END Variable Definitions --- */
 fn f(s1: &String) {
     s1.push_str(" 490!");

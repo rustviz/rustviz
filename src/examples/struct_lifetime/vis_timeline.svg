@@ -1,8 +1,8 @@
 <svg width="420px" height="700px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-        id="tl_examples/struct_lifetime/input/">
+        id="tl_examples/struct_lifetime">
 
-    <desc>examples/struct_lifetime/input/</desc>
+    <desc>examples/struct_lifetime</desc>
 
     <defs>
         <style type="text/css">

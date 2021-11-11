@@ -1,7 +1,7 @@
 <svg height="700px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
-    <desc>examples/struct_lifetime/input/</desc>
+    <desc>examples/struct_lifetime</desc>
 
     <defs>
         <style type="text/css">

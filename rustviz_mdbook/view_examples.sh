@@ -8,7 +8,10 @@ cp mdbook_plugin/book.js theme/book.js
 
 # clear assets and md files to mdbook directory
 rm -f src/*md
-rm -r src/assets
+
+if [ -d "src/assets" ]; then
+    rm -r src/assets
+fi
 
 # Write the first line of SUMMARY.md. This clears anything that was there previously
 printf "# Summary\n\n" > src/SUMMARY.md
@@ -17,31 +20,31 @@ printf "Generating visualizations for the following examples: \n"
 
 # Uncomment the examples are being tested
 declare -a targetExamples=(
-    # "copy"
-    # "func_take_ownership"
-    # "func_take_return_ownership"
-    # "function"
-    # "hatra1"
-    # "hatra1_test"
-    # "hatra2"
-    # "immutable_borrow"
-    # "immutable_borrow_method_call"
-    # "immutable_variable"
-    # "move_assignment"
-    # "move_different_scope"
-    # "move_func_return"
-    # "multiple_immutable_borrow"
-    # "mutable_borrow"
-    # "mutable_borrow_method_call"
-    # "mutable_variables"
-    # "nll_lexical_scope_different"
-    # "printing"
-    # "string_from_move_print"
-    # "string_from_print"
-    # "struct_lifetime"
-    # "struct_rect"
-    # "struct_rect2"
-    # "struct_string"
+    "copy"
+    "func_take_ownership"
+    "func_take_return_ownership"
+    "function"
+    "hatra1"
+    "hatra1_test"
+    "hatra2"
+    "immutable_borrow"
+    "immutable_borrow_method_call"
+    "immutable_variable"
+    "move_assignment"
+    "move_different_scope"
+    "move_func_return"
+    "multiple_immutable_borrow"
+    "mutable_borrow"
+    "mutable_borrow_method_call"
+    "mutable_variables"
+    "nll_lexical_scope_different"
+    "printing"
+    "string_from_move_print"
+    "string_from_print"
+    "struct_lifetime"
+    "struct_rect"
+    "struct_rect2"
+    "struct_string"
     # "extra_credit"
 )
 
@@ -51,14 +54,16 @@ for target in ${targetExamples[@]}; do
     printf "building %s..." $target
     
     # Check if required files are there
-    if [[ -f  "$EX/$target/input/annotated_source.rs" && -f "$EX/$target/source.rs" ]]
+    if [[ -f  "$EX/$target/annotated_source.rs" && -f "$EX/$target/source.rs" ]]
     then
         # Check if file headers exist
         if ! [[ -f "$EX/$target/main.rs" ]]
         then
             printf "\ngenerating header for %s..." $target
-            cd ../RustvizParse
-            cargo run "$EX/$target/source.rs" >/dev/null 2>&1
+            cd ../src/RustvizParse
+            cargo run "../examples/$target/source.rs" >/dev/null 2>&1
+            printf "\nPlease define events and run current script "
+            exit 0
         fi
 
         cd ../src # switch to appropriate folder

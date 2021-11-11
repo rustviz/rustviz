@@ -61,6 +61,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
 // Effects: Uses strings to build HashMap with
 //          {key, value} pair = {name, ResourceAccessPoint}
 fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
+    // println!("{:?}", vars_str);
     // iterate over all parsed strings
     let mut vars_map = HashMap::<String, ResourceAccessPoint>::new();
 
@@ -431,6 +432,16 @@ fn get_structs(
             }
         );
 
+        let declar_name = 
+            if cond {
+                if idx+1 >= fields.len() {
+                    eprintln!("Expected variable name after 'mut' qualifier, found nothing!");
+                    exit(1);
+                }
+                fields[idx+1]
+            } else {
+                fields[idx]
+            };
         // begin new def
         vars_map.insert(
             v_name.clone(),
@@ -443,6 +454,18 @@ fn get_structs(
             })
         );
         
+        // begin new def
+        vars_map.insert(
+            format!("{}", declar_name),
+            ResourceAccessPoint::Struct(Struct {
+                owner: 0,
+                hash: *hash,
+                name: format!("{:?}", declar_name),
+                is_mut: if cond {true} else {false},
+                is_member: true
+            })
+        );
+
         idx = if cond {idx+2} else {idx+1};
     }
 }

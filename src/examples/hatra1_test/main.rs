@@ -4,12 +4,12 @@ Function String::from();
 Function takes_ownership();
 Function println!()
 --- END Variable Definitions --- */
- fn main() {
+fn main() {
     let s = String::from("hello"); // !{ Move(String::from()->s) }
     takes_ownership(s); // !{ Move(s->takes_ownership()) }
-    let mut x = 5; // !{ Bind(None->x) }
+    let mut x = 5; // !{ Bind(x) }
     let y = x; // !{ Copy(x->y) }
-    x = 6; // !{ Bind(None->x) }
+    x = 6; // !{ Bind(x) }
 } // !{ GoOutOfScope(s), GoOutOfScope(x), GoOutOfScope(y) }
 
 fn takes_ownership(some_string: String) { // !{ InitOwnerParam(some_string) }

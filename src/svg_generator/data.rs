@@ -65,7 +65,8 @@ pub struct Struct {
     pub hash: u64,
     pub owner: u64,
     pub is_mut: bool,                     
-    pub is_member: bool
+    pub is_member: bool,
+    // pub field_hash: Vec<u64>,
 }
 
 // a reference of type &mut T
@@ -92,6 +93,44 @@ pub struct Function {
 
 
 impl ResourceAccessPoint {
+    // Change hash
+    pub fn hash_mod(&mut self, id: u64) {
+        match self {
+            ResourceAccessPoint::Owner(Owner) => {Owner.hash=id;},
+            ResourceAccessPoint::Struct(Struct) => {Struct.hash=id;},
+            ResourceAccessPoint::MutRef(MutRef) => {MutRef.hash=id;},
+            ResourceAccessPoint::StaticRef(StaticRef) => {StaticRef.hash=id;},
+            ResourceAccessPoint::Function(Function) => {Function.hash=id;},
+        }
+    }
+    // Acquire header string 
+    pub fn rap_header(&self, struct_store: &mut Vec<Struct>) -> String {
+        let mut header = String::new();
+        match self {
+            ResourceAccessPoint::Owner(Owner) => {
+                if Owner.is_mut {
+                    header.push_str(&format!("Owner mut {};\n", &Owner.name));
+                } else {
+                    header.push_str(&format!("Owner {};\n", &Owner.name));
+                }
+            },
+            ResourceAccessPoint::Struct(Struct) => {
+                struct_store.push(Struct.clone());
+            },
+            ResourceAccessPoint::MutRef(MutRef) => {
+                header.push_str(&format!("MutRef {};\n", &MutRef.name));
+            },
+            ResourceAccessPoint::StaticRef(StaticRef) => {
+                header.push_str(&format!("StaticRef {};\n", &StaticRef.name));
+            },
+            ResourceAccessPoint::Function(Function) => {
+                if Function.name != String::from("main") {
+                    header.push_str(&format!("Function {}();\n", &Function.name));
+                }
+            },
+        }
+        header
+    }
     // get the attribute hash
     pub fn hash(&self) -> &u64 {
         match self {
