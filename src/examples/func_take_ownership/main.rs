@@ -11,6 +11,6 @@ fn main() {
     // println!("{}", s) // won't compile if added
 } // !{ GoOutOfScope(s) }
 
-fn takes_ownership(some_string: String) { // !{ InitializeParam(some_string) }
+fn takes_ownership(some_string: String) { // !{ Move(None->some_string) }
     println!("{}", some_string); // !{ PassByStaticReference(some_string->println!()) }
 } // !{ GoOutOfScope(some_string) }

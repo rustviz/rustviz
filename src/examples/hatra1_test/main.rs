@@ -12,6 +12,6 @@ fn main() {
     x = 6; // !{ Bind(x) }
 } // !{ GoOutOfScope(s), GoOutOfScope(x), GoOutOfScope(y) }
 
-fn takes_ownership(some_string: String) { // !{ InitializeParam(some_string) }
+fn takes_ownership(some_string: String) { // !{ InitOwnerParam(some_string) }
     println!("{}", some_string); // !{ PassByStaticReference(some_string->println!()) }
 } // !{ GoOutOfScope(some_string) }

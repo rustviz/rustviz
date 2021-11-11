@@ -254,7 +254,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; goes out of scope. Its resource is dropped."/>
         <circle cx="200" cy="85" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; is initialized as the function argument"/>
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; acquires ownership of a resource"/>
         <circle cx="200" cy="115" r="5" data-hash="2" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is immutably borrowed"/>

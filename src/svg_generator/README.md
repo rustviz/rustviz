@@ -156,8 +156,7 @@ Congratulations! You have Successfully generated the visulizations! Add the name
     * [Pass By Static Reference](#PassByStaticReference)
     * [Pass By Mutable Reference](#PassByMutableReference)
     * [Go Out Of Scope](#GoOutOfScope)
-    * [Initialize Param](#InitializeParam)
-    * [Struct Box](#StructBox)
+    * [Initialize Param](#InitRefParam)
 - [ResourceAccessPoint](svg_generator/src/data.rs) <a name="ResourceAccessPoint"></a>
 ResourceAccessPoint is an enum that define all possible owner, references or creator of any memory resource. For now, the types of ResourceAccessPoint could possibly be an owner of a resource, a mutable reference of a resource, a unmutable referene of a resource or a function:
     ```
@@ -365,10 +364,10 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
             let y = x; // x and y both go out of scope
         } 
         ```
-    - InitializeParam <a name="InitializeParam"></a>
-    The InitializeParam event represent initialization of the parameters within a function
+    - InitRefParam <a name="InitRefParam"></a>
+    The InitRefParam event represent initialization of the parameters within a function
         ```
-        InitializeParam {
+        InitRefParam {
             param: ResourceAccessPoint, // the parameter in function
         }
         ```
@@ -377,21 +376,6 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
         fn takes_ownership(some_string: String) { // initialize some_string
             println!("{}", some_string) 
         } 
-        ```
-    - StructBox <a name="StructBox"></a>
-    The StructBox event represent a struct owner and its members as a group
-        ```
-        StructBox{ 
-            from: Option<ResourceAccessPoint>, // the owner of the struct
-            to: Option<ResourceAccessPoint>, // the member with the largest hash 
-        }
-        ```
-        User case:
-        ```
-        Struct Position { // take Position as from and y as to
-            x: u32,
-            y: u32,
-        }
         ```
 ## Modules
 1. [mdbook_plugin](mdbook_plugin)

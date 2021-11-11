@@ -266,7 +266,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;y&lt;/span&gt; goes out of scope. Its resource is dropped."/>
         <circle cx="340" cy="325" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; is initialized as the function argument"/>
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; acquires ownership of a resource"/>
         <circle cx="340" cy="355" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is immutably borrowed"/>
@@ -275,7 +275,7 @@ object.code_panel {
         monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;'s resource is no longer immutably borrowed"/>
         <circle cx="340" cy="385" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; goes out of scope. No resource is dropped."/>
+        monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt; goes out of scope. Its resource is dropped."/>
         <text x="96" y="120" data-hash="5" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
         <text x="35" y="150" data-hash="6" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;takes_ownership()&lt;/span&gt;">f</text>
         <use xlink:href="#functionDot" data-hash="4" x="340" y="355" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!()&lt;/span&gt; reads from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;some_string&lt;/span&gt;"/>

@@ -14,4 +14,4 @@ fn main() {
     let f = Foo { x: 5, y: _y }; // !{ Bind(f), Bind(f.x), Move(_y->f.y) }
     println!("{}", f.x); // !{ PassByStaticReference(f.x->println!())  }
     println!("{}", f.y); // !{ PassByStaticReference(f.y->println!())  }
-} // !{ StructBox(f->f.y), GoOutOfScope(f), GoOutOfScope(f.x), GoOutOfScope(f.y) }
+} // !{ GoOutOfScope(f), GoOutOfScope(f.x), GoOutOfScope(f.y) }

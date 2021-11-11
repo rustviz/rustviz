@@ -123,7 +123,7 @@ Each Event is defined on the line where it occurs and within delimiters `!{` and
 ExternalEvents Usage:
     Format: <event_name>(<from>-><to>)
         e.g.: // !{ PassByMutableReference(a->Some_Function()), ... }
-    Note: GoOutOfScope and InitializeParam require only the <from> parameter
+    Note: GoOutOfScope and InitRefParam require only the <from> parameter
         e.g.: // !{ GoOutOfScope(x) }
 ```
 > Refer to the [Appendix](#Appendix) for a list of usable `ExternalEvent`'s.
@@ -158,12 +158,12 @@ Congratulations! You have successfully generated your first visualization! As a 
 | `MutableDie(a->b)` | Ends the non-lexical lifetime of the reference variable `a` and returns the resource back to its owner `b`. |
 | `PassByStaticReference(a->b)` | Passes an immutable reference of variable `a` to function `b`. Not to be confused with StaticBorrow. |
 | `PassByMutableReference(a->b)` | Passes a mutable reference of variable `a` to function `b`. Not to be confused with MutableBorrow. |
-| `StructBox(a->a.b)` | Creates a struct instance `a` whose last member variable is `b`.<br>Notes:<br>(1) This event should be specified on the _same line_ the struct instance, `a`, goes out of lexical scope.<br>(2) A struct's member variables should always be defined in the same order they are declared in. |
 | `GoOutOfScope(a)` | Ends the lexical lifetime of variable `a`. |
-| `InitializeParam(a)` | Initializes the parameter `a` of some function.<br>e.g.: `some_fn(a: String) {..}` |
+| `InitRefParam(a)` | Initializes the parameter `a` of some function, which is a reference.<br>e.g.: `some_fn(a: &String) {..}` |
+| `InitOwnerParam(a)` | Initializes the parameter `a` of some function, which owns the resource.<br>e.g.: `some_fn(a: String) {..}` |
 
 > Note:
-> 1. `GoOutOfScope` and `InitializeParam` require a singular parameter previously defined in the `Variable Definitions` section.
+> 1. `GoOutOfScope`, `InitRefParam` and `InitOwnerParam` require a singular parameter previously defined in the `Variable Definitions` section.
 (e.g.: `// !{ GoOutOfScope(x) }`)
 > 2. All other events require two parameters, `a` and `b`, which can either be defined (e.g.: `Owner a`) or undefined (`None`).
 <!-- The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(x)`).  -->
