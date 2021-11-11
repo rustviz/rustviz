@@ -106,15 +106,22 @@ pub fn event_dot_copy_to(my_name: &String, _target_name: &String) -> String {
 pub fn event_dot_move_to(my_name: &String, target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
-    // if  target_name.chars().nth(0).unwrap() == '|' &&  target_name.chars().last().unwrap() == '|'{
-    //     //this is a closure owner
-    //     format!(
-    //         "{0}'s resource is moved to closure",
-    //         my_name_fmt
-    //     )
-    // } else {
         format!(
             "{0}'s resource is moved",
+            my_name_fmt
+        )
+    // }
+}
+
+// 1   0
+//     |
+// o<--*   the star event
+// |
+pub fn event_dot_move_to_closure(my_name: &String, target_name: &String) -> String {
+    // update styling
+    let my_name_fmt = fmt_style(my_name);
+        format!(
+            "{0}'s resource is moved to closure",
             my_name_fmt
         )
     // }

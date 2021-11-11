@@ -18,6 +18,7 @@ struct TimelineColumnData {
     is_ref: bool,
     is_struct_group: bool,
     is_member: bool,
+    is_closure: bool,
     owner: u64
 }
 
@@ -59,6 +60,12 @@ struct ArrowData {
     coordinates: Vec<(f64, f64)>,
     coordinates_hbs: String,
     title: String
+}
+
+#[derive(Serialize)]
+struct ClosureArrowData {
+    x: i64,
+    y: i64,
 }
 
 #[derive(Serialize)]
@@ -192,6 +199,8 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
     let function_logo_template =
         "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
+    let closure_logo_template =
+        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">c</text>\n";
     let arrow_template =
         "        <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" marker-end=\"url(#arrowHead)\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\" style=\"fill: none;\"/> \n";
     let vertical_line_template =
@@ -204,6 +213,8 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
+    let arrow_closure_template = 
+        "        <text x=\"{{x}}\" y=\"{{y}}\" stroke=\"gray\">||</text>\n";
 
     assert!(
         registry.register_template_string("struct_template", struct_template).is_ok()
@@ -221,6 +232,9 @@ fn prepare_registry(registry: &mut Handlebars) {
         registry.register_template_string("arrow_template", arrow_template).is_ok()
     );
     assert!(
+        registry.register_template_string("arrow_closure_template", arrow_closure_template).is_ok()
+    );
+    assert!(
         registry.register_template_string("vertical_line_template", vertical_line_template).is_ok()
     );
     assert!(
@@ -228,6 +242,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     );
     assert!(
         registry.register_template_string("function_logo_template", function_logo_template).is_ok()
+    );
+    assert!(
+        registry.register_template_string("closure_logo_template", closure_logo_template).is_ok()
     );
     assert!(
         registry.register_template_string("hollow_line_template", hollow_line_template).is_ok()
@@ -308,6 +325,7 @@ fn compute_column_layout<'a>(
                         is_ref: ref_bool,
                         is_struct_group: timeline.resource_access_point.is_struct_group(),
                         is_member: timeline.resource_access_point.is_member(),
+                        is_closure: timeline.resource_access_point.is_closure(),
                         owner: timeline.resource_access_point.get_owner(),
                     });
             }
@@ -443,6 +461,10 @@ fn render_arrows_string_external_events_version(
                 title = String::from("Move");
                 (from_ro, to_ro)
             },
+            ExternalEvent::MoveToClosure{ from: from_ro, to: to_ro } => {
+                title = String::from("Move to closure");
+                (from_ro, to_ro)
+            },
             ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro } => {
                 title = String::from("Immutable borrow");
                 (from_ro, to_ro)
@@ -502,6 +524,11 @@ fn render_arrows_string_external_events_version(
             title: title
         };
 
+        let mut closure_data = ClosureArrowData {
+            x: 0,
+            y: 0
+        };
+
         let arrow_length = 20;
         // render title
         match (from, to, external_event) {
@@ -532,8 +559,7 @@ fn render_arrows_string_external_events_version(
                     } else {
                         output.get_mut(&(resource_owners_layout[to_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     }
-                }
-                else {
+                } else {
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                 }
             },
@@ -620,6 +646,10 @@ fn render_arrows_string_external_events_version(
                 let x2 = resource_owners_layout[from_variable.hash()].x_val;
                 let y1 = get_y_axis_pos(*line_number);
                 let y2 = get_y_axis_pos(*line_number);
+                if resource_owners_layout[to_variable.hash()].is_closure{
+                    closure_data.x = (x1+x2)/2;
+                    closure_data.y = get_y_axis_pos(*line_number) + 5;
+                }
                 // if the arrow is pointing from left to right
                 if arrow_order > 0 && x2 <= x1{
                     let x3 = resource_owners_layout[from_variable.hash()].x_val + 20;
@@ -700,10 +730,12 @@ fn render_arrows_string_external_events_version(
                     } else {
                         output.get_mut(&(resource_owners_layout[ro.hash()].owner.to_owned() as i64)).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                     }
-                }
-                else {
+                } else {
                     output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                 }
+            }
+            if closure_data.x != 0 || closure_data.y != 0 {
+                output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_closure_template", &closure_data).unwrap());
             }
         }
     }

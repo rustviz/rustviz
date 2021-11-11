@@ -229,6 +229,10 @@ pub enum ExternalEvent {
         from: Option<ResourceAccessPoint>,
         to: Option<ResourceAccessPoint>,
     },
+    MoveToClosure {
+        from: Option<ResourceAccessPoint>,
+        to: Option<ResourceAccessPoint>,
+    },
     StaticBorrow {
         from: Option<ResourceAccessPoint>,
         to: Option<ResourceAccessPoint>,
@@ -317,6 +321,9 @@ pub enum Event {
     //    its ownership on this line. This includes tranfering its
     //    ownership to a function as well.
     Move {
+        to: Option<ResourceAccessPoint>
+    },
+    MoveToClosure {
         to: Option<ResourceAccessPoint>
     },
     MutableLend {
@@ -458,6 +465,7 @@ impl Display for Event {
             Event::Duplicate{ to } => { to_ro = to.to_owned(); "Copying resource" },
             Event::Copy{ from } => { from_ro = from.to_owned(); "Copying resource from some variable" },
             Event::Move{ to } => { to_ro = to.to_owned(); "Moving resource" },
+            Event::MoveToClosure{ to } => { to_ro = to.to_owned(); "Moving resource to closure" },
             Event::MutableLend{ to } => { to_ro = to.to_owned(); "Mutable lend" },
             Event::MutableBorrow{ from } => { from_ro = Some(from.to_owned()); "Fully borrows resource" },
             Event::MutableDie{ to } => { to_ro = to.to_owned(); "Fully returns resource"},
@@ -508,6 +516,10 @@ impl Event {
                     // a Move to None implies the resource is returned by a function
                     None => safe_message(hover_messages::event_dot_move_to_caller, my_name, to)
                 }
+                
+            }
+            MoveToClosure{ to } => {
+                safe_message(hover_messages::event_dot_move_to_closure, my_name, to)
                 
             }
             StaticLend{ to } => {
@@ -586,6 +598,7 @@ pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option
         ExternalEvent::Bind{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::Copy{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::Move{from: from_ro, to: to_ro} => (from_ro, to_ro),
+        ExternalEvent::MoveToClosure{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::StaticDie{from: from_ro, to: to_ro} => (from_ro, to_ro),
         ExternalEvent::MutableBorrow{from: from_ro, to: to_ro} => (from_ro, to_ro),
@@ -677,6 +690,9 @@ impl Visualizable for VisualizationData {
             },
 
             (State::FullPrivilege, Event::Move{to: to_ro}) =>
+                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line },
+
+            (State::FullPrivilege, Event::MoveToClosure{to: to_ro}) =>
                 State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line },
 
             (State::ResourceMoved{ .. }, Event::Acquire{ .. }) => {
@@ -892,6 +908,11 @@ impl Visualizable for VisualizationData {
         match event {
             // eg let ro_to = String::from("");
             ExternalEvent::Move{from: from_ro, to: to_ro} => {
+                maybe_append_event(self, &to_ro, Event::Acquire{from : from_ro.to_owned()}, &line_number);
+                maybe_append_event(self, &from_ro, Event::Move{to : to_ro.to_owned()}, &line_number);
+            },
+            // eg let thread::spawn(move || println!("{}", from_ro.len());
+            ExternalEvent::MoveToClosure{from: from_ro, to: to_ro} => {
                 maybe_append_event(self, &to_ro, Event::Acquire{from : from_ro.to_owned()}, &line_number);
                 maybe_append_event(self, &from_ro, Event::Move{to : to_ro.to_owned()}, &line_number);
             },

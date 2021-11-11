@@ -279,6 +279,13 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
+            "MoveToClosure" => vd.append_external_event(
+                ExternalEvent::MoveToClosure{
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
+                },
+                &(event.0 as usize)
+            ),
             "StaticBorrow" => vd.append_external_event(
                 ExternalEvent::StaticBorrow{
                     from: get_resource(&vars, field[1]),
