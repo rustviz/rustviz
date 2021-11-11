@@ -46,6 +46,7 @@ pub trait Visualizable {
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub enum ResourceAccessPoint {
     Owner(Owner),
+    Closure(Closure),
     MutRef(MutRef),
     StaticRef(StaticRef),
     Function(Function),
@@ -59,6 +60,15 @@ pub struct Owner {
     pub hash: u64,
     pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
 }
+
+// when something is a closure
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub struct Closure {
+    pub name: String,
+    pub hash: u64,
+    pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
+}
+
 
 // when something is a struct member
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
@@ -98,6 +108,7 @@ impl ResourceAccessPoint {
     pub fn hash(&self) -> &u64 {
         match self {
             ResourceAccessPoint::Owner(Owner{hash, ..}) => hash,
+            ResourceAccessPoint::Closure(Closure{hash, ..}) => hash,
             ResourceAccessPoint::Struct(Struct{hash, ..}) => hash,
             ResourceAccessPoint::MutRef(MutRef{hash, ..}) => hash,
             ResourceAccessPoint::StaticRef(StaticRef{hash, ..}) => hash,
@@ -109,6 +120,7 @@ impl ResourceAccessPoint {
     pub fn name(&self) -> &String {
         match self {
             ResourceAccessPoint::Owner(Owner{name, ..}) => name,
+            ResourceAccessPoint::Closure(Closure{name, ..}) => name,
             ResourceAccessPoint::Struct(Struct{name, ..}) => name,
             ResourceAccessPoint::MutRef(MutRef{name, ..}) => name,
             ResourceAccessPoint::StaticRef(StaticRef{name, ..}) => name,
@@ -120,6 +132,7 @@ impl ResourceAccessPoint {
     pub fn is_mut(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(Owner{is_mut, ..}) => is_mut.to_owned(),
+            ResourceAccessPoint::Closure(Closure{is_mut, ..}) => is_mut.to_owned(),
             ResourceAccessPoint::Struct(Struct{is_mut, ..}) => is_mut.to_owned(),
             ResourceAccessPoint::MutRef(MutRef{is_mut, ..}) => is_mut.to_owned(),
             ResourceAccessPoint::StaticRef(StaticRef{is_mut, ..}) => is_mut.to_owned(),
@@ -130,6 +143,7 @@ impl ResourceAccessPoint {
     pub fn is_ref(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Closure(_) => false,
             ResourceAccessPoint::Struct(_) => false,
             ResourceAccessPoint::MutRef(_) => true,
             ResourceAccessPoint::StaticRef(_) => true,
@@ -145,16 +159,20 @@ impl ResourceAccessPoint {
     }
 
     pub fn is_closure(&self) -> bool {
-        if self.name().chars().nth(0).unwrap() == '|' && self.name().chars().last().unwrap() == '|' {
-            true
-        } else {
-            false
+        match self {
+            ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Closure(_) => true,
+            ResourceAccessPoint::Struct(_) => false,
+            ResourceAccessPoint::MutRef(_) => false,
+            ResourceAccessPoint::StaticRef(_) => false,
+            ResourceAccessPoint::Function(_) => false,
         }
     }
 
     pub fn is_struct_group(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Closure(_) => false,
             ResourceAccessPoint::Struct(_) => true,
             ResourceAccessPoint::MutRef(_) => false,
             ResourceAccessPoint::StaticRef(_) => false,
@@ -165,6 +183,7 @@ impl ResourceAccessPoint {
     pub fn is_struct(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Closure(_) => false,
             ResourceAccessPoint::Struct(Struct{is_member, ..}) => !is_member.to_owned(),
             ResourceAccessPoint::MutRef(_) => false,
             ResourceAccessPoint::StaticRef(_) => false,
@@ -175,6 +194,7 @@ impl ResourceAccessPoint {
     pub fn is_member(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(_) => false,
+            ResourceAccessPoint::Closure(_) => false,
             ResourceAccessPoint::Struct(Struct{is_member, ..}) => is_member.to_owned(),
             ResourceAccessPoint::MutRef(_) => false,
             ResourceAccessPoint::StaticRef(_) => false,
@@ -185,6 +205,7 @@ impl ResourceAccessPoint {
     pub fn get_owner(&self) -> u64 {
         match self {
             ResourceAccessPoint::Owner(Owner{hash, ..}) => hash.to_owned(),
+            ResourceAccessPoint::Closure(Closure{hash, ..}) => hash.to_owned(),
             ResourceAccessPoint::Struct(Struct{owner, ..}) => owner.to_owned(),
             ResourceAccessPoint::MutRef(MutRef{hash, ..}) => hash.to_owned(),
             ResourceAccessPoint::StaticRef(StaticRef{hash, ..}) => hash.to_owned(),
@@ -330,6 +351,7 @@ pub enum Event {
     RefGoOutOfScope,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
+    ClosureGoOutOfScope,
     InitRefParam {
         param: ResourceAccessPoint
     },
@@ -447,6 +469,7 @@ impl Display for Event {
             Event::InitRefParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
+            Event::ClosureGoOutOfScope => { "Goes out of Scope with the resources" },
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -468,6 +491,9 @@ impl Event {
             }
             RefGoOutOfScope => {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
+            }
+            ClosureGoOutOfScope => { 
+                hover_messages::event_dot_closure_go_out_out_scope(my_name)
             }
             InitRefParam{ param: _ } => {
                 hover_messages::event_dot_init_param(my_name)
@@ -635,7 +661,7 @@ impl Visualizable for VisualizationData {
                     ResourceAccessPoint::Function(..) => {
                         panic!("Cannot initialize function as as valid parameter!")
                     },
-                    ResourceAccessPoint::Owner(..) | ResourceAccessPoint::MutRef(..) => {
+                    ResourceAccessPoint::Owner(..) | ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::Closure(..) => {
                         State::FullPrivilege
                     },
                     ResourceAccessPoint::Struct(..) => {
@@ -693,6 +719,9 @@ impl Visualizable for VisualizationData {
             (State::FullPrivilege, Event::RefGoOutOfScope) =>
                 State::OutOfScope,
 
+            (State::FullPrivilege, Event::ClosureGoOutOfScope) =>
+                State::OutOfScope,
+
             (State::FullPrivilege, Event::StaticLend{ to: to_ro }) =>
                 State::PartialPrivilege {
                     borrow_count: 1,
@@ -737,6 +766,9 @@ impl Visualizable for VisualizationData {
                 State::OutOfScope,
 
             (State::PartialPrivilege{ .. }, Event::RefGoOutOfScope) =>
+                State::OutOfScope,
+
+            (State::PartialPrivilege{ .. }, Event::ClosureGoOutOfScope) =>
                 State::OutOfScope,
 
             (State::RevokedPrivilege{ .. }, Event::MutableReacquire{ .. }) =>
@@ -923,6 +955,9 @@ impl Visualizable for VisualizationData {
                 match ro {
                     ResourceAccessPoint::Owner(..) => {
                         maybe_append_event(self, &Some(ro), Event::OwnerGoOutOfScope, &line_number);
+                    },
+                    ResourceAccessPoint::Closure(..) => {
+                        maybe_append_event(self, &Some(ro), Event::ClosureGoOutOfScope, &line_number);
                     },
                     ResourceAccessPoint::Struct(..) => {
                         maybe_append_event(self, &Some(ro), Event::OwnerGoOutOfScope, &line_number);

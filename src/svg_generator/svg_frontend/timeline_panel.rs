@@ -259,7 +259,7 @@ fn compute_column_layout<'a>(
             ResourceAccessPoint::Function(_) => {
                 /* do nothing */
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let name = match visualization_data.get_name_from_hash(hash) {
                     Some(_name) => _name,
@@ -273,7 +273,7 @@ fn compute_column_layout<'a>(
                 };
                 let mut title = mut_title.clone();
                 if visualization_data.is_closure(hash) {
-                    title = title + " in closure";
+                    title = title + " is closure";
                 }
                 let mut ref_bool = false;
 
@@ -361,7 +361,7 @@ fn render_dots_string(
             ResourceAccessPoint::Function(_) => {
                 // nothing to be done
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let mut resource_hold = false;
                 for (line_number, event) in timeline.history.iter() {
@@ -473,6 +473,7 @@ fn render_arrows_string_external_events_version(
         if let Some(some_from) = from {
             let from_string = match some_from {
                 ResourceAccessPoint::Owner(owner) => owner.name.to_owned(),
+                ResourceAccessPoint::Closure(closure) => closure.name.to_owned(),
                 ResourceAccessPoint::Struct(stru) => stru.name.to_owned(),
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
@@ -484,6 +485,7 @@ fn render_arrows_string_external_events_version(
         if let Some(some_to) = to {
             let to_string = match some_to {
                 ResourceAccessPoint::Owner(owner) => owner.name.to_owned(),
+                ResourceAccessPoint::Closure(closure) => closure.name.to_owned(),
                 ResourceAccessPoint::Struct(stru) => stru.name.to_owned(),
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
@@ -872,7 +874,7 @@ fn render_timelines(
             };
             match rap {
                 ResourceAccessPoint::Function(_) => {}, // Don't do anything
-                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
+                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Struct(_) => {
                     if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
                         if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
                             output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
@@ -910,7 +912,7 @@ fn render_ref_line(
     for (hash, timeline) in timelines{
         match timeline.resource_access_point {
             ResourceAccessPoint::Function(_) => (), /* do nothing */
-            ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let ro = timeline.resource_access_point.to_owned();
                 // verticle state lines
