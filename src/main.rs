@@ -65,9 +65,13 @@ fn main() -> Result<(), Error> {
     /* ******************************************
             --- Render SVG images ---
     ****************************************** */
-    let input_path = path_to_ex.join("input/")
-        .into_os_string().into_string()
-        .expect("Error in input file path!");
+    // let input_path = path_to_ex.join("input/")
+    //     .into_os_string().into_string()
+    //     .expect("Error in input file path!");
+    let input_path = path_to_ex.clone()
+    .into_os_string().into_string()
+    .expect("Error in input file path!");
+
     let output_path = path_to_ex
         .into_os_string().into_string()
         .expect("Error in output file path!");

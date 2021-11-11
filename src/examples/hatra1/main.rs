@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-Owner s; Owner y; Owner mut x; Owner some_string;
+Owner s; Owner mut x; Owner y; Owner some_string;
 Function String::from();
 Function takes_ownership();
 Function println!()

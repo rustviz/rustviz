@@ -1,8 +1,8 @@
 <svg width="240px" height="370px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-        id="tl_examples/mutable_borrow_method_call/input/">
+        id="tl_examples/mutable_borrow_method_call">
 
-    <desc>examples/mutable_borrow_method_call/input/</desc>
+    <desc>examples/mutable_borrow_method_call</desc>
 
     <defs>
         <style type="text/css">

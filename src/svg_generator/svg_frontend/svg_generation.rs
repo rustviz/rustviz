@@ -100,7 +100,7 @@ pub fn render_svg(
     // data for code panel
     let mut max_x_space: i64 = 0;
     if let (Ok(annotated_lines),Ok(lines)) = 
-    (utils::read_lines(input_path.to_owned() + "annotated_source.rs"), utils::read_lines(output_path.to_owned() + "source.rs")) {
+    (utils::read_lines(input_path.to_owned() + "/annotated_source.rs"), utils::read_lines(output_path.to_owned() + "source.rs")) {
         let (output, line_of_code) =
             code_panel::render_code_panel(annotated_lines, lines, &mut max_x_space, &visualization_data.event_line_map);
         code_panel_string = output;

@@ -20,31 +20,31 @@ printf "Generating visualizations for the following examples: \n"
 
 # Uncomment the examples are being tested
 declare -a targetExamples=(
-    # "copy"
-    # "func_take_ownership"
-    # "func_take_return_ownership"
-    # "function"
+    "copy"
+    "func_take_ownership"
+    "func_take_return_ownership"
+    "function"
     "hatra1"
     "hatra1_test"
-    # "hatra2"
-    # "immutable_borrow"
-    # "immutable_borrow_method_call"
-    # "immutable_variable"
-    # "move_assignment"
-    # "move_different_scope"
-    # "move_func_return"
-    # "multiple_immutable_borrow"
-    # "mutable_borrow"
-    # "mutable_borrow_method_call"
-    # "mutable_variables"
-    # "nll_lexical_scope_different"
-    # "printing"
-    # "string_from_move_print"
-    # "string_from_print"
-    # "struct_lifetime"
-    # "struct_rect"
-    # "struct_rect2"
-    # "struct_string"
+    "hatra2"
+    "immutable_borrow"
+    "immutable_borrow_method_call"
+    "immutable_variable"
+    "move_assignment"
+    "move_different_scope"
+    "move_func_return"
+    "multiple_immutable_borrow"
+    "mutable_borrow"
+    "mutable_borrow_method_call"
+    "mutable_variables"
+    "nll_lexical_scope_different"
+    "printing"
+    "string_from_move_print"
+    "string_from_print"
+    "struct_lifetime"
+    "struct_rect"
+    "struct_rect2"
+    "struct_string"
     # "extra_credit"
 )
 
@@ -54,7 +54,7 @@ for target in ${targetExamples[@]}; do
     printf "building %s..." $target
     
     # Check if required files are there
-    if [[ -f  "$EX/$target/input/annotated_source.rs" && -f "$EX/$target/source.rs" ]]
+    if [[ -f  "$EX/$target/annotated_source.rs" && -f "$EX/$target/source.rs" ]]
     then
         # Check if file headers exist
         if ! [[ -f "$EX/$target/main.rs" ]]

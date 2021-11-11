@@ -1,7 +1,7 @@
 <svg height="700px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
-    <desc>examples/extra_credit/input/</desc>
+    <desc>examples/extra_credit</desc>
 
     <defs>
         <style type="text/css">
@@ -168,22 +168,22 @@ object.code_panel {
     </g>
 
     <g id="code">
-        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn <tspan class="fn" data-hash="0" hash="7">f</tspan>(<tspan data-hash="6">s1</tspan>: &amp;String) { </text>
-        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    <tspan data-hash="6">s1</tspan>.<tspan class="fn" data-hash="0" hash="8">push_str</tspan>(" 490!"); </text>
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn f(s1: &amp;String) { </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    s1.push_str(" 490!"); </text>
         <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>} </text>
         <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan> </text>
         <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>fn main() { </text>
-        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    let mut <tspan data-hash="1">num</tspan> = 490; </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let mut <tspan data-hash="2">x</tspan> = <tspan class="fn" data-hash="0" hash="9">String::from</tspan>("EECS"); </text>
+        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    let mut num = 490; </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let mut x = String::from("EECS"); </text>
         <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    { </text>
-        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>        let <tspan data-hash="3">y</tspan> = &amp;mut <tspan data-hash="2">x</tspan>; </text>
-        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>        <tspan class="fn" data-hash="0" hash="7">f</tspan>(<tspan data-hash="3">y</tspan>); </text>
-        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>        let mut <tspan data-hash="4">s2</tspan> = <tspan data-hash="2">x</tspan>; </text>
-        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>        <tspan data-hash="4">s2</tspan>.<tspan class="fn" data-hash="0" hash="8">push_str</tspan>(" Woo!"); </text>
-        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>        println!("{}", <tspan data-hash="4">s2</tspan>); </text>
+        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>        let y = &amp;mut x; </text>
+        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>        f(y); </text>
+        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>        let mut s2 = x; </text>
+        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>        s2.push_str(" Woo!"); </text>
+        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>        println!("{}", s2); </text>
         <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan> </text>
-        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>        let <tspan data-hash="5">n1</tspan> = <tspan data-hash="1">num</tspan>; </text>
-        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>        println!("{}", <tspan data-hash="5">n1</tspan>); </text>
+        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>        let n1 = num; </text>
+        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>        println!("{}", n1); </text>
         <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>    } </text>
         <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>} </text>
     </g>

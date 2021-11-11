@@ -1,8 +1,8 @@
 <svg width="200px" height="250px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-        id="tl_examples/immutable_variable/input/">
+        id="tl_examples/immutable_variable">
 
-    <desc>examples/immutable_variable/input/</desc>
+    <desc>examples/immutable_variable</desc>
 
     <defs>
         <style type="text/css">

@@ -1,22 +1,22 @@
 struct Rect {
-    w: u32,
-    h: u32,
+    <tspan data-hash="2">w</tspan>: u32,
+    <tspan data-hash="3">h</tspan>: u32,
 }
 
 fn main() {
     let <tspan data-hash="1">r</tspan> = Rect {
-        w: 30,
-        h: 50,
+        <tspan data-hash="2">w</tspan>: 30,
+        <tspan data-hash="3">h</tspan>: 50,
     };
 
     <tspan class="fn" data-hash="0" hash="6">println!</tspan>(
         "The area of the rectangle is {} square pixels.",
-        <tspan class="fn" data-hash="0" hash="5">area</tspan>(&r)
+        <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="1">&amp;r</tspan>)
     );
     
-    <tspan class="fn" data-hash="0" hash="6">println!</tspan>("The height of that is {}.", r.h);
+    <tspan class="fn" data-hash="0" hash="6">println!</tspan>("The height of that is {}.", <tspan data-hash="1">r</tspan>.<tspan data-hash="3">h</tspan>);
 }
 
-fn <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="4">rect: &Rect</tspan>) -> u32 {
+fn <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="4">rect</tspan>: &amp;Rect) -&gt; u32 {
     rect.w * rect.h
 }

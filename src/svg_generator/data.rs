@@ -65,7 +65,8 @@ pub struct Struct {
     pub hash: u64,
     pub owner: u64,
     pub is_mut: bool,                     
-    pub is_member: bool
+    pub is_member: bool,
+    // pub field_hash: Vec<u64>,
 }
 
 // a reference of type &mut T

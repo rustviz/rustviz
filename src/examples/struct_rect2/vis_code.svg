@@ -1,7 +1,7 @@
 <svg height="940px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
-    <desc>examples/struct_rect2/input/</desc>
+    <desc>examples/struct_rect2</desc>
 
     <defs>
         <style type="text/css">
@@ -174,15 +174,15 @@ object.code_panel {
         <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>} </text>
         <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan> </text>
         <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>impl Rectangle { </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    fn <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="8">&amp;self</tspan>) -> u32 { </text>
-        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>        <tspan data-hash="8">self</tspan>.<tspan data-hash="2">width</tspan> * <tspan data-hash="8">self</tspan>.<tspan data-hash="3">height</tspan> </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    fn area(&amp;self) -&gt; u32 { </text>
+        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>        self.width * self.height </text>
         <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>    } </text>
         <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>} </text>
         <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan> </text>
-        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>fn <tspan class="fn" data-hash="0" hash="6">print_area</tspan>(<tspan data-hash="4">rect</tspan>: &amp;Rectangle) -> u32 { </text>
-        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>    <tspan class="fn" data-hash="0" hash="7">println!</tspan>( </text>
+        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>fn <tspan class="fn" data-hash="0" hash="7">print_area</tspan>(<tspan data-hash="4">rect</tspan>: &amp;Rectangle) { </text>
+        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>    println!( </text>
         <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>        "The area of the rectangle is {} square pixels.", </text>
-        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>        <tspan data-hash="4">rect</tspan>.<tspan class="fn" data-hash="0" hash="5">area</tspan>() // dot even though it's actually a reference </text>
+        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>       	<tspan data-hash="4">rect</tspan>.<tspan class="fn" data-hash="0" hash="6">area</tspan>() // dot even though it's actually a reference </text>
         <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>    ); </text>
         <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>} </text>
         <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan> </text>
@@ -192,7 +192,7 @@ object.code_panel {
         <text class="code" x="20" y="720"> <tspan fill="#AAA">22  </tspan>        <tspan data-hash="3">height</tspan>: 50, </text>
         <text class="code" x="20" y="750"> <tspan fill="#AAA">23  </tspan>    }; </text>
         <text class="code" x="20" y="780"> <tspan fill="#AAA">24  </tspan> </text>
-        <text class="code" x="20" y="810"> <tspan fill="#AAA">25  </tspan>    <tspan class="fn" data-hash="0" hash="6">print_area</tspan>(<tspan data-hash="1">&amp;r</tspan>); </text>
+        <text class="code" x="20" y="810"> <tspan fill="#AAA">25  </tspan>    <tspan class="fn" data-hash="0" hash="7">print_area</tspan>(<tspan data-hash="1">&amp;r</tspan>); </text>
         <text class="code" x="20" y="840"> <tspan fill="#AAA">26  </tspan>} </text>
     </g>
 
