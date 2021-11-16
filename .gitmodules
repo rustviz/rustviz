@@ -1,0 +1,3 @@
+[submodule "RustvizParse"]
+	path = src/RustvizParse
+	url = https://github.com/rustviz/RustvizParse.git
