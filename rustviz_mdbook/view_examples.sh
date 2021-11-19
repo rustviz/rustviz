@@ -6,9 +6,16 @@ end=$'\e[0m'
 mkdir -p "./theme"
 cp mdbook_plugin/book.js theme/book.js
 
+if ! [[ -d "src" ]]; then
+    mkdir src
+fi
+
 # clear assets and md files to mdbook directory
 rm -f src/*md
-rm -r src/assets
+
+if [[ -d "src/assets" ]]; then
+    rm -r src/assets
+fi
 
 # Write the first line of SUMMARY.md. This clears anything that was there previously
 printf "# Summary\n\n" > src/SUMMARY.md
