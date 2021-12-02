@@ -45,6 +45,8 @@ declare -a targetExamples=(
     # "extra_credit"
     # "closure_test"
     # "closure_thread"
+    "thread_vec"
+    "thread_vec2"
 )
 
 EX="../src/examples"
