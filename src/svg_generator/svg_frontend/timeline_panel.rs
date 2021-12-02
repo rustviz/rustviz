@@ -199,8 +199,6 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
     let function_logo_template =
         "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
-    let closure_logo_template =
-        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">c</text>\n";
     let arrow_template =
         "        <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" marker-end=\"url(#arrowHead)\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\" style=\"fill: none;\"/> \n";
     let vertical_line_template =
@@ -242,9 +240,6 @@ fn prepare_registry(registry: &mut Handlebars) {
     );
     assert!(
         registry.register_template_string("function_logo_template", function_logo_template).is_ok()
-    );
-    assert!(
-        registry.register_template_string("closure_logo_template", closure_logo_template).is_ok()
     );
     assert!(
         registry.register_template_string("hollow_line_template", hollow_line_template).is_ok()
@@ -462,7 +457,7 @@ fn render_arrows_string_external_events_version(
                 (from_ro, to_ro)
             },
             ExternalEvent::MoveToClosure{ from: from_ro, to: to_ro } => {
-                title = String::from("Move to closure");
+                title = String::from("Move");
                 (from_ro, to_ro)
             },
             ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro } => {
@@ -515,6 +510,13 @@ fn render_arrows_string_external_events_version(
             };
             let styled_to_string = SPAN_BEGIN.to_string() + &to_string + SPAN_END;
             title = format!("{} to {}", title, styled_to_string);
+        };
+        let (from, to) = match external_event {
+            ExternalEvent::MoveToClosure{ from: from_ro, to: to_ro } => {
+                title = format!("{} via closure", title);
+                (from_ro, to_ro)
+            },
+            _ => (&None, &None),
         };
 
         // order of points is to -> from
@@ -592,7 +594,6 @@ fn render_arrows_string_external_events_version(
                 // get variable's position
                 let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
                 let styled_from_name = SPAN_BEGIN.to_string() + from_variable.name() + SPAN_END;
-
                 let function_dot_data = FunctionDotData {
                     x: resource_owners_layout[from_variable.hash()].x_val,
                     y: get_y_axis_pos(*line_number),
@@ -609,6 +610,38 @@ fn render_arrows_string_external_events_version(
                 else {
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                 }
+            },
+            (Some(from_variable), Some(ResourceAccessPoint::Function(to_function)), 
+             ExternalEvent::MoveToClosure{..}) => {  // (Some(variable), Some(function), MoveToClosure)
+                let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
+                //  ro1 (to_function) <- ro2 (from_variable)
+                let x2 = resource_owners_layout[from_variable.hash()].x_val - 5;
+                let x1 = x2 - arrow_length;
+                let y1 = get_y_axis_pos(*line_number);
+                let y2 = get_y_axis_pos(*line_number);
+                data.coordinates.push((x1 as f64, y1 as f64));
+                data.coordinates.push((x2 as f64, y2 as f64));
+
+                let function_data = FunctionLogoData {
+                    // adjust Function logo pos
+                    x: x1 - 10,  
+                    y: y1 + 5,
+                    hash: to_function.hash.to_owned() as u64,
+                    title: styled_fn_name,
+                };
+                closure_data.x = (x1+x2)/2;
+                closure_data.y = get_y_axis_pos(*line_number) + 5;
+                if resource_owners_layout[from_variable.hash()].is_struct_group {
+                    if resource_owners_layout[from_variable.hash()].is_member {
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    } else {
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    }
+                }
+                else {
+                    output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                }
+                output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_closure_template", &closure_data).unwrap());
             },
             (Some(from_variable), Some(ResourceAccessPoint::Function(to_function)), _) => { // (Some(variable), Some(function), _)
                 let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
