@@ -5,7 +5,7 @@ Function String::from();
 Function f();
 Function println!()
 --- END Variable Definitions --- */
-fn f() {
+fn f() -> String {
     let x = String::from("hello"); // !{ Move(String::from()->x) }
     // ...
     x // !{ Move(x->None) }

@@ -1,4 +1,4 @@
-fn f() {
+fn f() -> String {
     let x = String::from("hello");
     // ...
     x
