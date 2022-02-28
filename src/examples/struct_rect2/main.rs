@@ -11,12 +11,12 @@ struct Rectangle {
 }
 
 impl Rectangle {
-    fn area(&self) -> u32 { // !{ InitializeParam(self) }
+    fn area(&self) -> u32 { // !{ InitRefParam(self) }
         self.width * self.height
     } // !{ GoOutOfScope(self) }
 }
 
-fn print_area(rect: &Rectangle) { // !{ InitializeParam(rect) }
+fn print_area(rect: &Rectangle) { // !{ InitRefParam(rect) }
     println!(
         "The area of the rectangle is {} square pixels.",
        	rect.area() // dot even though it's actually a reference !{ PassByStaticReference(rect->area()) }
@@ -30,4 +30,4 @@ fn main() {
     };
     
    	print_area(&r); // !{ PassByStaticReference(r->print_area()) }
-} // !{ StructBox(r->r.height), GoOutOfScope(r), GoOutOfScope(r.width), GoOutOfScope(r.height) }
+} // !{ GoOutOfScope(r), GoOutOfScope(r.width), GoOutOfScope(r.height) }
