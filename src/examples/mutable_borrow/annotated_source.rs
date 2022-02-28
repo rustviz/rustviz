@@ -5,5 +5,5 @@ fn main() {
 }
 
 fn <tspan class="fn" data-hash="0" hash="4">world</tspan>(<tspan data-hash="2">s</tspan> : &amp;mut String) {
-    <tspan data-hash="2">s</tspan>.<tspan class="fn" data-hash="0" hash="6">push_str(", world")</tspan>;
+    <tspan data-hash="2">s</tspan>.<tspan class="fn" data-hash="0" hash="6">push_str</tspan>(", world");
 }

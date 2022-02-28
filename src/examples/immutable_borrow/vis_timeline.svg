@@ -1,8 +1,8 @@
 <svg width="260px" height="430px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-        id="tl_examples/immutable_borrow">
+        id="tl_examples/immutable_borrow/">
 
-    <desc>examples/immutable_borrow</desc>
+    <desc>examples/immutable_borrow/</desc>
 
     <defs>
         <style type="text/css">

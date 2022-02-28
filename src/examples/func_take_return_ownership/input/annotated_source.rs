@@ -1,4 +1,4 @@
-fn <tspan class="fn" data-hash="0" hash="4">take_and_return_ownership</tspan>(<tspan data-hash="2">some_string</tspan> : String) -> String {
+fn <tspan class="fn" data-hash="0" hash="4">take_and_return_ownership</tspan>(<tspan data-hash="2">some_string</tspan> : String) -&gt; String {
     <tspan class="fn" data-hash="0" hash="5">println!</tspan>("{}", <tspan data-hash="2">some_string</tspan>);
     <tspan data-hash="2">some_string</tspan>
 }

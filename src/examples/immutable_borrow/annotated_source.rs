@@ -5,5 +5,5 @@ fn main() {
 }
 
 fn <tspan class="fn" data-hash="0" hash="4">f</tspan>(<tspan data-hash="2">s</tspan> : &amp;String) {
-    <tspan class="fn" data-hash="0" hash="5">println!</tspan>("{}", *<tspan data-hash="2">s</tspan>);
+    <tspan class="fn" data-hash="0" hash="5">println!</tspan>("{}", <tspan data-hash="2">*s</tspan>);
 }

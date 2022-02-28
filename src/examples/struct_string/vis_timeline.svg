@@ -1,8 +1,8 @@
 <svg width="380px" height="490px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-        id="tl_examples/struct_string">
+        id="tl_examples/struct_string/">
 
-    <desc>examples/struct_string</desc>
+    <desc>examples/struct_string/</desc>
 
     <defs>
         <style type="text/css">

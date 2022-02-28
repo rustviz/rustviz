@@ -1,7 +1,7 @@
 <svg height="820px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
-    <desc>examples/struct_rect</desc>
+    <desc>examples/struct_rect/</desc>
 
     <defs>
         <style type="text/css">
@@ -184,7 +184,7 @@ object.code_panel {
         <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>        <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="1">&amp;r</tspan>) </text>
         <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>    ); </text>
         <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>     </text>
-        <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>    <tspan class="fn" data-hash="0" hash="6">println!</tspan>("The height of that is {}.", <tspan data-hash="1">r</tspan>.<tspan data-hash="3">h</tspan>); </text>
+        <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>    <tspan class="fn" data-hash="0" hash="6">println!</tspan>("The height of that is {}.", r.h); </text>
         <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>} </text>
         <text class="code" x="20" y="630"> <tspan fill="#AAA">19  </tspan> </text>
         <text class="code" x="20" y="660"> <tspan fill="#AAA">20  </tspan>fn <tspan class="fn" data-hash="0" hash="5">area</tspan>(<tspan data-hash="4">rect</tspan>: &amp;Rect) -&gt; u32 { </text>

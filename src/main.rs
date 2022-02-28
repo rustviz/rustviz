@@ -36,6 +36,7 @@ fn main() -> Result<(), Error> {
     /* ***********************************************************
             --- Generate stack info ---
     ************************************************************ */
+    // println!("{:?}", syn_parse(&source_fname));
     let (_, mut color_info) = syn_parse(&source_fname).unwrap();
 
     /* ******************************************
