@@ -6,7 +6,7 @@ use handlebars::Handlebars;
 use std::collections::BTreeMap;
 use serde::Serialize;
 use std::cmp;
-
+use std::collections::HashSet;
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
 static SPAN_END : &'static str = "&lt;/span&gt;";
@@ -66,7 +66,8 @@ struct FunctionLogoData {
     hash: u64,
     x: i64,
     y: i64,
-    title: String
+    title: String,
+    stmtext: String
 }
 
 #[derive(Serialize)]
@@ -191,7 +192,7 @@ fn prepare_registry(registry: &mut Handlebars) {
     let function_dot_template =    
         "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
     let function_logo_template =
-        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
+        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">{{stmtext}}</text>\n";
     let arrow_template =
         "        <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" marker-end=\"url(#arrowHead)\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\" style=\"fill: none;\"/> \n";
     let vertical_line_template =
@@ -424,6 +425,73 @@ fn render_arrows_string_external_events_version(
     resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ){
+    let mut is_in_if = false;
+    let mut set_RAP = HashSet::new();
+    for (line_number, external_event) in &visualization_data.external_events {
+        match external_event {
+            ExternalEvent::StartIf{} => {
+                is_in_if = true;
+            }
+            ExternalEvent::EndJoint{} => {
+                is_in_if = false;
+            }
+            ExternalEvent::Bind{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                } 
+            },
+            ExternalEvent::Copy{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            ExternalEvent::Move{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            ExternalEvent::StaticDie{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            ExternalEvent::MutableBorrow{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            ExternalEvent::MutableDie{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro } => {
+                if(is_in_if) {
+                    set_RAP.insert(from_ro);
+                    set_RAP.insert(to_ro);
+                }
+            },
+            _ => {},
+        };
+    }
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
         let (from, to) = match external_event {
@@ -510,6 +578,7 @@ fn render_arrows_string_external_events_version(
                 let x2 = x1 + arrow_length;
                 let y1 = get_y_axis_pos(*line_number);
                 let y2 = get_y_axis_pos(*line_number);
+
                 data.coordinates.push((x1 as f64, y1 as f64));
                 data.coordinates.push((x2 as f64, y2 as f64));
 
@@ -518,6 +587,7 @@ fn render_arrows_string_external_events_version(
                     y: y2 + 5,
                     hash: from_function.hash.to_owned() as u64,
                     title: SPAN_BEGIN.to_string() + &from_function.name + SPAN_END,
+                    stmtext: String::from("f"),
                 };
 
                 if resource_owners_layout[to_variable.hash()].is_struct_group {
@@ -594,6 +664,7 @@ fn render_arrows_string_external_events_version(
                     y: y1 + 5,
                     hash: to_function.hash.to_owned() as u64,
                     title: styled_fn_name,
+                    stmtext: String::from("f"),
                 };
 
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
@@ -608,6 +679,7 @@ fn render_arrows_string_external_events_version(
                 }
             },
             (Some(from_variable), Some(to_variable), _) => {
+
                 let arrow_order = visualization_data.event_line_map.get(line_number).unwrap().iter().position(|x| x == external_event).unwrap() as i64;
 
                 let x1 = resource_owners_layout[to_variable.hash()].x_val;
@@ -641,6 +713,61 @@ fn render_arrows_string_external_events_version(
                 } else {
                     data.coordinates.push((x1 as f64, y1 as f64));
                     data.coordinates.push((x2 as f64, y2 as f64));
+                }
+            },
+            (_, _, ExternalEvent::StartIf {}) => {
+                let styled_stmt_name = String::from("Start of If Statement");
+                for rap in &set_RAP { 
+                    if let Some(tmp_rap) = rap{
+                        let x1 = resource_owners_layout[tmp_rap.hash()].x_val + 3;
+                        let x2 = x1;
+                        let y1 = get_y_axis_pos(*line_number);
+                        let function_data = FunctionLogoData {
+                            x: x1 + 3,
+                            y: y1 + 5,
+                            hash: tmp_rap.hash().to_owned() as u64,
+                            title: styled_stmt_name,
+                            stmtext: String::from("If"),
+                        };
+                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                        }
+                }
+            },
+            (_, _, ExternalEvent::StartElse {}) => {
+                let styled_stmt_name = String::from("Start of Else Statement");
+                for rap in &set_RAP {
+                    if let Some(tmp_rap) = rap {
+                        let x1 = resource_owners_layout[tmp_rap.hash()].x_val + 3;
+                        let x2 = x1;
+                        let y1 = get_y_axis_pos(*line_number);
+                        let function_data = FunctionLogoData {
+                            x: x1 + 3,
+                            y: y1 + 5,
+                            hash: tmp_rap.hash().to_owned() as u64,
+                            title: styled_stmt_name,
+                            stmtext: String::from("Else"),
+                        };
+                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    }
+                }
+            },
+
+            (_, _, ExternalEvent::EndJoint {}) => {
+                let styled_stmt_name = String::from("End of If Else Statement");
+                for rap in &set_RAP {
+                    if let Some(tmp_rap) = rap {
+                        let x1 = resource_owners_layout[tmp_rap.hash()].x_val + 3;
+                        let x2 = x1;
+                        let y1 = get_y_axis_pos(*line_number);
+                        let function_data = FunctionLogoData {
+                            x: x1 + 3,
+                            y: y1 + 5,
+                            hash: tmp_rap.hash().to_owned() as u64,
+                            title: styled_stmt_name,
+                            stmtext: String::from("End of conditional stmt"),
+                        };
+                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    }
                 }
             },
             _ => (), // don't support other cases for now

@@ -10,6 +10,7 @@ fn main() {
     let z = {
         let y = x; // !{ Move(x->y) }
         println("{}", y); // !{ PassByStaticReference(y->println!()) }
+        y // !{ Move(y->None) }
         // ...
     }; // !{ GoOutOfScope(y), Move(None->z) }
     println!("Hello, world!");

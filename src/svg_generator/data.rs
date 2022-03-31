@@ -3,6 +3,7 @@ use std::vec::Vec;
 use std::fmt::{Formatter, Result, Display};
 use crate::data::Event::*;
 use crate::hover_messages;
+use std::ops::{Index, IndexMut};
 /*
  * Basic Data Structure Needed by Lifetime Visualization
  */
@@ -234,6 +235,15 @@ pub enum ExternalEvent {
     InitRefParam {
         param: ResourceAccessPoint,
     },
+    StartIf{
+
+    },
+    StartElse{
+        
+    },
+    EndJoint{
+
+    },
 }
 
 
@@ -323,11 +333,17 @@ pub enum Event {
     InitRefParam {
         param: ResourceAccessPoint
     },
+    // this happens when an if statement block is entered.
+    StartIf,
+    // this happens when an else statement block is entered.
+    StartElse,
+    // this happens when the entire conditional block finishes.
+    EndJoint,
 }
 
 // A State is a description of a ResourceAccessPoint IMMEDIATELY AFTER a specific line.
 // We think of this as what read/write access we have to its resource.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum State {
     // The viable is no longer in the scope after this line.
     OutOfScope,
@@ -359,9 +375,20 @@ pub enum State {
         to: Option<ResourceAccessPoint>,
         borrow_to: Option<ResourceAccessPoint>,
     },
+
     // should not appear for visualization in a correct program
     Invalid,
 }
+
+// impl PartialEq for State {
+//     fn eq(&self, other: &Self) -> bool {
+
+//     }
+// }
+// impl PartialOrd for State {
+
+// }
+
 
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result {
@@ -437,6 +464,9 @@ impl Display for Event {
             Event::InitRefParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
+            Event::StartIf => {"Enters an if statement block"},
+            Event::StartElse => {"Enters an else or else if statement block"},
+            Event::EndJoint => {"The entire conditional block finishes (the end of else statement)"},
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -505,6 +535,17 @@ impl Event {
             MutableReacquire{ from } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
+            StartIf => { 
+                // my_name should be if
+                hover_messages::start_cond(my_name)
+            }
+            StartElse => {
+                 // my_name should be else
+                hover_messages::start_cond(my_name)
+            }
+            EndJoint => {
+                hover_messages::end_cond()
+            }
         } 
     }
 }
@@ -542,6 +583,8 @@ pub struct VisualizationData {
     pub preprocess_external_events: Vec<(usize, ExternalEvent)>,
     //line_info
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
+    // an orderred map from a variable's hash to its state
+    pub variable_state_map: BTreeMap<u64, Vec<State>>,
 }
 
 #[allow(non_snake_case)]
@@ -564,6 +607,7 @@ pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option
 // fulfills the promise that we can support all the methods that a
 // frontend would need.
 impl Visualizable for VisualizationData {
+
     fn get_name_from_hash(&self, hash: &u64) -> Option<String> {
         match self.timelines.get(hash) {
             Some(timeline) => Some(timeline.resource_access_point.name().to_owned()),
@@ -580,7 +624,11 @@ impl Visualizable for VisualizationData {
     fn is_mutref(&self, hash: &u64) -> bool {
         self.timelines[hash].resource_access_point.is_mutref()
     }
-
+    // update state for variables. should only be called when dealing with conditionals
+    // fn update_conditional_state(&self) -> State {
+    //     self.variable_state_map[hash].push()
+        
+    // }
     // a Function does not have a State, so we assume previous_state is always for Variables
     fn calc_state(&self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State {
         /* a Variable cannot borrow or return resource from Functions, 
@@ -726,10 +774,41 @@ impl Visualizable for VisualizationData {
 
             (State::RevokedPrivilege{ .. }, Event::MutableReacquire{ .. }) =>
                 State::FullPrivilege,
+                
 
             (_, Event::Duplicate { .. }) =>
                 (*previous_state).clone(),
-
+            (_, Event::StartIf {}) => {
+                let mut tmp_vec = self.variable_state_map[hash].clone();
+                tmp_vec.push((*previous_state).clone());
+                self.variable_state_map.insert(*hash, tmp_vec);
+                (*previous_state).clone()
+            }
+            (_, Event::StartElse {}) => {
+                let mut tmp_vec = self.variable_state_map[hash].clone();
+                tmp_vec.push((*previous_state).clone());
+                self.variable_state_map.insert(*hash, tmp_vec);
+                tmp_vec[tmp_vec.len() - 3]
+            }
+            (_, Event::EndJoint {}) => {
+                let mut second_last_elem = self.variable_state_map[hash][self.variable_state_map[hash].len() - 3].clone();
+                if (*previous_state == State::OutOfScope || second_last_elem == State::OutOfScope ) {
+                    State::OutOfScope
+                }
+                // else if (*previous_state == State::ResourceMoved|| second_last_elem == State::ResourceMoved) {
+                //     State::ResourceMoved
+                // }
+                // else if (*previous_state == State::RevokedPrivilege || second_last_elem == State::RevokedPrivilege) {
+                //     State::RevokedPrivilege{ .. }
+                // }
+                // else if (*previous_state == State::PartialPrivilege || second_last_elem == State::PartialPrivilege ) {
+                //     State::PartialPrivilege{ .. }
+                // }
+                else {
+                    State::FullPrivilege
+                }
+            }
+                
             (_, _) => State::Invalid,
         }
     }
@@ -927,6 +1006,7 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
+            _ => {},
         }
     }
 }

@@ -3,7 +3,7 @@ fn main() {
     let z = {
         let y = x;
         println("{}", y);
-        y
+        yxxxxx
         // ...
     };
     println!("Hello, world!");

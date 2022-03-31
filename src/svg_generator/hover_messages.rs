@@ -532,3 +532,11 @@ pub fn structure(my_name: &String) -> String {
         my_name_fmt
     )
 }
+
+pub fn start_cond(my_name: &String) -> String {
+    format!("enters an {0} statement block", my_name)
+}
+
+pub fn end_cond() -> String {
+    format!("the entire conditional block is finished")
+}

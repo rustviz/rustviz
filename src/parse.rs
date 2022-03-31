@@ -332,6 +332,12 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
+            "StartIf" => vd.append_external_event(
+                ExternalEvent::StartIf{
+
+                },
+                &(event.0 as usize)
+            ),
             _ => {
                 eprintln!("{} is not a valid event.", field[0]);
                 println!("{}", event_usage_err());
