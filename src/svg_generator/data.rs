@@ -18,7 +18,7 @@ pub trait Visualizable {
     
     // for querying states of a resource owner using its hash
     //                                         start line, end line, state
-    fn get_states(&self, hash: &u64) -> Vec::<(usize,      usize,    State)>;
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize,      usize,    State)>;
 
     // WARNING do not call this when making visualization!! 
     // use append_external_event instead
@@ -34,7 +34,7 @@ pub trait Visualizable {
     // if resource_access_point with hash is a function
     fn is_mutref(&self, hash: &u64) -> bool;
 
-    fn calc_state(&self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State;
+    fn calc_state(&mut self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State;
 }
 
 
@@ -252,7 +252,7 @@ pub enum ExternalEvent {
 // An Event describes the acquisition or release of a
 // resource ownership by a Owner on any given line.
 // There are six types of them.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Event {
     // this happens when a variable is initiated, it should obtain
     // its resource from either another variable or from a
@@ -379,15 +379,6 @@ pub enum State {
     // should not appear for visualization in a correct program
     Invalid,
 }
-
-// impl PartialEq for State {
-//     fn eq(&self, other: &Self) -> bool {
-
-//     }
-// }
-// impl PartialOrd for State {
-
-// }
 
 
 impl std::fmt::Display for State {
@@ -630,7 +621,7 @@ impl Visualizable for VisualizationData {
         
     // }
     // a Function does not have a State, so we assume previous_state is always for Variables
-    fn calc_state(&self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State {
+    fn calc_state(&mut self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State {
         /* a Variable cannot borrow or return resource from Functions, 
         but can 'lend' or 'reaquire' to Functions (pass itself by reference and take it back); */
         fn event_invalid(event: & Event) -> bool {
@@ -779,45 +770,65 @@ impl Visualizable for VisualizationData {
             (_, Event::Duplicate { .. }) =>
                 (*previous_state).clone(),
             (_, Event::StartIf {}) => {
-                let mut tmp_vec = self.variable_state_map[hash].clone();
-                tmp_vec.push((*previous_state).clone());
-                self.variable_state_map.insert(*hash, tmp_vec);
-                (*previous_state).clone()
+                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
+                    tmp_vec.push((*previous_state).clone());
+                    (*previous_state).clone()
+                }
+                else{
+                    (*previous_state).clone()
+                }
             }
             (_, Event::StartElse {}) => {
-                let mut tmp_vec = self.variable_state_map[hash].clone();
-                tmp_vec.push((*previous_state).clone());
-                self.variable_state_map.insert(*hash, tmp_vec);
-                tmp_vec[tmp_vec.len() - 3]
+                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
+                    tmp_vec.push((*previous_state).clone());
+                    (tmp_vec[tmp_vec.len() - 3]).clone()
+                }
+                else{
+                    let vec = vec![(*previous_state).clone()];
+                    self.variable_state_map.insert(hash.clone(), vec);
+                    (*previous_state).clone()
+                }
             }
             (_, Event::EndJoint {}) => {
                 let mut second_last_elem = self.variable_state_map[hash][self.variable_state_map[hash].len() - 3].clone();
-                if (*previous_state == State::OutOfScope || second_last_elem == State::OutOfScope ) {
-                    State::OutOfScope
+                // match
+                let mut priority_prev_state =  -1;
+                let mut priority_second_last = -1;
+                match(previous_state) {
+                    State::OutOfScope => priority_prev_state = 5,
+                    State::ResourceMoved{ .. } => priority_prev_state = 4,
+                    State::RevokedPrivilege{ .. } => priority_prev_state = 3,
+                    State::PartialPrivilege{ .. } => priority_prev_state = 2,
+                    State::FullPrivilege => priority_prev_state = 1,
+                    _ => {},
                 }
-                // else if (*previous_state == State::ResourceMoved|| second_last_elem == State::ResourceMoved) {
-                //     State::ResourceMoved
-                // }
-                // else if (*previous_state == State::RevokedPrivilege || second_last_elem == State::RevokedPrivilege) {
-                //     State::RevokedPrivilege{ .. }
-                // }
-                // else if (*previous_state == State::PartialPrivilege || second_last_elem == State::PartialPrivilege ) {
-                //     State::PartialPrivilege{ .. }
-                // }
-                else {
-                    State::FullPrivilege
+                match(second_last_elem) {
+                    State::OutOfScope => priority_second_last = 5,
+                    State::ResourceMoved{ .. } => priority_second_last = 4,
+                    State::RevokedPrivilege{ .. } => priority_second_last = 3,
+                    State::PartialPrivilege{ .. } => priority_second_last = 2,
+                    State::FullPrivilege => priority_second_last = 1,
+                    _ => {},
                 }
+                if(priority_prev_state < priority_second_last) {
+                    second_last_elem
+                }
+                else{
+                    (*previous_state).clone()
+                }
+                
             }
                 
             (_, _) => State::Invalid,
         }
     }
 
-    fn get_states(&self, hash: &u64) -> Vec::<(usize, usize, State)> {
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize, usize, State)> {
         let mut states = Vec::<(usize, usize, State)>::new();
         let mut previous_line_number: usize = 1;
         let mut prev_state = State::OutOfScope;
-        for (line_number, event) in self.timelines[hash].history.iter() {
+        // clone instead of borrow
+        for (line_number, event) in self.timelines[hash].history.clone().iter() {
             states.push(
                 (previous_line_number, *line_number, prev_state.clone())
             );

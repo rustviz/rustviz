@@ -119,7 +119,7 @@ struct OutputStringData {
     struct_members: String
 }
 
-pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String, i32) {
+pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (String, i32) {
     /* Template creation */
     let mut registry = Handlebars::new();
     prepare_registry(&mut registry);
@@ -246,7 +246,7 @@ fn prepare_registry(registry: &mut Handlebars) {
 
 // Returns: a binary tree map from the hash of the ResourceOwner to its Column information
 fn compute_column_layout<'a>(
-    visualization_data: &'a VisualizationData,
+    visualization_data: &'a mut VisualizationData,
     structs_info: &'a mut StructsInfo,
 ) -> (BTreeMap<&'a u64, TimelineColumnData>, i32) {
     let mut resource_owners_layout = BTreeMap::new();
@@ -716,8 +716,8 @@ fn render_arrows_string_external_events_version(
                 }
             },
             (_, _, ExternalEvent::StartIf {}) => {
-                let styled_stmt_name = String::from("Start of If Statement");
                 for rap in &set_RAP { 
+                    let styled_stmt_name = String::from("Start of If Statement");
                     if let Some(tmp_rap) = rap{
                         let x1 = resource_owners_layout[tmp_rap.hash()].x_val + 3;
                         let x2 = x1;
@@ -734,8 +734,8 @@ fn render_arrows_string_external_events_version(
                 }
             },
             (_, _, ExternalEvent::StartElse {}) => {
-                let styled_stmt_name = String::from("Start of Else Statement");
                 for rap in &set_RAP {
+                    let styled_stmt_name = String::from("Start of Else Statement");
                     if let Some(tmp_rap) = rap {
                         let x1 = resource_owners_layout[tmp_rap.hash()].x_val + 3;
                         let x2 = x1;
@@ -753,8 +753,8 @@ fn render_arrows_string_external_events_version(
             },
 
             (_, _, ExternalEvent::EndJoint {}) => {
-                let styled_stmt_name = String::from("End of If Else Statement");
                 for rap in &set_RAP {
+                    let styled_stmt_name = String::from("End of If Else Statement");
                     if let Some(tmp_rap) = rap {
                         let x1 = resource_owners_layout[tmp_rap.hash()].x_val + 3;
                         let x2 = x1;
@@ -971,7 +971,7 @@ fn create_reference_line_string(
 // render timelines (states) for RAPs using vertical lines
 fn render_timelines(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    visualization_data: &VisualizationData,
+    visualization_data: & mut VisualizationData,
     resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ){
@@ -1024,7 +1024,7 @@ fn render_timelines(
 // (iff it's a MutRef && it has FullPrivilege)
 fn render_ref_line(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    visualization_data: &VisualizationData,
+    visualization_data: &mut VisualizationData,
     resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ){
