@@ -543,7 +543,7 @@ impl Event {
 
 // a vector of ownership transfer history of a specific variable,
 // in a sorted order by line number.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Timeline {
     pub resource_access_point: ResourceAccessPoint,    // a reference of an Owner or a (TODO) Reference, 
                                 // since Functions don't have a timeline 
@@ -561,7 +561,7 @@ pub struct StructsInfo {
 // VisualizationData supplies all the information we need in the frontend,
 // from rendering a PNG to px roducing an interactive HTML guide.
 // The internal data is simple: a map from variable hash to its Timeline.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VisualizationData {
     // When displaying all timelines in the frontend of choice, one should
     // consider picking a hash function that gives the BTreeMap a sensible order.

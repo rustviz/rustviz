@@ -217,17 +217,27 @@ pub fn add_events(
     events: Vec<(u64, String)>
 ) {
     for event in events {
+        let mut cond_flag = false;
         // fmt: Event(from->to)
         let split: Vec<String> = event.1.split("->")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-
         let mut field = Vec::new();
         if split.len() == 1 { // no "->"
+            if(&split[0][split[0].len()-2..split[0].len()] == String::from("()")) {
+                cond_flag = true;
+            }
+            // println!("len is 1");
             let idx = split[0].find("(").expect(&event_usage_err());
+            // println!("{}", &idx);
             field.push(&split[0][..idx]); // event
-            field.push(&split[0][idx+1..split[0].len()-1]); // name
+            // println!("event {}", &split[0][..idx]);
+            if(cond_flag == false) {
+                field.push(&split[0][idx+1..split[0].len()-1]); // name
+            }
+           
+            // println!("name {}", &split[0][idx+1..split[0].len()-1]);
         }
         else if split.len() == 2 { // has "->"
             // [event, name1, name2]
@@ -332,12 +342,33 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
-            "StartIf" => vd.append_external_event(
-                ExternalEvent::StartIf{
-
-                },
-                &(event.0 as usize)
-            ),
+            "StartIf" => {
+                println!("StartIf");
+                vd.append_external_event(
+                    ExternalEvent::StartIf{
+    
+                    },
+                    &(event.0 as usize)
+                );
+            } 
+            "StartElse" => {
+                println!("StartElse");
+                vd.append_external_event(
+                    ExternalEvent::StartElse{
+    
+                    },
+                    &(event.0 as usize)
+                );
+            }
+            "EndJoint" => {
+                println!("End");
+                vd.append_external_event(
+                    ExternalEvent::EndJoint{
+    
+                    },
+                    &(event.0 as usize)
+                );
+            }
             _ => {
                 eprintln!("{} is not a valid event.", field[0]);
                 println!("{}", event_usage_err());
