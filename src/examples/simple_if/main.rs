@@ -6,4 +6,5 @@ fn main() {
     if x == 1 { // !{ StartIf() }
         println!("{}", x); // !{ PassByStaticReference(x->println!()) }
     }
+    // !{ EndJoint() }
 } // !{ GoOutOfScope(x) }

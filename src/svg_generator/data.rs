@@ -622,6 +622,7 @@ impl Visualizable for VisualizationData {
     // }
     // a Function does not have a State, so we assume previous_state is always for Variables
     fn calc_state(&mut self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State {
+        // println!("entered calc state");
         /* a Variable cannot borrow or return resource from Functions, 
         but can 'lend' or 'reaquire' to Functions (pass itself by reference and take it back); */
         fn event_invalid(event: & Event) -> bool {
@@ -638,6 +639,101 @@ impl Visualizable for VisualizationData {
         match (previous_state, event) {
             (State::Invalid, _) =>
                 State::Invalid,
+            (_, Event::StartIf {}) => {
+                println!("matched if");
+                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
+                    tmp_vec.push((*previous_state).clone());
+
+                    match(previous_state) {
+                        State::OutOfScope => println!("if{}", 5),
+                        State::ResourceMoved{ .. } => println!("if{}", 4),
+                        State::RevokedPrivilege{ .. } => println!("if{}", 3),
+                        State::PartialPrivilege{ .. } => println!("if{}", 2),
+                        State::FullPrivilege => println!("if{}", 1),
+                        _ => {},
+                    }
+                    (*previous_state).clone()
+                }
+                // if the map is empty
+                else{
+                    let vec = vec![(*previous_state).clone()];
+                    self.variable_state_map.insert(hash.clone(), vec);
+                    match(previous_state) {
+                        State::OutOfScope => println!("newlyadd{}", 5),
+                        State::ResourceMoved{ .. } => println!("newlyadd{}", 4),
+                        State::RevokedPrivilege{ .. } => println!("newlyadd{}", 3),
+                        State::PartialPrivilege{ .. } => println!("newlyadd{}", 2),
+                        State::FullPrivilege => println!("newlyadd{}", 1),
+                        _ => {},
+                    }
+                    (*previous_state).clone()
+                }
+            }
+            (_, Event::StartElse {}) => {
+                println!("matched else");
+                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
+                    println!("should always be executed{}", hash);
+                    tmp_vec.push((*previous_state).clone());
+                    match(previous_state) {
+                        State::OutOfScope => println!("else{}", 5),
+                        State::ResourceMoved{ .. } => println!("else{}", 4),
+                        State::RevokedPrivilege{ .. } => println!("else{}", 3),
+                        State::PartialPrivilege{ .. } => println!("else{}", 2),
+                        State::FullPrivilege => println!("else{}", 1),
+                        _ => {},
+                    }
+                    match(tmp_vec[tmp_vec.len() - 2]) {
+                        State::OutOfScope => println!("second last{}", 5),
+                        State::ResourceMoved{ .. } => println!("second last{}", 4),
+                        State::RevokedPrivilege{ .. } => println!("second last{}", 3),
+                        State::PartialPrivilege{ .. } => println!("second last{}", 2),
+                        State::FullPrivilege => println!("second last{}", 1),
+                        _ => println!("Error! Vec length is wrong"),
+                    }
+                    (tmp_vec[tmp_vec.len() - 2]).clone()
+                }
+                // shouldn't be executed
+                else{
+                    println!("shouldn't be executed");
+                    let vec = vec![(*previous_state).clone()];
+                    self.variable_state_map.insert(hash.clone(), vec);
+                    (*previous_state).clone()
+                }
+                // println!("length is{}", self.variable_state_map.clone().len());
+                
+            }
+            (_, Event::EndJoint {}) => {
+                println!("matched end");
+                println!("length is{}", self.variable_state_map[hash].clone().len());
+                let mut second_last_elem = self.variable_state_map[hash][self.variable_state_map[hash].len() - 1].clone();
+                let mut priority_prev_state =  -1;
+                let mut priority_second_last = -1;
+                match(previous_state) {
+                    State::OutOfScope => priority_prev_state = 5,
+                    State::ResourceMoved{ .. } => priority_prev_state = 4,
+                    State::RevokedPrivilege{ .. } => priority_prev_state = 3,
+                    State::PartialPrivilege{ .. } => priority_prev_state = 2,
+                    State::FullPrivilege => priority_prev_state = 1,
+                    _ => {},
+                }
+                match(second_last_elem) {
+                    State::OutOfScope => priority_second_last = 5,
+                    State::ResourceMoved{ .. } => priority_second_last = 4,
+                    State::RevokedPrivilege{ .. } => priority_second_last = 3,
+                    State::PartialPrivilege{ .. } => priority_second_last = 2,
+                    State::FullPrivilege => priority_second_last = 1,
+                    _ => {},
+                }
+                println!("pri_prev{}, hash is {}", priority_prev_state, hash);
+                println!("pri_secondlast{}, hash is {}", priority_second_last, hash);
+                if(priority_prev_state < priority_second_last) {
+                    second_last_elem
+                }
+                else{
+                    (*previous_state).clone()
+                }
+                
+            }
 
             (State::OutOfScope, Event::Acquire{ .. }) =>
                 State::FullPrivilege,
@@ -769,55 +865,6 @@ impl Visualizable for VisualizationData {
 
             (_, Event::Duplicate { .. }) =>
                 (*previous_state).clone(),
-            (_, Event::StartIf {}) => {
-                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
-                    tmp_vec.push((*previous_state).clone());
-                    (*previous_state).clone()
-                }
-                else{
-                    (*previous_state).clone()
-                }
-            }
-            (_, Event::StartElse {}) => {
-                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
-                    tmp_vec.push((*previous_state).clone());
-                    (tmp_vec[tmp_vec.len() - 3]).clone()
-                }
-                else{
-                    let vec = vec![(*previous_state).clone()];
-                    self.variable_state_map.insert(hash.clone(), vec);
-                    (*previous_state).clone()
-                }
-            }
-            (_, Event::EndJoint {}) => {
-                let mut second_last_elem = self.variable_state_map[hash][self.variable_state_map[hash].len() - 3].clone();
-                // match
-                let mut priority_prev_state =  -1;
-                let mut priority_second_last = -1;
-                match(previous_state) {
-                    State::OutOfScope => priority_prev_state = 5,
-                    State::ResourceMoved{ .. } => priority_prev_state = 4,
-                    State::RevokedPrivilege{ .. } => priority_prev_state = 3,
-                    State::PartialPrivilege{ .. } => priority_prev_state = 2,
-                    State::FullPrivilege => priority_prev_state = 1,
-                    _ => {},
-                }
-                match(second_last_elem) {
-                    State::OutOfScope => priority_second_last = 5,
-                    State::ResourceMoved{ .. } => priority_second_last = 4,
-                    State::RevokedPrivilege{ .. } => priority_second_last = 3,
-                    State::PartialPrivilege{ .. } => priority_second_last = 2,
-                    State::FullPrivilege => priority_second_last = 1,
-                    _ => {},
-                }
-                if(priority_prev_state < priority_second_last) {
-                    second_last_elem
-                }
-                else{
-                    (*previous_state).clone()
-                }
-                
-            }
                 
             (_, _) => State::Invalid,
         }
@@ -1017,8 +1064,36 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
+            ExternalEvent::StartIf{} => {
+                // {hash, Timeline{rap, history}}
+                for (hash, timeline) in self.timelines.clone().iter() {
+                    match timeline.resource_access_point {
+                        ResourceAccessPoint::Function(_) => {}
+                        _ => { maybe_append_event(self, &Some(self.timelines[hash].resource_access_point.clone()), Event::StartIf, &line_number); }
+
+                    }
+                }
+            }
+            ExternalEvent::StartElse{} => {
+                for (hash, timeline) in self.timelines.clone().iter() {
+                    match timeline.resource_access_point {
+                        ResourceAccessPoint::Function(_) => {}
+                        _ => { maybe_append_event(self, &Some(self.timelines[hash].resource_access_point.clone()), Event::StartElse, &line_number); }
+
+                    }
+                }
+            }
+            ExternalEvent::EndJoint{} => {
+                for (hash, timeline) in self.timelines.clone().iter() {
+                    match timeline.resource_access_point {
+                        ResourceAccessPoint::Function(_) => {}
+                        _ => { maybe_append_event(self, &Some(self.timelines[hash].resource_access_point.clone()), Event::EndJoint, &line_number); }
+                    }
+                }
+            }
             _ => {},
         }
+
     }
 }
 

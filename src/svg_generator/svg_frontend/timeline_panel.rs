@@ -436,99 +436,235 @@ fn render_arrows_string_external_events_version(
                 is_in_if = false;
             }
             ExternalEvent::Bind{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("bind{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("bindt{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 } 
             },
             ExternalEvent::Copy{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("cpy{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("cpyt{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 }
             },
             ExternalEvent::Move{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("mv{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("mvt{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 }
             },
             ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("staticborrow{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("statictb{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 }
             },
             ExternalEvent::StaticDie{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("sdie{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("statictdie{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 }
             },
             ExternalEvent::MutableBorrow{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("mutborrow{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("mutbrw{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 }
             },
             ExternalEvent::MutableDie{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("mutdie{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("mutdiet{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 }
             },
             ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
                 if(is_in_if) {
                     if let Some(tmp_rap) = from_ro{
-                        println!("passbymutref{}",tmp_rap.hash());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    if let Some(tmp_rap) = to_ro{
-                        println!("passbymutreft{}",tmp_rap.hash());
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
                     }
-                    set_RAP.insert(from_ro);
-                    set_RAP.insert(to_ro);
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
                 }
             },
             ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro } => {
@@ -796,11 +932,11 @@ fn render_arrows_string_external_events_version(
                 for rap in &set_RAP { 
                     let styled_stmt_name = String::from("Start of If Statement");
                     if let Some(tmp_rap) = rap{
-                        for (hash, column_data) in resource_owners_layout.iter() {
-                            println!("i{}", &hash);
-                            println!("{}", column_data.x_val);
-                            println!("{}", column_data.name);
-                        }
+                        // for (hash, column_data) in resource_owners_layout.iter() {
+                        //     println!("i{}", &hash);
+                        //     println!("{}", column_data.x_val);
+                        //     println!("{}", column_data.name);
+                        // }
                         // println!("{}",resource_owners_layout.len());
                         // println!("{}", &(tmp_rap.hash()));
                         let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
@@ -822,7 +958,7 @@ fn render_arrows_string_external_events_version(
                 for rap in &set_RAP {
                     let styled_stmt_name = String::from("Start of Else Statement");
                     if let Some(tmp_rap) = rap {
-                        let x1 = resource_owners_layout[&(tmp_rap.hash() - 1)].x_val + 3;
+                        let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
                         let x2 = x1;
                         let y1 = get_y_axis_pos(*line_number);
                         let function_data = FunctionLogoData {
@@ -841,7 +977,7 @@ fn render_arrows_string_external_events_version(
                 for rap in &set_RAP {
                     let styled_stmt_name = String::from("End of If Else Statement");
                     if let Some(tmp_rap) = rap {
-                        let x1 = resource_owners_layout[&(tmp_rap.hash() - 1)].x_val + 3;
+                        let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
                         let x2 = x1;
                         let y1 = get_y_axis_pos(*line_number);
                         let function_data = FunctionLogoData {
@@ -849,7 +985,7 @@ fn render_arrows_string_external_events_version(
                             y: y1 + 5,
                             hash: tmp_rap.hash().to_owned() as u64,
                             title: styled_stmt_name,
-                            stmtext: String::from("End of conditional stmt"),
+                            stmtext: String::from("Endif"),
                         };
                         output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     }

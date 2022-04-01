@@ -3,4 +3,7 @@ fn main() {
     if x == 1 {
         println!("{}", x);
     }
+    else {
+        
+    }
 }
