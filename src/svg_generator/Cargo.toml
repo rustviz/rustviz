@@ -7,6 +7,10 @@ authors = [
     "Haochen Zhang <haochenz@umich.edu>", "Vishnu Reddy <reddyvis@umich.edu>"
 ]
 edition = "2018"
+license = "MIT"
+description = "A tool that allows teachers to generate an interactive timeline depicting ownership and borrowing events for each variable in a Rust code example"
+readme = "README.md"
+repository = "https://github.com/rustviz/rustviz"
 
 [lib]
 name = "rustviz_lib"
