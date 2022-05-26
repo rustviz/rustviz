@@ -1,0 +1,2 @@
+cargo:rustc-cfg=underscore_consts
+cargo:rustc-cfg=ptr_addr_of

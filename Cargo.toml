@@ -1,0 +1,19 @@
+[package]
+name = "rustviz"
+version = "0.1.0"
+authors = [
+    "Marcelo Almeida <mgba@umich.edu>", "Gongming (Gabriel) Luo <luogm@umich.edu>",
+    "Ke Du <madoka@umich.edu>", "Yingying Zhu <zyy@umich.edu>", 
+    "Haochen Zhang <haochenz@umich.edu>", "Vishnu Reddy <reddyvis@umich.edu>",
+    "Yu Pan <panyu@umich.edu>"
+]
+edition = "2018"
+license = "MIT"
+description = "A tool that allows teachers to generate an interactive timeline depicting ownership and borrowing events for each variable in a Rust code example"
+readme = "README.md"
+repository = "https://github.com/rustviz/rustviz"
+exclude = ["src/svg_generator/README.md", "src/svg_generator/example.png"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+rustviz-svg = { path = "src/svg_generator/" }

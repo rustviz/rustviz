@@ -1,0 +1,12 @@
+/Users/apple/Desktop/rust/target/rls/debug/deps/proc_macro2-8ebaa46789ba1d9c.rmeta: /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/lib.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/marker.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/parse.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/detection.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/fallback.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/wrapper.rs
+
+/Users/apple/Desktop/rust/target/rls/debug/deps/libproc_macro2-8ebaa46789ba1d9c.rlib: /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/lib.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/marker.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/parse.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/detection.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/fallback.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/wrapper.rs
+
+/Users/apple/Desktop/rust/target/rls/debug/deps/proc_macro2-8ebaa46789ba1d9c.d: /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/lib.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/marker.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/parse.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/detection.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/fallback.rs /Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/wrapper.rs
+
+/Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/lib.rs:
+/Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/marker.rs:
+/Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/parse.rs:
+/Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/detection.rs:
+/Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/fallback.rs:
+/Users/apple/.cargo/registry/src/github.com-1ecc6299db9ec823/proc-macro2-1.0.39/src/wrapper.rs:
