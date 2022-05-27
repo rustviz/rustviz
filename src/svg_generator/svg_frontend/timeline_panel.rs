@@ -58,7 +58,8 @@ struct FunctionDotData {
 struct ArrowData {
     coordinates: Vec<(f64, f64)>,
     coordinates_hbs: String,
-    title: String
+    title: String,
+    valid: bool
 }
 
 #[derive(Serialize)]
@@ -424,23 +425,28 @@ fn render_arrows_string_external_events_version(
     resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ){
+    let mut is_valid = None;
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
         let (from, to) = match external_event {
             ExternalEvent::Bind{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Bind");
+                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::Copy{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Copy");
+                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::Move{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Move");
+                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Immutable borrow");
+                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::StaticDie{ from: from_ro, to: to_ro } => {
@@ -457,10 +463,12 @@ fn render_arrows_string_external_events_version(
             },
             ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Pass by mutable reference");
+                is_valid = valid_ro.clone();
                 (from_ro, to_ro) 
             },
             ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Pass by immutable reference");
+                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             _ => (&None, &None),
@@ -493,8 +501,19 @@ fn render_arrows_string_external_events_version(
         let mut data = ArrowData {
             coordinates: Vec::new(),
             coordinates_hbs: String::new(),
-            title: title
+            title: title,
+            valid: true
         };
+        match is_valid {
+            Some(false) => {
+                data.valid = false;
+            },
+            _ => {
+                //do nothing
+            }
+        };
+
+
 
         let arrow_length = 20;
         // render title
@@ -701,6 +720,7 @@ fn render_arrows_string_external_events_version(
             }
         }
     }
+
 }
 
 fn determine_owner_line_styles(

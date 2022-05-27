@@ -223,8 +223,6 @@ pub fn add_events(
             .filter(|s| !s.is_empty())
             .collect();
 
-        let mut is_valid = Some(true);
-        let
         let mut field = Vec::new();
         if split.len() == 1 { // no "->"
             let idx = split[0].find("(").expect(&event_usage_err());
