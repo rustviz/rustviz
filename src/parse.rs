@@ -223,22 +223,33 @@ pub fn add_events(
             .filter(|s| !s.is_empty())
             .collect();
 
+        let another_split: Vec<String> = event.1.split("|")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         let mut field = Vec::new();
         if split.len() == 1 { // no "->"
             let idx = split[0].find("(").expect(&event_usage_err());
+            let idx2 = split[0].find("|").expect(&event_usage_err());
             field.push(&split[0][..idx]); // event
-            field.push(&split[0][idx+1..split[0].len()-1]); // name
+            field.push(&split[0][idx+1..idx2]); // name
         }
         else if split.len() == 2 { // has "->"
             // [event, name1, name2]
             let idx = split[0].find("(").expect(&event_usage_err());
+            let idx2 = split[1].find("|").expect(&event_usage_err());
             field.push(&split[0][..idx]); // event
             field.push(&split[0][idx+1..]); // from
-            field.push(&split[1][..split[1].len()-1]); // to
+            field.push(&split[1][..idx2]); // to
         }
         else { // uh oh, wrong
             eprintln!("{}", event_usage_err());
             exit(1);
+        }
+
+        if another_split.len() == 2 {
+            field.push(&another_split[1][..another_split[1].len()-1]);
         }
 
         // check for any empty fields
@@ -249,26 +260,34 @@ pub fn add_events(
             }
         };
 
+        let mut is_valid = None;
+        if field.len()==3 && field[2] == "true"  {
+            is_valid = Some(true);
+        }
+        else if field.len()==3 && field[2] == "false"{
+            is_valid = Some(false);
+        }
+
         match field[0] {
             "Bind" => vd.append_external_event(
                 ExternalEvent::Bind{
                     from: get_resource(&vars, "None"),
                     to: get_resource(&vars, field[1]),
-                    valid: Some(true)
+                    valid: is_valid
                 }, &(event.0 as usize)
             ),
             "Copy" => vd.append_external_event(
                 ExternalEvent::Copy{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2]),
-                    valid: None
+                    valid: is_valid
                 }, &(event.0 as usize)
             ),
             "Move" => vd.append_external_event(
                 ExternalEvent::Move{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2]),
-                    valid: None
+                    valid: is_valid
                 },
                 &(event.0 as usize)
             ),
@@ -276,7 +295,7 @@ pub fn add_events(
                 ExternalEvent::StaticBorrow{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2]),
-                    valid: None
+                    valid: is_valid
                 },
                 &(event.0 as usize)
             ),
@@ -284,7 +303,7 @@ pub fn add_events(
                 ExternalEvent::MutableBorrow{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2]),
-                    valid: None
+                    valid: is_valid
                 },
                 &(event.0 as usize)
             ),
@@ -306,7 +325,7 @@ pub fn add_events(
                 ExternalEvent::PassByStaticReference{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2]),
-                    valid: None
+                    valid: is_valid
                 },
                 &(event.0 as usize)
             ),
@@ -314,7 +333,7 @@ pub fn add_events(
                 ExternalEvent::PassByMutableReference{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2]),
-                    valid: None
+                    valid: is_valid
                 },
                 &(event.0 as usize)
             ),
@@ -329,7 +348,7 @@ pub fn add_events(
                 ExternalEvent::Move{
                     from: get_resource(&vars, "None"),
                     to: get_resource(&vars, field[1]),
-                    valid: None
+                    valid: is_valid
                 },
                 &(event.0 as usize)
             ),
