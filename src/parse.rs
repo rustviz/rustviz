@@ -231,14 +231,24 @@ pub fn add_events(
         let mut field = Vec::new();
         if split.len() == 1 { // no "->"
             let idx = split[0].find("(").expect(&event_usage_err());
-            let idx2 = split[0].find("|").expect(&event_usage_err());
+            let idx1 = split[0].find("|");
+            let mut idx2 = split[0].len()-1;
+            match idx1 {
+                None => {},
+                Some(value) => {idx2 = value;},
+            }
             field.push(&split[0][..idx]); // event
             field.push(&split[0][idx+1..idx2]); // name
         }
         else if split.len() == 2 { // has "->"
             // [event, name1, name2]
             let idx = split[0].find("(").expect(&event_usage_err());
-            let idx2 = split[1].find("|").expect(&event_usage_err());
+            let idx1 = split[1].find("|");
+            let mut idx2 = split[1].len()-1;
+            match idx1 {
+                None => {},
+                Some(value) => {idx2 = value;},
+            }
             field.push(&split[0][..idx]); // event
             field.push(&split[0][idx+1..]); // from
             field.push(&split[1][..idx2]); // to
