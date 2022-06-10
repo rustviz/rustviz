@@ -158,6 +158,12 @@ object.code_panel {
     fill: #b99f35;
     stroke: #b99f35;
 }
+
+[data-hash="100"] {
+    fill: #5a5a5a;
+    stroke: #5a5a5a;
+}
+
         ]]>
         </style>
     </defs>

@@ -18,7 +18,7 @@ pub trait Visualizable {
     
     // for querying states of a resource owner using its hash
     //                                         start line, end line, state. the last two states should only be used in conditional rendering
-    fn get_states(&mut self, hash: &u64) -> Vec::<(usize,      usize,    State, State, State)>;
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize,      usize,    bool, State, State, State)>;
 
     // WARNING do not call this when making visualization!! 
     // use append_external_event instead
@@ -872,8 +872,8 @@ impl Visualizable for VisualizationData {
         }
     }
 
-    fn get_states(&mut self, hash: &u64) -> Vec::<(usize, usize, State, State, State)> {
-        let mut states = Vec::<(usize, usize, State, State, State)>::new();
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize, usize, bool, State, State, State)> {
+        let mut states = Vec::<(usize, usize, bool, State, State, State)>::new();
         let mut previous_line_number: usize = 1;
         let mut prev_state = State::OutOfScope;
         let mut if_state = State::OutOfScope;
@@ -882,11 +882,11 @@ impl Visualizable for VisualizationData {
         let mut flag = false;
         for (line_number, event) in self.timelines[hash].history.clone().iter() {
             if (flag) {states.push(
-                (previous_line_number, *line_number, prev_state.clone(), State::OutOfScope, else_state.clone())
+                (previous_line_number, *line_number, flag, prev_state.clone(), State::OutOfScope, else_state.clone())
             );}
             else{
                 states.push(
-                    (previous_line_number, *line_number, prev_state.clone(), prev_state.clone(), else_state.clone())
+                    (previous_line_number, *line_number, flag, prev_state.clone(), prev_state.clone(), else_state.clone())
                 );
             }
             flag = false;
@@ -917,7 +917,7 @@ impl Visualizable for VisualizationData {
             
         }
         states.push(
-            (previous_line_number, previous_line_number, prev_state.clone(), prev_state.clone(), else_state.clone())
+            (previous_line_number, previous_line_number, flag, prev_state.clone(), prev_state.clone(), else_state.clone())
         );
         states
     }

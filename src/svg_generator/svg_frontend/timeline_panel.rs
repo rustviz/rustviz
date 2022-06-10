@@ -1217,7 +1217,7 @@ fn render_timelines(
     for (hash, timeline) in timelines.iter() {
         let rap = &timeline.resource_access_point;
         let rap_states = visualization_data.get_states(hash);
-        for (line_start, line_end, prevState, ifState, elseState) in rap_states.iter() {
+        for (line_start, line_end, afterElse, prevState, ifState, elseState) in rap_states.iter() {
             // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
             
             println!("{}, {}, {}", prevState, ifState, elseState);
@@ -1284,11 +1284,11 @@ fn render_timelines(
                             title: ifState.print_message_with_name(rap.name())
                         })
                     };
-                    let elseData = match rap {
+                    let mut elseData = match rap {
                         ResourceAccessPoint::Function(_) => None,
-                        _ => Some(VerticalLineData {
+                        _ => Some( VerticalLineData {
                             line_class: String::new(),
-                            hash: *hash,
+                            hash: 100,
                             x1: (resource_owners_layout[hash].x_val+5) as f64,
                             y1: get_y_axis_pos(*line_start),
                             x2: (resource_owners_layout[hash].x_val+5),
@@ -1297,6 +1297,10 @@ fn render_timelines(
                         })
                     };
 
+                    if *afterElse {
+                        let elseD = elseData.as_mut().unwrap();
+                        elseD.hash = *hash;
+                    }
                     match rap {
                         ResourceAccessPoint::Function(_) => {}, // Don't do anything
                         ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
@@ -1364,7 +1368,7 @@ fn render_ref_line(
                     dy: 0,
                     title: String::new(),
                 };
-                for (line_start, _line_end, state, state2, state3) in states.iter() {
+                for (line_start, _line_end, afterElse, state, state2, state3) in states.iter() {
                     match state { // consider removing .clone()
                         State::OutOfScope | State::ResourceMoved{ .. } => {
                             if alive {
