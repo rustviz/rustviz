@@ -886,7 +886,7 @@ impl Visualizable for VisualizationData {
                     else_state = prev_state;
                 }
                 _ => {
-                    
+
                 }
             }
             states.push(
@@ -896,7 +896,7 @@ impl Visualizable for VisualizationData {
             previous_line_number = *line_number;
         }
         states.push(
-            (previous_line_number, previous_line_number, prev_state.clone(), if_state.clone(), else_state.clone())
+            (previous_line_number, previous_line_number, prev_state.clone(), prev_state.clone(), else_state.clone())
         );
         states
     }
