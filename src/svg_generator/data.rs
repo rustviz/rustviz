@@ -886,7 +886,6 @@ impl Visualizable for VisualizationData {
                     else_state = prev_state;
                 }
                 Event::EndJoint => {
-                    if_state = State::OutOfScope;
                     else_state = State::OutOfScope;
                 }
                 _ => {
