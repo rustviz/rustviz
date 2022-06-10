@@ -885,8 +885,12 @@ impl Visualizable for VisualizationData {
                     if_state = prev_state;
                     else_state = prev_state;
                 }
+                Event::EndJoint => {
+                    if_state = State::OutOfScope;
+                    else_state = State::OutOfScope;
+                }
                 _ => {
-
+                    
                 }
             }
             states.push(
@@ -896,7 +900,7 @@ impl Visualizable for VisualizationData {
             previous_line_number = *line_number;
         }
         states.push(
-            (previous_line_number, previous_line_number, prev_state.clone(), prev_state.clone(), else_state.clone())
+            (previous_line_number, previous_line_number, prev_state.clone(), if_state.clone(), else_state.clone())
         );
         states
     }
