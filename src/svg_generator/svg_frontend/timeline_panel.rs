@@ -1216,43 +1216,116 @@ fn render_timelines(
     let timelines = visualization_data.timelines.clone();
     for (hash, timeline) in timelines.iter() {
         let rap = &timeline.resource_access_point;
-        let rap_states = visualization_data.VerticalLineData(hash);
-        for (line_start, line_end, state) in rap_states.iter() {
+        let rap_states = visualization_data.get_states(hash);
+        for (line_start, line_end, prevState, ifState, elseState) in rap_states.iter() {
             // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
-            let data = match rap {
-                ResourceAccessPoint::Function(_) => None,
-                _ => Some(VerticalLineData {
-                    line_class: String::new(),
-                    hash: *hash,
-                    x1: resource_owners_layout[hash].x_val as f64,
-                    y1: get_y_axis_pos(*line_start),
-                    x2: resource_owners_layout[hash].x_val,
-                    y2: get_y_axis_pos(*line_end),
-                    title: state.print_message_with_name(rap.name())
-                })
-            };
-            match rap {
-                ResourceAccessPoint::Function(_) => {}, // Don't do anything
-                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
-                    if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
-                        if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
-                            output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
-                                ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
-                                    timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
-                        }
-                        if resource_owners_layout[hash].is_member {
-                            output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
-                        } else {
-                            output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
-                        }
-                    }
-                    else {
-                        output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
+            
+            println!("{}, {}, {}", prevState, ifState, elseState);
+            match (prevState, ifState, elseState) {
+                (_, State::OutOfScope, State::OutOfScope) | (_, _, State::OutOfScope)=> {
+                    println!("before if or after else");
+                    // before if and after else
+                    let data = match rap {
+                        ResourceAccessPoint::Function(_) => None,
+                        _ => Some(VerticalLineData {
+                            line_class: String::new(),
+                            hash: *hash,
+                            x1: resource_owners_layout[hash].x_val as f64,
+                            y1: get_y_axis_pos(*line_start),
+                            x2: resource_owners_layout[hash].x_val,
+                            y2: get_y_axis_pos(*line_end),
+                            title: prevState.print_message_with_name(rap.name())
+                        })
+                    };
+
+                    match rap {
+                        ResourceAccessPoint::Function(_) => {}, // Don't do anything
+                        ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
+                            if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
+                                if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
+                                    output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
+                                        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
+                                            timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+                                }
+                                if resource_owners_layout[hash].is_member {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, prevState, &mut data.unwrap(), registry));
+                                } else {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, prevState, &mut data.unwrap(), registry));
+                                }
+                            }
+                            else {
+                                output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, prevState, &mut data.unwrap(), registry));
+                            }
+                        },
+                        ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
+                            
+                            output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, prevState, &mut data.unwrap(), registry));
+                        },
                     }
                 },
-                ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
-                    output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, state, &mut data.unwrap(), registry));
-                },
+                //  => {
+                //     // after else
+                //     if let Some(stateData) = data {
+                //         stateData.title = prevState.print_message_with_name(rap.name())
+                //     }
+                // },
+                _ => {
+                    println!("between if else");
+                    // between if else
+                    let ifData = match rap {
+                        ResourceAccessPoint::Function(_) => None,
+                        _ => Some(VerticalLineData {
+                            line_class: String::new(),
+                            hash: *hash,
+                            x1: (resource_owners_layout[hash].x_val-5) as f64,
+                            y1: get_y_axis_pos(*line_start),
+                            x2: (resource_owners_layout[hash].x_val-5),
+                            y2: get_y_axis_pos(*line_end),
+                            title: ifState.print_message_with_name(rap.name())
+                        })
+                    };
+                    let elseData = match rap {
+                        ResourceAccessPoint::Function(_) => None,
+                        _ => Some(VerticalLineData {
+                            line_class: String::new(),
+                            hash: *hash,
+                            x1: (resource_owners_layout[hash].x_val+5) as f64,
+                            y1: get_y_axis_pos(*line_start),
+                            x2: (resource_owners_layout[hash].x_val+5),
+                            y2: get_y_axis_pos(*line_end),
+                            title: elseState.print_message_with_name(rap.name())
+                        })
+                    };
+
+                    match rap {
+                        ResourceAccessPoint::Function(_) => {}, // Don't do anything
+                        ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
+                            if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
+                                if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
+                                    output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
+                                        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
+                                            timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+                                }
+                                if resource_owners_layout[hash].is_member {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                                } else {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                                }
+                            }
+                            else {
+                                output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                                output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                            }
+                        },
+                        ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
+                            
+                            output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                            output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                        },
+                    }
+                }
             }
         }
     }
