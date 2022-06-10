@@ -879,18 +879,28 @@ impl Visualizable for VisualizationData {
         let mut if_state = State::OutOfScope;
         let mut else_state = State::OutOfScope;
         // clone instead of borrow
+        let mut flag = false;
         for (line_number, event) in self.timelines[hash].history.clone().iter() {
-            
-            states.push(
-                (previous_line_number, *line_number, prev_state.clone(), if_state.clone(), else_state.clone())
-            );
-            
+            if (flag) {states.push(
+                (previous_line_number, *line_number, prev_state.clone(), State::OutOfScope, else_state.clone())
+            );}
+            else{
+                states.push(
+                    (previous_line_number, *line_number, prev_state.clone(), prev_state.clone(), else_state.clone())
+                );
+            }
+            flag = false;
             println!("{}", event);
             match event {
                 Event::StartIf => {
                     println!("Event::StartIf");
                     if_state = prev_state.clone();
                     else_state = prev_state.clone();
+                }
+                Event::StartElse => {
+                    println!("Event::StartElse");
+                    // prev_state = State::OutOfScope;
+                    flag = true;
                 }
                 Event::EndJoint => {
                     println!("Event::EndJoint");
@@ -904,9 +914,10 @@ impl Visualizable for VisualizationData {
 
             prev_state = self.calc_state(&prev_state, &event, *line_number, hash);
             previous_line_number = *line_number;
+            
         }
         states.push(
-            (previous_line_number, previous_line_number, prev_state.clone(), if_state.clone(), else_state.clone())
+            (previous_line_number, previous_line_number, prev_state.clone(), prev_state.clone(), else_state.clone())
         );
         states
     }
