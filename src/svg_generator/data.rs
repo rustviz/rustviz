@@ -17,8 +17,8 @@ pub trait Visualizable {
     fn get_state(&self, hash: &u64, line_number: &usize) -> Option<State>;
     
     // for querying states of a resource owner using its hash
-    //                                         start line, end line, state
-    fn get_states(&mut self, hash: &u64) -> Vec::<(usize,      usize,    State)>;
+    //                                         start line, end line, state. the last two states should only be used in conditional rendering
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize,      usize,    State, State, State)>;
 
     // WARNING do not call this when making visualization!! 
     // use append_external_event instead
@@ -455,9 +455,9 @@ impl Display for Event {
             Event::InitRefParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
-            Event::StartIf => {"Enters an if statement block"},
-            Event::StartElse => {"Enters an else or else if statement block"},
-            Event::EndJoint => {"The entire conditional block finishes (the end of else statement)"},
+            Event::StartIf => {"Enters an if block"},
+            Event::StartElse => {"Enters an else block"},
+            Event::EndJoint => {"Finishes an entire conditional block)"},
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -640,56 +640,58 @@ impl Visualizable for VisualizationData {
             (State::Invalid, _) =>
                 State::Invalid,
             (_, Event::StartIf {}) => {
-                println!("matched if");
+                // println!("matched if");
                 if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
                     tmp_vec.push((*previous_state).clone());
-
-                    match(previous_state) {
-                        State::OutOfScope => println!("if{}", 5),
-                        State::ResourceMoved{ .. } => println!("if{}", 4),
-                        State::RevokedPrivilege{ .. } => println!("if{}", 3),
-                        State::PartialPrivilege{ .. } => println!("if{}", 2),
-                        State::FullPrivilege => println!("if{}", 1),
-                        _ => {},
-                    }
+// for debug purpose
+                    // match(previous_state) {
+                    //     State::OutOfScope => println!("if{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("if{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("if{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("if{}", 2),
+                    //     State::FullPrivilege => println!("if{}", 1),
+                    //     _ => {},
+                    // }
                     (*previous_state).clone()
                 }
                 // if the map is empty
                 else{
                     let vec = vec![(*previous_state).clone()];
                     self.variable_state_map.insert(hash.clone(), vec);
-                    match(previous_state) {
-                        State::OutOfScope => println!("newlyadd{}", 5),
-                        State::ResourceMoved{ .. } => println!("newlyadd{}", 4),
-                        State::RevokedPrivilege{ .. } => println!("newlyadd{}", 3),
-                        State::PartialPrivilege{ .. } => println!("newlyadd{}", 2),
-                        State::FullPrivilege => println!("newlyadd{}", 1),
-                        _ => {},
-                    }
+                    // for debug
+                    // match(previous_state) {
+                    //     State::OutOfScope => println!("newlyadd{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("newlyadd{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("newlyadd{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("newlyadd{}", 2),
+                    //     State::FullPrivilege => println!("newlyadd{}", 1),
+                    //     _ => {},
+                    // }
                     (*previous_state).clone()
                 }
             }
             (_, Event::StartElse {}) => {
                 println!("matched else");
                 if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
-                    println!("should always be executed{}", hash);
+                    // for debug purpose
+                    // println!("should always be executed{}", hash);
                     tmp_vec.push((*previous_state).clone());
-                    match(previous_state) {
-                        State::OutOfScope => println!("else{}", 5),
-                        State::ResourceMoved{ .. } => println!("else{}", 4),
-                        State::RevokedPrivilege{ .. } => println!("else{}", 3),
-                        State::PartialPrivilege{ .. } => println!("else{}", 2),
-                        State::FullPrivilege => println!("else{}", 1),
-                        _ => {},
-                    }
-                    match(tmp_vec[tmp_vec.len() - 2]) {
-                        State::OutOfScope => println!("second last{}", 5),
-                        State::ResourceMoved{ .. } => println!("second last{}", 4),
-                        State::RevokedPrivilege{ .. } => println!("second last{}", 3),
-                        State::PartialPrivilege{ .. } => println!("second last{}", 2),
-                        State::FullPrivilege => println!("second last{}", 1),
-                        _ => println!("Error! Vec length is wrong"),
-                    }
+                    // match(previous_state) {
+                    //     State::OutOfScope => println!("else{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("else{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("else{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("else{}", 2),
+                    //     State::FullPrivilege => println!("else{}", 1),
+                    //     _ => {},
+                    // }
+                    // match(tmp_vec[tmp_vec.len() - 2]) {
+                    //     State::OutOfScope => println!("second last{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("second last{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("second last{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("second last{}", 2),
+                    //     State::FullPrivilege => println!("second last{}", 1),
+                    //     _ => println!("Error! Vec length is wrong"),
+                    // }
                     (tmp_vec[tmp_vec.len() - 2]).clone()
                 }
                 // shouldn't be executed
@@ -703,8 +705,8 @@ impl Visualizable for VisualizationData {
                 
             }
             (_, Event::EndJoint {}) => {
-                println!("matched end");
-                println!("length is{}", self.variable_state_map[hash].clone().len());
+                // println!("matched end");
+                // println!("length is{}", self.variable_state_map[hash].clone().len());
                 let mut second_last_elem = self.variable_state_map[hash][self.variable_state_map[hash].len() - 1].clone();
                 let mut priority_prev_state =  -1;
                 let mut priority_second_last = -1;
@@ -724,8 +726,8 @@ impl Visualizable for VisualizationData {
                     State::FullPrivilege => priority_second_last = 1,
                     _ => {},
                 }
-                println!("pri_prev{}, hash is {}", priority_prev_state, hash);
-                println!("pri_secondlast{}, hash is {}", priority_second_last, hash);
+                // println!("pri_prev{}, hash is {}", priority_prev_state, hash);
+                // println!("pri_secondlast{}, hash is {}", priority_second_last, hash);
                 if(priority_prev_state < priority_second_last) {
                     second_last_elem
                 }
@@ -870,20 +872,31 @@ impl Visualizable for VisualizationData {
         }
     }
 
-    fn get_states(&mut self, hash: &u64) -> Vec::<(usize, usize, State)> {
-        let mut states = Vec::<(usize, usize, State)>::new();
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize, usize, State, State, State)> {
+        let mut states = Vec::<(usize, usize, State, State, State)>::new();
         let mut previous_line_number: usize = 1;
         let mut prev_state = State::OutOfScope;
+        let mut if_state = State::OutOfScope;
+        let mut else_state = State::OutOfScope;
         // clone instead of borrow
         for (line_number, event) in self.timelines[hash].history.clone().iter() {
+            match event {
+                Event::StartIf => {
+                    if_state = prev_state;
+                    else_state = prev_state;
+                }
+                _ => {
+                    
+                }
+            }
             states.push(
-                (previous_line_number, *line_number, prev_state.clone())
+                (previous_line_number, *line_number, prev_state.clone(), if_state.clone(), else_state.clone())
             );
             prev_state = self.calc_state(&prev_state, &event, *line_number, hash);
             previous_line_number = *line_number;
         }
         states.push(
-            (previous_line_number, previous_line_number, prev_state.clone())
+            (previous_line_number, previous_line_number, prev_state.clone(), if_state.clone(), else_state.clone())
         );
         states
     }

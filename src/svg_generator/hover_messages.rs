@@ -534,9 +534,9 @@ pub fn structure(my_name: &String) -> String {
 }
 
 pub fn start_cond(my_name: &String) -> String {
-    format!("enters an {0} statement block", my_name)
+    format!("enters an {0} block", my_name)
 }
 
 pub fn end_cond() -> String {
-    format!("the entire conditional block is finished")
+    format!("finsihes an entire conditional block")
 }

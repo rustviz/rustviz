@@ -8,8 +8,3 @@ fn main() {
         0
     }
 }
-
-
-fn takes_ownership(some_string: String) {
-    println!("{}", some_string);
-}

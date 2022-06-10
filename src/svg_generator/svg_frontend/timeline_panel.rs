@@ -119,6 +119,22 @@ struct OutputStringData {
     struct_members: String
 }
 
+#[derive(Serialize, Clone)]
+struct IfLineData {
+    x1: i64,
+    x2: i64,
+    y1: i64,
+    y2: i64,
+}
+
+#[derive(Serialize, Clone)]
+struct ElseLineData {
+    x1: i64,
+    x2: i64,
+    y1: i64,
+    y2: i64,
+}
+
 pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (String, i32) {
     /* Template creation */
     let mut registry = Handlebars::new();
@@ -205,7 +221,6 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
-
     assert!(
         registry.register_template_string("struct_template", struct_template).is_ok()
     );
@@ -704,6 +719,7 @@ fn render_arrows_string_external_events_version(
             _ => {},
         };
     }
+    
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
         let (from, to) = match external_event {
@@ -928,9 +944,9 @@ fn render_arrows_string_external_events_version(
                 }
             },
             (_, _, ExternalEvent::StartIf {}) => {
-                println!("{}", &set_RAP.len());
+                // println!("{}", &set_RAP.len());
                 for rap in &set_RAP { 
-                    let styled_stmt_name = String::from("Start of If Statement");
+                    let styled_stmt_name = String::from("Enters an If block");
                     if let Some(tmp_rap) = rap{
                         // for (hash, column_data) in resource_owners_layout.iter() {
                         //     println!("i{}", &hash);
@@ -939,7 +955,7 @@ fn render_arrows_string_external_events_version(
                         // }
                         // println!("{}",resource_owners_layout.len());
                         // println!("{}", &(tmp_rap.hash()));
-                        let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
+                        let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val - 1;
                         // let x1 = 0;
                         let x2 = x1;
                         let y1 = get_y_axis_pos(*line_number);
@@ -952,11 +968,12 @@ fn render_arrows_string_external_events_version(
                         };
                         output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                         }
+
                 }
             },
             (_, _, ExternalEvent::StartElse {}) => {
                 for rap in &set_RAP {
-                    let styled_stmt_name = String::from("Start of Else Statement");
+                    let styled_stmt_name = String::from("Enters an Else block");
                     if let Some(tmp_rap) = rap {
                         let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
                         let x2 = x1;
@@ -975,7 +992,7 @@ fn render_arrows_string_external_events_version(
 
             (_, _, ExternalEvent::EndJoint {}) => {
                 for rap in &set_RAP {
-                    let styled_stmt_name = String::from("End of If Else Statement");
+                    let styled_stmt_name = String::from("Finishes an entire conditional block");
                     if let Some(tmp_rap) = rap {
                         let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
                         let x2 = x1;
@@ -1199,7 +1216,7 @@ fn render_timelines(
     let timelines = visualization_data.timelines.clone();
     for (hash, timeline) in timelines.iter() {
         let rap = &timeline.resource_access_point;
-        let rap_states = visualization_data.get_states(hash);
+        let rap_states = visualization_data.VerticalLineData(hash);
         for (line_start, line_end, state) in rap_states.iter() {
             // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
             let data = match rap {
@@ -1250,7 +1267,7 @@ fn render_ref_line(
     registry: &Handlebars
 ){
     let timelines = visualization_data.timelines.clone();
-
+    let external_events = visualization_data.external_events.clone();
     for (hash, timeline) in timelines.iter() {
         match timeline.resource_access_point {
             ResourceAccessPoint::Function(_) => (), /* do nothing */
@@ -1274,7 +1291,7 @@ fn render_ref_line(
                     dy: 0,
                     title: String::new(),
                 };
-                for (line_start, _line_end, state) in states.iter() {
+                for (line_start, _line_end, state, state2, state3) in states.iter() {
                     match state { // consider removing .clone()
                         State::OutOfScope | State::ResourceMoved{ .. } => {
                             if alive {
@@ -1332,6 +1349,7 @@ fn render_ref_line(
             },  
         }
     }
+
 }
 
 fn render_struct_box(
