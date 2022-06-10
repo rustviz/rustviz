@@ -271,10 +271,10 @@ pub fn add_events(
         };
 
         let mut is_valid = None;
-        if field.len()==3 && field[2] == "true"  {
+        if field[field.len()-1] == "true"  {
             is_valid = Some(true);
         }
-        else if field.len()==3 && field[2] == "false"{
+        else if field[field.len()-1] == "false"{
             is_valid = Some(false);
         }
 

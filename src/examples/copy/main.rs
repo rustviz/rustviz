@@ -3,7 +3,7 @@ Owner x; Owner y
 --- END Variable Definitions --- */
 fn main() {
     let x = 5; // !{ Bind(x) }
-    let y = x; // !{ Copy(x->y) }
+    let y = x; // !{ Copy(x->y|false) }
 } /* !{
     GoOutOfScope(x),
     GoOutOfScope(y)
