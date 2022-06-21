@@ -141,6 +141,7 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &registry);
+    render_error_external_events(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_struct_box(&mut output, &structs_info, &registry);
 
     let mut output_string : String = String::new();
@@ -184,7 +185,10 @@ fn prepare_registry(registry: &mut Handlebars) {
              \t<g class=\"struct_instance\">\n{{ struct_instance }}</g>\n\
              \t<g class=\"struct_members\">\n{{ struct_members }}</g>\n\
              \t</g>\n    ";
-    
+    let error_template =
+        "       <line stroke-width=\"3px\" stroke=\"red\" x1=\"{{x-6}}\" y1=\"{{y-6}}\" x2=\"{{x+6}}\" y2=\"{{y+6}}\">\n\
+                <line stroke-width=\"3px\" stroke=\"red\" x1=\"{{x-6}}\" y1=\"{{y+6}}\" x2=\"{{x+6}}\" y2=\"{{y-6}}\">\n";
+
     let label_template =
         "        <text x=\"{{x_val}}\" y=\"70\" style=\"text-anchor:middle\" data-hash=\"{{hash}}\" class=\"label tooltip-trigger\" data-tooltip-text=\"{{title}}\">{{name}}</text>\n";
     let dot_template =
@@ -384,7 +388,7 @@ fn render_dots_string(
                         dot_x: resource_owners_layout[hash].x_val,
                         dot_y: get_y_axis_pos(*line_number),
                         // default value if print_message_with_name() fails
-                        title: "Unknown Resource Owner Value".to_owned()
+                        title: "Unknown Resource Owner Value".to_owned(),
                     };
                     if let Some(name) = visualization_data.get_name_from_hash(hash) {
                         match event {
@@ -429,28 +433,23 @@ fn render_arrows_string_external_events_version(
     resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
     registry: &Handlebars
 ){
-    let mut is_valid = None;
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
         let (from, to) = match external_event {
             ExternalEvent::Bind{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Bind");
-                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::Copy{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Copy");
-                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::Move{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Move");
-                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Immutable borrow");
-                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::StaticDie{ from: from_ro, to: to_ro } => {
@@ -467,12 +466,10 @@ fn render_arrows_string_external_events_version(
             },
             ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Pass by mutable reference");
-                is_valid = valid_ro.clone();
-                (from_ro, to_ro) 
+                (from_ro, to_ro)
             },
             ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro, valid: valid_ro } => {
                 title = String::from("Pass by immutable reference");
-                is_valid = valid_ro.clone();
                 (from_ro, to_ro)
             },
             _ => (&None, &None),
@@ -507,14 +504,6 @@ fn render_arrows_string_external_events_version(
             coordinates_hbs: String::new(),
             title: title,
             valid: true
-        };
-        match is_valid {
-            Some(false) => {
-                data.valid = false;
-            },
-            _ => {
-                //do nothing
-            }
         };
 
 
@@ -1031,6 +1020,15 @@ fn render_struct_box(
         output.get_mut(owner).unwrap().1.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
     }
 }
+
+fn render_error_external_events(output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+visualization_data: &VisualizationData,
+resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
+registry: &Handlebars
+){
+
+}
+
 
 fn get_y_axis_pos(line_number : usize) -> i64 {
     85 - LINE_SPACE + LINE_SPACE * line_number as i64

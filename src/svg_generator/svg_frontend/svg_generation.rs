@@ -60,6 +60,19 @@ pub fn render_svg(
         let final_line_num = line_number.clone() + extra_line;
         visualization_data.append_processed_external_event(event, final_line_num);
     }
+    //-----------------------update line number for invalid external events------------------
+    for (line_number, event) in visualization_data.invalid_preprocess_external_events.clone() {
+        let mut extra_line: usize = 0;
+        for (info_line_number, event_vec) in &visualization_data.event_line_map {
+            if info_line_number < &line_number {
+                extra_line += event_vec.len() - 1;
+            } else {
+                break;
+            }
+        }
+        let final_line_num = line_number.clone() + extra_line;
+        visualization_data.append_processed_external_event(event, final_line_num);
+    }
     //-----------------------update event_line_map line number------------------
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut extra_line_sum = 0;

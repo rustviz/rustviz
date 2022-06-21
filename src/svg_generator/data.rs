@@ -38,6 +38,11 @@ pub trait Visualizable {
     fn check_valid(&self, event: ExternalEvent) -> bool;
 }
 
+pub trait External {
+    fn valid_event(&self) -> bool;
+}
+
+
 
 // Every object in Rust should belong in one of these catagories
 // A ResourceAccessPoint is either an Owner, a reference, or a Function that
@@ -425,6 +430,57 @@ impl State {
     }
 }
 
+
+impl External for ExternalEvent {
+    fn valid_event(&self) -> bool {
+        match self {
+            ExternalEvent::Move{from: _, to: _, valid: valid_ro} => {
+                match valid_ro {
+                    Some(false) => false,
+                    _ => true
+                }
+            },
+            ExternalEvent::Bind{from: _, to: _, valid: valid_ro} => {
+                match valid_ro {
+                    Some(false) => false,
+                    _ => true
+                }
+            },
+            ExternalEvent::Copy{from: _, to: _, valid: valid_ro} => {
+                match valid_ro {
+                    Some(false) => false,
+                    _ => true
+                }
+            },
+            ExternalEvent::StaticBorrow{from: _, to: _, valid: valid_ro} => {
+                match valid_ro {
+                    Some(false) => false,
+                    _ => true
+                }
+            },
+            ExternalEvent::MutableBorrow{from: _, to: _, valid: valid_ro} => {
+                match valid_ro {
+                    Some(false) => false,
+                    _ => true
+                }
+            },
+            ExternalEvent::PassByStaticReference{from: _, to: _, valid: valid_ro} => {
+                match valid_ro {
+                    Some(false) => false,
+                    _ => true
+                }
+            },
+            ExternalEvent::PassByMutableReference{from: _, to: _, valid: valid_ro} => {
+                match valid_ro {
+                    Some(false) => false,
+                    _ => true
+                }
+            },
+            _ => true
+        }
+    }
+}
+
 // provide string output for usages like format!("{}", eventA)
 impl Display for Event {
     fn fmt(&self, f: &mut Formatter) -> Result {       
@@ -547,8 +603,10 @@ pub struct VisualizationData {
     pub timelines: BTreeMap<u64, Timeline>,
     
     pub external_events: Vec<(usize, ExternalEvent)>,
-    //temp container for external_events
+    //temp container for true_external_events
     pub preprocess_external_events: Vec<(usize, ExternalEvent)>,
+    //temp container for false_external_events
+    pub invalid_preprocess_external_events: Vec<(usize, ExternalEvent)>,
     //line_info
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
 }
@@ -773,7 +831,11 @@ impl Visualizable for VisualizationData {
 
     fn append_external_event(&mut self, event: ExternalEvent, line_number: &usize) {
         // push in preprocess_external_events
-        self.preprocess_external_events.push((*line_number, event.clone()));
+        if !event.valid_event() {
+            self.invalid_preprocess_external_events.push((*line_number, event.clone()));
+        }else {
+            self.preprocess_external_events.push((*line_number, event.clone()));
+        }
         //------------------------construct external event line info----------------------
         let resourceaccesspoint = ResourceAccessPoint_extract(&event);
         match (resourceaccesspoint.0, resourceaccesspoint.1, &event) {
@@ -953,6 +1015,7 @@ impl Visualizable for VisualizationData {
         }
         
     }
+
 }
 
 /* TODO use this function to create a single copy of resource owner in resource_access_point_map,
