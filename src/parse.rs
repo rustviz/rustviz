@@ -375,6 +375,7 @@ pub fn add_events(
                 exit(1);
             }
         }
+
     }
 }
 

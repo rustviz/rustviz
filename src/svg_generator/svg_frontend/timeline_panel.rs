@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::data::{StructsInfo, VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event, LINE_SPACE};
+use crate::data::{StructsInfo, VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event, LINE_SPACE, External};
 use crate::svg_frontend::line_styles::{RefDataLine, RefValueLine, OwnerLine};
 use handlebars::Handlebars;
 use std::collections::BTreeMap;
@@ -52,6 +52,7 @@ struct FunctionDotData {
     hash: u64,
     x: i64,
     y: i64,
+    valid: bool,
     title: String
 }
 
@@ -142,7 +143,6 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &registry);
-    render_error_external_events(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_struct_box(&mut output, &structs_info, &registry);
 
     let mut output_string : String = String::new();
@@ -197,7 +197,9 @@ fn prepare_registry(registry: &mut Handlebars) {
                     <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
                  {{/if}}";
     let function_dot_template =    
-        "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        {{#if valid}}\
+                    <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
+                 {{/if}}";
     let function_logo_template =
         "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
     let arrow_template =
@@ -565,6 +567,7 @@ fn render_arrows_string_external_events_version(
                     x: resource_owners_layout[from_variable.hash()].x_val,
                     y: get_y_axis_pos(*line_number),
                     title: styled_fn_name + " reads from " + &styled_from_name,
+                    valid: external_event.valid_event(),
                     hash: from_variable.hash().to_owned() as u64,
                 };
 
@@ -589,6 +592,7 @@ fn render_arrows_string_external_events_version(
                     x: resource_owners_layout[from_variable.hash()].x_val,
                     y: get_y_axis_pos(*line_number),
                     title: styled_fn_name + " reads from/writes to " + &styled_from_name,
+                    valid: external_event.valid_event(),
                     hash: from_variable.hash().to_owned() as u64,
                 };
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
@@ -1031,14 +1035,6 @@ fn render_struct_box(
         box_data.h = 30;
         output.get_mut(owner).unwrap().1.arrows.push_str(&registry.render("box_template", &box_data).unwrap());
     }
-}
-
-fn render_error_external_events(output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-visualization_data: &VisualizationData,
-resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
-registry: &Handlebars
-){
-
 }
 
 
