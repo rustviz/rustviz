@@ -10,10 +10,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="b0c2a095-3e97-4b91-8095-d4e879284de5" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/erroneous_PassByStaticReference/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/erroneous_PassByStaticReference/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/erroneous_move/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/erroneous_move/vis_timeline.svg" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/svg_generator/data.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/data.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/svg_generator/svg_frontend/svg_generation.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/svg_frontend/svg_generation.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/.fingerprint/rustviz-svg-a8d8b6208a240b72/output-lib-rustviz_lib" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/.fingerprint/rustviz-svg-a8d8b6208a240b72/output-lib-rustviz_lib" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" afterDir="false" />
@@ -21,42 +21,14 @@
       <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.12.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.12.rcgu.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.13.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.13.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.14.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.14.rcgu.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.15.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.15.rcgu.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.2.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.2.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.3.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.3.rcgu.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.6.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.6.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.7.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.7.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.8.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.8.rcgu.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/rustviz" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/rustviz" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/build/serde-824c7bd6070960a8/root-output" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/build/serde-824c7bd6070960a8/root-output" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/build/serde_json-6993e7f9b2ac01ed/root-output" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/build/serde_json-6993e7f9b2ac01ed/root-output" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/handlebars-4378cd105edbc217.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/handlebars-4378cd105edbc217.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/libpest_derive-20296b36a627a3e5.dylib" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/libpest_derive-20296b36a627a3e5.dylib" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/librustviz_lib-5f53d26701b7db35.rmeta" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/librustviz_lib-5f53d26701b7db35.rmeta" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/libserde_derive-11723f6bf6038f07.dylib" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/libserde_derive-11723f6bf6038f07.dylib" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/pest-e04f779c5f0a2222.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/pest-e04f779c5f0a2222.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/pest-eb12217e15e5dc1f.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/pest-eb12217e15e5dc1f.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/pest_derive-20296b36a627a3e5.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/pest_derive-20296b36a627a3e5.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/pest_generator-0631adbe74eab632.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/pest_generator-0631adbe74eab632.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/pest_meta-1cce433a18075e97.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/pest_meta-1cce433a18075e97.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/proc_macro2-8ebaa46789ba1d9c.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/proc_macro2-8ebaa46789ba1d9c.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/quote-12cb10524441eda5.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/quote-12cb10524441eda5.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/rustviz-04f2416a79f2192f.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/rustviz-04f2416a79f2192f.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/rustviz-7cbf49bb90b077fe.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/rustviz-7cbf49bb90b077fe.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/rustviz_lib-5f53d26701b7db35.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/rustviz_lib-5f53d26701b7db35.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libhandlebars-4378cd105edbc217.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libhandlebars-4378cd105edbc217.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest-e04f779c5f0a2222.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest-e04f779c5f0a2222.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest-eb12217e15e5dc1f.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest-eb12217e15e5dc1f.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest_derive-20296b36a627a3e5.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest_derive-20296b36a627a3e5.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest_generator-0631adbe74eab632.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest_generator-0631adbe74eab632.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest_meta-1cce433a18075e97.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libpest_meta-1cce433a18075e97.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libproc_macro2-8ebaa46789ba1d9c.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libproc_macro2-8ebaa46789ba1d9c.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libquote-12cb10524441eda5.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libquote-12cb10524441eda5.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/librustviz_lib-5f53d26701b7db35.json" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libsyn-7dc5155a86781ef9.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/libsyn-7dc5155a86781ef9.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/rustviz-04f2416a79f2192f.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/rustviz-04f2416a79f2192f.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/rustviz-7cbf49bb90b077fe.json" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/save-analysis/rustviz-7cbf49bb90b077fe.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/serde-4ee2fce4acdd843d.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/serde-4ee2fce4acdd843d.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/serde_derive-11723f6bf6038f07.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/serde_derive-11723f6bf6038f07.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/serde_json-47b317aca2b79c27.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/serde_json-47b317aca2b79c27.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/rls/debug/deps/syn-7dc5155a86781ef9.d" beforeDir="false" afterPath="$PROJECT_DIR$/target/rls/debug/deps/syn-7dc5155a86781ef9.d" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -96,7 +68,7 @@
   </component>
   <component name="RunManager">
     <configuration name="Run" type="CargoCommandRunConfiguration" factoryName="Cargo Command" nameIsGenerated="true">
-      <option name="command" value="run erroneous_Move" />
+      <option name="command" value="run erroneous_PassByStaticReference" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$/src" />
       <option name="channel" value="DEFAULT" />
       <option name="requiredFeatures" value="true" />
@@ -135,7 +107,7 @@
       <workItem from="1655355353919" duration="7088000" />
       <workItem from="1655487820002" duration="12840000" />
       <workItem from="1655524274102" duration="18000" />
-      <workItem from="1655564416216" duration="7301000" />
+      <workItem from="1655564416216" duration="17745000" />
     </task>
     <servers />
   </component>
@@ -147,13 +119,18 @@
       <breakpoints>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
-          <line>447</line>
+          <line>455</line>
           <option name="timeStamp" value="8" />
         </line-breakpoint>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
-          <line>393</line>
+          <line>397</line>
           <option name="timeStamp" value="25" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
+          <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
+          <line>364</line>
+          <option name="timeStamp" value="28" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>

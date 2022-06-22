@@ -43,6 +43,7 @@ struct EventDotData {
     hash: u64,
     dot_x: i64,
     dot_y: i64,
+    valid: bool,
     title: String,
 }
 
@@ -192,7 +193,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     let label_template =
         "        <text x=\"{{x_val}}\" y=\"70\" style=\"text-anchor:middle\" data-hash=\"{{hash}}\" class=\"label tooltip-trigger\" data-tooltip-text=\"{{title}}\">{{name}}</text>\n";
     let dot_template =
-        "        <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        {{#if valid}}\
+                    <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
+                 {{/if}}";
     let function_dot_template =    
         "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
     let function_logo_template =
@@ -387,6 +390,7 @@ fn render_dots_string(
                         hash: *hash as u64,
                         dot_x: resource_owners_layout[hash].x_val,
                         dot_y: get_y_axis_pos(*line_number),
+                        valid: event.check_valid(),
                         // default value if print_message_with_name() fails
                         title: "Unknown Resource Owner Value".to_owned(),
                     };
@@ -435,20 +439,25 @@ fn render_arrows_string_external_events_version(
 ){
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
+        let mut v = true;
         let (from, to) = match external_event {
             ExternalEvent::Bind{ from: from_ro, to: to_ro, valid: valid_ro } => {
+                if valid_ro == &Some(false){ v = false; }
                 title = String::from("Bind");
                 (from_ro, to_ro)
             },
             ExternalEvent::Copy{ from: from_ro, to: to_ro, valid: valid_ro } => {
+                if valid_ro == &Some(false){ v = false; }
                 title = String::from("Copy");
                 (from_ro, to_ro)
             },
             ExternalEvent::Move{ from: from_ro, to: to_ro, valid: valid_ro } => {
+                if valid_ro == &Some(false){ v = false; }
                 title = String::from("Move");
                 (from_ro, to_ro)
             },
             ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro, valid: valid_ro } => {
+                if valid_ro == &Some(false){ v = false; }
                 title = String::from("Immutable borrow");
                 (from_ro, to_ro)
             },
@@ -457,6 +466,7 @@ fn render_arrows_string_external_events_version(
                 (from_ro, to_ro)
             },
             ExternalEvent::MutableBorrow{ from: from_ro, to: to_ro, valid: valid_ro } => {
+                if valid_ro == &Some(false){ v = false; }
                 title = String::from("Mutable borrow");
                 (from_ro, to_ro)
             },
@@ -465,10 +475,12 @@ fn render_arrows_string_external_events_version(
                 (from_ro, to_ro)
             },
             ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro, valid: valid_ro } => {
+                if valid_ro == &Some(false){ v = false; }
                 title = String::from("Pass by mutable reference");
                 (from_ro, to_ro)
             },
             ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro, valid: valid_ro } => {
+                if valid_ro == &Some(false){ v = false; }
                 title = String::from("Pass by immutable reference");
                 (from_ro, to_ro)
             },
@@ -503,7 +515,7 @@ fn render_arrows_string_external_events_version(
             coordinates: Vec::new(),
             coordinates_hbs: String::new(),
             title: title,
-            valid: true
+            valid: v.clone()
         };
 
 
