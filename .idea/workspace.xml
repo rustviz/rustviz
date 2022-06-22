@@ -11,14 +11,18 @@
   <component name="ChangeListManager">
     <list default="true" id="b0c2a095-3e97-4b91-8095-d4e879284de5" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/examples/erroneous_PassByStaticReference/vis_timeline copy.svg" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/examples/erroneous_PassByStaticReference/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/erroneous_PassByStaticReference/vis_timeline.svg" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/parse.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/parse.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/erroneous_move/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/erroneous_move/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/svg_generator/data.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/data.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/svg_generator/svg_frontend/svg_generation.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/svg_frontend/svg_generation.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/.fingerprint/rustviz-svg-a8d8b6208a240b72/output-lib-rustviz_lib" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/.fingerprint/rustviz-svg-a8d8b6208a240b72/output-lib-rustviz_lib" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rmeta" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rmeta" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.12.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.12.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.13.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.13.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.15.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.15.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.2.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.2.rcgu.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/target/debug/rustviz" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/rustviz" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -99,7 +103,7 @@
       <workItem from="1655487820002" duration="12840000" />
       <workItem from="1655524274102" duration="18000" />
       <workItem from="1655564416216" duration="19809000" />
-      <workItem from="1655913658565" duration="1951000" />
+      <workItem from="1655913658565" duration="5609000" />
     </task>
     <servers />
   </component>
@@ -110,14 +114,9 @@
     <breakpoint-manager>
       <breakpoints>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
-          <url>file://$PROJECT_DIR$/src/parse.rs</url>
-          <line>377</line>
-          <option name="timeStamp" value="31" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
-          <url>file://$PROJECT_DIR$/src/svg_generator/data.rs</url>
-          <line>951</line>
-          <option name="timeStamp" value="35" />
+          <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
+          <line>879</line>
+          <option name="timeStamp" value="38" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>

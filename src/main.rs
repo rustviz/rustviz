@@ -41,7 +41,6 @@ fn main() {
         timelines: BTreeMap::new(),
         external_events: Vec::new(),
         preprocess_external_events: Vec::new(),
-        invalid_preprocess_external_events: Vec::new(),
         event_line_map: BTreeMap::new()
     };
     parse::add_events(&mut vd, var_map, events);

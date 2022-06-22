@@ -648,10 +648,8 @@ pub struct VisualizationData {
     pub timelines: BTreeMap<u64, Timeline>,
     
     pub external_events: Vec<(usize, ExternalEvent)>,
-    //temp container for true_external_events
+    //temp container for external_events
     pub preprocess_external_events: Vec<(usize, ExternalEvent)>,
-    //temp container for false_external_events
-    pub invalid_preprocess_external_events: Vec<(usize, ExternalEvent)>,
     //line_info
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
 }
@@ -851,6 +849,7 @@ impl Visualizable for VisualizationData {
         let mut previous_line_number: usize = 1;
         let mut prev_state = State::OutOfScope;
         for (line_number, event) in self.timelines[hash].history.iter() {
+            if !event.check_valid() { continue; }
             states.push(
                 (previous_line_number, *line_number, prev_state.clone())
             );
@@ -876,11 +875,11 @@ impl Visualizable for VisualizationData {
 
     fn append_external_event(&mut self, event: ExternalEvent, line_number: &usize) {
         // push in preprocess_external_events
-        if !event.valid_event() {
-            self.invalid_preprocess_external_events.push((*line_number, event.clone()));
-        }else {
+        // if !event.valid_event() {
+        //     self.invalid_preprocess_external_events.push((*line_number, event.clone()));
+        // }else {
             self.preprocess_external_events.push((*line_number, event.clone()));
-        }
+        // }
         //------------------------construct external event line info----------------------
         let resourceaccesspoint = ResourceAccessPoint_extract(&event);
         match (resourceaccesspoint.0, resourceaccesspoint.1, &event) {
