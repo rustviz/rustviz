@@ -195,9 +195,15 @@ fn prepare_registry(registry: &mut Handlebars) {
     let dot_template =
         "        {{#if valid}}\
                     <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
+                 {{ else }}\
+                    <svg x=\"{{dot_x}}\" y=\"{{dot_y}}\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">
+                        <path d=\"M 1,1 l 9,9 M 10,1 l -9,9\" data-hash=\"{{hash}}\" stroke-width=\"3\" />
+                    </svg> \n\
                  {{/if}}";
     let function_dot_template =    
         "        {{#if valid}}\
+                    <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
+                 {{ else }}\
                     <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
                  {{/if}}";
     let function_logo_template =
@@ -396,6 +402,10 @@ fn render_dots_string(
                         // default value if print_message_with_name() fails
                         title: "Unknown Resource Owner Value".to_owned(),
                     };
+                    if !data.valid {
+                        data.dot_x = data.dot_x - 5;
+                        data.dot_y = data.dot_y - 5;
+                    }
                     if let Some(name) = visualization_data.get_name_from_hash(hash) {
                         match event {
                             Event::OwnerGoOutOfScope => {
