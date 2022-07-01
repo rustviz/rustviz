@@ -11,15 +11,12 @@
   <component name="ChangeListManager">
     <list default="true" id="b0c2a095-3e97-4b91-8095-d4e879284de5" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/examples/copy/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/copy/main.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/examples/erroneous_PassByStaticReference/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/erroneous_PassByStaticReference/vis_timeline.svg" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/examples/erroneous_move/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/erroneous_move/main.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/examples/erroneous_move/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/erroneous_move/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_1/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_1/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_3/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_3/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_4/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_4/main.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rmeta" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rmeta" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/target/debug/rustviz" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/rustviz" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -58,13 +55,8 @@
     <property name="org.rust.cargo.project.model.PROJECT_DISCOVERY" value="true" />
   </component>
   <component name="RunManager">
-    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
-    </configuration>
     <configuration name="Run" type="CargoCommandRunConfiguration" factoryName="Cargo Command" nameIsGenerated="true">
-      <option name="command" value="run erroneous_PassByStaticReference" />
+      <option name="command" value="run error_3" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$/src" />
       <option name="channel" value="DEFAULT" />
       <option name="requiredFeatures" value="true" />
@@ -77,6 +69,11 @@
       <option name="redirectInputPath" value="" />
       <method v="2">
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
   </component>
@@ -106,7 +103,8 @@
       <workItem from="1656478894959" duration="1605000" />
       <workItem from="1656524943997" duration="18000" />
       <workItem from="1656524966163" duration="598000" />
-      <workItem from="1656526595429" duration="1228000" />
+      <workItem from="1656526595429" duration="1950000" />
+      <workItem from="1656634556262" duration="8318000" />
     </task>
     <servers />
   </component>
@@ -138,13 +136,18 @@
         </line-breakpoint>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
-          <line>532</line>
-          <option name="timeStamp" value="48" />
+          <line>554</line>
+          <option name="timeStamp" value="50" />
         </line-breakpoint>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
-          <line>452</line>
-          <option name="timeStamp" value="49" />
+          <line>571</line>
+          <option name="timeStamp" value="51" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
+          <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
+          <line>520</line>
+          <option name="timeStamp" value="52" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>

@@ -197,15 +197,11 @@ fn prepare_registry(registry: &mut Handlebars) {
                     <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
                  {{ else }}\
                     <svg x=\"{{dot_x}}\" y=\"{{dot_y}}\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">
-                        <path d=\"M 1,1 l 9,9 M 10,1 l -9,9\" data-hash=\"{{hash}}\" stroke-width=\"3\" />
+                        <path d=\"M 1,1 l 9,9 M 10,1 l -9,9\" stroke=\"red\" stroke-width=\"3\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>
                     </svg> \n\
                  {{/if}}";
     let function_dot_template =    
-        "        {{#if valid}}\
-                    <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
-                 {{ else }}\
-                    <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
-                 {{/if}}";
+        "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
     let function_logo_template =
         "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
     let arrow_template =
@@ -523,6 +519,7 @@ fn render_arrows_string_external_events_version(
         };
 
         // order of points is to -> from
+        if !v { title = format!("{} uncuessfully", title); }
         let mut data = ArrowData {
             coordinates: Vec::new(),
             coordinates_hbs: String::new(),
@@ -572,11 +569,15 @@ fn render_arrows_string_external_events_version(
                 // get variable's position
                 let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
                 let styled_from_name = SPAN_BEGIN.to_string() + from_variable.name() + SPAN_END;
-                
+                let mut read_from = " reads from ";
+                if !external_event.valid_event() {
+                    read_from = " uncuessfullly reads from ";
+                }
+
                 let function_dot_data = FunctionDotData {
                     x: resource_owners_layout[from_variable.hash()].x_val,
                     y: get_y_axis_pos(*line_number),
-                    title: styled_fn_name + " reads from " + &styled_from_name,
+                    title: styled_fn_name + read_from + &styled_from_name,
                     valid: external_event.valid_event(),
                     hash: from_variable.hash().to_owned() as u64,
                 };
@@ -598,10 +599,14 @@ fn render_arrows_string_external_events_version(
                 let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
                 let styled_from_name = SPAN_BEGIN.to_string() + from_variable.name() + SPAN_END;
 
+                let mut read_from = " reads from/writes to ";
+                if !external_event.valid_event() {
+                    read_from = " uncuessfullly reads from/writes to ";
+                }
                 let function_dot_data = FunctionDotData {
                     x: resource_owners_layout[from_variable.hash()].x_val,
                     y: get_y_axis_pos(*line_number),
-                    title: styled_fn_name + " reads from/writes to " + &styled_from_name,
+                    title: styled_fn_name + read_from + &styled_from_name,
                     valid: external_event.valid_event(),
                     hash: from_variable.hash().to_owned() as u64,
                 };

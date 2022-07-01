@@ -11,7 +11,7 @@ fn main() {
     let mut x = String::from("hello"); // !{ Move(String::from()->x)}
     let y = &mut x; // !{ MutableBorrow(x->y) }
     f(&x); // !{ PassByStaticReference(x->f()|false) } ERROR: y is still live
-    String::push_str(y, ", world"); // !{ PassByMutableReference(y->String::push_str()), PassByStaticReference(String::from()->String::push_str()) }
+    String::push_str(y, ", world"); // !{ PassByMutableReference(y->String::push_str()), PassByStaticReference(String::from()->String::push_str()), MutableDie(y->x) }
 } // !{ GoOutOfScope(x), GoOutOfScope(y) }
   
 fn f(s : &String) { // !{ InitOwnerParam(s) }
