@@ -1,8 +1,8 @@
 <svg width="330px" height="430px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
-        id="tl_examples/erroneous_Move/input/">
+        id="tl_examples/erroneous_move/input/">
 
-    <desc>examples/erroneous_Move/input/</desc>
+    <desc>examples/erroneous_move/input/</desc>
 
     <defs>
         <style type="text/css">
@@ -239,7 +239,7 @@ object.code_panel {
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; goes out of scope. No resource is dropped."/>
         <svg x="135" y="170" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-                        <path d="M 1,1 l 9,9 M 10,1 l -9,9" data-hash="2" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+                        <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;s2&lt;/span&gt; acquires ownership of a resource"/>
                     </svg> 
@@ -255,7 +255,7 @@ object.code_panel {
     <g id="arrows">
         <polyline stroke-width="5px" stroke="gray" points="93 115 83 115 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;" style="fill: none;"/> 
         <polyline stroke-width="5px" stroke="gray" points="70 145 220 145 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Immutable borrow from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;" style="fill: none;"/> 
-        <polyline stroke-width="5px" stroke="gray" stroke-dasharray="5,5" points="70 175 130 175 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s2&lt;/span&gt;" style="fill: none;"/> 
+        <polyline stroke-width="5px" stroke="gray" stroke-dasharray="5,5" points="70 175 130 175 " marker-end="url(#arrowHead)" class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s2&lt;/span&gt; uncuessfully" style="fill: none;"/> 
     </g></g>
 	<g class="struct_members">
     <g id="labels">

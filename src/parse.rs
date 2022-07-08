@@ -228,10 +228,18 @@ pub fn add_events(
             .filter(|s| !s.is_empty())
             .collect();
 
+        let reason_split: Vec<String> = event.1.split("*")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         let mut field = Vec::new();
         if split.len() == 1 { // no "->"
             let idx = split[0].find("(").expect(&event_usage_err());
-            let idx1 = split[0].find("|");
+            let mut idx1 = split[0].find("|");
+            if idx1== None {
+                idx1 = split[0].find("*");
+            }
             let mut idx2 = split[0].len()-1;
             match idx1 {
                 None => {},
@@ -243,7 +251,10 @@ pub fn add_events(
         else if split.len() == 2 { // has "->"
             // [event, name1, name2]
             let idx = split[0].find("(").expect(&event_usage_err());
-            let idx1 = split[1].find("|");
+            let mut idx1 = split[1].find("|");
+            if idx1==None {
+                idx1 = split[1].find("*");
+            }
             let mut idx2 = split[1].len()-1;
             match idx1 {
                 None => {},
@@ -261,6 +272,9 @@ pub fn add_events(
         if another_split.len() == 2 {
             field.push(&another_split[1][..another_split[1].len()-1]);
         }
+        if reason_split.len() == 2 {
+            field.push(&reason_split[1][..reason_split[1].len()-1]);
+        }
 
         // check for any empty fields
         for f in &field {
@@ -271,11 +285,20 @@ pub fn add_events(
         };
 
         let mut is_valid = None;
-        if field[field.len()-1] == "true"  {
+        let mut reason = "";
+        if field[field.len()-1] == "true" {
             is_valid = Some(true);
         }
-        else if field[field.len()-1] == "false"{
+        else if field[field.len()-1] == "false" {
             is_valid = Some(false);
+        }
+        else if field[field.len()-2] == "true" {
+            is_valid = Some(true);
+            reason = field[field.len()-1];
+        }
+        else if field[field.len()-2] == "false" {
+            is_valid = Some(false);
+            reason = field[field.len()-1]
         }
 
         match field[0] {

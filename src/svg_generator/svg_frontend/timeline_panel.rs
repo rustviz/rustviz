@@ -447,6 +447,7 @@ fn render_arrows_string_external_events_version(
 ){
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
+
         let mut v = true;
         let (from, to) = match external_event {
             ExternalEvent::Bind{ from: from_ro, to: to_ro, valid: valid_ro } => {

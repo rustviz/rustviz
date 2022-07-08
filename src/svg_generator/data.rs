@@ -239,7 +239,7 @@ pub enum ExternalEvent {
     PassByMutableReference {
         from: Option<ResourceAccessPoint>,
         to: Option<ResourceAccessPoint>, // must be a function
-        valid: Option<bool> 
+        valid: Option<bool>
     },
     GoOutOfScope {
         ro: ResourceAccessPoint

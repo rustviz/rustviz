@@ -242,7 +242,7 @@ object.code_panel {
         <svg x="65" y="170" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
                         <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is mutably borrowed"/>
+        monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is mutably borrowed" layer="0"/>
                     </svg> 
         <circle cx="70" cy="205" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
@@ -274,17 +274,17 @@ object.code_panel {
         <svg x="245" y="170" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
                         <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;z&lt;/span&gt; mutably borrows a resource"/>
+        monospace, monospace !important;&quot;&gt;z&lt;/span&gt; mutably borrows a resource" layer="0"/>
                     </svg> 
         <svg x="245" y="230" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
                         <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;z&lt;/span&gt;'s resource is mutably borrowed"/>
+        monospace, monospace !important;&quot;&gt;z&lt;/span&gt;'s resource is mutably borrowed" layer="0"/>
                     </svg> 
         <svg x="245" y="230" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
                         <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;z&lt;/span&gt;'s resource is no longer mutably borrowed"/>
+        monospace, monospace !important;&quot;&gt;z&lt;/span&gt;'s resource is no longer mutably borrowed" layer="0"/>
                     </svg> 
         <text x="96" y="120" data-hash="4" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
         <use xlink:href="#functionDot" data-hash="2" x="160" y="205" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::push_str()&lt;/span&gt; reads from/writes to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;y&lt;/span&gt;"/>
