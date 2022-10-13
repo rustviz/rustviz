@@ -95,7 +95,7 @@ for target in ${targetExamples[@]}; do
         printf "\`\`\`rust\n" >> src/$target.md
         printf "{{#rustdoc_include assets/%s/source.rs}}\n" "$target" >> src/$target.md
         printf "\`\`\`\n" >> src/$target.md
-        printf '<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">\n' >> src/$target.md
+        printf '<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: flex;">\n' >> src/$target.md
         printf '\t<object type="image/svg+xml" class="%s code_panel" data="assets/%s/vis_code.svg"></object>\n' "$target" "$target">> src/$target.md
         printf '\t<object type="image/svg+xml" class="%s tl_panel" data="assets/%s/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('"'"'%s'"'"')"></object>\n' "$target" "$target" "$target">> src/$target.md
         printf "</div>" >> src/$target.md
@@ -110,4 +110,4 @@ mdbook build
 
 # Run HTTP server on docs directory
 cd book
-python3 -m http.server 8000
+mdbook serve -p 8000
