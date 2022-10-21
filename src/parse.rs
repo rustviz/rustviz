@@ -176,8 +176,8 @@ pub fn extract_events(
                 if let Some(j) = line_string[i..].rfind("}") {
                     let evt_str = &line_string[
                         i+2.. // i+2: skip !{
-                        i+j // i+j: capture str from !{ to }
-                    ].trim();
+                            i+j // i+j: capture str from !{ to }
+                        ].trim();
 
                     // do not count block comments towards valid lines of code
                     let diff = line_end - line_begin;
@@ -199,13 +199,13 @@ pub fn extract_events(
         .flat_map(|(lnum, evts)| { // flatten nested Vec<(u64, String)> into (u64, String)
             evts.split(',') // split all comma-separated events
                 .map(|s| // make pair {line_num, event_string}
-                    (lnum.to_owned(),
-                    s.trim().to_string()) // trim whitespace
+                         (lnum.to_owned(),
+                          s.trim().to_string()) // trim whitespace
                 )
                 .filter(|e| !e.1.is_empty()) // remove empty cells
                 .collect::<Vec<(u64, String)>>() // collect vec
         }
-    ).collect::<Vec<(u64, String)>>() // return vec<(line_num, event_string)>
+        ).collect::<Vec<(u64, String)>>() // return vec<(line_num, event_string)>
 }
 
 // Requires: Well-formatted events, HashMap of ResourceAccessPoints
@@ -270,7 +270,13 @@ pub fn add_events(
         }
 
         if another_split.len() == 2 {
-            field.push(&another_split[1][..another_split[1].len()-1]);
+            let idx = another_split[1].find("*");
+            let mut num = another_split[1].len()-1;
+            match idx {
+                None => {},
+                Some(value) => {num = value;}
+            }
+            field.push(&another_split[1][..num]);
         }
         if reason_split.len() == 2 {
             field.push(&reason_split[1][..reason_split[1].len()-1]);
@@ -285,7 +291,7 @@ pub fn add_events(
         };
 
         let mut is_valid = None;
-        let mut reason = "";
+        let mut rea = String::new();
         if field[field.len()-1] == "true" {
             is_valid = Some(true);
         }
@@ -294,11 +300,11 @@ pub fn add_events(
         }
         else if field[field.len()-2] == "true" {
             is_valid = Some(true);
-            reason = field[field.len()-1];
+            rea = String::from(field[field.len()-1]);
         }
         else if field[field.len()-2] == "false" {
             is_valid = Some(false);
-            reason = field[field.len()-1]
+            rea = String::from(field[field.len()-1]);
         }
 
         match field[0] {
@@ -306,7 +312,8 @@ pub fn add_events(
                 ExternalEvent::Bind{
                     from: get_resource(&vars, "None"),
                     to: get_resource(&vars, field[1]),
-                    valid: is_valid
+                    valid: is_valid,
+                    reason: rea
                 }, &(event.0 as usize)
             ),
             "Copy" => vd.append_external_event(
@@ -438,7 +445,7 @@ fn get_name_field(fields: &Vec<&str>) -> String {
 fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
     if fields.len() == 2 { false }
     else if fields[1] == "mut" { true }
-    else { 
+    else {
         eprintln!(
             "Did not understand qualifier '{}' of variable '{}'! \
             Field must either be empty or 'mut'.",
@@ -503,7 +510,7 @@ fn get_structs(
                 is_member: true
             })
         );
-        
+
         idx = if cond {idx+2} else {idx+1};
     }
 }
@@ -518,7 +525,7 @@ fn print_var_usage_error(fields: &Vec<&str>) {
         \n\tMutRef <:mut> <name>\
         \n\tStaticRef <:mut> <name>\
         \n\tFunction <name>",
-        fields.join(" ")
+              fields.join(" ")
     );
 }
 

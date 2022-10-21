@@ -1,10 +1,6 @@
 fn main() {
-    let mut x = String::from("hello");
-    let y = &mut x;
-    f(&x); // ERROR: y is still live
-    String::push_str(y, ", world");
-}
-  
-fn f(x : &String) {
+    let s = String::from("hello");
+    let x = &s;
+    let s2 = s;
     println!("{}", x);
 }

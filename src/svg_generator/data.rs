@@ -11,10 +11,10 @@ pub static LINE_SPACE: i64 = 30;
 pub trait Visualizable {
     // returns None if the hash does not exist
     fn get_name_from_hash(&self, hash: &u64) -> Option<String>;
-    
+
     // returns None if the hash does not exist
     fn get_state(&self, hash: &u64, line_number: &usize) -> Option<State>;
-    
+
     // for querying states of a resource owner using its hash
     //                                         start line, end line, state
     fn get_states(&self, hash: &u64) -> Vec::<(usize,      usize,    State)>;
@@ -22,10 +22,10 @@ pub trait Visualizable {
     // WARNING do not call this when making visualization!! 
     // use append_external_event instead
     fn _append_event(&mut self, resource_access_point: &ResourceAccessPoint, event: Event, line_number: &usize);
-    
+
     // add an event to the Visualizable data structure
     fn append_processed_external_event(&mut self, event: ExternalEvent, line_number: usize);
-    
+
     // preprocess externa event information for arrow overlapping issue
     fn append_external_event(&mut self, event: ExternalEvent, line_number: &usize);
     // if resource_access_point with hash is mutable
@@ -71,14 +71,14 @@ pub struct Struct {
     pub name: String,
     pub hash: u64,
     pub owner: u64,
-    pub is_mut: bool,                     
+    pub is_mut: bool,
     pub is_member: bool
 }
 
 // a reference of type &mut T
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct MutRef {         // let (mut) r1 = &mut a;
-    pub name: String,
+pub name: String,
     pub hash: u64,
     pub is_mut: bool,
 }
@@ -86,7 +86,7 @@ pub struct MutRef {         // let (mut) r1 = &mut a;
 // a reference of type & T
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct StaticRef {                // let (mut) r1 = & a;
-    pub name: String,
+pub name: String,
     pub hash: u64,
     pub is_mut: bool,
 }
@@ -196,7 +196,8 @@ pub enum ExternalEvent {
     Bind {
         from: Option<ResourceAccessPoint>,
         to: Option<ResourceAccessPoint>,
-        valid: Option<bool>
+        valid: Option<bool>,
+        reason: String
     },
     Copy {
         from: Option<ResourceAccessPoint>,
@@ -450,7 +451,7 @@ impl External for ExternalEvent {
                     _ => true
                 }
             },
-            ExternalEvent::Bind{from: _, to: _, valid: valid_ro} => {
+            ExternalEvent::Bind{from: _, to: _, valid: valid_ro, reason:_} => {
                 match valid_ro {
                     Some(false) => false,
                     _ => true
@@ -493,7 +494,7 @@ impl External for ExternalEvent {
 
 // provide string output for usages like format!("{}", eventA)
 impl Display for Event {
-    fn fmt(&self, f: &mut Formatter) -> Result {       
+    fn fmt(&self, f: &mut Formatter) -> Result {
         let mut from_ro = None;
         let mut to_ro = None;
         let mut display = match self {
@@ -528,7 +529,7 @@ impl Event {
     pub fn print_message_with_name(&self, my_name: &String) -> String {
         match self {
             // no arrow involved
-            OwnerGoOutOfScope => { 
+            OwnerGoOutOfScope => {
                 hover_messages::event_dot_owner_go_out_out_scope(my_name)
             }
             RefGoOutOfScope => {
@@ -580,7 +581,7 @@ impl Event {
             MutableReacquire{ from, valid } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
-        } 
+        }
     }
     pub fn check_valid(&self) -> bool {
         match self {
@@ -624,7 +625,7 @@ impl Event {
 #[derive(Debug)]
 pub struct Timeline {
     pub resource_access_point: ResourceAccessPoint,    // a reference of an Owner or a (TODO) Reference, 
-                                // since Functions don't have a timeline 
+    // since Functions don't have a timeline
     // line number in usize
     pub history: Vec<(usize, Event)>,
 }
@@ -646,7 +647,7 @@ pub struct VisualizationData {
     //      timelines: an orderred map from a Variable's hash to 
     //      the Variable's Timeline.
     pub timelines: BTreeMap<u64, Timeline>,
-    
+
     pub external_events: Vec<(usize, ExternalEvent)>,
     //temp container for external_events
     pub preprocess_external_events: Vec<(usize, ExternalEvent)>,
@@ -657,7 +658,7 @@ pub struct VisualizationData {
 #[allow(non_snake_case)]
 pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option<ResourceAccessPoint>, &Option<ResourceAccessPoint>){
     let (from, to) = match external_event {
-        ExternalEvent::Bind{from: from_ro, to: to_ro, valid: _} => (from_ro, to_ro),
+        ExternalEvent::Bind{from: from_ro, to: to_ro, valid: _, reason:_} => (from_ro, to_ro),
         ExternalEvent::Copy{from: from_ro, to: to_ro, valid: _} => (from_ro, to_ro),
         ExternalEvent::Move{from: from_ro, to: to_ro, valid: _} => (from_ro, to_ro),
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, valid: _} => (from_ro, to_ro),
@@ -759,16 +760,16 @@ impl Visualizable for VisualizationData {
             },
 
             (State::FullPrivilege, Event::MutableLend{ to: to_ro, valid:_ }) => {
-            // Assumption: variables can lend mutably if
-            // 1) variable instance is mutable or 2) variable is a mutable reference
-            // Use cases: 'mutable_borrow' & 'nll_lexical_scope_different'
+                // Assumption: variables can lend mutably if
+                // 1) variable instance is mutable or 2) variable is a mutable reference
+                // Use cases: 'mutable_borrow' & 'nll_lexical_scope_different'
                 if self.is_mut(hash) | self.is_mutref(hash) {
                     State::RevokedPrivilege{ to: None, borrow_to: to_ro.to_owned() }
                 } else {
                     State::Invalid
                 }
             },
-            
+
             // happends when a mutable reference returns, invalid otherwise
             (State::FullPrivilege, Event::MutableDie{ .. }) =>
                 State::OutOfScope,
@@ -806,7 +807,7 @@ impl Visualizable for VisualizationData {
                     borrow_to: new_borrow_to,
                 }
             }
-                
+
             // self statically borrowed resource, and it returns; TODO what about references to self?
             (State::PartialPrivilege{ .. }, Event::StaticDie{ .. }) =>
                 State::OutOfScope,
@@ -815,18 +816,18 @@ impl Visualizable for VisualizationData {
                 let new_borrow_count = borrow_count - 1;
                 // check if it resumes to full privilege    
                 if borrow_count - 1 == 0 {
-                        State::FullPrivilege 
-                    } else {
-                        let mut new_borrow_to = borrow_to.clone();
-                        // TODO ro.unwrap() should not panic, because Reacquire{from: None} is not possible
-                        // TODO change to Reaquire{from: ResourceAccessPoint}
-                        assert_eq!(new_borrow_to.remove(&ro.to_owned().unwrap()), true); // borrow_to must contain ro
-                        State::PartialPrivilege{
-                            borrow_count: new_borrow_count,
-                            borrow_to: new_borrow_to,
-                        }
+                    State::FullPrivilege
+                } else {
+                    let mut new_borrow_to = borrow_to.clone();
+                    // TODO ro.unwrap() should not panic, because Reacquire{from: None} is not possible
+                    // TODO change to Reaquire{from: ResourceAccessPoint}
+                    assert_eq!(new_borrow_to.remove(&ro.to_owned().unwrap()), true); // borrow_to must contain ro
+                    State::PartialPrivilege{
+                        borrow_count: new_borrow_count,
+                        borrow_to: new_borrow_to,
                     }
                 }
+            }
 
             (State::PartialPrivilege{ .. }, Event::OwnerGoOutOfScope) =>
                 State::OutOfScope,
@@ -878,7 +879,7 @@ impl Visualizable for VisualizationData {
         // if !event.valid_event() {
         //     self.invalid_preprocess_external_events.push((*line_number, event.clone()));
         // }else {
-            self.preprocess_external_events.push((*line_number, event.clone()));
+        self.preprocess_external_events.push((*line_number, event.clone()));
         // }
         //------------------------construct external event line info----------------------
         let resourceaccesspoint = ResourceAccessPoint_extract(&event);
@@ -886,18 +887,18 @@ impl Visualizable for VisualizationData {
             (Some(ResourceAccessPoint::Function(_)), Some(ResourceAccessPoint::Function(_)), _) => {
                 // do nothing case
             },
-            (Some(ResourceAccessPoint::Function(_from_function)), Some(_to_variable), _) => {  
+            (Some(ResourceAccessPoint::Function(_from_function)), Some(_to_variable), _) => {
                 // (Some(function), Some(variable), _)
             },
-            (Some(_from_variable), Some(ResourceAccessPoint::Function(_function)), 
-             ExternalEvent::PassByStaticReference{..}) => { 
-                 // (Some(variable), Some(function), PassByStatRef)
+            (Some(_from_variable), Some(ResourceAccessPoint::Function(_function)),
+                ExternalEvent::PassByStaticReference{..}) => {
+                // (Some(variable), Some(function), PassByStatRef)
             },
-            (Some(_from_variable), Some(ResourceAccessPoint::Function(_function)), 
-             ExternalEvent::PassByMutableReference{..}) => {  
-                 // (Some(variable), Some(function), PassByMutRef)
+            (Some(_from_variable), Some(ResourceAccessPoint::Function(_function)),
+                ExternalEvent::PassByMutableReference{..}) => {
+                // (Some(variable), Some(function), PassByMutRef)
             },
-            (Some(_from_variable), Some(ResourceAccessPoint::Function(_to_function)), _) => { 
+            (Some(_from_variable), Some(ResourceAccessPoint::Function(_to_function)), _) => {
                 // (Some(variable), Some(function), _)
             },
             (Some(_from_variable), Some(_to_variable), _) => {
@@ -949,7 +950,7 @@ impl Visualizable for VisualizationData {
     // default way to record events
     fn append_processed_external_event(&mut self, event: ExternalEvent, line_number: usize) {
         self.external_events.push((line_number, event.clone()));
-        
+
         // append_event if resource_access_point is not null
         fn maybe_append_event(vd: &mut VisualizationData, resource_access_point: &Option<ResourceAccessPoint>, event: Event, line_number : &usize) {
             if let Some(ro) = resource_access_point {
@@ -968,7 +969,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro, Event::Move{to : to_ro.to_owned(), valid:v.clone() }, &line_number);
             },
             // eg: let ro_to = 5;
-            ExternalEvent::Bind{from: from_ro, to: to_ro, valid: valid_ro} => {
+            ExternalEvent::Bind{from: from_ro, to: to_ro, valid: valid_ro, reason:_} => {
                 let mut v = true;
                 if valid_ro == Some(false) {
                     v = false;
@@ -1077,7 +1078,7 @@ impl Visualizable for VisualizationData {
     fn check_valid(&self, event: ExternalEvent) -> bool{
         match event {
             ExternalEvent::Move{from: from_ro, to: to_ro, valid: _} => {true},
-            ExternalEvent::Bind{from: from_ro, to: to_ro, valid: _} => {true},
+            ExternalEvent::Bind{from: from_ro, to: to_ro, valid: _, reason:_} => {true},
             ExternalEvent::Copy{from: from_ro, to: to_ro, valid: _} => {true},
             ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, valid: _} => {true},
             ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, valid: _} => {true},
@@ -1085,13 +1086,13 @@ impl Visualizable for VisualizationData {
             ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, valid: _} => {true},
             _ => false
         }
-        
+
     }
 
 }
 
 /* TODO use this function to create a single copy of resource owner in resource_access_point_map,
- and use hash to refer to it */ 
+ and use hash to refer to it */
 // impl VisualizationData {
 //     fn create_resource_access_point(&mut self, ro: ResourceAccessPoint) -> &ResourceAccessPoint {
 //         self.resource_access_point_map.entry(ro.get_hash()).or_insert(ro);

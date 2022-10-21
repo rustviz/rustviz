@@ -11,12 +11,65 @@
   <component name="ChangeListManager">
     <list default="true" id="b0c2a095-3e97-4b91-8095-d4e879284de5" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rustviz_mdbook/view_examples.sh" beforeDir="false" afterPath="$PROJECT_DIR$/rustviz_mdbook/view_examples.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/rustviz_mdbook/src/error_1.md" beforeDir="false" afterPath="$PROJECT_DIR$/rustviz_mdbook/src/error_1.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/rustviz_mdbook/src/error_2.md" beforeDir="false" afterPath="$PROJECT_DIR$/rustviz_mdbook/src/error_2.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/rustviz_mdbook/src/error_3.md" beforeDir="false" afterPath="$PROJECT_DIR$/rustviz_mdbook/src/error_3.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/rustviz_mdbook/src/error_4.md" beforeDir="false" afterPath="$PROJECT_DIR$/rustviz_mdbook/src/error_4.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/examples/copy/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/copy/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_1/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_1/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_1/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_1/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_2/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_2/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_3/input/annotated_source.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_3/input/annotated_source.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_3/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_3/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_3/source.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_3/source.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_3/vis_code.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_3/vis_code.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_3/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_3/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_4/input/annotated_source.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_4/input/annotated_source.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_4/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_4/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_4/source.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_4/source.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/error_4/vis_code.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_4/vis_code.svg" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/examples/error_4/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/error_4/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/extra_credit/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/extra_credit/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/func_take_ownership/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/func_take_ownership/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/func_take_return_ownership/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/func_take_return_ownership/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/function/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/function/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/hatra1/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/hatra1/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/hatra1_test/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/hatra1_test/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/hatra2/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/hatra2/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/immutable_borrow/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/immutable_borrow/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/immutable_borrow_method_call/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/immutable_borrow_method_call/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/immutable_variable/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/immutable_variable/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/move_assignment/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/move_assignment/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/move_different_scope/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/move_different_scope/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/move_func_return/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/move_func_return/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/multiple_immutable_borrow/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/multiple_immutable_borrow/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/mutable_borrow/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/mutable_borrow/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/mutable_borrow_method_call/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/mutable_borrow_method_call/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/mutable_variables/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/mutable_variables/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/nll_lexical_scope_different/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/nll_lexical_scope_different/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/printing/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/printing/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/string_from_move_print/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/string_from_move_print/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/string_from_print/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/string_from_print/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/struct_lifetime/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/struct_lifetime/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/struct_rect/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/struct_rect/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/struct_rect2/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/struct_rect2/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/examples/struct_string/vis_timeline.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/examples/struct_string/vis_timeline.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/parse.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/parse.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/svg_generator/data.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/data.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/svg_generator/templates/timeline_template.svg" beforeDir="false" afterPath="$PROJECT_DIR$/src/svg_generator/templates/timeline_template.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/.fingerprint/rustviz-e5af8268f63eb851/output-bin-rustviz" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/.fingerprint/rustviz-svg-a8d8b6208a240b72/output-lib-rustviz_lib" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/.fingerprint/rustviz-svg-a8d8b6208a240b72/output-lib-rustviz_lib" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rlib" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rmeta" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/librustviz_lib-a8d8b6208a240b72.rmeta" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.0.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.0.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.1.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.1.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.10.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.10.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.14.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.14.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.6.rcgu.o" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/deps/rustviz-e5af8268f63eb851.rustviz.f3716a28-cgu.6.rcgu.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/target/debug/rustviz" beforeDir="false" afterPath="$PROJECT_DIR$/target/debug/rustviz" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -61,7 +114,7 @@
       </method>
     </configuration>
     <configuration name="Run" type="CargoCommandRunConfiguration" factoryName="Cargo Command" nameIsGenerated="true">
-      <option name="command" value="run erroneous_move" />
+      <option name="command" value="run error_3" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$/src" />
       <option name="channel" value="DEFAULT" />
       <option name="requiredFeatures" value="true" />
@@ -105,7 +158,15 @@
       <workItem from="1656524966163" duration="598000" />
       <workItem from="1656526595429" duration="1950000" />
       <workItem from="1656634556262" duration="12009000" />
-      <workItem from="1657298568566" duration="4047000" />
+      <workItem from="1657298568566" duration="7896000" />
+      <workItem from="1657395899828" duration="3929000" />
+      <workItem from="1657417297927" duration="2749000" />
+      <workItem from="1658284715693" duration="7328000" />
+      <workItem from="1658522829934" duration="2844000" />
+      <workItem from="1663886593217" duration="10537000" />
+      <workItem from="1665121038393" duration="5892000" />
+      <workItem from="1665601418781" duration="954000" />
+      <workItem from="1666383470045" duration="413000" />
     </task>
     <servers />
   </component>
@@ -137,18 +198,18 @@
         </line-breakpoint>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
-          <line>555</line>
-          <option name="timeStamp" value="50" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
-          <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
-          <line>572</line>
-          <option name="timeStamp" value="51" />
+          <line>642</line>
+          <option name="timeStamp" value="65" />
         </line-breakpoint>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/src/svg_generator/svg_frontend/timeline_panel.rs</url>
           <line>529</line>
-          <option name="timeStamp" value="55" />
+          <option name="timeStamp" value="77" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
+          <url>file://$PROJECT_DIR$/src/svg_generator/data.rs</url>
+          <line>974</line>
+          <option name="timeStamp" value="83" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>

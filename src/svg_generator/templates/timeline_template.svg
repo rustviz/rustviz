@@ -22,6 +22,17 @@
              <circle cx="0" cy="0" r="5" fill="transparent"/>
              <text class="functionIcon" dx="-3.5" dy="0" fill="#6e6b5e">f</text>
         </g>
+        <g id="functionX">
+            <text class="functionIcon" dx="-3.5" dy="0" fill="#6e6b5e">f</text>
+            <svg x="-5.5" y="-5">
+                <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3"/>
+            </svg>
+        </g>
+        <g id="X">
+            <svg x="-5.5" y="-5">
+                <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3"/>
+            </svg>
+        </g>
         <marker id="arrowHead" viewBox="0 0 10 10"
             refX="0" refY="4"
             markerUnits="strokeWidth"

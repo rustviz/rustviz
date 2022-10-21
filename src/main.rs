@@ -54,4 +54,5 @@ fn main() {
         .into_os_string().into_string()
         .expect("Error in output file path!");
     svg_generation::render_svg(&input_path, &(output_path+"/"), &mut vd);
+
 }

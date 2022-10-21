@@ -132,11 +132,11 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     let (resource_owners_layout, width) = compute_column_layout(visualization_data, &mut structs_info);
 
     let mut output : BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
-    output.insert(-1, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
-        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
-            timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+    output.insert(-1, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(),
+        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(),
+        timelines: String::new(), ref_line: String::new(), arrows: String::new() }));
     // Note: key {-1} = non-struct timelines
-    
+
     // render resource owner labels
     render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_labels_string(&mut output, &resource_owners_layout, &registry);
@@ -181,7 +181,7 @@ fn prepare_registry(registry: &mut Handlebars) {
         <g id=\"events\">\n{{ dots }}    </g>\n\n    \
         <g id=\"arrows\">\n{{ arrows }}    </g>";
 
-    let struct_template  = 
+    let struct_template  =
         "    <g id=\"{{struct_name}}\">\n\
              \t<g class=\"struct_instance\">\n{{ struct_instance }}</g>\n\
              \t<g class=\"struct_members\">\n{{ struct_members }}</g>\n\
@@ -196,12 +196,14 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        {{#if valid}}\
                     <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
                  {{ else }}\
-                    <svg x=\"{{dot_x}}\" y=\"{{dot_y}}\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">
-                        <path d=\"M 1,1 l 9,9 M 10,1 l -9,9\" stroke=\"red\" stroke-width=\"3\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>
-                    </svg> \n\
+                    <use xlink:href=\"#X\" data-hash=\"{{hash}}\" x=\"{{dot_x}}\" y=\"{{dot_y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
                  {{/if}}";
-    let function_dot_template =    
-        "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
+    let function_dot_template =
+        "        {{#if valid}}\
+                    <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
+                 {{ else }}\
+                    <use xlink:href=\"#functionX\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n\
+                 {{/if}}";
     let function_logo_template =
         "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
     let arrow_template =
@@ -276,53 +278,53 @@ fn compute_column_layout<'a>(
                 /* do nothing */
             },
             ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
-            {
-                let name = match visualization_data.get_name_from_hash(hash) {
-                    Some(_name) => _name,
-                    None => panic!("no matching resource owner for hash {}", hash),
-                };
-                let mut x_space = cmp::max(70, (&(name.len() as i64)-1)*13);
-                x = x + x_space;
-                let title = match visualization_data.is_mut(hash) {
-                    true => String::from("mutable"),
-                    false => String::from("immutable"),
-                };
-                let mut ref_bool = false;
+                {
+                    let name = match visualization_data.get_name_from_hash(hash) {
+                        Some(_name) => _name,
+                        None => panic!("no matching resource owner for hash {}", hash),
+                    };
+                    let mut x_space = cmp::max(70, (&(name.len() as i64)-1)*13);
+                    x = x + x_space;
+                    let title = match visualization_data.is_mut(hash) {
+                        true => String::from("mutable"),
+                        false => String::from("immutable"),
+                    };
+                    let mut ref_bool = false;
 
-                // render reference label
-                if timeline.resource_access_point.is_ref() {
-                    let temp_name = name.clone() + "|*" + &name; // used for calculating x_space
-                    x = x - x_space; // reset
-                    x_space = cmp::max(90, (&(temp_name.len() as i64)-1)*7); // new x_space
-                    x = x + x_space; // new x pos
-                    ref_bool = true; // hover msg displays only "s" rather than "s|*s"
-                }
+                    // render reference label
+                    if timeline.resource_access_point.is_ref() {
+                        let temp_name = name.clone() + "|*" + &name; // used for calculating x_space
+                        x = x - x_space; // reset
+                        x_space = cmp::max(90, (&(temp_name.len() as i64)-1)*7); // new x_space
+                        x = x + x_space; // new x pos
+                        ref_bool = true; // hover msg displays only "s" rather than "s|*s"
+                    }
 
-                let styled_name = SPAN_BEGIN.to_string() + &name + SPAN_END;
-                
-                if (owner == -1) && timeline.resource_access_point.is_struct_group() && !timeline.resource_access_point.is_member() {
-                    owner = timeline.resource_access_point.hash().clone() as i64;
-                    owner_x = x;
-                } else if (owner != -1) && timeline.resource_access_point.is_struct_group() && timeline.resource_access_point.is_member() {
-                    last_x = x;
-                } else if (owner != -1) && !timeline.resource_access_point.is_struct_group() {
-                    structs_info.structs.push((owner, owner_x, last_x));
-                    owner = -1;
-                    owner_x = 0;
-                    last_x = 0;
-                }
+                    let styled_name = SPAN_BEGIN.to_string() + &name + SPAN_END;
 
-                resource_owners_layout.insert(hash, TimelineColumnData
-                    { 
-                        name: name.clone(), 
-                        x_val: x, 
+                    if (owner == -1) && timeline.resource_access_point.is_struct_group() && !timeline.resource_access_point.is_member() {
+                        owner = timeline.resource_access_point.hash().clone() as i64;
+                        owner_x = x;
+                    } else if (owner != -1) && timeline.resource_access_point.is_struct_group() && timeline.resource_access_point.is_member() {
+                        last_x = x;
+                    } else if (owner != -1) && !timeline.resource_access_point.is_struct_group() {
+                        structs_info.structs.push((owner, owner_x, last_x));
+                        owner = -1;
+                        owner_x = 0;
+                        last_x = 0;
+                    }
+
+                    resource_owners_layout.insert(hash, TimelineColumnData
+                    {
+                        name: name.clone(),
+                        x_val: x,
                         title: styled_name.clone() + ", " + &title,
                         is_ref: ref_bool,
                         is_struct_group: timeline.resource_access_point.is_struct_group(),
                         is_member: timeline.resource_access_point.is_member(),
                         owner: timeline.resource_access_point.get_owner(),
                     });
-            }
+                }
         }
     }
     (resource_owners_layout, (x as i32)+100)
@@ -374,66 +376,65 @@ fn render_dots_string(
                 // nothing to be done
             },
             ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
-            {
-                let mut resource_hold = false;
-                for (line_number, event) in timeline.history.iter() {
-                    //matching the event
-                    match event {
-                        Event::Acquire{..} => {
-                            resource_hold = true;
-                        },
-                        Event::Copy{..} => {
-                            resource_hold = true;
-                        },
-                        Event::Move{..} => {
-                            resource_hold = false;
-                        },
-                        _ => {} //do nothing
-                    }
-                    let mut data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: resource_owners_layout[hash].x_val,
-                        dot_y: get_y_axis_pos(*line_number),
-                        valid: event.check_valid(),
-                        // default value if print_message_with_name() fails
-                        title: "Unknown Resource Owner Value".to_owned(),
-                    };
-                    if !data.valid {
-                        data.dot_x = data.dot_x - 5;
-                        data.dot_y = data.dot_y - 5;
-                    }
-                    if let Some(name) = visualization_data.get_name_from_hash(hash) {
+                {
+                    let mut resource_hold = false;
+                    for (line_number, event) in timeline.history.iter() {
+                        //matching the event
                         match event {
-                            Event::OwnerGoOutOfScope => {
-                                if !resource_hold {
-                                    let resource_info: &str = ". No resource is dropped.";
-                                    data.title = event.print_message_with_name(&name);
-                                    data.title.push_str(resource_info);
-                                } else {
-                                    let resource_info: &str = ". Its resource is dropped.";
-                                    data.title = event.print_message_with_name(&name);
-                                    data.title.push_str(resource_info);
-                                }
+                            Event::Acquire{..} => {
+                                resource_hold = true;
                             },
-                            _ => {
-                                data.title = event.print_message_with_name(&name);
+                            Event::Copy{..} => {
+                                resource_hold = true;
+                            },
+                            Event::Move{..} => {
+                                resource_hold = false;
+                            },
+                            _ => {} //do nothing
+                        }
+                        let mut data = EventDotData {
+                            hash: *hash as u64,
+                            dot_x: resource_owners_layout[hash].x_val,
+                            dot_y: get_y_axis_pos(*line_number),
+                            valid: event.check_valid(),
+                            // default value if print_message_with_name() fails
+                            title: "Unknown Resource Owner Value".to_owned(),
+                        };
+                        if let Some(name) = visualization_data.get_name_from_hash(hash) {
+                            match event {
+                                Event::OwnerGoOutOfScope => {
+                                    if !resource_hold {
+                                        let resource_info: &str = ". No resource is dropped.";
+                                        data.title = event.print_message_with_name(&name);
+                                        data.title.push_str(resource_info);
+                                    } else {
+                                        let resource_info: &str = ". Its resource is dropped.";
+                                        data.title = event.print_message_with_name(&name);
+                                        data.title.push_str(resource_info);
+                                    }
+                                },
+                                _ => {
+                                    data.title = event.print_message_with_name(&name);
+                                    if !data.valid {
+                                        data.title.push_str(" unsuccessfully")
+                                    }
+                                }
                             }
                         }
-                    }
-                    // push to individual timelines
-                    let column = &resource_owners_layout[hash];
-                    if column.is_struct_group {
-                        if column.is_member {
-                            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("dot_template", &data).unwrap());
-                        } else {
-                            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("dot_template", &data).unwrap());
+                        // push to individual timelines
+                        let column = &resource_owners_layout[hash];
+                        if column.is_struct_group {
+                            if column.is_member {
+                                output.get_mut(&(column.owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("dot_template", &data).unwrap());
+                            } else {
+                                output.get_mut(&(column.owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("dot_template", &data).unwrap());
+                            }
+                        }
+                        else {
+                            output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("dot_template", &data).unwrap());
                         }
                     }
-                    else {
-                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("dot_template", &data).unwrap());
-                    }
-                }
-            },
+                },
         }
     }
 }
@@ -447,12 +448,14 @@ fn render_arrows_string_external_events_version(
 ){
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
+        let mut reason = String::from("");
 
         let mut v = true;
         let (from, to) = match external_event {
-            ExternalEvent::Bind{ from: from_ro, to: to_ro, valid: valid_ro } => {
+            ExternalEvent::Bind{ from: from_ro, to: to_ro, valid: valid_ro, reason:reason_ro } => {
                 if valid_ro == &Some(false){ v = false; }
                 title = String::from("Bind");
+                reason = reason_ro.clone();
                 (from_ro, to_ro)
             },
             ExternalEvent::Copy{ from: from_ro, to: to_ro, valid: valid_ro } => {
@@ -520,7 +523,12 @@ fn render_arrows_string_external_events_version(
         };
 
         // order of points is to -> from
-        if !v { title = format!("{} uncuessfully", title); }
+        if !v {
+            title = format!("{} unsuccessfully", title);
+        }
+        if !reason.is_empty() {
+            title = format!("{} because {}", title, reason);
+        }
         let mut data = ArrowData {
             coordinates: Vec::new(),
             coordinates_hbs: String::new(),
@@ -565,14 +573,14 @@ fn render_arrows_string_external_events_version(
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                 }
             },
-            (Some(from_variable), Some(ResourceAccessPoint::Function(function)), 
-             ExternalEvent::PassByStaticReference{..}) => { // (Some(variable), Some(function), PassByStatRef)
+            (Some(from_variable), Some(ResourceAccessPoint::Function(function)),
+                ExternalEvent::PassByStaticReference{..}) => { // (Some(variable), Some(function), PassByStatRef)
                 // get variable's position
                 let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
                 let styled_from_name = SPAN_BEGIN.to_string() + from_variable.name() + SPAN_END;
                 let mut read_from = " reads from ";
                 if !external_event.valid_event() {
-                    read_from = " uncuessfullly reads from ";
+                    read_from = " unsuccessfully reads from ";
                 }
 
                 let function_dot_data = FunctionDotData {
@@ -594,15 +602,15 @@ fn render_arrows_string_external_events_version(
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                 }
             },
-            (Some(from_variable), Some(ResourceAccessPoint::Function(function)), 
-             ExternalEvent::PassByMutableReference{..}) => {  // (Some(variable), Some(function), PassByMutRef)
+            (Some(from_variable), Some(ResourceAccessPoint::Function(function)),
+                ExternalEvent::PassByMutableReference{..}) => {  // (Some(variable), Some(function), PassByMutRef)
                 // get variable's position
                 let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
                 let styled_from_name = SPAN_BEGIN.to_string() + from_variable.name() + SPAN_END;
 
                 let mut read_from = " reads from/writes to ";
                 if !external_event.valid_event() {
-                    read_from = " uncuessfullly reads from/writes to ";
+                    read_from = " unsuccessfully reads from/writes to ";
                 }
                 let function_dot_data = FunctionDotData {
                     x: resource_owners_layout[from_variable.hash()].x_val,
@@ -634,7 +642,7 @@ fn render_arrows_string_external_events_version(
 
                 let function_data = FunctionLogoData {
                     // adjust Function logo pos
-                    x: x1 - 10,  
+                    x: x1 - 10,
                     y: y1 + 5,
                     hash: to_function.hash.to_owned() as u64,
                     title: styled_fn_name,
@@ -670,7 +678,7 @@ fn render_arrows_string_external_events_version(
                     data.coordinates.push((x3 as f64, y3 as f64));
                     data.coordinates.push((x2 as f64, y2 as f64));
 
-                // if the arrow is pointing from right to left
+                    // if the arrow is pointing from right to left
                 } else if arrow_order > 0 && x2 > x1 {
                     let x3 = resource_owners_layout[from_variable.hash()].x_val - 20;
                     let x4 = resource_owners_layout[to_variable.hash()].x_val + 20;
@@ -778,12 +786,12 @@ fn _determine_stat_ref_line_styles(
         ),
         (State::PartialPrivilege{..}, true) => (
             RefDataLine::Hollow,
-            RefValueLine::Reassignable,     // potentially wrong. Not taking second level 
-                                            // borrowing into account
+            RefValueLine::Reassignable,     // potentially wrong. Not taking second level
+            // borrowing into account
         ),
         _ => (                              // TODO: not finished
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
+                                            RefDataLine::Hollow,
+                                            RefValueLine::NotReassignable,
         )
     }
 }
@@ -803,8 +811,8 @@ fn _determine_mut_ref_line_styles(
             RefValueLine::Reassignable,
         ),
         _ => ( // TODO: not finished
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
+               RefDataLine::Hollow,
+               RefValueLine::NotReassignable,
         )
     }
 }
@@ -860,20 +868,20 @@ fn create_reference_line_string(
             } else {
                 data.title += "; can only read data";
             }
-            
+
             let mut hollow_line_data = data.clone();
             hollow_line_data.x1 -= 1.8; // center middle of path to center of event dot
-            
+
             registry.render("hollow_line_template", &hollow_line_data).unwrap()
         },
         (State::PartialPrivilege{ .. }, _) => {
             data.line_class = String::from("solid");
             data.title += "; can only read data.";
-            
+
             let mut hollow_line_data = data.clone();
             hollow_line_data.x1 -= 1.8; // center middle of path to center of event dot
             hollow_line_data.title = data.title.to_owned();
-            
+
             registry.render("hollow_line_template", &hollow_line_data).unwrap()
         },
         (State::ResourceMoved{ .. }, true) => {
@@ -916,9 +924,9 @@ fn render_timelines(
                 ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
                     if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
                         if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
-                            output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
-                                ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
-                                    timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+                            output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(),
+                                ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(),
+                                timelines: String::new(), ref_line: String::new(), arrows: String::new() }));
                         }
                         if resource_owners_layout[hash].is_member {
                             output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
@@ -952,88 +960,88 @@ fn render_ref_line(
         match timeline.resource_access_point {
             ResourceAccessPoint::Function(_) => (), /* do nothing */
             ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
-            {
-                let ro = timeline.resource_access_point.to_owned();
-                // verticle state lines
-                let states = visualization_data.get_states(hash);
+                {
+                    let ro = timeline.resource_access_point.to_owned();
+                    // verticle state lines
+                    let states = visualization_data.get_states(hash);
 
-                // struct can live over events
-                let mut alive = false;
-                let mut data = RefLineData {
-                    line_class: String::new(),
-                    hash: 0,
-                    x1: 0,
-                    x2: 0,
-                    y1: 0,
-                    y2: 0,
-                    v: 0,
-                    dx: 15,
-                    dy: 0,
-                    title: String::new(),
-                };
-                for (line_start, _line_end, state) in states.iter() {
-                    match state { // consider removing .clone()
-                        State::OutOfScope | State::ResourceMoved{ .. } => {
-                            if alive {
-                                // finish line template
-                                data.x2 = data.x1.clone();
-                                data.y2 = get_y_axis_pos(*line_start);
-                                let dv = get_y_axis_pos(*line_start)-data.y1;
-                                data.v = dv - 2*dv/5;
-                                data.dy = dv/5;
+                    // struct can live over events
+                    let mut alive = false;
+                    let mut data = RefLineData {
+                        line_class: String::new(),
+                        hash: 0,
+                        x1: 0,
+                        x2: 0,
+                        y1: 0,
+                        y2: 0,
+                        v: 0,
+                        dx: 15,
+                        dy: 0,
+                        title: String::new(),
+                    };
+                    for (line_start, _line_end, state) in states.iter() {
+                        match state { // consider removing .clone()
+                            State::OutOfScope | State::ResourceMoved{ .. } => {
+                                if alive {
+                                    // finish line template
+                                    data.x2 = data.x1.clone();
+                                    data.y2 = get_y_axis_pos(*line_start);
+                                    let dv = get_y_axis_pos(*line_start)-data.y1;
+                                    data.v = dv - 2*dv/5;
+                                    data.dy = dv/5;
 
-                                match ro {
-                                    ResourceAccessPoint::MutRef(_) => {
-                                        output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("solid_ref_line_template", &data).unwrap());
-                                    },
-                                    ResourceAccessPoint::StaticRef(_) => {
-                                        output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("hollow_ref_line_template", &data).unwrap());
-                                    },
-                                    _ => (),
+                                    match ro {
+                                        ResourceAccessPoint::MutRef(_) => {
+                                            output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("solid_ref_line_template", &data).unwrap());
+                                        },
+                                        ResourceAccessPoint::StaticRef(_) => {
+                                            output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("hollow_ref_line_template", &data).unwrap());
+                                        },
+                                        _ => (),
+                                    }
+
+                                    alive = false;
                                 }
+                            },
+                            State::FullPrivilege => {
+                                if !alive {
+                                    // set known vals
+                                    data.hash = *hash;
+                                    data.x1 = resource_owners_layout[hash].x_val;
+                                    data.y1 = get_y_axis_pos(*line_start);
 
-                                alive = false;
-                            }
-                        },
-                        State::FullPrivilege => {
-                            if !alive {
-                                // set known vals
-                                data.hash = *hash;
-                                data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = get_y_axis_pos(*line_start);
+                                    data.title = String::from(
+                                        format!("can mutate *{}", visualization_data.get_name_from_hash(hash).unwrap())
+                                    );
+                                    data.line_class = String::from("solid");
+                                    alive = true;
+                                }
+                            },
+                            State::PartialPrivilege{..} => {
+                                if !alive {
+                                    // set known vals
+                                    data.hash = *hash;
+                                    data.x1 = resource_owners_layout[hash].x_val;
+                                    data.y1 = get_y_axis_pos(*line_start);
 
-                                data.title = String::from(
-                                    format!("can mutate *{}", visualization_data.get_name_from_hash(hash).unwrap())
-                                );
-                                data.line_class = String::from("solid");
-                                alive = true;
-                            }
-                        },
-                        State::PartialPrivilege{..} => {
-                            if !alive {
-                                // set known vals
-                                data.hash = *hash;
-                                data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = get_y_axis_pos(*line_start);
-
-                                data.title = String::from(
-                                    format!("cannot mutate *{}",visualization_data.get_name_from_hash(hash).unwrap())
-                                );
-                                data.line_class = String::from("solid");
-                                alive = true;
-                            }
-                        },
-                        _ => (),
+                                    data.title = String::from(
+                                        format!("cannot mutate *{}",visualization_data.get_name_from_hash(hash).unwrap())
+                                    );
+                                    data.line_class = String::from("solid");
+                                    alive = true;
+                                }
+                            },
+                            _ => (),
+                        }
                     }
-                }
-            },  
+                },
         }
     }
 }
 
 fn render_struct_box(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    structs_info: &StructsInfo, 
+    structs_info: &StructsInfo,
     registry: &Handlebars,
 ) {
     for (owner, owner_x, last_x) in structs_info.structs.iter() {
@@ -1045,7 +1053,7 @@ fn render_struct_box(
             w: 0,
             h: 0,
             title: String::new(),
-        };   
+        };
         box_data.x = owner_x - 20;
         box_data.w = last_x - owner_x + 60;
         box_data.h = 30;

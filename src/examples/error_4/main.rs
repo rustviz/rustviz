@@ -1,16 +1,19 @@
 /* --- BEGIN Variable Definitions ---
 Owner mut x;
 MutRef y;
-MutRef z;
+StaticRef s;
 Function String::from();
 Function println!();
 Function String::push_str();
+Function f();
 --- END Variable Definitions --- */
 fn main() {
-    let mut x = String::from("Hello"); // !{ Move(String::from()->x)}
+    let mut x = String::from("hello"); // !{ Move(String::from()->x)}
     let y = &mut x; // !{ MutableBorrow(x->y) }
-    let z = &mut x; // !{ MutableBorrow(x->z|false) } ERROR: y is still live
+    f(&x); // !{ PassByStaticReference(x->f()|false) } ERROR: y is still live
     String::push_str(y, ", world"); // !{ PassByMutableReference(y->String::push_str()), PassByStaticReference(String::from()->String::push_str()), MutableDie(y->x) }
-    String::push_str(z, ", friend"); // !{ PassByMutableReference(z->String::push_str()|false), PassByStaticReference(String::from()->String::push_str()|false) }
-    println!("{}", x); // !{ PassByStaticReference(x->println!()) }
-  } // !{ GoOutOfScope(x), GoOutOfScope(y) }
+} // !{ GoOutOfScope(x), GoOutOfScope(y) }
+  
+fn f(s : &String) { // !{ InitOwnerParam(s) }
+    println!("{}", s); // !{ PassByStaticReference(s->println!()) }
+} // !{ GoOutOfScope(s) }

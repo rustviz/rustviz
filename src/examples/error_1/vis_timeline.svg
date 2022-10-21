@@ -173,6 +173,17 @@ object.code_panel {
              <circle cx="0" cy="0" r="5" fill="transparent"/>
              <text class="functionIcon" dx="-3.5" dy="0" fill="#6e6b5e">f</text>
         </g>
+        <g id="functionX">
+            <text class="functionIcon" dx="-3.5" dy="0" fill="#6e6b5e">f</text>
+            <svg x="-5.5" y="-5">
+                <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3"/>
+            </svg>
+        </g>
+        <g id="X">
+            <svg x="-5.5" y="-5">
+                <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3"/>
+            </svg>
+        </g>
         <marker id="arrowHead" viewBox="0 0 10 10"
             refX="0" refY="4"
             markerUnits="strokeWidth"
@@ -218,11 +229,9 @@ object.code_panel {
         <circle cx="70" cy="115" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; acquires ownership of a resource"/>
-        <svg x="65" y="140" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-                        <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <use xlink:href="#X" data-hash="1" x="70" y="145" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;x&lt;/span&gt; acquires ownership of a resource"/>
-                    </svg> 
+        monospace, monospace !important;&quot;&gt;x&lt;/span&gt; acquires ownership of a resource unsuccessfully"/>
         <circle cx="70" cy="175" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; goes out of scope. Its resource is dropped."/>

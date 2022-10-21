@@ -173,6 +173,17 @@ object.code_panel {
              <circle cx="0" cy="0" r="5" fill="transparent"/>
              <text class="functionIcon" dx="-3.5" dy="0" fill="#6e6b5e">f</text>
         </g>
+        <g id="functionX">
+            <text class="functionIcon" dx="-3.5" dy="0" fill="#6e6b5e">f</text>
+            <svg x="-5.5" y="-5">
+                <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3"/>
+            </svg>
+        </g>
+        <g id="X">
+            <svg x="-5.5" y="-5">
+                <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3"/>
+            </svg>
+        </g>
         <marker id="arrowHead" viewBox="0 0 10 10"
             refX="0" refY="4"
             markerUnits="strokeWidth"
@@ -225,16 +236,12 @@ object.code_panel {
         <circle cx="70" cy="145" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is moved"/>
-        <svg x="65" y="170" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-                        <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <use xlink:href="#X" data-hash="1" x="70" y="175" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is immutably borrowed"/>
-                    </svg> 
-        <svg x="65" y="170" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-                        <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="red" stroke-width="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is immutably borrowed unsuccessfully"/>
+        <use xlink:href="#X" data-hash="1" x="70" y="175" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is no longer immutably borrowed"/>
-                    </svg> 
+        monospace, monospace !important;&quot;&gt;x&lt;/span&gt;'s resource is no longer immutably borrowed unsuccessfully"/>
         <circle cx="70" cy="205" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; goes out of scope. No resource is dropped."/>
@@ -245,7 +252,7 @@ object.code_panel {
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;y&lt;/span&gt; goes out of scope. Its resource is dropped."/>
         <text x="96" y="120" data-hash="3" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from()&lt;/span&gt;">f</text>
-        <use xlink:href="#functionDot" data-hash="1" x="70" y="175" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!()&lt;/span&gt; reads from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;"/>
+        <use xlink:href="#functionX" data-hash="1" x="70" y="175" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!()&lt;/span&gt; unsuccessfully reads from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;x&lt;/span&gt;"/>
     </g>
 
     <g id="arrows">
