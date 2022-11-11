@@ -109,5 +109,4 @@ done
 mdbook build
 
 # Run HTTP server on docs directory
-cd book
 mdbook serve -p 8000
