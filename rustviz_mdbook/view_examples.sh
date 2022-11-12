@@ -32,6 +32,7 @@ declare -a targetExamples=(
     "hatra1_test"
     "hatra2"
     "immutable_borrow"
+    "immutable_borrow_lifetime"
     "immutable_borrow_method_call"
     "immutable_variable"
     "move_assignment"
@@ -109,5 +110,4 @@ done
 mdbook build
 
 # Run HTTP server on docs directory
-cd book
 mdbook serve -p 8000
