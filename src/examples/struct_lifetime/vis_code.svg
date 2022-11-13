@@ -181,8 +181,8 @@ object.code_panel {
         <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>    <tspan class="fn" data-hash="0" hash="6">println!</tspan>("{}", <tspan data-hash="3">first</tspan>); </text>
         <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>    // 'i' cannot be returned be returned </text>
         <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>    // because the struct outlives 'n' </text>
-        <text class="code" x="20" y="480"> <tspan fill="#AAA">14</tspan> </text>
-        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>} </text>
+        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>} </text>
+        <text class="code" x="20" y="510"> <tspan fill="#AAA">15</tspan> </text>
         <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan> </text>
         <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>fn main() { </text>
         <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>    some_function(); </text>

@@ -13,10 +13,11 @@ fn some_function() {
     let n = String::from("Ok. I'm fine."); // !{ Move(String::from()->n) }
     let first = n.split('.').next().expect("Could not find a '.'"); // !{ StaticBorrow(n->first) }
     let i = Excerpt { // !{ Bind(i) }
-        p: first, /* reference &str is copied to p
-                    !{ Copy(first->i.p) } */
+        p: first, /* reference &str is copied to p !{ Copy(first->i.p) } */
     };
     println!("{}", first); // !{ PassByStaticReference(first->println!()) }
+    // 'i' cannot be returned be returned
+    // because the struct outlives 'n'
 } /* !{
     StaticDie(i.p->n), StaticDie(first->n),
     GoOutOfScope(first), 
