@@ -8,6 +8,7 @@ fn some_function() {
     let <tspan data-hash="1">i</tspan> = Excerpt {
         <tspan data-hash="2">p</tspan>: <tspan data-hash="3">first</tspan>,
     };
+    <tspan class="fn" data-hash="0" hash="6">println!</tspan>("{}", <tspan data-hash="3">first</tspan>);
     // 'i' cannot be returned be returned
     // because the struct outlives 'n'
 }
