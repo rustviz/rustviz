@@ -106,6 +106,7 @@ pub fn render_svg(
         let (output, line_of_code) =
             code_panel::render_code_panel(annotated_lines, lines, &mut max_x_space, &visualization_data.event_line_map);
         code_panel_string = output;
+        // println!({},code_panel_string);
         num_lines = line_of_code;
     }
 
@@ -121,6 +122,8 @@ pub fn render_svg(
         tl_width: cmp::max(max_width, 200),
         height: (num_lines * LINE_SPACE as i32 + 80) + 50,
     };
+
+    println!("{}", svg_data.code);
 
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();
     let final_timeline_svg_content = handlebars

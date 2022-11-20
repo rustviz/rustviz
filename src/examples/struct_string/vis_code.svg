@@ -1,4 +1,4 @@
-<svg height="490px" 
+<svg height="730px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
     <desc>examples/struct_string/input/</desc>
@@ -169,16 +169,16 @@ object.code_panel {
 
     <g id="code">
         <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>struct <tspan class="fn" data-hash="0" hash="5">Foo</tspan> { </text>
-        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    <tspan data-hash="2">x</tspan>: i32, </text>
-        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>    <tspan data-hash="3">y</tspan>: String, </text>
-        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>} </text>
-        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan> </text>
-        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>fn main() { </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let <tspan data-hash="4">_y</tspan> = <tspan class="fn" data-hash="0" hash="6">String::from</tspan>("bar"); </text>
-        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let <tspan data-hash="1">f</tspan> = <tspan class="fn" data-hash="0" hash="5">Foo</tspan> { <tspan data-hash="2">x</tspan>: 5, <tspan data-hash="3">y</tspan>: <tspan data-hash="4">_y</tspan> }; </text>
-        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">f</tspan>.<tspan data-hash="2">x</tspan>); </text>
-        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">f</tspan>.<tspan data-hash="3">y</tspan>); </text>
-        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>} </text>
+        <text class="code" x="20" y="140"> <tspan fill="#AAA">2  </tspan>    <tspan data-hash="2">x</tspan>: i32, </text>
+        <text class="code" x="20" y="190"> <tspan fill="#AAA">3  </tspan>    <tspan data-hash="3">y</tspan>: String, </text>
+        <text class="code" x="20" y="240"> <tspan fill="#AAA">4  </tspan>} </text>
+        <text class="code" x="20" y="290"> <tspan fill="#AAA">5  </tspan> </text>
+        <text class="code" x="20" y="340"> <tspan fill="#AAA">6  </tspan>fn main() { </text>
+        <text class="code" x="20" y="390"> <tspan fill="#AAA">7  </tspan>    let <tspan data-hash="4">_y</tspan> = <tspan class="fn" data-hash="0" hash="6">String::from</tspan>("bar"); </text>
+        <text class="code" x="20" y="440"> <tspan fill="#AAA">8  </tspan>    let <tspan data-hash="1">f</tspan> = <tspan class="fn" data-hash="0" hash="5">Foo</tspan> { <tspan data-hash="2">x</tspan>: 5, <tspan data-hash="3">y</tspan>: <tspan data-hash="4">_y</tspan> }; </text>
+        <text class="code" x="20" y="490"> <tspan fill="#AAA">9  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">f</tspan>.<tspan data-hash="2">x</tspan>); </text>
+        <text class="code" x="20" y="540"> <tspan fill="#AAA">10  </tspan>    <tspan class="fn" data-hash="0" hash="8">println!</tspan>("{}", <tspan data-hash="1">f</tspan>.<tspan data-hash="3">y</tspan>); </text>
+        <text class="code" x="20" y="590"> <tspan fill="#AAA">11  </tspan>} </text>
     </g>
 
    

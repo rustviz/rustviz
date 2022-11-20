@@ -6,7 +6,7 @@ use crate::hover_messages;
 /*
  * Basic Data Structure Needed by Lifetime Visualization
  */
-pub static LINE_SPACE: i64 = 30;
+pub static LINE_SPACE: i64 = 50; // changed from 30 to 50
 // Top level Api that the Timeline object supports
 pub trait Visualizable {
     // returns None if the hash does not exist

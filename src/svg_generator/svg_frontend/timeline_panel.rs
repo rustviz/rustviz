@@ -176,7 +176,7 @@ fn prepare_registry(registry: &mut Handlebars) {
         <g id=\"timelines\">\n{{ timelines }}    </g>\n\n    \
         <g id=\"ref_line\">\n{{ ref_line }}    </g>\n\n    \
         <g id=\"events\">\n{{ dots }}    </g>\n\n    \
-        <g id=\"arrows\">\n{{ arrows }}    </g>";
+        <g id=  \"arrows\">\n{{ arrows }}    </g>";
 
     let struct_template  = 
         "    <g id=\"{{struct_name}}\">\n\

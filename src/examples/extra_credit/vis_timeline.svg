@@ -1,4 +1,4 @@
-<svg width="200px" height="700px" 
+<svg width="200px" height="1080px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
         id="tl_examples/extra_credit/input/">
 
@@ -213,7 +213,7 @@ object.code_panel {
     <g id="events">
     </g>
 
-    <g id="arrows">
+    <g id=  "arrows">
     </g></g>
 	<g class="struct_members">
     <g id="labels">
@@ -228,7 +228,7 @@ object.code_panel {
     <g id="events">
     </g>
 
-    <g id="arrows">
+    <g id=  "arrows">
     </g></g>
 	</g>
     

@@ -300,6 +300,14 @@ window.onload = function () {
             top_btns[0].insertBefore(eye, top_btns[0].lastElementChild);
         }
 
+        if (!struct_eye) {
+            eye = document.createElement('button');
+            eye.id = 'viz-struct-toggle';
+            eye.className = 'icon-button fa fa-eye';
+            eye.title = 'Toggle struct';
+            top_btns[0].insertBefore(struct_eye, top_btns[0].lastElementChild);
+        }
+
         eye.addEventListener('click', function (e) {
             if (e.target.classList.contains('fa-eye')) {
                 // on button click, show all visualizations
@@ -313,6 +321,22 @@ window.onload = function () {
                 e.target.classList.add('fa-eye');
 
                 toggleAll(false);
+            }
+        });
+
+        struct_eye.addEventListener('click', function (e) {
+            if (e.target.classList.contains('fa-eye')) {
+                // on button click, show all visualizations
+                e.target.classList.remove('fa-eye');
+                e.target.classList.add('fa-eye-slash');
+
+                toggleStruct(true);
+            } else if (e.target.classList.contains('fa-eye-slash')) {
+                // on button click, hide all visualizations
+                e.target.classList.remove('fa-eye-slash');
+                e.target.classList.add('fa-eye');
+
+                toggleStruct(false);
             }
         });
     }

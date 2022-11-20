@@ -273,7 +273,13 @@ function adjust_visualization_size(flexbox) {
                 buttons = document.createElement('div');
                 buttons.className = 'buttons';
                 pre_block.insertBefore(buttons, pre_block.firstChild);
+
+
             }
+
+            let buttons2 = document.createElement('div');
+            buttons2.className = 'buttons2';
+            pre_block.insertBefore(buttons2, pre_block.firstChild);
             
             // create button element
             let toggleButton = document.createElement('button');
@@ -282,6 +288,13 @@ function adjust_visualization_size(flexbox) {
             toggleButton.setAttribute('aria-label', toggleButton.title);
     
             buttons.insertBefore(toggleButton, buttons.firstChild);
+
+            let toggleButton2 = document.createElement('button');
+            toggleButton2.className = 'fa fa-toggle-off toggle-button';
+            toggleButton2.title = 'struct visualization';
+            toggleButton2.setAttribute('aria-label', toggleButton2.title);
+
+            buttons2.insertBefore(toggleButton2, buttons2.firstChild);
             block.style.display = 'block'; // initialize display to original code
 
             var resize_done = false;
