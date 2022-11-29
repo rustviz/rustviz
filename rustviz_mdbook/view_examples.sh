@@ -32,6 +32,7 @@ declare -a targetExamples=(
     "hatra1_test"
     "hatra2"
     "immutable_borrow"
+    "immutable_borrow_lifetime"
     "immutable_borrow_method_call"
     "immutable_variable"
     "move_assignment"
