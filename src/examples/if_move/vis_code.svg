@@ -1,4 +1,12 @@
-/* general setup */
+<svg height="430px" 
+        xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+
+    <desc>examples/if_move/input/</desc>
+
+    <defs>
+        <style type="text/css">
+        <![CDATA[
+        /* general setup */
 :root {
     --bg-color:#f1f1f1;
     --text-color: #6e6b5e;
@@ -155,3 +163,27 @@ object.code_panel {
     fill: #a6a6a6;
     stroke: #a6a6a6;
 }
+
+        ]]>
+        </style>
+    </defs>
+
+    <g>
+        <text id="caption" x="30" y="30">Hover over timeline events (dots), states (vertical lines),</text>
+        <text id="caption" x="30" y="50">and actions (arrows) for extra information.</text>
+    </g>
+
+    <g id="code">
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn main() { </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    let <tspan data-hash="1">x</tspan> = <tspan class="fn" data-hash="0" hash="3">String::from</tspan>("ABC"); </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>    let <tspan data-hash="2">guard</tspan> = 1; </text>
+        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>    if <tspan data-hash="2">guard</tspan> == 1 { </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>        <tspan class="fn" data-hash="0" hash="4">takes_ownership</tspan>(<tspan data-hash="1">x</tspan>); </text>
+        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    } else { </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>        0 </text>
+        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    } </text>
+        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>} </text>
+    </g>
+
+   
+</svg>

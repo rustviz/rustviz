@@ -10,6 +10,8 @@ pub enum OwnerLine {
     Hollow,    // you can only read the data from this RAP.
     Dotted,    // you cannot read nor write the data from this RAP temporarily (borrowed away by a mut reference)
     Empty,     // you cannot read nor write the data from this RAP forever (moved)
+    IfGrey,    // this resource is not used in this if branch
+    ElseGrey,  // this resource is not used in this else branch
 }
 
 

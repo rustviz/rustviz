@@ -6,7 +6,7 @@ use handlebars::Handlebars;
 use std::collections::BTreeMap;
 use serde::Serialize;
 use std::cmp;
-
+use std::collections::HashSet;
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
 static SPAN_END : &'static str = "&lt;/span&gt;";
@@ -66,7 +66,8 @@ struct FunctionLogoData {
     hash: u64,
     x: i64,
     y: i64,
-    title: String
+    title: String,
+    stmtext: String
 }
 
 #[derive(Serialize)]
@@ -118,7 +119,23 @@ struct OutputStringData {
     struct_members: String
 }
 
-pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String, i32) {
+#[derive(Serialize, Clone)]
+struct IfLineData {
+    x1: i64,
+    x2: i64,
+    y1: i64,
+    y2: i64,
+}
+
+#[derive(Serialize, Clone)]
+struct ElseLineData {
+    x1: i64,
+    x2: i64,
+    y1: i64,
+    y2: i64,
+}
+
+pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (String, i32) {
     /* Template creation */
     let mut registry = Handlebars::new();
     prepare_registry(&mut registry);
@@ -126,7 +143,7 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     let mut structs_info = StructsInfo { structs: Vec::new() };
 
     // hash -> TimelineColumnData
-    let (resource_owners_layout, width) = compute_column_layout(visualization_data, &mut structs_info);
+    let (resource_owners_layout, width) = compute_column_layout(visualization_data.clone(), &mut structs_info);
 
     let mut output : BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
     output.insert(-1, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
@@ -191,7 +208,7 @@ fn prepare_registry(registry: &mut Handlebars) {
     let function_dot_template =    
         "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
     let function_logo_template =
-        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
+        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">{{stmtext}}</text>\n";
     let arrow_template =
         "        <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" marker-end=\"url(#arrowHead)\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\" style=\"fill: none;\"/> \n";
     let vertical_line_template =
@@ -204,7 +221,6 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
-
     assert!(
         registry.register_template_string("struct_template", struct_template).is_ok()
     );
@@ -245,9 +261,9 @@ fn prepare_registry(registry: &mut Handlebars) {
 
 // Returns: a binary tree map from the hash of the ResourceOwner to its Column information
 fn compute_column_layout<'a>(
-    visualization_data: &'a VisualizationData,
+    visualization_data: VisualizationData,
     structs_info: &'a mut StructsInfo,
-) -> (BTreeMap<&'a u64, TimelineColumnData>, i32) {
+) -> (BTreeMap<u64, TimelineColumnData>, i32) {
     let mut resource_owners_layout = BTreeMap::new();
     let mut x = 0; // Right-most Column x-offset.
     let mut owner = -1;
@@ -296,7 +312,7 @@ fn compute_column_layout<'a>(
                     last_x = 0;
                 }
 
-                resource_owners_layout.insert(hash, TimelineColumnData
+                resource_owners_layout.insert(hash.clone(), TimelineColumnData
                     { 
                         name: name.clone(), 
                         x_val: x, 
@@ -314,7 +330,7 @@ fn compute_column_layout<'a>(
 
 fn render_labels_string(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars
 ) {
     for (hash, column_data) in resource_owners_layout.iter() {
@@ -347,7 +363,7 @@ fn render_labels_string(
 fn render_dots_string(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
-    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars
 ){
     let timelines = &visualization_data.timelines;
@@ -421,9 +437,289 @@ fn render_dots_string(
 fn render_arrows_string_external_events_version(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
-    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars
 ){
+    let mut is_in_if = false;
+    let mut set_RAP = HashSet::new();
+    for (line_number, external_event) in &visualization_data.external_events {
+        match external_event {
+            ExternalEvent::StartIf{} => {
+                is_in_if = true;
+            }
+            ExternalEvent::EndJoint{} => {
+                is_in_if = false;
+            }
+            ExternalEvent::Bind{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                } 
+            },
+            ExternalEvent::Copy{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                }
+            },
+            ExternalEvent::Move{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                }
+            },
+            ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                }
+            },
+            ExternalEvent::StaticDie{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                }
+            },
+            ExternalEvent::MutableBorrow{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                }
+            },
+            ExternalEvent::MutableDie{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                }
+            },
+            ExternalEvent::PassByMutableReference{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                }
+            },
+            ExternalEvent::PassByStaticReference{ from: from_ro, to: to_ro } => {
+                let mut from_is_func = false;
+                let mut to_is_func = false;
+                if(is_in_if) {
+                    if let Some(tmp_rap) = from_ro{
+                        println!("passbystaticref{}", tmp_rap.hash());
+                        println!("passbystaticref{}", tmp_rap.name());
+                        match (tmp_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                from_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tmpt_rap) = to_ro{
+                        println!("passbystaticreft{}", tmpt_rap.hash());
+                        println!("passbystaticreft{}", tmpt_rap.name());
+                        match (tmpt_rap){
+                            ResourceAccessPoint::Function(_) => {
+                                to_is_func = true;
+                            },
+                            _ => {}
+                        }
+                    }
+                    if from_is_func != true {
+                        set_RAP.insert(from_ro);
+                    }
+                    if to_is_func != true {
+                        set_RAP.insert(to_ro);
+                    }
+                    
+                }
+            },
+            _ => {},
+        };
+    }
+    
     for (line_number, external_event) in &visualization_data.external_events {
         let mut title = String::from("");
         let (from, to) = match external_event {
@@ -510,6 +806,7 @@ fn render_arrows_string_external_events_version(
                 let x2 = x1 + arrow_length;
                 let y1 = get_y_axis_pos(*line_number);
                 let y2 = get_y_axis_pos(*line_number);
+
                 data.coordinates.push((x1 as f64, y1 as f64));
                 data.coordinates.push((x2 as f64, y2 as f64));
 
@@ -518,6 +815,7 @@ fn render_arrows_string_external_events_version(
                     y: y2 + 5,
                     hash: from_function.hash.to_owned() as u64,
                     title: SPAN_BEGIN.to_string() + &from_function.name + SPAN_END,
+                    stmtext: String::from("f"),
                 };
 
                 if resource_owners_layout[to_variable.hash()].is_struct_group {
@@ -594,6 +892,7 @@ fn render_arrows_string_external_events_version(
                     y: y1 + 5,
                     hash: to_function.hash.to_owned() as u64,
                     title: styled_fn_name,
+                    stmtext: String::from("f"),
                 };
 
                 if resource_owners_layout[from_variable.hash()].is_struct_group {
@@ -608,6 +907,7 @@ fn render_arrows_string_external_events_version(
                 }
             },
             (Some(from_variable), Some(to_variable), _) => {
+
                 let arrow_order = visualization_data.event_line_map.get(line_number).unwrap().iter().position(|x| x == external_event).unwrap() as i64;
 
                 let x1 = resource_owners_layout[to_variable.hash()].x_val;
@@ -641,6 +941,71 @@ fn render_arrows_string_external_events_version(
                 } else {
                     data.coordinates.push((x1 as f64, y1 as f64));
                     data.coordinates.push((x2 as f64, y2 as f64));
+                }
+            },
+            (_, _, ExternalEvent::StartIf {}) => {
+                // println!("{}", &set_RAP.len());
+                for rap in &set_RAP { 
+                    let styled_stmt_name = String::from("Enters an If block");
+                    if let Some(tmp_rap) = rap{
+                        // for (hash, column_data) in resource_owners_layout.iter() {
+                        //     println!("i{}", &hash);
+                        //     println!("{}", column_data.x_val);
+                        //     println!("{}", column_data.name);
+                        // }
+                        // println!("{}",resource_owners_layout.len());
+                        // println!("{}", &(tmp_rap.hash()));
+                        let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val - 1;
+                        // let x1 = 0;
+                        let x2 = x1;
+                        let y1 = get_y_axis_pos(*line_number);
+                        let function_data = FunctionLogoData {
+                            x: x1 + 3,
+                            y: y1 + 5,
+                            hash: tmp_rap.hash().to_owned() as u64,
+                            title: styled_stmt_name,
+                            stmtext: String::from("If"),
+                        };
+                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                        }
+
+                }
+            },
+            (_, _, ExternalEvent::StartElse {}) => {
+                for rap in &set_RAP {
+                    let styled_stmt_name = String::from("Enters an Else block");
+                    if let Some(tmp_rap) = rap {
+                        let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
+                        let x2 = x1;
+                        let y1 = get_y_axis_pos(*line_number);
+                        let function_data = FunctionLogoData {
+                            x: x1 + 3,
+                            y: y1 + 5,
+                            hash: tmp_rap.hash().to_owned() as u64,
+                            title: styled_stmt_name,
+                            stmtext: String::from("Else"),
+                        };
+                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    }
+                }
+            },
+
+            (_, _, ExternalEvent::EndJoint {}) => {
+                for rap in &set_RAP {
+                    let styled_stmt_name = String::from("Finishes an entire conditional block");
+                    if let Some(tmp_rap) = rap {
+                        let x1 = resource_owners_layout[&(tmp_rap.hash())].x_val + 3;
+                        let x2 = x1;
+                        let y1 = get_y_axis_pos(*line_number);
+                        let function_data = FunctionLogoData {
+                            x: x1 + 3,
+                            y: y1 + 5,
+                            hash: tmp_rap.hash().to_owned() as u64,
+                            title: styled_stmt_name,
+                            stmtext: String::from("Endif"),
+                        };
+                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    }
                 }
             },
             _ => (), // don't support other cases for now
@@ -844,50 +1209,127 @@ fn create_reference_line_string(
 // render timelines (states) for RAPs using vertical lines
 fn render_timelines(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    visualization_data: &VisualizationData,
-    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
+    visualization_data: & mut VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars
 ){
-    let timelines = &visualization_data.timelines;
-    for (hash, timeline) in timelines {
+    let timelines = visualization_data.timelines.clone();
+    for (hash, timeline) in timelines.iter() {
         let rap = &timeline.resource_access_point;
         let rap_states = visualization_data.get_states(hash);
-        for (line_start, line_end, state) in rap_states.iter() {
+        for (line_start, line_end, afterElse, prevState, ifState, elseState) in rap_states.iter() {
             // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
-            let data = match rap {
-                ResourceAccessPoint::Function(_) => None,
-                _ => Some(VerticalLineData {
-                    line_class: String::new(),
-                    hash: *hash,
-                    x1: resource_owners_layout[hash].x_val as f64,
-                    y1: get_y_axis_pos(*line_start),
-                    x2: resource_owners_layout[hash].x_val,
-                    y2: get_y_axis_pos(*line_end),
-                    title: state.print_message_with_name(rap.name())
-                })
-            };
-            match rap {
-                ResourceAccessPoint::Function(_) => {}, // Don't do anything
-                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
-                    if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
-                        if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
-                            output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
-                                ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
-                                    timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
-                        }
-                        if resource_owners_layout[hash].is_member {
-                            output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
-                        } else {
-                            output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
-                        }
-                    }
-                    else {
-                        output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, state, &mut data.unwrap(), registry));
+            
+            println!("{}, {}, {}", prevState, ifState, elseState);
+            match (prevState, ifState, elseState) {
+                (_, State::OutOfScope, State::OutOfScope) | (_, _, State::OutOfScope)=> {
+                    println!("before if or after else");
+                    // before if and after else
+                    let data = match rap {
+                        ResourceAccessPoint::Function(_) => None,
+                        _ => Some(VerticalLineData {
+                            line_class: String::new(),
+                            hash: *hash,
+                            x1: resource_owners_layout[hash].x_val as f64,
+                            y1: get_y_axis_pos(*line_start),
+                            x2: resource_owners_layout[hash].x_val,
+                            y2: get_y_axis_pos(*line_end),
+                            title: prevState.print_message_with_name(rap.name())
+                        })
+                    };
+
+                    match rap {
+                        ResourceAccessPoint::Function(_) => {}, // Don't do anything
+                        ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
+                            if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
+                                if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
+                                    output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
+                                        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
+                                            timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+                                }
+                                if resource_owners_layout[hash].is_member {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, prevState, &mut data.unwrap(), registry));
+                                } else {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, prevState, &mut data.unwrap(), registry));
+                                }
+                            }
+                            else {
+                                output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, prevState, &mut data.unwrap(), registry));
+                            }
+                        },
+                        ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
+                            
+                            output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, prevState, &mut data.unwrap(), registry));
+                        },
                     }
                 },
-                ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
-                    output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, state, &mut data.unwrap(), registry));
-                },
+                //  => {
+                //     // after else
+                //     if let Some(stateData) = data {
+                //         stateData.title = prevState.print_message_with_name(rap.name())
+                //     }
+                // },
+                _ => {
+                    println!("between if else");
+                    // between if else
+                    let ifData = match rap {
+                        ResourceAccessPoint::Function(_) => None,
+                        _ => Some(VerticalLineData {
+                            line_class: String::new(),
+                            hash: *hash,
+                            x1: (resource_owners_layout[hash].x_val-5) as f64,
+                            y1: get_y_axis_pos(*line_start),
+                            x2: (resource_owners_layout[hash].x_val-5),
+                            y2: get_y_axis_pos(*line_end),
+                            title: ifState.print_message_with_name(rap.name())
+                        })
+                    };
+                    let mut elseData = match rap {
+                        ResourceAccessPoint::Function(_) => None,
+                        _ => Some( VerticalLineData {
+                            line_class: String::new(),
+                            hash: 100,
+                            x1: (resource_owners_layout[hash].x_val+5) as f64,
+                            y1: get_y_axis_pos(*line_start),
+                            x2: (resource_owners_layout[hash].x_val+5),
+                            y2: get_y_axis_pos(*line_end),
+                            title: elseState.print_message_with_name(rap.name())
+                        })
+                    };
+
+                    if *afterElse {
+                        let elseD = elseData.as_mut().unwrap();
+                        elseD.hash = *hash;
+                    }
+                    match rap {
+                        ResourceAccessPoint::Function(_) => {}, // Don't do anything
+                        ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
+                            if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
+                                if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
+                                    output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
+                                        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
+                                            timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+                                }
+                                if resource_owners_layout[hash].is_member {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().1.timelines.push_str(&create_owner_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                                } else {
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                                    output.get_mut(&(resource_owners_layout[hash].owner.to_owned() as i64)).unwrap().0.timelines.push_str(&create_owner_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                                }
+                            }
+                            else {
+                                output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                                output.get_mut(&-1).unwrap().0.timelines.push_str(&create_owner_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                            }
+                        },
+                        ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
+                            
+                            output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, ifState, &mut ifData.unwrap(), registry));
+                            output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, elseState, &mut elseData.unwrap(), registry));
+                        },
+                    }
+                }
             }
         }
     }
@@ -897,13 +1339,13 @@ fn render_timelines(
 // (iff it's a MutRef && it has FullPrivilege)
 fn render_ref_line(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    visualization_data: &VisualizationData,
-    resource_owners_layout: &BTreeMap<&u64, TimelineColumnData>,
+    visualization_data: &mut VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars
 ){
-    let timelines = &visualization_data.timelines;
-
-    for (hash, timeline) in timelines{
+    let timelines = visualization_data.timelines.clone();
+    let external_events = visualization_data.external_events.clone();
+    for (hash, timeline) in timelines.iter() {
         match timeline.resource_access_point {
             ResourceAccessPoint::Function(_) => (), /* do nothing */
             ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
@@ -926,7 +1368,7 @@ fn render_ref_line(
                     dy: 0,
                     title: String::new(),
                 };
-                for (line_start, _line_end, state) in states.iter() {
+                for (line_start, _line_end, afterElse, state, state2, state3) in states.iter() {
                     match state { // consider removing .clone()
                         State::OutOfScope | State::ResourceMoved{ .. } => {
                             if alive {
@@ -984,6 +1426,7 @@ fn render_ref_line(
             },  
         }
     }
+
 }
 
 fn render_struct_box(

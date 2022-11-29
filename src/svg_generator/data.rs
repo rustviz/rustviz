@@ -3,6 +3,7 @@ use std::vec::Vec;
 use std::fmt::{Formatter, Result, Display};
 use crate::data::Event::*;
 use crate::hover_messages;
+use std::ops::{Index, IndexMut};
 /*
  * Basic Data Structure Needed by Lifetime Visualization
  */
@@ -16,8 +17,8 @@ pub trait Visualizable {
     fn get_state(&self, hash: &u64, line_number: &usize) -> Option<State>;
     
     // for querying states of a resource owner using its hash
-    //                                         start line, end line, state
-    fn get_states(&self, hash: &u64) -> Vec::<(usize,      usize,    State)>;
+    //                                         start line, end line, state. the last two states should only be used in conditional rendering
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize,      usize,    bool, State, State, State)>;
 
     // WARNING do not call this when making visualization!! 
     // use append_external_event instead
@@ -33,7 +34,7 @@ pub trait Visualizable {
     // if resource_access_point with hash is a function
     fn is_mutref(&self, hash: &u64) -> bool;
 
-    fn calc_state(&self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State;
+    fn calc_state(&mut self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State;
 }
 
 
@@ -234,6 +235,15 @@ pub enum ExternalEvent {
     InitRefParam {
         param: ResourceAccessPoint,
     },
+    StartIf{
+
+    },
+    StartElse{
+        
+    },
+    EndJoint{
+
+    },
 }
 
 
@@ -242,7 +252,7 @@ pub enum ExternalEvent {
 // An Event describes the acquisition or release of a
 // resource ownership by a Owner on any given line.
 // There are six types of them.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Event {
     // this happens when a variable is initiated, it should obtain
     // its resource from either another variable or from a
@@ -323,11 +333,17 @@ pub enum Event {
     InitRefParam {
         param: ResourceAccessPoint
     },
+    // this happens when an if statement block is entered.
+    StartIf,
+    // this happens when an else statement block is entered.
+    StartElse,
+    // this happens when the entire conditional block finishes.
+    EndJoint,
 }
 
 // A State is a description of a ResourceAccessPoint IMMEDIATELY AFTER a specific line.
 // We think of this as what read/write access we have to its resource.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum State {
     // The viable is no longer in the scope after this line.
     OutOfScope,
@@ -359,9 +375,11 @@ pub enum State {
         to: Option<ResourceAccessPoint>,
         borrow_to: Option<ResourceAccessPoint>,
     },
+
     // should not appear for visualization in a correct program
     Invalid,
 }
+
 
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result {
@@ -437,6 +455,9 @@ impl Display for Event {
             Event::InitRefParam{ param: _ } => { "Function parameter is initialized" },
             Event::OwnerGoOutOfScope => { "Goes out of Scope as an owner of resource" },
             Event::RefGoOutOfScope => { "Goes out of Scope as a reference to resource" },
+            Event::StartIf => {"Enters an if block"},
+            Event::StartElse => {"Enters an else block"},
+            Event::EndJoint => {"Finishes an entire conditional block)"},
         }.to_string();
 
         if let Some(from_ro) = from_ro {
@@ -505,13 +526,24 @@ impl Event {
             MutableReacquire{ from } => {
                 safe_message(hover_messages::event_dot_mut_reacquire, my_name, from)
             }
+            StartIf => { 
+                // my_name should be if
+                hover_messages::start_cond(my_name)
+            }
+            StartElse => {
+                 // my_name should be else
+                hover_messages::start_cond(my_name)
+            }
+            EndJoint => {
+                hover_messages::end_cond()
+            }
         } 
     }
 }
 
 // a vector of ownership transfer history of a specific variable,
 // in a sorted order by line number.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Timeline {
     pub resource_access_point: ResourceAccessPoint,    // a reference of an Owner or a (TODO) Reference, 
                                 // since Functions don't have a timeline 
@@ -529,7 +561,7 @@ pub struct StructsInfo {
 // VisualizationData supplies all the information we need in the frontend,
 // from rendering a PNG to px roducing an interactive HTML guide.
 // The internal data is simple: a map from variable hash to its Timeline.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VisualizationData {
     // When displaying all timelines in the frontend of choice, one should
     // consider picking a hash function that gives the BTreeMap a sensible order.
@@ -542,6 +574,8 @@ pub struct VisualizationData {
     pub preprocess_external_events: Vec<(usize, ExternalEvent)>,
     //line_info
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
+    // an orderred map from a variable's hash to its state
+    pub variable_state_map: BTreeMap<u64, Vec<State>>,
 }
 
 #[allow(non_snake_case)]
@@ -564,6 +598,7 @@ pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option
 // fulfills the promise that we can support all the methods that a
 // frontend would need.
 impl Visualizable for VisualizationData {
+
     fn get_name_from_hash(&self, hash: &u64) -> Option<String> {
         match self.timelines.get(hash) {
             Some(timeline) => Some(timeline.resource_access_point.name().to_owned()),
@@ -580,9 +615,14 @@ impl Visualizable for VisualizationData {
     fn is_mutref(&self, hash: &u64) -> bool {
         self.timelines[hash].resource_access_point.is_mutref()
     }
-
+    // update state for variables. should only be called when dealing with conditionals
+    // fn update_conditional_state(&self) -> State {
+    //     self.variable_state_map[hash].push()
+        
+    // }
     // a Function does not have a State, so we assume previous_state is always for Variables
-    fn calc_state(&self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State {
+    fn calc_state(&mut self, previous_state: & State, event: & Event, event_line: usize, hash: &u64) -> State {
+        // println!("entered calc state");
         /* a Variable cannot borrow or return resource from Functions, 
         but can 'lend' or 'reaquire' to Functions (pass itself by reference and take it back); */
         fn event_invalid(event: & Event) -> bool {
@@ -599,6 +639,103 @@ impl Visualizable for VisualizationData {
         match (previous_state, event) {
             (State::Invalid, _) =>
                 State::Invalid,
+            (_, Event::StartIf {}) => {
+                // println!("matched if");
+                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
+                    tmp_vec.push((*previous_state).clone());
+// for debug purpose
+                    // match(previous_state) {
+                    //     State::OutOfScope => println!("if{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("if{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("if{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("if{}", 2),
+                    //     State::FullPrivilege => println!("if{}", 1),
+                    //     _ => {},
+                    // }
+                    (*previous_state).clone()
+                }
+                // if the map is empty
+                else{
+                    let vec = vec![(*previous_state).clone()];
+                    self.variable_state_map.insert(hash.clone(), vec);
+                    // for debug
+                    // match(previous_state) {
+                    //     State::OutOfScope => println!("newlyadd{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("newlyadd{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("newlyadd{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("newlyadd{}", 2),
+                    //     State::FullPrivilege => println!("newlyadd{}", 1),
+                    //     _ => {},
+                    // }
+                    (*previous_state).clone()
+                }
+            }
+            (_, Event::StartElse {}) => {
+                println!("matched else");
+                if let Some(tmp_vec) = self.variable_state_map.get_mut(&hash) {
+                    // for debug purpose
+                    // println!("should always be executed{}", hash);
+                    tmp_vec.push((*previous_state).clone());
+                    // match(previous_state) {
+                    //     State::OutOfScope => println!("else{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("else{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("else{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("else{}", 2),
+                    //     State::FullPrivilege => println!("else{}", 1),
+                    //     _ => {},
+                    // }
+                    // match(tmp_vec[tmp_vec.len() - 2]) {
+                    //     State::OutOfScope => println!("second last{}", 5),
+                    //     State::ResourceMoved{ .. } => println!("second last{}", 4),
+                    //     State::RevokedPrivilege{ .. } => println!("second last{}", 3),
+                    //     State::PartialPrivilege{ .. } => println!("second last{}", 2),
+                    //     State::FullPrivilege => println!("second last{}", 1),
+                    //     _ => println!("Error! Vec length is wrong"),
+                    // }
+                    (tmp_vec[tmp_vec.len() - 2]).clone()
+                }
+                // shouldn't be executed
+                else{
+                    println!("shouldn't be executed");
+                    let vec = vec![(*previous_state).clone()];
+                    self.variable_state_map.insert(hash.clone(), vec);
+                    (*previous_state).clone()
+                }
+                // println!("length is{}", self.variable_state_map.clone().len());
+                
+            }
+            (_, Event::EndJoint {}) => {
+                // println!("matched end");
+                // println!("length is{}", self.variable_state_map[hash].clone().len());
+                let mut second_last_elem = self.variable_state_map[hash][self.variable_state_map[hash].len() - 1].clone();
+                let mut priority_prev_state =  -1;
+                let mut priority_second_last = -1;
+                match(previous_state) {
+                    State::OutOfScope => priority_prev_state = 5,
+                    State::ResourceMoved{ .. } => priority_prev_state = 4,
+                    State::RevokedPrivilege{ .. } => priority_prev_state = 3,
+                    State::PartialPrivilege{ .. } => priority_prev_state = 2,
+                    State::FullPrivilege => priority_prev_state = 1,
+                    _ => {},
+                }
+                match(second_last_elem) {
+                    State::OutOfScope => priority_second_last = 5,
+                    State::ResourceMoved{ .. } => priority_second_last = 4,
+                    State::RevokedPrivilege{ .. } => priority_second_last = 3,
+                    State::PartialPrivilege{ .. } => priority_second_last = 2,
+                    State::FullPrivilege => priority_second_last = 1,
+                    _ => {},
+                }
+                // println!("pri_prev{}, hash is {}", priority_prev_state, hash);
+                // println!("pri_secondlast{}, hash is {}", priority_second_last, hash);
+                if(priority_prev_state < priority_second_last) {
+                    second_last_elem
+                }
+                else{
+                    (*previous_state).clone()
+                }
+                
+            }
 
             (State::OutOfScope, Event::Acquire{ .. }) =>
                 State::FullPrivilege,
@@ -726,27 +863,61 @@ impl Visualizable for VisualizationData {
 
             (State::RevokedPrivilege{ .. }, Event::MutableReacquire{ .. }) =>
                 State::FullPrivilege,
+                
 
             (_, Event::Duplicate { .. }) =>
                 (*previous_state).clone(),
-
+                
             (_, _) => State::Invalid,
         }
     }
 
-    fn get_states(&self, hash: &u64) -> Vec::<(usize, usize, State)> {
-        let mut states = Vec::<(usize, usize, State)>::new();
+    fn get_states(&mut self, hash: &u64) -> Vec::<(usize, usize, bool, State, State, State)> {
+        let mut states = Vec::<(usize, usize, bool, State, State, State)>::new();
         let mut previous_line_number: usize = 1;
         let mut prev_state = State::OutOfScope;
-        for (line_number, event) in self.timelines[hash].history.iter() {
-            states.push(
-                (previous_line_number, *line_number, prev_state.clone())
-            );
+        let mut if_state = State::OutOfScope;
+        let mut else_state = State::OutOfScope;
+        // clone instead of borrow
+        let mut flag = false;
+        for (line_number, event) in self.timelines[hash].history.clone().iter() {
+            if (flag) {states.push(
+                (previous_line_number, *line_number, flag, prev_state.clone(), State::OutOfScope, else_state.clone())
+            );}
+            else{
+                states.push(
+                    (previous_line_number, *line_number, flag, prev_state.clone(), prev_state.clone(), else_state.clone())
+                );
+            }
+            flag = false;
+            println!("{}", event);
+            match event {
+                Event::StartIf => {
+                    println!("Event::StartIf");
+                    if_state = prev_state.clone();
+                    else_state = prev_state.clone();
+                }
+                Event::StartElse => {
+                    println!("Event::StartElse");
+                    // prev_state = State::OutOfScope;
+                    flag = true;
+                }
+                Event::EndJoint => {
+                    println!("Event::EndJoint");
+                    else_state = State::OutOfScope;
+                }
+                _ => {
+                    println!("Other Events");
+                }
+            }
+            println!("{}, {}, {}", prev_state, if_state, else_state);
+
             prev_state = self.calc_state(&prev_state, &event, *line_number, hash);
             previous_line_number = *line_number;
+            
         }
         states.push(
-            (previous_line_number, previous_line_number, prev_state.clone())
+            (previous_line_number, previous_line_number, flag, prev_state.clone(), prev_state.clone(), else_state.clone())
         );
         states
     }
@@ -927,7 +1098,36 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
+            ExternalEvent::StartIf{} => {
+                // {hash, Timeline{rap, history}}
+                for (hash, timeline) in self.timelines.clone().iter() {
+                    match timeline.resource_access_point {
+                        ResourceAccessPoint::Function(_) => {}
+                        _ => { maybe_append_event(self, &Some(self.timelines[hash].resource_access_point.clone()), Event::StartIf, &line_number); }
+
+                    }
+                }
+            }
+            ExternalEvent::StartElse{} => {
+                for (hash, timeline) in self.timelines.clone().iter() {
+                    match timeline.resource_access_point {
+                        ResourceAccessPoint::Function(_) => {}
+                        _ => { maybe_append_event(self, &Some(self.timelines[hash].resource_access_point.clone()), Event::StartElse, &line_number); }
+
+                    }
+                }
+            }
+            ExternalEvent::EndJoint{} => {
+                for (hash, timeline) in self.timelines.clone().iter() {
+                    match timeline.resource_access_point {
+                        ResourceAccessPoint::Function(_) => {}
+                        _ => { maybe_append_event(self, &Some(self.timelines[hash].resource_access_point.clone()), Event::EndJoint, &line_number); }
+                    }
+                }
+            }
+            _ => {},
         }
+
     }
 }
 
