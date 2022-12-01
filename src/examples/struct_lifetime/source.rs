@@ -8,6 +8,7 @@ fn some_function() {
     let i = Excerpt {
         p: first,
     };
+    println!("{}", first);
     // 'i' cannot be returned be returned
     // because the struct outlives 'n'
 }

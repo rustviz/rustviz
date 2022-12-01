@@ -11,6 +11,6 @@ fn main() {
         let y = x; // !{ Move(x->y) }
         println("{}", y); // !{ PassByStaticReference(y->println!()) }
         // ...
-    }; // !{ GoOutOfScope(y) } !{ Move(None->z) }
+    }; // !{ GoOutOfScope(y), Move(None->z) }
     println!("Hello, world!");
 } // !{ GoOutOfScope(x), GoOutOfScope(z) }

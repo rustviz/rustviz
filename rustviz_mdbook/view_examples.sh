@@ -6,9 +6,16 @@ end=$'\e[0m'
 mkdir -p "./theme"
 cp mdbook_plugin/book.js theme/book.js
 
+if ! [[ -d "src" ]]; then
+    mkdir src
+fi
+
 # clear assets and md files to mdbook directory
 rm -f src/*md
-rm -r src/assets
+
+if [[ -d "src/assets" ]]; then
+    rm -r src/assets
+fi
 
 # Write the first line of SUMMARY.md. This clears anything that was there previously
 printf "# Summary\n\n" > src/SUMMARY.md
@@ -17,32 +24,33 @@ printf "Generating visualizations for the following examples: \n"
 
 # Uncomment the examples are being tested
 declare -a targetExamples=(
-    # "copy"
-    # "func_take_ownership"
-    # "func_take_return_ownership"
-    # "function"
-    # "hatra1"
-    # "hatra1_test"
-    # "hatra2"
-    # "immutable_borrow"
-    # "immutable_borrow_method_call"
-    # "immutable_variable"
-    # "move_assignment"
-    # "move_different_scope"
-    # "move_func_return"
-    # "multiple_immutable_borrow"
-    # "mutable_borrow"
-    # "mutable_borrow_method_call"
-    # "mutable_variables"
-    # "nll_lexical_scope_different"
-    # "printing"
-    # "string_from_move_print"
-    # "string_from_print"
-    # "struct_lifetime"
-    # "struct_rect"
-    # "struct_rect2"
-    # "struct_string"
-    # "extra_credit"
+    "copy"
+    "func_take_ownership"
+    "func_take_return_ownership"
+    "function"
+    "hatra1"
+    "hatra1_test"
+    "hatra2"
+    "immutable_borrow"
+    "immutable_borrow_lifetime"
+    "immutable_borrow_method_call"
+    "immutable_variable"
+    "move_assignment"
+    "move_different_scope"
+    "move_func_return"
+    "multiple_immutable_borrow"
+    "mutable_borrow"
+    "mutable_borrow_method_call"
+    "mutable_variables"
+    "nll_lexical_scope_different"
+    "printing"
+    "string_from_move_print"
+    "string_from_print"
+    "struct_lifetime"
+    "struct_rect"
+    "struct_rect2"
+    "struct_string"
+    "extra_credit"
     # "closure_test"
     # "closure_thread"
     "thread_vec"
@@ -92,7 +100,7 @@ for target in ${targetExamples[@]}; do
         printf "\`\`\`rust\n" >> src/$target.md
         printf "{{#rustdoc_include assets/%s/source.rs}}\n" "$target" >> src/$target.md
         printf "\`\`\`\n" >> src/$target.md
-        printf '<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: none;">\n' >> src/$target.md
+        printf '<div class="flex-container vis_block" style="position:relative; margin-left:-75px; margin-right:-75px; display: flex;">\n' >> src/$target.md
         printf '\t<object type="image/svg+xml" class="%s code_panel" data="assets/%s/vis_code.svg"></object>\n' "$target" "$target">> src/$target.md
         printf '\t<object type="image/svg+xml" class="%s tl_panel" data="assets/%s/vis_timeline.svg" style="width: auto;" onmouseenter="helpers('"'"'%s'"'"')"></object>\n' "$target" "$target" "$target">> src/$target.md
         printf "</div>" >> src/$target.md
@@ -106,5 +114,4 @@ done
 mdbook build
 
 # Run HTTP server on docs directory
-cd book
-python3 -m http.server 8000
+mdbook serve -p 8000
