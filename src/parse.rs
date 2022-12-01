@@ -4,7 +4,7 @@ use std::collections::HashMap;
 type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
 use rustviz_lib::data::{
-    ExternalEvent, Function, MutRef, Owner, Struct,
+    ExternalEvent, Function, MutRef, Owner, Struct, Closure,
     ResourceAccessPoint, StaticRef, VisualizationData, Visualizable
 };
 
@@ -87,6 +87,16 @@ fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
                 vars_map.insert(
                     name,
                     ResourceAccessPoint::Owner(Owner {
+                        hash: hash,
+                        name: get_name_field(&fields),
+                        is_mut: get_mut_qualifier(&fields),
+                    })
+                );
+            },
+            ("Closure", 2) | ("Closure", 3) => {
+                vars_map.insert(
+                    name,
+                    ResourceAccessPoint::Closure(Closure {
                         hash: hash,
                         name: get_name_field(&fields),
                         is_mut: get_mut_qualifier(&fields),
@@ -213,7 +223,7 @@ pub fn extract_events(
 // Effects: Creates ExternalEvents and appends to VisualizationData
 pub fn add_events(
     vd: &mut VisualizationData,
-    vars: HashMap<String, ResourceAccessPoint>,
+    vars: &mut HashMap<String, ResourceAccessPoint>,
     events: Vec<(u64, String)>
 ) {
     for event in events {
@@ -264,6 +274,13 @@ pub fn add_events(
             ),
             "Move" => vd.append_external_event(
                 ExternalEvent::Move{
+                    from: get_resource(&vars, field[1]),
+                    to: get_resource(&vars, field[2])
+                },
+                &(event.0 as usize)
+            ),
+            "MoveToClosure" => vd.append_external_event(
+                ExternalEvent::MoveToClosure{
                     from: get_resource(&vars, field[1]),
                     to: get_resource(&vars, field[2])
                 },

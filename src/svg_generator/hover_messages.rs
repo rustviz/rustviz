@@ -49,6 +49,20 @@ pub fn event_dot_owner_go_out_out_scope(my_name: &String) -> String {
     )                             //was moved from the variable earlier.
 }
 
+// 0
+// |
+// *   the star event
+//
+pub fn event_dot_closure_go_out_out_scope(my_name: &String) -> String {
+    // update styling
+    let my_name_fmt = fmt_style(my_name);
+    
+    format!(
+        "{0} goes out of scope. All resources in closure dropped.", 
+        my_name_fmt              
+    )                             
+}
+
 //     0
 //     
 // f1  *   the star event
@@ -89,14 +103,28 @@ pub fn event_dot_copy_to(my_name: &String, _target_name: &String) -> String {
 //     |
 // o<--*   the star event
 // |
-pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
+pub fn event_dot_move_to(my_name: &String, target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
-    
-    format!(
-        "{0}'s resource is moved",
-        my_name_fmt
-    )
+        format!(
+            "{0}'s resource is moved",
+            my_name_fmt
+        )
+    // }
+}
+
+// 1   0
+//     |
+// o<--*   the star event
+// |
+pub fn event_dot_move_to_closure(my_name: &String, target_name: &String) -> String {
+    // update styling
+    let my_name_fmt = fmt_style(my_name);
+        format!(
+            "{0}'s resource is moved to closure",
+            my_name_fmt
+        )
+    // }
 }
 
 // def fn(p):
@@ -183,11 +211,18 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
 pub fn event_dot_acquire(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
-    
-    format!(
-        "{0} acquires ownership of a resource",
-        my_name_fmt
-    )
+    if my_name.chars().nth(0).unwrap() == '|' && my_name.chars().last().unwrap() == '|'{
+        //this is a closure owner
+        format!(
+            "{0} in closure acquires ownership of a resource",
+            my_name_fmt
+        )
+    } else {
+        format!(
+            "{0} acquires ownership of a resource",
+            my_name_fmt
+        )
+    }
 }
 
 // 1   0        1   0
@@ -272,13 +307,25 @@ pub fn arrow_move_val_to_val(from_name: &String, to_name: &String) -> String {
     // update styling
     let from_name_fmt = fmt_style(from_name);
     let to_name_fmt = fmt_style(to_name);
-    
-    format!(
-        "{0}'s resource is moved to {1}",
-        from_name_fmt,
-        to_name_fmt
-    )
+
+    if to_name.chars().nth(0).unwrap() == '|' && to_name.chars().last().unwrap() == '|'{
+        //this is a closure owner
+        format!(
+            "{0}'s resource is moved to closure {1}",
+            from_name_fmt,
+            to_name_fmt
+        )
+    } else {
+        format!(
+            "{0}'s resource is moved to {1}",
+            from_name_fmt,
+            to_name_fmt
+        )
+    }
 }
+
+/* Arrow messages: shows up when someone hovers over an arrow */
+
 
 // 1   0
 //     |
