@@ -18,6 +18,7 @@ struct TimelineColumnData {
     is_ref: bool,
     is_struct_group: bool,
     is_member: bool,
+    is_closure: bool,
     owner: u64
 }
 
@@ -59,6 +60,12 @@ struct ArrowData {
     coordinates: Vec<(f64, f64)>,
     coordinates_hbs: String,
     title: String
+}
+
+#[derive(Serialize)]
+struct ClosureArrowData {
+    x: i64,
+    y: i64,
 }
 
 #[derive(Serialize)]
@@ -204,6 +211,8 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
+    let arrow_closure_template = 
+        "        <text x=\"{{x}}\" y=\"{{y}}\" stroke=\"gray\">||</text>\n";
 
     assert!(
         registry.register_template_string("struct_template", struct_template).is_ok()
@@ -219,6 +228,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     );
     assert!(
         registry.register_template_string("arrow_template", arrow_template).is_ok()
+    );
+    assert!(
+        registry.register_template_string("arrow_closure_template", arrow_closure_template).is_ok()
     );
     assert!(
         registry.register_template_string("vertical_line_template", vertical_line_template).is_ok()
@@ -259,7 +271,7 @@ fn compute_column_layout<'a>(
             ResourceAccessPoint::Function(_) => {
                 /* do nothing */
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let name = match visualization_data.get_name_from_hash(hash) {
                     Some(_name) => _name,
@@ -267,10 +279,14 @@ fn compute_column_layout<'a>(
                 };
                 let mut x_space = cmp::max(70, (&(name.len() as i64)-1)*13);
                 x = x + x_space;
-                let title = match visualization_data.is_mut(hash) {
+                let mut_title = match visualization_data.is_mut(hash) {
                     true => String::from("mutable"),
                     false => String::from("immutable"),
                 };
+                let mut title = mut_title.clone();
+                if visualization_data.is_closure(hash) {
+                    title = title + " is closure";
+                }
                 let mut ref_bool = false;
 
                 // render reference label
@@ -304,6 +320,7 @@ fn compute_column_layout<'a>(
                         is_ref: ref_bool,
                         is_struct_group: timeline.resource_access_point.is_struct_group(),
                         is_member: timeline.resource_access_point.is_member(),
+                        is_closure: timeline.resource_access_point.is_closure(),
                         owner: timeline.resource_access_point.get_owner(),
                     });
             }
@@ -357,7 +374,7 @@ fn render_dots_string(
             ResourceAccessPoint::Function(_) => {
                 // nothing to be done
             },
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let mut resource_hold = false;
                 for (line_number, event) in timeline.history.iter() {
@@ -439,6 +456,10 @@ fn render_arrows_string_external_events_version(
                 title = String::from("Move");
                 (from_ro, to_ro)
             },
+            ExternalEvent::MoveToClosure{ from: from_ro, to: to_ro } => {
+                title = String::from("Move");
+                (from_ro, to_ro)
+            },
             ExternalEvent::StaticBorrow{ from: from_ro, to: to_ro } => {
                 title = String::from("Immutable borrow");
                 (from_ro, to_ro)
@@ -469,6 +490,7 @@ fn render_arrows_string_external_events_version(
         if let Some(some_from) = from {
             let from_string = match some_from {
                 ResourceAccessPoint::Owner(owner) => owner.name.to_owned(),
+                ResourceAccessPoint::Closure(closure) => closure.name.to_owned(),
                 ResourceAccessPoint::Struct(stru) => stru.name.to_owned(),
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
@@ -480,6 +502,7 @@ fn render_arrows_string_external_events_version(
         if let Some(some_to) = to {
             let to_string = match some_to {
                 ResourceAccessPoint::Owner(owner) => owner.name.to_owned(),
+                ResourceAccessPoint::Closure(closure) => closure.name.to_owned(),
                 ResourceAccessPoint::Struct(stru) => stru.name.to_owned(),
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
@@ -488,12 +511,24 @@ fn render_arrows_string_external_events_version(
             let styled_to_string = SPAN_BEGIN.to_string() + &to_string + SPAN_END;
             title = format!("{} to {}", title, styled_to_string);
         };
+        let (from, to) = match external_event {
+            ExternalEvent::MoveToClosure{ from: from_ro, to: to_ro } => {
+                title = format!("{} via closure", title);
+                (from_ro, to_ro)
+            },
+            _ => (&None, &None),
+        };
 
         // order of points is to -> from
         let mut data = ArrowData {
             coordinates: Vec::new(),
             coordinates_hbs: String::new(),
             title: title
+        };
+
+        let mut closure_data = ClosureArrowData {
+            x: 0,
+            y: 0
         };
 
         let arrow_length = 20;
@@ -526,8 +561,7 @@ fn render_arrows_string_external_events_version(
                     } else {
                         output.get_mut(&(resource_owners_layout[to_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     }
-                }
-                else {
+                } else {
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                 }
             },
@@ -560,7 +594,6 @@ fn render_arrows_string_external_events_version(
                 // get variable's position
                 let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
                 let styled_from_name = SPAN_BEGIN.to_string() + from_variable.name() + SPAN_END;
-
                 let function_dot_data = FunctionDotData {
                     x: resource_owners_layout[from_variable.hash()].x_val,
                     y: get_y_axis_pos(*line_number),
@@ -577,6 +610,38 @@ fn render_arrows_string_external_events_version(
                 else {
                     output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                 }
+            },
+            (Some(from_variable), Some(ResourceAccessPoint::Function(to_function)), 
+             ExternalEvent::MoveToClosure{..}) => {  // (Some(variable), Some(function), MoveToClosure)
+                let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
+                //  ro1 (to_function) <- ro2 (from_variable)
+                let x2 = resource_owners_layout[from_variable.hash()].x_val - 5;
+                let x1 = x2 - arrow_length;
+                let y1 = get_y_axis_pos(*line_number);
+                let y2 = get_y_axis_pos(*line_number);
+                data.coordinates.push((x1 as f64, y1 as f64));
+                data.coordinates.push((x2 as f64, y2 as f64));
+
+                let function_data = FunctionLogoData {
+                    // adjust Function logo pos
+                    x: x1 - 10,  
+                    y: y1 + 5,
+                    hash: to_function.hash.to_owned() as u64,
+                    title: styled_fn_name,
+                };
+                closure_data.x = (x1+x2)/2;
+                closure_data.y = get_y_axis_pos(*line_number) + 5;
+                if resource_owners_layout[from_variable.hash()].is_struct_group {
+                    if resource_owners_layout[from_variable.hash()].is_member {
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    } else {
+                        output.get_mut(&(resource_owners_layout[from_variable.hash()].owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                    }
+                }
+                else {
+                    output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                }
+                output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_closure_template", &closure_data).unwrap());
             },
             (Some(from_variable), Some(ResourceAccessPoint::Function(to_function)), _) => { // (Some(variable), Some(function), _)
                 let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
@@ -614,6 +679,10 @@ fn render_arrows_string_external_events_version(
                 let x2 = resource_owners_layout[from_variable.hash()].x_val;
                 let y1 = get_y_axis_pos(*line_number);
                 let y2 = get_y_axis_pos(*line_number);
+                if resource_owners_layout[to_variable.hash()].is_closure{
+                    closure_data.x = (x1+x2)/2;
+                    closure_data.y = get_y_axis_pos(*line_number) + 5;
+                }
                 // if the arrow is pointing from left to right
                 if arrow_order > 0 && x2 <= x1{
                     let x3 = resource_owners_layout[from_variable.hash()].x_val + 20;
@@ -694,10 +763,12 @@ fn render_arrows_string_external_events_version(
                     } else {
                         output.get_mut(&(resource_owners_layout[ro.hash()].owner.to_owned() as i64)).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                     }
-                }
-                else {
+                } else {
                     output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                 }
+            }
+            if closure_data.x != 0 || closure_data.y != 0 {
+                output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_closure_template", &closure_data).unwrap());
             }
         }
     }
@@ -868,7 +939,7 @@ fn render_timelines(
             };
             match rap {
                 ResourceAccessPoint::Function(_) => {}, // Don't do anything
-                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
+                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Struct(_) => {
                     if resource_owners_layout[hash].is_struct_group { //TODO: not sure if this is correct
                         if !output.contains_key(&(resource_owners_layout[hash].owner.to_owned() as i64)) {
                             output.insert(resource_owners_layout[hash].owner.to_owned() as i64, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
@@ -906,7 +977,7 @@ fn render_ref_line(
     for (hash, timeline) in timelines{
         match timeline.resource_access_point {
             ResourceAccessPoint::Function(_) => (), /* do nothing */
-            ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
+            ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Closure(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
             {
                 let ro = timeline.resource_access_point.to_owned();
                 // verticle state lines
