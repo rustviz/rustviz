@@ -53,8 +53,13 @@ declare -a targetExamples=(
     "extra_credit"
     # "closure_test"
     # "closure_thread"
+    "closure_immutable_borrow"
+    "closure_multiple_immutable_borrow"
+    "closure_mutable_borrow"
     "thread_vec"
     "thread_vec2"
+    "thread_msg"
+    "thread_msg2"
 )
 
 EX="../src/examples"
