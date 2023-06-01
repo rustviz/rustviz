@@ -212,13 +212,13 @@ object.code_panel {
         <path data-hash="1" class="hollow tooltip-trigger" style="fill:transparent;" d="M 68.2,115 V 145 h 3.5 V 115 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource. The binding cannot be reassigned."/>
-        <line data-hash="2" class="solid tooltip-trigger" x1="140" x2="140" y1="175" y2="205" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <line data-hash="2" class="solid tooltip-trigger" x1="140.0" x2="140" y1="175" y2="205" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
-        <line data-hash="2" class="solid tooltip-trigger" x1="140" x2="140" y1="205" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <line data-hash="2" class="solid tooltip-trigger" x1="140.0" x2="140" y1="205" y2="235" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
-        <line data-hash="2" class="solid tooltip-trigger" x1="140" x2="140" y1="235" y2="265" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <line data-hash="2" class="solid tooltip-trigger" x1="140.0" x2="140" y1="235" y2="265" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
         <path data-hash="3" class="hollow tooltip-trigger" style="fill:transparent;" d="M 208.2,205 V 265 h 3.5 V 205 h -3.5" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',

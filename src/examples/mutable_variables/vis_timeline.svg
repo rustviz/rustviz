@@ -206,10 +206,10 @@ object.code_panel {
     </g>
 
     <g id="timelines">
-        <line data-hash="1" class="solid tooltip-trigger" x1="70" x2="70" y1="115" y2="145" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <line data-hash="1" class="solid tooltip-trigger" x1="70.0" x2="70" y1="115" y2="145" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
-        <line data-hash="1" class="solid tooltip-trigger" x1="70" x2="70" y1="145" y2="175" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
+        <line data-hash="1" class="solid tooltip-trigger" x1="70.0" x2="70" y1="145" y2="175" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;x&lt;/span&gt; is the owner of the resource. The binding can be reassigned."/>
     </g>
