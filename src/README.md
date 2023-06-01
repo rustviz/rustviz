@@ -1,6 +1,4 @@
-# RustViz
-*RustViz* is a tool written in Rust that generates visualizations from simple Rust programs to assist potential users and students in better understanding the Rust [Lifetime and Borrowing](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html) mechanism.
-
+# Dev Doc
 *This is a Dev Documents for people who wants to contribute to this project.*
 
 ## Data Structures and Function Specifications
