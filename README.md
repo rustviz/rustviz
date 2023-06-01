@@ -5,7 +5,7 @@
 
 RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/) at the University of Michigan.
 
-*For people who wants to contribute this project, refer to readme in /src*
+*For people who wants to contribute this project, refer to README in /src*
 
 ## What does it look like?
 
