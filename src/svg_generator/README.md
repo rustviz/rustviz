@@ -165,6 +165,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         MutRef(MutRef),
         StaticRef(StaticRef),
         Function(Function),
+        Struct(Struct),
     }
     ```
     - Owner<a name="Owner"></a>
@@ -174,7 +175,6 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
             pub name: String,
             pub hash: u64,
             pub is_mut: bool, // let a = 42; vs let mut a = 42;
-            pub lifetime_trait: LifetimeTrait,
         }
         ```
     - Struct<a name="Struct"></a>
@@ -185,7 +185,6 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
             pub hash: u64,
             pub owner: u64, // if it is the owner, then keep it the same as hash of itself
             pub is_mut: bool, // let a = 42; vs let mut a = 42;
-            pub lifetime_trait: LifetimeTrait,
             pub is_member: bool, 
         }
         ```
@@ -197,9 +196,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         pub struct MutRef {         // let (mut) r1 = &mut a;
             pub name: String,
             pub hash: u64,
-            pub my_owner_hash: Option<u64>,
             pub is_mut: bool,
-            pub lifetime_trait: LifetimeTrait,
         }
     
         // a reference of type & T
@@ -207,9 +204,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
         pub struct StaticRef {                // let (mut) r1 = & a;
             pub name: String,
             pub hash: u64,
-            pub my_owner_hash: Option<u64>,
             pub is_mut: bool,
-            pub lifetime_trait: LifetimeTrait,
         }
         ```
     - Functions<a name="Functions"></a> 
@@ -425,3 +420,4 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
     
 ## Visualization Limitations
 Yet to be finished....
+
