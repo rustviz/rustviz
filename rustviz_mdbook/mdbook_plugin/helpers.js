@@ -311,39 +311,3 @@ function toggleStruct(turn_on) {
         }
     }
 }
-
-/*window.onload = function () {
-    var correct_doc = (document.getElementsByClassName('active')[0].attributes.href.value === 'ch04-01-what-is-ownership.html'
-            || document.getElementsByClassName('active')[0].attributes.href.value === 'ch04-02-references-and-borrowing.html');
-
-    if (correct_doc) {
-        let top_btns = document.getElementsByClassName('left-buttons');
-
-        var eye = document.getElementById('viz-toggle');
-        var struct_eye = document.getElementById('viz-struct-toggle')
-
-        if (!eye) {
-            eye = document.createElement('button');
-            eye.id = 'viz-toggle';
-            eye.className = 'icon-button fa fa-eye';
-            eye.title = 'Toggle all visualizations';
-            top_btns[0].insertBefore(eye, top_btns[0].lastElementChild);
-        }
-
-        eye.addEventListener('click', function (e) {
-            if (e.currentTarget.classList.contains('fa-eye')) {
-                // on button click, show all visualizations
-                e.currentTarget.classList.remove('fa-eye');
-                e.currentTarget.classList.add('fa-eye-slash');
-
-                toggleAll(true);
-            } else if (e.currentTarget.classList.contains('fa-eye-slash')) {
-                // on button click, hide all visualizations
-                e.currentTarget.classList.remove('fa-eye-slash');
-                e.currentTarget.classList.add('fa-eye');
-
-                toggleAll(false);
-            }
-        });
-    }
-};*/

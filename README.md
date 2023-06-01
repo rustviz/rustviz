@@ -5,6 +5,8 @@
 
 RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/) at the University of Michigan.
 
+*For people who wants to contribute this project, refer to readme in /src*
+
 ## What does it look like?
 
 *RustViz* generates [SVG](https://developer.mozilla.org/en-US/docs/Web/SVG) files with graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to render interactive visualizations of ownership and borrowing related events in a Rust program. Here's a sample view of what a visualization can look like:
