@@ -180,7 +180,7 @@ ResourceAccessPoint is an enum that define all possible owner, references or cre
     - Struct<a name="Struct"></a>
     For the owner and members of a struct, we need to define several properties: The name of the variable, the hash number of itself and its owner, if it is a member and whether the vairable is mutable. The *lifetime_trait* property is not yet implemented.
         ```
-        pub struct Owner {
+        pub struct Struct {
             pub name: String,
             pub hash: u64,
             pub owner: u64, // if it is the owner, then keep it the same as hash of itself
