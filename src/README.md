@@ -280,7 +280,4 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
     | [timeline_panel.rs](svg_generator/src/timeline_panel.rs)<br>[timeline_template.svg](svg_generator/src/timeline_template.svg) | Defines template for timeline panel and builds corresponding SVG renderings |
     | [svg_generation.rs](svg_generator/src/svg_generation.rs) | Renders source code to SVG images and saves them under respective directory in `svg_generator/examples/` |
     | [line_styles.rs](svg_generator/src/line_styles.rs) | Unused |
-    
-## Visualization Limitations
-Yet to be finished....
 
