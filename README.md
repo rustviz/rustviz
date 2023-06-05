@@ -88,15 +88,6 @@ An immutable instance of some struct with member variables `x` and `mut y`, on t
 > </ol>
 <br>
 
-After running the [view_examples.sh](rustviz_mdbook/view_examples.sh) once we should have the following file structure:
-```shell
-string_from_move_print
-├── input
-│   └── annotated_source.rs
-├── main.rs
-└── source.rs
-```
-
 Next, we annotate the code with the use of `ExternalEvent`s that **describe move, borrow, and drop semantics** of Rust. In [string_from_move_print](src/examples/string_from_move_print), we have four such events:
 1. Move of resource from `String::from()` to `x`
 2. Move of resource from `y` to `x`
@@ -130,19 +121,6 @@ ExternalEvents Usage:
 ```
 > Refer to the [Appendix](#Appendix) for a list of usable `ExternalEvent`'s.
 
-Phew! All that's left is running the program. Simply navigate into [src](src) and run:
-```shell
-cargo run string_from_move_print
-```
-Now your folder should look like this:
-```
-string_from_move_print
-├── input
-│   └── annotated_source.rs
-├── main.rs
-├── source.rs
-├── vis_code.svg
-└── vis_timeline.svg
 ```
 Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script from [rustviz_mdbook](rustviz_mdbook) to see it in your browser.
 

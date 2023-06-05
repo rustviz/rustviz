@@ -1,0 +1,22 @@
+[package]
+name = "parse"
+version = "0.1.0"
+authors = ["Haochen Zhang <haochenz@umich.edu>", "Yu Pan <panyu@umich.edu>", "Cyrus Omar <comar@umich.edu>"]
+edition = "2018"
+description = "a tool that use syn crate to parse rust code"
+repository = "https://github.com/rustviz/RustvizParse"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.syn]
+version = "1.0.72"
+default-features = false # do not include the default features, and optionally
+                         # cherry-pick individual features
+features = ["parsing", "full", "extra-traits"]
+
+[dependencies]
+quote = "1.0.9"
+log = "0.4.14"
+env_logger = "0.8.4"
+clap = "2.33.3"
+proc-macro2="1.0"
