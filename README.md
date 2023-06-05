@@ -121,7 +121,7 @@ ExternalEvents Usage:
 ```
 > Refer to the [Appendix](#Appendix) for a list of usable `ExternalEvent`'s.
 
-```
+
 Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script from [rustviz_mdbook](rustviz_mdbook) to see it in your browser.
 
 ## Appendix
