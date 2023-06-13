@@ -44,7 +44,6 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
         num_lines += 1;
         vars_string.push_str(&line); // get vars to string
     }
-    println!("vars_string: {}", vars_string);
 
     // split string into individual variables
     let vars: Vec<String> = vars_string.split(';')

@@ -13,7 +13,7 @@ RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/)
 
 ![alt tag](https://github.com/rustviz/rustviz/blob/master/src/svg_generator/example.png)
 
-You can read more about it in [our draft paper](https://web.eecs.umich.edu/~comar/rustviz-hatra20.pdf). Note that the section on generating visualizations is out of date, see below.
+You can read more about it in [our latest paper](https://web.eecs.umich.edu/~comar/rustviz-vlhcc22.pdf). Note that the section on generating visualizations is out of date, see below.
 
 ## Usage
 *RustViz* is capable of generating visualizations for simple Rust programs (albeit with certain limitations) that have been annotated by the user. We are not currently attempting to generate visualizations automatically. In this section, we'll showcase how to generate SVG renderings of examples provided by us.
@@ -149,6 +149,17 @@ Congratulations! You have successfully generated your first visualization! As a 
 <!-- The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(x)`).  -->
 The `None` type can be used as the `<to>` parameter (e.g.: `Move(a->None)`) to specify a move to the function caller.
 > 3. All uses of `Struct` fields must be preceded by its parent struct's name. (e.g.: `a.b = 1;` can be annotated as `Move(None->a.b)`, where `a` is the parent and `b` is the field.)
+
+## Error Messages
+"Usage Error: cargo run <filename>" Missing key arguments in input command
+"Error: no corresponding directory exists in examples/!" No /example folder in designated path
+"Example source file (main.rs) not found in <filename>!" No main.rs in designated path
+"Unable to read file!" Error in open the main.rs
+"Oops, could not read. Empty file maybe?" & "Unable to read first line!" Can't read main.rs
+"Uh oh! Do not change the first line!" & "Something went wrong! Do not remove BEGIN and END statements!" First line of processed main.rs has been changed
+"Expected Some variable, found None!" Missing something in comments
+
+
 
 ## Visualization Limitations
 
