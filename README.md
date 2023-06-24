@@ -37,7 +37,8 @@ If you observed this output, then you have successfully generated the Rust visua
 Great, this is how you can generate and view visualizations created using *RustViz*. Now let's create one from scratch!
 
 ## Step-By-Step Guide
-In this section, we'll dive into creating an example, [string_from_move_print](src/examples/string_from_move_print). First, take note of the file structure we'll need to run the example:
+In this section, we'll dive into creating an example, [string_from_move_print](src/examples/string_from_move_print). Note that all visualization examples are placed under [`rustviz/src/examples/`](src/examples) directory and you can create a new directory in [`rustviz/src/examples/`](src/examples) of your own.
+First, take note of the file structure we'll need to run the example:
 ```shell
 string_from_move_print
 ├── input
@@ -53,6 +54,15 @@ fn main() {
 }
 ```
 In this example, `String::from()` moves a string (`"hello"`) to `x`, then `x`'s resource is moved to `y`. Subsequently, `println!()` outputs a message to `io::stdout` without moving the resource.
+
+[annotated_source.rs](src/examples/string_from_move_print/input/annotated_source.rs) contains style annotation to [source.rs](src/examples/string_from_move_print/source.rs) so as to generate SVG for code panel.
+```rust
+fn main() {
+    let <tspan data-hash="1">x</tspan> = <tspan class="fn" data-hash="0" hash="3">String::from</tspan>("hello");
+    let <tspan data-hash="2">y</tspan> = <tspan data-hash="1">x</tspan>;
+    <tspan class="fn" data-hash="0" hash="4">println!</tspan>("{}", <tspan data-hash="2">y</tspan>);
+}
+```
 
 Next, let's familiarize ourselves with the syntax used in [main.rs](src/examples/string_from_move_print/main.rs). The RustViz tool **defines all possible owners, references or input of any memory resource** as a [ResourceAccessPoint](#Data_Structures_and_Function_Specifications). In this case, we consider the function `String::from()` and two variables, `x` and `y`, as Resource Access Points (RAPs). Each of `String::from()` and `x`/`y` corresponds to RAPs `ResourceAccessPoint::Function` and `ResourceAccessPoint::Owner`, respectively.
 
