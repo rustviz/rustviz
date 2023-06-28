@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-//temp fix
+
 #[derive(Debug, Hash, PartialEq, Eq)]
 struct OwnerInfo {
     Name: Option<String>,
@@ -15,11 +15,13 @@ struct OwnerInfo {
     Fields: Option<Vec<String>>,
 }
 
+// The name of the function is optional
 #[derive(Debug, Hash, PartialEq, Eq)]
 struct FuncInfo {
     Name: Option<String>
 }
 
+// RAP means Rust Analysis Parser
 #[derive(Debug, Hash, PartialEq, Eq)]
 enum RAP {
     Owner(OwnerInfo),
