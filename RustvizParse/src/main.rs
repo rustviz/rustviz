@@ -19,6 +19,7 @@ use clap::{Arg, App};
 mod parse;
 
 fn main() {
+    // This initializes the env_logger, a logging implementation that reads its configuration from environment variables.
     env_logger::init();
     let matches = App::new("Rustviz Parse")
                         //   .version("1.0")
