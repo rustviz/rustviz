@@ -5,13 +5,15 @@
 
 RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/) at the University of Michigan.
 
+*For people who wants to contribute this project, refer to README in /src*
+
 ## What does it look like?
 
 *RustViz* generates [SVG](https://developer.mozilla.org/en-US/docs/Web/SVG) files with graphical indicators that integrate with [mdbook](https://github.com/rust-lang/mdBook) to render interactive visualizations of ownership and borrowing related events in a Rust program. Here's a sample view of what a visualization can look like:
 
 ![alt tag](https://github.com/rustviz/rustviz/blob/master/src/svg_generator/example.png)
 
-You can read more about it in [our draft paper](https://web.eecs.umich.edu/~comar/rustviz-hatra20.pdf). Note that the section on generating visualizations is out of date, see below.
+You can read more about it in [our latest paper](https://web.eecs.umich.edu/~comar/rustviz-vlhcc22.pdf). Note that the section on generating visualizations is out of date, see below.
 
 ## Usage
 *RustViz* is capable of generating visualizations for simple Rust programs (albeit with certain limitations) that have been annotated by the user. We are not currently attempting to generate visualizations automatically. In this section, we'll showcase how to generate SVG renderings of examples provided by us.
@@ -96,15 +98,6 @@ An immutable instance of some struct with member variables `x` and `mut y`, on t
 > </ol>
 <br>
 
-After running the [view_examples.sh](rustviz_mdbook/view_examples.sh) once we should have the following file structure:
-```shell
-string_from_move_print
-├── input
-│   └── annotated_source.rs
-├── main.rs
-└── source.rs
-```
-
 Next, we annotate the code with the use of `ExternalEvent`s that **describe move, borrow, and drop semantics** of Rust. In [string_from_move_print](src/examples/string_from_move_print), we have four such events:
 1. Move of resource from `String::from()` to `x`
 2. Move of resource from `y` to `x`
@@ -138,20 +131,7 @@ ExternalEvents Usage:
 ```
 > Refer to the [Appendix](#Appendix) for a list of usable `ExternalEvent`'s.
 
-Phew! All that's left is running the program. Simply navigate into [src](src) and run:
-```shell
-cargo run string_from_move_print
-```
-Now your folder should look like this:
-```
-string_from_move_print
-├── input
-│   └── annotated_source.rs
-├── main.rs
-├── source.rs
-├── vis_code.svg
-└── vis_timeline.svg
-```
+
 Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script from [rustviz_mdbook](rustviz_mdbook) to see it in your browser.
 
 ## Appendix
@@ -179,6 +159,17 @@ Congratulations! You have successfully generated your first visualization! As a 
 <!-- The `None` option is generally used for scalar types or undefined variables (e.g.: `let x = 1` can be annotated as `Bind(x)`).  -->
 The `None` type can be used as the `<to>` parameter (e.g.: `Move(a->None)`) to specify a move to the function caller.
 > 3. All uses of `Struct` fields must be preceded by its parent struct's name. (e.g.: `a.b = 1;` can be annotated as `Move(None->a.b)`, where `a` is the parent and `b` is the field.)
+
+## Error Messages
+"Usage Error: cargo run <filename>" Missing key arguments in input command
+"Error: no corresponding directory exists in examples/!" No /example folder in designated path
+"Example source file (main.rs) not found in <filename>!" No main.rs in designated path
+"Unable to read file!" Error in open the main.rs
+"Oops, could not read. Empty file maybe?" & "Unable to read first line!" Can't read main.rs
+"Uh oh! Do not change the first line!" & "Something went wrong! Do not remove BEGIN and END statements!" First line of processed main.rs has been changed
+"Expected Some variable, found None!" Missing something in comments
+
+
 
 ## Visualization Limitations
 

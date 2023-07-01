@@ -24,7 +24,7 @@ printf "Generating visualizations for the following examples: \n"
 
 # Uncomment the examples are being tested
 declare -a targetExamples=(
-    "copy"
+        "copy"
     "func_take_ownership"
     "func_take_return_ownership"
     "function"
