@@ -421,7 +421,91 @@ ExternalEvents is an enum that hold all the movements of a the resource, here is
     | [code_panel.rs](svg_generator/src/code_panel.rs)<br>[code_template.svg](svg_generator/src/code_template.svg) | Defines template for code panel and builds corresponding SVG renderings |
     | [timeline_panel.rs](svg_generator/src/timeline_panel.rs)<br>[timeline_template.svg](svg_generator/src/timeline_template.svg) | Defines template for timeline panel and builds corresponding SVG renderings |
     | [svg_generation.rs](svg_generator/src/svg_generation.rs) | Renders source code to SVG images and saves them under respective directory in `svg_generator/examples/` |
-    | [line_styles.rs](svg_generator/src/line_styles.rs) | Unused |
+    | [line_styles.rs](svg_generator/src/line_styles.rs) | Defines state for vertical line components as they relate to Owners |
+
+## Understanding How Rustviz Works
+It is recommended that you read over the content above and investigate the source files before attempting to understand the following section.
+
+1. <b>Parsing main.rs</b>
+    - `parse_vars_to_map`
+        Parses the block comments at the beginning of the main.rs file that refer to variable definitions  and constructs a map from the name of a variable to its respective [Resource Access Point](#ResourceAccessPoint). Each variable is assigned a distinct hash that increases incrementally such that interactions in the visualization appear in the order by which they were defined. For example, the following variable definitions would result in the ordering `[s, r1, r2, r3]` of timelines (left to right).
+        ```
+            /* --- BEGIN Variable Definitions ---
+            Owner mut s; StaticRef r1; StaticRef r2; MutRef r3;
+            --- END Variable Definitions --- */
+        ```
+    - `extract_events`
+        Builds a vector of `(line number, event)` tuples by parsing the comments of each line in the main.rs file. Note that at this moment said vector only contains the string representations of each event and not [External Events](#ExternalEvents).
+        ```
+            let r1 = &s; // !{ StaticBorrow(s->r1) }
+            let r2 = &s; // !{ StaticBorrow(s->r2) }
+
+            events: [(4, "StaticBorrow(s->r1)"), (5, "StaticBorrow(s->r2)")]
+        ```
+2. <b>Building Visualization Data </b>
+    - `add_events`
+        Constructs an [External Event](#ExternalEvents) for each respective string representation found in the vector returned by `extract_events`. These events are paired in `(line number, event)` tuples that are appended to the `preprocess_external_events` member of the `vd` VisualizationData struct. The hashmap returned from `parse_vars_to_map` is utilized to confirm that each event contains only variables, functions, or structs that were defined in the variable definition block comments at the top of main.rs. The member function `append_external_event` will insert a `{line, ExternalEvent}` key-value pair in the `event_line_map` member of the `vd` struct.
+        ```
+            match field[0] {
+                "Bind" => vd.append_external_event(
+                    ExternalEvent::Bind{
+                        from: get_resource(&vars, "None"),
+                        to: get_resource(&vars, field[1])
+                    }, &(event.0 as usize)
+                ),
+        ```
+        In the case of `Bind` a 'dummy' [RAP](#ResourceAccessPoint) is used for the `from:` field. 
+3. <b>Rendering svg files</b>
+    - `render_svg`
+        First, each vector of [External Events](#ExternalEvents) in the `event_line_map` is sorted in the order specified by their corresponding unique hashes. This allows for events to be described in any order in the comments of main.rs irrespective of the order defined originally in the header comments, granting the user more flexibility. For example:
+        ```
+            //main.rs
+            // !{ GoOutOfScope(s), GoOutOfScope(r1), GoOutOfScope(r2), GoOutOfScope(r3) }
     
-## Visualization Limitations
-Yet to be finished....
+            Is equivalent to
+    
+            // !{ GoOutOfScope(r1), GoOutOfScope(s), GoOutOfScope(r3), GoOutOfScope(r2) }
+        ```
+        Then, line numbers corresponding to [External Events](#ExternalEvents) need to be transposed to their final position as the line numbers extracted from main.rs are not representative of the line numbers in the visualization. Additionally, the timelines, member of `vd` is initialized with the `_append_event` function.
+      ```
+          pub struct VisualizationData {
+            //      timelines: an orderred map from a Variable's hash to the Variable's Timeline.
+            pub timelines: BTreeMap<u64, Timeline>,
+      ```
+      A variable's timeline holds all interactions that it engages in (as it relates to ownership) that will appear in the visualization.
+      ```
+          pub struct Timeline {
+            pub resource_access_point: ResourceAccessPoint,    // a reference of an Owner
+            // line number in usize
+            // a vector of ownership transfer history of a specific variable, in a sorted order by line number.
+            pub history: Vec<(usize, Event)>,
+          }
+      ```
+   - Handlebars
+        At this point all the necessary data has been extracted and processed from the main.rs file and is ready to be interpolated into SVG elements. Here is an example of an SVG element (a hoverable dot) and its corresponding line of code:
+        ```
+            <circle cx="70" cy="115" r="5" data-hash="1" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; acquires ownership of a resource"/>
+
+            let mut s = String::from("hello");
+
+        ```
+        Two svg files are rendered for the final visualization: the code panel (the text) `vis_code.svg` and the timeline panel (the interactive state diagram) `vis_timeline.svg`. Templates for each component of the visualization: dots, arrows, vertical lines, etc are registered using Handlebars and are utilized to dynamically render visualizations. Here is the dot template that is used to generate the SVG element in the example above:
+        ```
+            let dot_template = 
+            "        <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\"     class=\"tooltip-trigger\"data-tooltip-text=\"{{title}}\"/>\n";
+
+            assert!(
+                registry.register_template_string("dot_template", dot_template).is_ok()
+            );
+        ```
+        Functions in `timeline_panel.rs` translate state from the VisualizationData, `vd`, struct into the content that will satisfy the parameters of the different component templates. Below is a snippet of code from the `create_owner_line_string` function that demonstrates how the vertical line corresponding to a mutable variable is rendered.
+        ```
+            let style = determine_owner_line_styles(rap, state);
+            match (state, style) {
+                (State::FullPrivilege, OwnerLine::Solid) | (State::PartialPrivilege{ .. }, OwnerLine::Solid) => {
+                    data.line_class = String::from("solid");
+                    data.title += ". The binding can be reassigned.";
+                    registry.render("vertical_line_template", &data).unwrap()
+            },
+        ```
+        Once each component of the visualization is rendered, contents of both the code panel and timeline panel are written to `vis_code.svg` and `vis_timeline.svg` respectively, which at that point are ready to be integrated into the rustviz-tutorial mdbook. 

@@ -152,7 +152,7 @@ string_from_move_print
 ├── vis_code.svg
 └── vis_timeline.svg
 ```
-Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script from [rustviz_mdbook](rustviz_mdbook) to see it in your browser.
+Congratulations! You have successfully generated your first visualization! As a last step, add the name of your example to `targetExamples` under [view_examples.sh](rustviz_mdbook/view_examples.sh) and run the script from [rustviz_mdbook](rustviz_mdbook) to see it in your browser. For a more in-depth walkthrough of how rustviz works check out the [README](src/svg_generator/README.md) in `src/svg_generator/`
 
 ## Appendix
 
@@ -186,3 +186,4 @@ Some features are still being built. As of now, we are limited to:
 - No branching logic
 - No looping
 - No explicit lifetime annotation
+- No shadowed variables
