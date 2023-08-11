@@ -3,6 +3,7 @@ use std::vec::Vec;
 use std::fmt::{Formatter, Result, Display};
 use crate::data::Event::*;
 use crate::hover_messages;
+pub(crate) use crate::svg_frontend::lifetime_vis::LifetimeVisualization;
 /*
  * Basic Data Structure Needed by Lifetime Visualization
  */
@@ -28,6 +29,8 @@ pub trait Visualizable {
     
     // preprocess externa event information for arrow overlapping issue
     fn append_external_event(&mut self, event: ExternalEvent, line_number: &usize);
+    // adds lifetimes to visualization data
+    fn append_lifetimes(&mut self, spool: LifetimeVisualization);
     // if resource_access_point with hash is mutable
     fn is_mut(&self, hash: &u64 ) -> bool;
     // if resource_access_point with hash is a function
@@ -542,7 +545,10 @@ pub struct VisualizationData {
     pub preprocess_external_events: Vec<(usize, ExternalEvent)>,
     //line_info
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
+
+    pub lifetimes: Option<Vec<LifetimeVisualization>>,
 }
+
 
 #[allow(non_snake_case)]
 pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Option<ResourceAccessPoint>, &Option<ResourceAccessPoint>){
@@ -798,6 +804,17 @@ impl Visualizable for VisualizationData {
             _ => ()
         }
     }
+
+
+    fn append_lifetimes(&mut self, spool: LifetimeVisualization) {
+        if let Some(ref mut life) = self.lifetimes {
+            life.push(spool);
+        }
+        else {
+            self.lifetimes = Some(vec![spool]);
+        }
+    }
+
 
     // WARNING do not call this when making visualization!! 
     // use append_external_event instead

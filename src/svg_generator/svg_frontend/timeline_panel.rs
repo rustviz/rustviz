@@ -129,11 +129,11 @@ pub fn render_timeline_panel(visualization_data : &VisualizationData) -> (String
     let (resource_owners_layout, width) = compute_column_layout(visualization_data, &mut structs_info);
 
     let mut output : BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
-    output.insert(-1, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), 
-        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(), 
-            timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
+    output.insert(-1, (TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(),
+        ref_line: String::new(), arrows: String::new() }, TimelinePanelData{ labels: String::new(), dots: String::new(),
+            timelines: String::new(), ref_line: String::new(), arrows: String::new() }));
     // Note: key {-1} = non-struct timelines
-    
+
     // render resource owner labels
     render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry);
     render_labels_string(&mut output, &resource_owners_layout, &registry);
@@ -205,6 +205,8 @@ fn prepare_registry(registry: &mut Handlebars) {
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
 
+
+
     assert!(
         registry.register_template_string("struct_template", struct_template).is_ok()
     );
@@ -241,6 +243,7 @@ fn prepare_registry(registry: &mut Handlebars) {
     assert!(
         registry.register_template_string("box_template", box_template).is_ok()
     );
+
 }
 
 // Returns: a binary tree map from the hash of the ResourceOwner to its Column information
@@ -248,7 +251,7 @@ fn compute_column_layout<'a>(
     visualization_data: &'a VisualizationData,
     structs_info: &'a mut StructsInfo,
 ) -> (BTreeMap<&'a u64, TimelineColumnData>, i32) {
-    let mut resource_owners_layout = BTreeMap::new();
+    let mut resource_owners_layout: BTreeMap<&u64, TimelineColumnData> = BTreeMap::new();
     let mut x = 0; // Right-most Column x-offset.
     let mut owner = -1;
     let mut owner_x = 0;

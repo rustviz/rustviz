@@ -60,6 +60,7 @@ pub fn render_svg(
         let final_line_num = line_number.clone() + extra_line;
         visualization_data.append_processed_external_event(event, final_line_num);
     }
+
     //-----------------------update event_line_map line number------------------
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut extra_line_sum = 0;
@@ -68,6 +69,7 @@ pub fn render_svg(
         extra_line_sum += event_vec.len() - 1;
     }
     visualization_data.event_line_map = event_line_map_replace;
+
 
     let code_image_file_path = format!("{}vis_code.svg", output_path);
     let timeline_image_file_path = format!("{}vis_timeline.svg", output_path);
