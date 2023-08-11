@@ -12,6 +12,7 @@ pub fn render_code_panel(
     max_x_space: &mut i64,
     event_line_map: &BTreeMap<usize, Vec<ExternalEvent>>,
 ) -> (String, i32) {
+    println!("\n{:#?}", event_line_map);
     /* Template creation */
     let mut handlebars = Handlebars::new();
     // We want to preserve the inputs `as is`, and want to make no changes based on html escape.

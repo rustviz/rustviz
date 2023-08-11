@@ -17,3 +17,7 @@ exclude = ["src/svg_generator/README.md", "src/svg_generator/example.png"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 rustviz-svg = { path = "src/svg_generator/" }
+syn = "2.0.22"
+quote = "1.0.28"
+handlebars = "4.3.7"
+rand = "0.8.5"

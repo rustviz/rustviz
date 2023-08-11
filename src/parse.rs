@@ -7,7 +7,7 @@ use rustviz_lib::data::{
     ExternalEvent, Function, MutRef, Owner, Struct,
     ResourceAccessPoint, StaticRef, VisualizationData, Visualizable
 };
-
+use rustviz_lib::svg_frontend::lifetime_vis::*;
 // Requires: Valid file path
 //           Variables specified within BEGIN and END statements
 // Modifies: Nothing, unchanged
@@ -332,6 +332,7 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
+            "Lifetime" => vd.append_lifetimes(create_lifetime_vis(&field[1], &field[2], &vars)),
             _ => {
                 eprintln!("{} is not a valid event.", field[0]);
                 println!("{}", event_usage_err());
@@ -341,6 +342,81 @@ pub fn add_events(
     }
 }
 
+//fn add_annotation_type()
+fn create_lifetime_vis(half_one: &str, half_two: &str, vars: &HashMap<String, ResourceAccessPoint>) -> LifetimeVisualization {
+    let mut livis = LifetimeVisualization{
+        input_lives: Vec::new(),
+        return_lives: Vec::new(),
+        annotation_type: LifetimeType::None,
+    };
+    let half_one_string = half_one.to_string();
+    let half_two_string = half_two.to_string();
+    let annotation: Vec<&str> = half_one_string
+        .split(|c| c == '<' || c == '>')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let anno_data: Vec<&str> = annotation[0]
+        .split(|c| c == ':')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    match anno_data[0] {
+       "FUNC" => livis.annotation_type = LifetimeType::Func(anno_data[1].to_string()),
+        "STRUCT" => livis.annotation_type = LifetimeType::Struct(anno_data[1].to_string()),
+        "VAR" => livis.annotation_type = LifetimeType::Var(anno_data[1].to_string()),
+        _ => eprintln!("Incorrect lifetime type!"),
+    };
+    livis.input_lives = parse_lifetime(&annotation[1], &vars);
+    livis.return_lives = parse_lifetime(&half_two_string, &vars);
+    livis
+
+
+}
+fn parse_lifetime(field: &str, vars: &HashMap<String, ResourceAccessPoint>) -> Vec<Lifetime> {
+    let field_string = field.to_string();
+    let elements: Vec<&str> = field_string
+        .split(|c| c == '[' || c == ']' || c == '<' || c == '>')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut input_lives: Vec<Lifetime> = Vec::new();
+    for element in elements {
+        input_lives.push(create_lifetime(element, &vars));
+}
+    input_lives
+}
+
+fn create_lifetime(input: &str, vars: &HashMap<String, ResourceAccessPoint>) -> Lifetime {
+    let lifetime_data: Vec<&str> = input
+        .split(|c| c == '{' || c == '}' || c == ':' || c == '*')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Structure should be: [RAP, start_line, end_line, optional_comment]
+    let mut lifetime = Lifetime {
+        rap: get_resource(&vars, lifetime_data[0]).expect("Not a valid ResourceAccessPoint!"),
+        start_line: lifetime_data[1].parse::<u64>().expect("Not a valid line number!"),
+        end_line: lifetime_data[2].parse::<u64>().expect("Not a valid line number!"),
+        explanation: None,
+    };
+    /* changed lifetime annotation syntax to allow multiple ExtraExplanation for one variable */
+    if lifetime_data.len() > 3 {
+        let mut tmp_vec : Vec<ExtraExplanation> = Vec::new();
+        for (itr, expl) in lifetime_data[3..].iter().enumerate().step_by(2) {
+        match *expl {
+                "NAME" => tmp_vec.push(ExtraExplanation::NAME(lifetime_data[itr + 4].to_string())),
+                "CRPT" => tmp_vec.push(ExtraExplanation::CRPT(lifetime_data[itr + 4].to_string())),
+                "DRPT" => tmp_vec.push(ExtraExplanation::DRPT(lifetime_data[itr + 4].to_string())),
+                "BODY" => tmp_vec.push(ExtraExplanation::BODY(lifetime_data[itr + 4].to_string())),
+                _ => eprintln!("Invalid Explanation type!"),
+        }
+        }
+        lifetime.explanation = Some(tmp_vec);
+    };
+    lifetime
+}
 // Requires: Valid, existant ResourceAccessPoint name
 // Modifies: Nothing, unchanged
 // Effects: Returns clone of ResourceAccessPoint
