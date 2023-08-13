@@ -2,16 +2,29 @@ pub mod lifetime_parse;
 pub mod lifetime_render;
 pub mod lifetime_render_data_structures;
 use crate::data::{ ResourceAccessPoint};
-use crate::svg_frontend::lifetime_vis::lifetime_render::*;
 use std::collections::{VecDeque, BTreeMap};
 use std::process::exit;
 use handlebars::Handlebars;
 use lifetime_parse::*;
+use lifetime_render::*;
+use lifetime_render_data_structures::*;
 use std::{fs, cmp};
 use std::io::{BufReader, BufRead};
 use regex::*;
 use serde::Serialize;
 
+/*********************
+						LIFETIME ANNOTATION SPEC (cont.)
+															**********************/
+/**
+ * 1. every variables in the function signature should be annotated with lifetime, even though some of them may not have lifetime parameter
+ * 2. for input variables, annotation should start from left to right, in strict order. If this function is invoked on struct instance, then the struct instance should be at the first place.
+ * 		For example:
+```
+  (x,y) = my_instance.create_conv(a,b,c)
+```
+		Then, annotations for input vars should in order of (my_instance, a, b, c)
+ */
 
 /*********************
 						Parsed Result from Lifetime Syntax Parser
@@ -69,14 +82,24 @@ pub struct FuncSignatureSpec{
 	 */
 	pub struct_group_name: Option<String>,
 	pub is_not_static_struct_method: bool,
+	/**
+	 * pure function name, doesn't have struct name for decoration.
+	 * if it belongs to struct method, e.g, `MyStruct::new()` will have function name `new` and struct group name `Some(MyStruct)`
+	 */
 	pub function_name: String,
 	/**
 	 * lifetime parameter with their ticks, e.g: 'i, 'a
 	 */
 	pub lifetime_param: Option<Vec<String>>,
+	/**
+	 * Names in function definitions
+	 */
 	pub input_variables: VecDeque<VariableSpec>,
 	pub output_variables: VecDeque<VariableSpec>,
 	/* indexed the same as input_variables */
+	/**
+	 * Names when the function is invoked
+	 */
 	pub input_var_called_names: VecDeque<String>,
 	pub output_var_called_names: VecDeque<String>
 	// pub is_output_tuple: bool
@@ -178,10 +201,10 @@ impl FuncSignatureSpec{
 			assert_eq!(self.output_variables[idx].name, String::from(""));
 			// variable name (stored in called name vector )
 			match &ov.rap{
-				ResourceAccessPoint::Owner(info) => self.output_var_called_names[idx] = info.name.clone(),
-				ResourceAccessPoint::StaticRef(info) => self.output_var_called_names[idx] = info.name.clone(),
-				ResourceAccessPoint::MutRef(info) => self.output_var_called_names[idx] = info.name.clone(),
-				ResourceAccessPoint::Struct(info) => self.output_var_called_names[idx] = info.name.clone(),
+				ResourceAccessPoint::Owner(info) => self.output_var_called_names.push_back(info.name.clone()),
+				ResourceAccessPoint::StaticRef(info) => self.output_var_called_names.push_back(info.name.clone()),
+				ResourceAccessPoint::MutRef(info) => self.output_var_called_names.push_back(info.name.clone()),
+				ResourceAccessPoint::Struct(info) => self.output_var_called_names.push_back(info.name.clone()),
 				_ => {}
 			}
 			// update lifetime start and end point
@@ -203,10 +226,10 @@ impl FuncSignatureSpec{
 		 */
 	}
 	/**
-	 * Update function signature based on `self.function_name` and `self.struct_group_name`, which is given by the parser.
+	 * Update function signature based on `self.function_name`, `self.struct_group_name` and `is_not_static_struct_method`, which is given by the parser.
 	 * complete function signature struct, except for `input_var_called_names` and `output_var_called_names`. Those two are updated in `update_input_names_main_rs`.
 	 * Now has added struct method parsing and determine whether it's static struct method.
-	 * `is_not_static_struct_method` is important because this determines whether the function signature rendering should highlight the struct instance!!!
+	 * `is_not_static_struct_method` is determined based on whether the signature contains `self` keyword
 	 */
 	pub fn replenish_parse(&mut self, path_to_source_rs: String) -> Result<String, String>{
 		let mut found = false;
@@ -257,6 +280,23 @@ impl FuncSignatureSpec{
 		}
 	}
 
+
+	pub fn update_hover_messages_by_parser_data(&mut self, parser_data: &LifetimeVisualization){
+		// update input var hover messages
+		for (idx, vinfo) in parser_data.input_lives.iter().enumerate(){
+			if self.is_not_static_struct_method{
+				assert!(self.input_variables[0].name.find("self").is_some());
+			}
+			if let Some(hmsgs) = vinfo.explanation.as_ref(){
+				self.input_variables[idx].hover_messages = hmsgs.clone();
+			}
+		}
+		for (idx, ovinfo) in parser_data.return_lives.iter().enumerate(){
+			if let Some(hmsgs) = ovinfo.explanation.as_ref(){
+				self.output_variables[idx].hover_messages = hmsgs.clone();
+			}
+		}
+	}
 	/**
 	 * Only update input variables names!
 	 * It will navigate to the line with `Lifetime` keyword and parse that line. So make sure Lifetime annotation is at the right place!!!
@@ -285,9 +325,12 @@ impl FuncSignatureSpec{
 				// only parse the one with Lifetime annotation
 				if call_line.find("Lifetime").is_some(){
 					// find if it's struct method
-					if call_line.find(format!("{}(", self.function_name).as_str()).is_some(){
+					if self.is_not_static_struct_method == false{
 						self.update_first_input_var_if_struct_instance_method(call_line.clone());
 					}
+					// if call_line.find(format!("{}(", self.function_name).as_str()).is_some(){
+					// 	self.update_first_input_var_if_struct_instance_method(call_line.clone());
+					// }
 					match self.update_self_input_variables(call_line.clone()) {
 						Ok(_) => return Ok("".to_string()),
 						_ => return Err("failed to update input parameter from main.rs! No Lifetime annotation or no matching function call from Lifetime annotation!".to_string()),
@@ -299,6 +342,9 @@ impl FuncSignatureSpec{
 		Err("no matching function definition in source.rs!".to_string())
 	}
 
+	/**
+	 * If function is static struct method, then it shall have the struct name accompany, such as `Book::new`
+	 */
 	fn update_first_input_var_if_struct_instance_method(&mut self, call_line:String){
 
 		let mut lnn = call_line.trim().to_string();
@@ -306,11 +352,10 @@ impl FuncSignatureSpec{
 		if let Some(eq_idx) = lnn.find("="){
 			lnn = lnn.get(eq_idx+1..).unwrap().trim().to_string();
 		}
-		println!("lnn: {}",lnn );
+		// println!("lnn: {}",lnn );
 		// find if there is any trace of method calling syntax
 		if let Some(dot_idx) = lnn.find(format!(".{}", self.function_name).as_str()){
 			// this should have been parsed in replenish_parse() !!!
-			println!("here!!!");
 			assert!(self.is_not_static_struct_method == true);
 			self.input_var_called_names.push_back(lnn.get(0..dot_idx).unwrap().to_string());
 		}
@@ -319,7 +364,9 @@ impl FuncSignatureSpec{
 
 	fn update_self_input_variables(&mut self, mut line: String) -> Result<String, String>{
 		let tmp_vec: Vec<String> = line.split(";").map(|x| x.trim().to_string()).collect();
+		// make sure all comments are removed
 		line = tmp_vec[0].clone();
+		println!("update_self_input_var: lnn: {}", line);
 
 		// check whether there are output variables in this function signature
 		if let Some(eq_idx) = line.find("="){
@@ -363,53 +410,7 @@ impl FuncSignatureSpec{
 	}
 
 }
-
-/********************
-					 Render Abstraction Interface
-												  *********************/
-/**
- * Input: parser data, path to source.rs and main.rs for function signature rendering
- * Output: SVG code string for whole lifetime panel and width for that panel
- */
-pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String, parser_data: &LifetimeVisualization) -> (String, u32){
-	let mut registry = Handlebars::new();
-    let mut fs = FuncSignatureSpec::new();
-	/* TODO:
-	 * parse function name by parser data
-	 */
-    match fs.replenish_parse(path_to_source_rs){
-		Ok(_) =>{},
-		Err(err_msg) => {
-			eprintln!("{}",err_msg);
-			exit(0)
-		}
-	}
-    match fs.update_input_names_main_rs(path_to_main_rs){
-		Ok(_) =>{},
-		Err(err_msg) => {
-			eprintln!("{}",err_msg);
-			exit(0)
-		}
-	}
-	fs.update_output_var_name_and_update_vars_lifetimes(parser_data);
-    println!("{:?}", fs);
-
-    let (width, y_end, func_sig_str) = render_function_lifetime_signature(&fs, &mut registry);
-	/*
-	 * extract `vars: Vec<VariableSpec>` from `fs` and assign data-hash for those have lifetime parameters (i.e., related to lifetime parameter calculation)
-	 */
-	let vars = assign_hash_to_vars_with_lp(&mut fs);
-    println!("{:?}", vars);
-	let lifetime_hash : usize = 0;
-	let max_y: u32 = 100;
-    let (w2, column_str) = render_lifetime_columns_one_for_lifetime_parameter(&vars, &registry, 0, &lifetime_hash, &max_y);
-    let dash_line_str =  render_dashed_number_line(vars,w2, &registry);
-    // The appending sequency doesn't matter
-	let lifetime_panel_str = func_sig_str + &column_str + &dash_line_str;
-	
-	(lifetime_panel_str, cmp::max(w2, width))
-}
-
+/* helpers */
 
 /**
  * Assign data hash for vars with lifetime parameters
@@ -435,9 +436,64 @@ fn assign_hash_to_vars_with_lp(func_info: &mut FuncSignatureSpec) -> Vec<Variabl
     vars
 }
 
-pub fn remove_lifetime_tick(lifetime_param : &mut String){
+fn remove_lifetime_tick(lifetime_param : &mut String){
 	assert!(lifetime_param.len() > 0);
 	if lifetime_param.chars().nth(0).unwrap() == '\''{
 		*lifetime_param = lifetime_param.get(1..).unwrap().to_string();
 	}
 }
+
+
+/********************
+					 Render SVG - Abstraction Interface
+												  		*********************/
+/**
+ * Input: parser data, path to source.rs and main.rs for function signature rendering
+ * Output: (SVG code string, max width, max height)
+ */
+pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String, parser_data: &LifetimeVisualization) -> (String, u32, u32){
+	let mut registry = Handlebars::new();
+	/*
+	 * Parse function/lifetime/variables info
+	 */
+    let mut fs = translate_parser_data_to_function_signature_info(parser_data, &path_to_source_rs, &path_to_main_rs);
+    println!("func sig info: {:?}", fs);
+
+    let (width, y_end, func_sig_str) = render_function_lifetime_signature(&fs, &mut registry);
+	/*
+	 * extract `vars: Vec<VariableSpec>` from `fs` and assign data-hash for those have lifetime parameters (i.e., related to lifetime parameter calculation)
+	 */
+	let vars = assign_hash_to_vars_with_lp(&mut fs);
+
+    let mut lifetime_vis_svg_str = func_sig_str;
+    let mut x_begin : u32 = 0;
+    // calculate max y val beforehand
+    let mut max_y = 0;
+    for var in &vars{
+        if let Some(lp_info) = &var.lifetime_info{
+            max_y = cmp::max(lp_info.end, max_y)
+        }
+    }
+    max_y = CODE_LINE_Y_START + (max_y - 1) * CODE_VERTICAL_LINE_SPACE + 15;
+    if let Some(lps) = fs.lifetime_param.clone(){
+        for (lifetime_hash,mut lp) in lps.into_iter().enumerate(){
+            remove_lifetime_tick(&mut lp);
+            let mut var_same_lifetime : Vec<VariableSpec> = Vec::new();
+            for v in &vars{
+                if let Some(v_lifetime) = v.lifetime_param.clone(){
+                    if v_lifetime == lp {
+                        var_same_lifetime.push(v.clone());
+                    }
+                }
+            }
+            let (w2, column_str) = render_lifetime_columns_one_for_lifetime_parameter(&var_same_lifetime, &registry, x_begin, &lifetime_hash, &max_y);
+            x_begin += w2 + 20;
+            lifetime_vis_svg_str = lifetime_vis_svg_str + &column_str;
+            // render lifetime region square
+        }
+        let dash_line_str = render_dashed_number_line(vars,x_begin, &registry);
+        lifetime_vis_svg_str = lifetime_vis_svg_str + &dash_line_str;
+    }
+	(lifetime_vis_svg_str, cmp::max(x_begin, width), max_y + 100)
+}
+

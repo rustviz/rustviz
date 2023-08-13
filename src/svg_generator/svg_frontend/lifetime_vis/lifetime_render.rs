@@ -14,24 +14,24 @@ use std::cmp;
 
 
 /*** global setting for rendering ***/
-static FUNC_SIG_CHAR_X_SPACE: u32 = 10;
-static SIG_LT_CMP_CHAR_X_SPACE: u32 = 8;
-static X_START: u32 = 10;
-static Y_START: u32 = 20;
-static CODE_VERTICAL_LINE_SPACE: u32 = 30;
-static LABEL_Y_VAL: u32 = 70;
-static CODE_LINE_Y_START: u32 = 90;
-static DASH_NUM_LINE_X_START: u32 = 30;
+pub const FUNC_SIG_CHAR_X_SPACE: u32 = 10;
+pub const SIG_LT_CMP_CHAR_X_SPACE: u32 = 8;
+pub const X_START: u32 = 10;
+pub const Y_START: u32 = 20;
+pub const CODE_VERTICAL_LINE_SPACE: u32 = 30;
+pub const LABEL_Y_VAL: u32 = 70;
+pub const CODE_LINE_Y_START: u32 = 90;
+pub const DASH_NUM_LINE_X_START: u32 = 30;
 static mut hash : u32 = 0;
 // pub static AMPERSAND : &'static str = "&amp;";
 // pub static LEFT_ANGLE_BR : &'static str = "&lt;";
 // pub static RIGHT_ANGLE_BR : &'static str = "&gt;";
-pub static AMPERSAND : &'static str = "&";
-pub static LEFT_ANGLE_BR : &'static str = "<";
-pub static RIGHT_ANGLE_BR : &'static str = ">";
+pub const AMPERSAND : &'static str = "&";
+pub const LEFT_ANGLE_BR : &'static str = "<";
+pub const RIGHT_ANGLE_BR : &'static str = ">";
 // set style for code string
-static SPAN_BEGIN : &'static str = "<span style=\"font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;\">";
-static SPAN_END : &'static str = "</span>";
+pub const SPAN_BEGIN : &'static str = "<span style=\"font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;\">";
+pub const SPAN_END : &'static str = "</span>";
 
 
 /**********************

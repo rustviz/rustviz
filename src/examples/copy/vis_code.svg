@@ -1,4 +1,4 @@
-<svg height="280px" 
+<svg height="1075px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
     <desc>examples/copy/input/</desc>
@@ -39,11 +39,38 @@ text.code {
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-size: 0.875em;
 }
+text.funcSigCode {
+    fill: #13b516;
+    font-weight: bold;
+    white-space: pre;
+    font-family: monospace;
+    font-size: 1.2em;
+}
+
+text.structInstance {
+    fill: rgba(10,29,242,0.906);
+    white-space: pre;
+    font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-weight: bold;
+    font-size: 0.875em;
+}
+text.lifetime{
+    fill: #eca163;
+    white-space: pre;
+    font-family: monospace;
+    font-size: 1em;
+}
 
 text.label {
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-size: 0.875em;
 }
+text.label_lifetime{
+    font-family: "Source Code Pro", Monaco, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-size: 0.875em;
+
+}
+
 
 /* timeline/event interaction styling */
 .solid {
@@ -93,6 +120,20 @@ text.label {
     flex-shrink: 0;
 }
 
+.lineNumDashLine{
+    stroke: #6c6a6a; 
+    stroke-width: 2; 
+    stroke-dasharray: 5 3; 
+    stroke-opacity: 0.5;
+}
+
+
+
+text.lineNum{
+    fill: rgba(90,92,90,0.795);
+    font-family: monospace;
+    font-size: 0.875em;
+}
 object.tl_panel {
     flex-grow: 1;
 }
@@ -157,6 +198,68 @@ object.code_panel {
 [data-hash="9"] {
     fill: #b99f35;
     stroke: #b99f35;
+}
+
+[lifetime-body="a"]{
+    fill: #dc143c;
+    stroke: #dc143c;
+}
+[lifetime-dash="a"]{
+    fill: rgba(220,20,60,0.451);
+    stroke: rgba(220,20,60,0.469);
+}
+
+[lifetime-body-hash="0"]{
+    fill: #9810e6;
+    stroke: #9810e6;
+}
+
+[lifetime-dash-hash="0"]{
+    fill: #9810e6;
+    stroke: rgba(152,16,230,0.600);
+}
+
+[lifetime-reg-hash="0"]{
+    stroke: rgba(152,16,230,0.600);
+}
+
+[lifetime-body-hash="1"]{
+    fill: #03b72a;
+    stroke: #03b72a;
+}
+[lifetime-dash-hash="1"]{
+    fill: rgba(3,183,42,0.600);
+    stroke:rgba(3,183,42,0.600);
+}
+
+[lifetime-reg-hash="1"]{
+    stroke:rgba(3,183,42,0.600);
+}
+
+[lifetime-body-hash="2"]{
+    fill: #e98615;
+    stroke: #e98615;
+}
+[lifetime-dash-hash="2"]{
+    fill: rgba(233,134,21,0.600);
+    stroke: rgba(233,134,21,0.600);
+}
+
+[lifetime-reg-hash="2"]{
+    stroke: rgba(233,134,21,0.600);
+}
+
+[lifetime-body-hash="3"]{
+    fill: #f10dde;
+    stroke: #f10dde;
+}
+[lifetime-dash-hash="3"]{
+    fill: rgba(241,13,222,0.600);
+    stroke: rgba(241,13,222,0.600);
+}
+
+[lifetime-reg-hash="3"]{
+    stroke: rgba(241,13,222,0.600);
 }
         ]]>
         </style>

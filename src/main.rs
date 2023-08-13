@@ -86,7 +86,8 @@ fn main() {
     let output_path = path_to_ex
         .into_os_string().into_string()
         .expect("Error in output file path!");
-    // svg_generation::render_svg(&input_path, &(output_path+"/"), &mut vd);
+    println!("in: {}\nout: {}", input_path, output_path);
+    svg_generation::render_svg(&input_path, &(output_path+"/"), &mut vd);
 }
 
 

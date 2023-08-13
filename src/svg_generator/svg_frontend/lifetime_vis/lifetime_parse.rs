@@ -166,7 +166,7 @@ pub enum sig_parse_status{
 pub fn parse_one_line_variables(mut line: String, func_info: &mut FuncSignatureSpec) -> sig_parse_status{
     /* erase possible left curly brace and white spaces from both ends */
     line = line.replace("{", "").trim().to_string();
-    println!("input: {}", line);
+    // println!("input: {}", line);
     if line.find("fn").is_some(){
         if let Some(idx) = line.find('(') {
             let left_part = line.get(0..idx).unwrap(); // ✅
@@ -201,7 +201,7 @@ pub fn parse_one_line_variables(mut line: String, func_info: &mut FuncSignatureS
             }
         }
     }
-    println!("1: {}", line);
+    // println!("1: {}", line);
     let ret: sig_parse_status;
     // judge whether its the last line
     if is_last_line_of_func_signature(line.clone()){
@@ -227,9 +227,9 @@ pub fn parse_one_line_variables(mut line: String, func_info: &mut FuncSignatureS
         return ret;
     }
     // right parenthesis, if any, has been truncated ✅
-    println!("2: {}", line);
+    // println!("2: {}", line);
     turn_commas_surrounded_by_brackets_to_semicolon(&mut line);
-    println!("3: {}", line);
+    // println!("3: {}", line);
     let vars: Vec<_> = line.split(',').map(
         |elem| /*mut x: &'i i32 */{
             if elem.len() != 0{
@@ -249,7 +249,7 @@ pub fn parse_one_line_variables(mut line: String, func_info: &mut FuncSignatureS
  *
  * */
 pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableSpec{
-    println!("single cell: {}", elem);
+    // println!("single cell: {}", elem);
     let mut var_name = String::from("");
     let mut var_lifetime_param: Option<String> = None;
     let mut var_type = String::from("");
@@ -399,7 +399,7 @@ fn parse_func_name_and_is_method(mut line: String, func_info: &mut FuncSignature
         // after split: "fn", "funcName". Extract the second field
         let tmp: Vec<&str> = line.split(" ").collect();
         let funcName = tmp[1].to_string();
-        println!("{funcName}");
+        // println!("{funcName}");
         // match funcName.find("::"){
         //     Some(_) => func_info.is_method = true,
         //     None => func_info.is_method = false
@@ -423,8 +423,8 @@ fn parse_func_name_and_is_method(mut line: String, func_info: &mut FuncSignature
                                                                                     **********************/
 pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVisualization, path_to_source_rs: &String, path_to_main_rs: &String) -> FuncSignatureSpec{
     let mut fs = FuncSignatureSpec::new();
-    /* TODO:
-	 * parse function name by parser data
+    /* Step 1:
+	 *  parse function name by parser data.
 	 */
     match parser_data.annotation_type.clone() {
         LifetimeType::Func(func_name) => {
@@ -438,10 +438,14 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
             fs.struct_group_name = Some(struct_group_name);
             fs.function_name = method_name;
         },
-        LifetimeType::Var(_) => {},
+        LifetimeType::Var(_) => {todo!()},
         LifetimeType::None => {eprintln!("No annotation!"); exit(0)}
     }
-    
+
+    /* Step 2
+     *  Based on function/method name, parse function signature based on function definition found in source.rs.
+     *  Note that this step doesn't parse input/output variable names when this function is invoked
+     */
      match fs.replenish_parse(path_to_source_rs.clone()){
 		Ok(_) =>{},
 		Err(err_msg) => {
@@ -449,6 +453,10 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
 			exit(0)
 		}
 	}
+    // println!("replenish parse: {:?}", fs);
+    /* Step 3
+     *  Update input variable names, based on where `@Lifetime` syntax is invoked.
+     */
     match fs.update_input_names_main_rs(path_to_main_rs.clone()){
 		Ok(_) =>{},
 		Err(err_msg) => {
@@ -456,8 +464,10 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
 			exit(0)
 		}
 	}
+    // println!("update input names parse: {:?}", fs);
 	fs.update_output_var_name_and_update_vars_lifetimes(parser_data);
-    println!("{:?}", fs);
+    fs.update_hover_messages_by_parser_data(parser_data);
+    // println!("{:?}", fs);
 
     // sync variable invoked name with signature name
     fs.sync_var_name_with_invoked_name();

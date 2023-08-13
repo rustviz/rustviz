@@ -1,11 +1,12 @@
 extern crate handlebars;
 
 use crate::data::{ExternalEvent, ResourceAccessPoint_extract, Visualizable, VisualizationData, LINE_SPACE};
-use crate::svg_frontend::{code_panel, timeline_panel, utils};
+use crate::svg_frontend::{code_panel, timeline_panel, utils, lifetime_vis};
 use handlebars::Handlebars;
 use serde::Serialize;
 use std::cmp;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Serialize)]
 struct SvgData {
@@ -114,7 +115,7 @@ pub fn render_svg(
     // data for tl panel
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
 
-    let svg_data = SvgData {
+    let mut svg_data = SvgData {
         visualization_name: input_path.to_owned(),
         css: css_string,
         code: code_panel_string,
@@ -124,6 +125,19 @@ pub fn render_svg(
         height: (num_lines * LINE_SPACE as i32 + 80) + 50,
     };
 
+    // data for lifetime panel (optional)
+    /*
+     * TODO: Make sure multiple lifetime parameter can work
+     */
+    if let Some(lifetime_info_data) = visualization_data.lifetimes.clone(){
+        let path_to_main_rs = Path::new(output_path).join("main.rs");
+        let path_to_source_rs = Path::new(output_path).join("source.rs");
+        let (lifetime_render_str, width, height) = lifetime_vis::render_lifetime_panel(path_to_main_rs.to_str().unwrap().to_string(), path_to_source_rs.to_str().unwrap().to_string(), &lifetime_info_data[0]);
+        // println!("width: {}, height: {}", width, height);
+        svg_data.diagram = lifetime_render_str;
+        svg_data.height = height as i32;
+        svg_data.tl_width = width as i32;
+    }
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();
     let final_timeline_svg_content = handlebars
         .render("timeline_svg_template", &svg_data)
@@ -132,4 +146,5 @@ pub fn render_svg(
     // write to file
     utils::create_and_write_to_file(&final_code_svg_content, code_image_file_path); // write svg code
     utils::create_and_write_to_file(&final_timeline_svg_content, timeline_image_file_path); // write svg timeline
+
 }

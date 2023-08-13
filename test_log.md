@@ -1,3 +1,7 @@
+## Testing
+- [x] `/copy`, single lifetime, func: `!{ Lifetime(<FUNC: max>[x{3:15}*NAME* wow wow *DRPT* bow bow][y{7:15}]->[k{8:30}]) }`
+- [ ] `/hatra1`, multiple lifetime, func
+
 ## fn render_code_panel
 
 + `max_x_space`: maximum number of characters of a single line in `source.rs`
