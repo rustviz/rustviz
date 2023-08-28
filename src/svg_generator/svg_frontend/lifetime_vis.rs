@@ -118,6 +118,9 @@ pub struct VariableSpec{
 	pub hover_messages: Vec<ExtraExplanation>,
 	/* data hash is used for SVG styling */
 	pub data_hash: Option<u32>,
+	/* variables that do not show up in function signature however related to this variable.
+	For example, instances possessed by container type such as VecDeque */
+
 }
 
 

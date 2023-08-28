@@ -1,5 +1,6 @@
 // rust lib
 use std::process::exit;
+use regex::Regex;
 use std::collections::HashMap;
 type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
@@ -97,6 +98,10 @@ fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
                 );
             },
             ("LifetimeBind", _) => {
+                // syntax (every white space is required to ensure correctness):
+                // LifetimeBind name_separated_by_spaces -> bind_to_name_separated_by_spaces [Relationship]
+                // for example:
+                // LifetimeBind &mut read_request -> &mut request_queue [Containing]
                 // -> symbol is required
                 if let Some(binds_to_idx) = fields.iter().position(|e| e == &"->"){
                     let l_name = fields[1..binds_to_idx].join(" ");
@@ -104,11 +109,27 @@ fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
                         eprintln!("Must have bind-to LifetimeVar name!");
                         exit(0);
                     }
-                    let binds_to_name = fields[binds_to_idx+1..].join(" ");
+                    let bind_to_name = fields[binds_to_idx+1..fields.len()-1].join(" ");
+                    let re = Regex::new(r"\[([^\]]+)\]").unwrap();
+                    let mut relationship = String::new();
+                    for captures in re.captures_iter(&fields[fields.len()-1]){
+                        if let Some(captured_content) = captures.get(1){
+                            relationship = captured_content.as_str().to_string();
+                        }
+                        else{
+                            eprintln!("Must have bind-to relationship enclosed by square brackets!");
+                            exit(0);
+                        }
+                    }
+                    if relationship.len() == 0{
+                        eprintln!("Must have non-trivial bind-to relationship enclosed by square brackets!");
+                        exit(0);
+                    }
                     vars_map.insert(l_name.clone(),
                         ResourceAccessPoint::LifetimeBind(LifetimeBind{
                         name : l_name,
-                        bind_to_name: binds_to_name,
+                        bind_to_name: bind_to_name,
+                        relationship: relationship,
                         })
                     );
                 }

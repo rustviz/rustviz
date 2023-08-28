@@ -63,7 +63,8 @@ pub enum ResourceAccessPoint {
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct LifetimeBind{
     pub name: String,
-    pub bind_to_name: String
+    pub bind_to_name: String,
+    pub relationship: String,
 }
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct LifetimeVars{

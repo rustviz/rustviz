@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-LifetimeVars &mut request_queue; LifetimeVars &mut available_resource; LifetimeVars request_halfway; LifetimeBind &mut read_request -> &mut request_queue; LifetimeBind &mut update_request -> &mut request_queue; LifetimeBind &mut delete_request -> &mut request_queue
+LifetimeVars &mut request_queue; LifetimeVars &mut available_resource; LifetimeVars request_halfway; LifetimeBind &mut read_request -> &mut request_queue [Containing]; LifetimeBind &mut update_request -> &mut request_queue [Containing]; LifetimeBind &mut delete_request -> &mut request_queue [Containing];
 --- END Variable Definitions --- */
 fn process_requests<'i,'a>(queue: &'i mut VecDeque<&'i mut Request<'i>>, max_process_unit: &'a mut u32) -> Option<&'i mut Request<'i>>{
     loop {
