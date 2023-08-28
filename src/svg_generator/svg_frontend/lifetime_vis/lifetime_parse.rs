@@ -250,7 +250,7 @@ pub fn parse_one_line_variables(mut line: String, func_info: &mut FuncSignatureS
  *
  * */
 pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableSpec{
-    // println!("single cell: {}", elem);
+    println!("single cell: {}", elem);
     let mut var_name = String::from("");
     let mut var_lifetime_param: Option<String> = None;
     let mut var_type = String::from("");
@@ -298,6 +298,7 @@ pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableS
     let pattern = r"<(.*?)>";
     let regex = Regex::new(pattern).unwrap();
     for capture in regex.captures_iter(&var_type) {
+        println!("var_type: {}", var_type);
         if let Some(content) = capture.get(1) {
             let lp_content = content.as_str().to_string();
             if lp_content.len() > 2{

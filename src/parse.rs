@@ -5,7 +5,7 @@ type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
 use rustviz_lib::data::{
     ExternalEvent, Function, MutRef, Owner, Struct,
-    ResourceAccessPoint, StaticRef, VisualizationData, Visualizable
+    ResourceAccessPoint, StaticRef, VisualizationData, Visualizable, LifetimeVars
 };
 use rustviz_lib::svg_frontend::lifetime_vis::*;
 // Requires: Valid file path
@@ -52,6 +52,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
         .collect();
 
     // return Lines iterator
+    println!("vars_string: {:?}", vars_string);
     (fin_lines, num_lines, vec_to_map(vars))
 }
 
@@ -83,6 +84,18 @@ fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
         let name = (if fields.len() > 2 { fields[2] } else { fields[1] }).to_string();
         // match type with possible ResourceAccessPoints
         match (fields[0], fields.len()) {
+            ("LifetimeVars", _) => {
+                let mut l_name = name;
+                if fields.len() > 2 {
+                    l_name = fields[1..].join(" ");
+                }
+                vars_map.insert(
+                    l_name.clone(),
+                    ResourceAccessPoint::LifetimeVars(LifetimeVars{
+                        name : l_name
+                    })
+                );
+            },
             ("Owner", 2) | ("Owner", 3) => {
                 vars_map.insert(
                     name,

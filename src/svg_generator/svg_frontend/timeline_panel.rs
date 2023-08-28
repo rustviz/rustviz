@@ -4,6 +4,7 @@ use crate::data::{StructsInfo, VisualizationData, Visualizable, ExternalEvent, S
 use crate::svg_frontend::line_styles::{RefDataLine, RefValueLine, OwnerLine};
 use handlebars::Handlebars;
 use std::collections::BTreeMap;
+use std::process::exit;
 use serde::Serialize;
 use std::cmp;
 
@@ -309,7 +310,8 @@ fn compute_column_layout<'a>(
                         is_member: timeline.resource_access_point.is_member(),
                         owner: timeline.resource_access_point.get_owner(),
                     });
-            }
+            },
+            _ => ()
         }
     }
     (resource_owners_layout, (x as i32)+100)
@@ -416,6 +418,7 @@ fn render_dots_string(
                     }
                 }
             },
+            _ => (),
         }
     }
 }
@@ -476,6 +479,7 @@ fn render_arrows_string_external_events_version(
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
                 ResourceAccessPoint::Function(func) => func.name.to_owned(),
+                _ => {eprintln!("LifetimeVars annotation shouldn't appear here! Try looking at your annotations!"); exit(0);},
             };
             let styled_from_string = SPAN_BEGIN.to_string() + &from_string + SPAN_END;
             title = format!("{} from {}", title, styled_from_string);
@@ -487,6 +491,7 @@ fn render_arrows_string_external_events_version(
                 ResourceAccessPoint::MutRef(mutref) => mutref.name.to_owned(),
                 ResourceAccessPoint::StaticRef(statref) => statref.name.to_owned(),
                 ResourceAccessPoint::Function(func) => func.name.to_owned(),
+                _ => {eprintln!("LifetimeVars annotation shouldn't appear here! Try looking at your annotations!"); exit(0);},
             };
             let styled_to_string = SPAN_BEGIN.to_string() + &to_string + SPAN_END;
             title = format!("{} to {}", title, styled_to_string);
@@ -891,6 +896,7 @@ fn render_timelines(
                 ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::MutRef(_) => {
                     output.get_mut(&-1).unwrap().0.timelines.push_str(&create_reference_line_string(rap, state, &mut data.unwrap(), registry));
                 },
+                _ => (),
             }
         }
     }
@@ -984,7 +990,8 @@ fn render_ref_line(
                         _ => (),
                     }
                 }
-            },  
+            },
+            _ => (),
         }
     }
 }

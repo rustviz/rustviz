@@ -55,6 +55,7 @@ fn main() {
             --- Parse main.rs file ---
     ****************************************** */
     let (contents, line_num, var_map) = parse::parse_vars_to_map(filename.clone());
+    println!("var_map: {:?}", var_map);
     let events = parse::extract_events(contents, line_num);
     /* ******************************************
             --- Build VisualizationData ---
