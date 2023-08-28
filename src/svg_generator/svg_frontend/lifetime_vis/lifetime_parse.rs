@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, VecDeque},process::exit, fs};
+use std::{collections::{BTreeMap, VecDeque, HashSet},process::exit, fs, hash::Hash};
 use std::io::{self, Error};
 use std::io::BufReader;
 use quote::__private::ext::RepToTokensExt;
@@ -280,10 +280,11 @@ pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableS
                 None => {}
             }
             // remove the lifetime parameter tick along with itself
-            type_cplx = type_cplx.replace(&("'".to_string() + var_lifetime_param.as_ref().unwrap()) , "");
+            // type_cplx = type_cplx.replace(&("'".to_string() + var_lifetime_param.as_ref().unwrap()) , "");
         }
-        let tv : Vec<&str> = type_cplx.split(' ').map(|x| x.trim()).collect();
-        var_type = tv.join(" ");
+        // let tv : Vec<&str> = type_cplx.split(' ').map(|x| x.trim()).collect();
+        // var_type = tv.join(" ");
+        var_type = type_cplx.clone();
     }
     /* mut x: i32*/
     else{
@@ -295,22 +296,77 @@ pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableS
         var_type = var_name.clone();
     }
     // lifetime declared in structs need to be considered for special case, such as "Book<'a>"
-    let pattern = r"<(.*?)>";
-    let regex = Regex::new(pattern).unwrap();
-    for capture in regex.captures_iter(&var_type) {
-        println!("var_type: {}", var_type);
-        if let Some(content) = capture.get(1) {
-            let lp_content = content.as_str().to_string();
-            if lp_content.len() > 2{
-                eprintln!("The current lifetime visualization doesn't support variable struct with multiple lifetimes!");
-                exit(0);
-            }
-            var_lifetime_param = Some(lp_content.chars().nth(1).unwrap().to_string());
-        }
+
+    let lps_set = extract_wrapped_LP_in_angle_brackets(&var_type);
+
+    // currently doesn't support multiple LP inside one variable type
+    if lps_set.len() > 1{
+        eprintln!("The current lifetime visualization doesn't support variable struct with multiple lifetimes!");
+        exit(0);
     }
-    VariableSpec {  name: var_name.to_string(), lifetime_param: var_lifetime_param, data_type: var_type, lifetime_info: None, hover_messages: Vec::new(), data_hash: None }
+    if var_lifetime_param.is_none() && lps_set.len() > 0 {
+        var_lifetime_param = Some(lps_set.iter().next().unwrap().to_owned());
+    }
+
+    let ret = VariableSpec {  name: var_name.to_string(), lifetime_param: var_lifetime_param, data_type: var_type, lifetime_info: None, hover_messages: Vec::new(), data_hash: None };
+    println!("varSpec: {:?}", ret);
+    ret
 }
 
+/**
+ * With tick removed
+ */
+fn extract_wrapped_LP_in_angle_brackets(segment: &String) -> HashSet<String>{
+    let mut set_lps : HashSet<String> = HashSet::new();
+    let pattern = r"<(.*?)>";
+    let regex = Regex::new(pattern).unwrap();
+    for capture in regex.captures_iter(&segment) {
+        if let Some(_) = capture.get(1) {
+            // stack, containing only '<'. When seeing one '>', pop the stack and analyze things in between
+            let mut stack : Vec<(usize, char)> = Vec::new();
+            let mut first_left_ab_found = false;
+            // index for previous left angle bracket index, used as minimize the search space
+            let mut prev_lab_idx: i32 = -1;
+            for (idx, ch) in segment.chars().into_iter().enumerate(){
+                // start from leftmost, until found the first left angle bracket
+                if ch != '<' && !first_left_ab_found{
+                    continue;
+                }
+                if ch == '<' && !first_left_ab_found{
+                    first_left_ab_found = true;
+                    stack.push((idx,ch));
+                }
+                else if ch == '<' && first_left_ab_found{
+                    stack.push((idx,ch));
+                }
+                if first_left_ab_found && ch == '>'{
+                    let paired_lab = stack.pop().unwrap();
+                    assert!(paired_lab.1 == '<');
+                    let mut sub_search_space = String::new();
+                    if prev_lab_idx == -1{
+                        sub_search_space = segment.get(paired_lab.0+1..idx).unwrap().to_string();
+                    }
+                    else{
+                        assert!(prev_lab_idx >= 0);
+                        sub_search_space = segment.get(paired_lab.0+1..prev_lab_idx as usize).unwrap().to_string();
+                    }
+                    prev_lab_idx = paired_lab.0 as i32;
+                    // println!("things inside angle bracket: {}", sub_search_space);
+                    // find lifetime parameter inside sub_search_space
+                    let sub_search_vec : Vec<&str> = sub_search_space.split(|c| c == ',' || c == ';' || c == ' ' || c == '\t' || c == '\r').collect();
+                    for elem in sub_search_vec{
+                        // everything behind the tick is part of the lifetime paramter
+                        if let Some(bidx) = elem.find('\''){
+                            set_lps.insert(elem.get(bidx+1..).unwrap().to_string());
+                        }
+                    }
+                }
+            }
+
+        }
+    }
+    set_lps
+}
 pub fn is_last_line_of_func_signature(line: String) -> bool{
     let mut sum = 0;
     for ch in line.chars(){

@@ -309,7 +309,7 @@ object.code_panel {
        <text class="lifetime tooltip-trigger" x="280" y="40" data-tooltip-text="lifetime of &amp;name should be less than &#x27;a"> [10,10] &lt;&#x3D; &#x27;a </text>
        <text class="funcSigCode" x="445" y="20"> , </text>
        <text class="funcSigCode" x="465" y="20"> serial_num: i32 </text>
-       <text class="funcSigCode" x="605" y="20"> ) </text>
+       <text class="funcSigCode" x="609" y="20"> ) </text>
 
     <rect class="tooltip-trigger" lifetime-reg-hash="0" stroke-width="3" stroke-dasharray="5,2" x="10" y="80"  width="360" height="525" fill="none" data-tooltip-text="lifetime calculation block for &#x27;a"/>
 
@@ -353,6 +353,13 @@ object.code_panel {
                 <polygon class="tooltip-trigger" data-hash="1" points="330,365 325,360 335,360" data-tooltip-text="&lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;&#x27;a&lt;/span&gt; should be at least as large as lifetime of &lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;&amp;name&lt;/span&gt;." />
             </g>
     
+            <g id="dashed-line-12">
+                <line class="lineNumDashLine" x1="30" y1="420" x2="415" y2="420" />
+                <text class="lineNum" x="30" y="420" text-anchor="start">#12</text>
+            </g>
+    
+
+    
             <g id="dashed-line-15">
                 <line class="lineNumDashLine" x1="30" y1="510" x2="415" y2="510" />
                 <text class="lineNum" x="30" y="510" text-anchor="start">#15</text>
@@ -363,13 +370,6 @@ object.code_panel {
             <g id="dashed-line-10">
                 <line class="lineNumDashLine" x1="30" y1="360" x2="415" y2="360" />
                 <text class="lineNum" x="30" y="360" text-anchor="start">#10</text>
-            </g>
-    
-
-    
-            <g id="dashed-line-12">
-                <line class="lineNumDashLine" x1="30" y1="420" x2="415" y2="420" />
-                <text class="lineNum" x="30" y="420" text-anchor="start">#12</text>
             </g>
     
 

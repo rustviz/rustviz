@@ -310,7 +310,7 @@ object.code_panel {
        <text class="funcSigCode" x="285" y="20"> , </text>
        <text class="funcSigCode" x="305" y="20"> y: &amp;&#x27;a i32 </text>
        <text class="lifetime tooltip-trigger" x="305" y="40" data-tooltip-text="lifetime of y should be less than &#x27;a"> [7,9] &lt;&#x3D; &#x27;a </text>
-       <text class="funcSigCode" x="395" y="20"> ) </text>
+       <text class="funcSigCode" x="399" y="20"> ) </text>
 
     <rect class="tooltip-trigger" lifetime-reg-hash="0" stroke-width="3" stroke-dasharray="5,2" x="10" y="80"  width="310" height="405" fill="none" data-tooltip-text="lifetime calculation block for &#x27;a"/>
 
@@ -382,9 +382,9 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-4">
-                <line class="lineNumDashLine" x1="30" y1="180" x2="365" y2="180" />
-                <text class="lineNum" x="30" y="180" text-anchor="start">#4</text>
+            <g id="dashed-line-9">
+                <line class="lineNumDashLine" x1="30" y1="330" x2="365" y2="330" />
+                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
             </g>
     
 
@@ -396,9 +396,9 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-9">
-                <line class="lineNumDashLine" x1="30" y1="330" x2="365" y2="330" />
-                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
+            <g id="dashed-line-4">
+                <line class="lineNumDashLine" x1="30" y1="180" x2="365" y2="180" />
+                <text class="lineNum" x="30" y="180" text-anchor="start">#4</text>
             </g>
     
 

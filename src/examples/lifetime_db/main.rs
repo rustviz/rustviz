@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-LifetimeVars &mut request_queue; LifetimeVars &mut available_resource; LifetimeVars request_halfway;
+LifetimeVars &mut request_queue; LifetimeVars &mut available_resource; LifetimeVars request_halfway; LifetimeBind &mut read_request -> &mut request_queue; LifetimeBind &mut update_request -> &mut request_queue; LifetimeBind &mut delete_request -> &mut request_queue
 --- END Variable Definitions --- */
 fn process_requests<'i,'a>(queue: &'i mut VecDeque<&'i mut Request<'i>>, max_process_unit: &'a mut u32) -> Option<&'i mut Request<'i>>{
     loop {
@@ -51,7 +51,7 @@ fn main() {
 
     // ..., process requests
     let mut available_resource: u32 = 10;
-    let request_halfway = process_requests(&mut request_queue, &mut available_resource); // !{ Lifetime(<FUNC: process_requests>[&mut request_queue{51:51}][&mut available_resource{51:51}]->[request_halfway{51:52}] )}
+    let request_halfway = process_requests(&mut request_queue, &mut available_resource); // !{ Lifetime(<FUNC: process_requests>[&mut request_queue{51:51}][&mut read_request{39:56}][&mut update_request{42:56}][&mut delete_request{46:56}][&mut available_resource{51:51}]->[request_halfway{51:52}] )}
     if let Some(req) = request_halfway {
         println!("#{} of {} requests are left unprocessed!", req.num_request_left, req.request_type.to_string());
     }

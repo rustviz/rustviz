@@ -128,7 +128,7 @@ pub fn render_function_lifetime_signature( func_info: & FuncSignatureSpec , regi
 
     /****** render closing parenthesis ******/
     render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
-                        FuncSignatureRenderHolder{ x_val: x_cursor - 10, y_val: y_cursor, segment: ")".to_string(), hover_msg: String::new()}));
+                        FuncSignatureRenderHolder{ x_val: x_cursor - 6, y_val: y_cursor, segment: ")".to_string(), hover_msg: String::new()}));
     x_cursor += 2 * FUNC_SIG_CHAR_X_SPACE;
 
 

@@ -5,7 +5,7 @@ type Lines = std::io::Lines<std::io::BufReader<std::fs::File>>;
 // svg_generator
 use rustviz_lib::data::{
     ExternalEvent, Function, MutRef, Owner, Struct,
-    ResourceAccessPoint, StaticRef, VisualizationData, Visualizable, LifetimeVars
+    ResourceAccessPoint, StaticRef, VisualizationData, Visualizable, LifetimeVars, LifetimeBind
 };
 use rustviz_lib::svg_frontend::lifetime_vis::*;
 // Requires: Valid file path
@@ -96,6 +96,27 @@ fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
                     })
                 );
             },
+            ("LifetimeBind", _) => {
+                // -> symbol is required
+                if let Some(binds_to_idx) = fields.iter().position(|e| e == &"->"){
+                    let l_name = fields[1..binds_to_idx].join(" ");
+                    if binds_to_idx == fields.len() - 1{
+                        eprintln!("Must have bind-to LifetimeVar name!");
+                        exit(0);
+                    }
+                    let binds_to_name = fields[binds_to_idx+1..].join(" ");
+                    vars_map.insert(l_name.clone(),
+                        ResourceAccessPoint::LifetimeBind(LifetimeBind{
+                        name : l_name,
+                        bind_to_name: binds_to_name,
+                        })
+                    );
+                }
+                else{
+                    eprintln!("Must have bind-to LifetimeVar name! Did you forget adding \"->\" to indicate that?");
+                    exit(0);
+                }
+            }
             ("Owner", 2) | ("Owner", 3) => {
                 vars_map.insert(
                     name,

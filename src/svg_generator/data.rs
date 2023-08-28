@@ -53,8 +53,18 @@ pub enum ResourceAccessPoint {
     Function(Function),
     Struct(Struct),
     LifetimeVars(LifetimeVars),
+    LifetimeBind(LifetimeBind),
 }
 
+/**
+ * LifetimeBind type can be used when a container possesses several instances with lifetime annotation.
+ * For example, dq: VecDeque<&'i MyStruct>. Things inside dq can be bound to dq.
+ */
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub struct LifetimeBind{
+    pub name: String,
+    pub bind_to_name: String
+}
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct LifetimeVars{
     pub name: String,

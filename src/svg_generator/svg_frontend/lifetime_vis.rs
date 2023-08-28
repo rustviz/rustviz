@@ -136,20 +136,21 @@ impl VariableSpec{
 		if self.name.find("self").is_some() || self.data_type.find("self").is_some(){
 			return format!("{}: {}", self.name, self.data_type)
 		}
-		if self.data_type.find("&").is_some(){
-			match &self.lifetime_param{
-				Some(LP) => {
-					let mut tmp = self.data_type.clone();
-					tmp.insert_str(self.data_type.find("&").unwrap()+1, &("'".to_string() + LP) );
-					ret = format!("{}: {}", self.name, tmp);
+		// if self.data_type.find("&").is_some(){
+		// 	match &self.lifetime_param{
+		// 		Some(LP) => {
+		// 			let mut tmp = self.data_type.clone();
+		// 			tmp.insert_str(self.data_type.find("&").unwrap()+1, &("'".to_string() + LP) );
+		// 			ret = format!("{}: {}", self.name, tmp);
 
-				},
-				None => ret = format!("{}: {}", self.name, self.data_type),
-			}
-		}
-		else{
-			ret = format!("{}: {}", self.name, self.data_type)
-		}
+		// 		},
+		// 		None => ret = format!("{}: {}", self.name, self.data_type),
+		// 	}
+		// }
+		// else{
+		// 	ret = format!("{}: {}", self.name, self.data_type)
+		// }
+		ret = format!("{}: {}", self.name, self.data_type);
 		ret
 	}
 }
