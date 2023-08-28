@@ -464,7 +464,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
 	 * extract `vars: Vec<VariableSpec>` from `fs` and assign data-hash for those have lifetime parameters (i.e., related to lifetime parameter calculation)
 	 */
 	let vars = assign_hash_to_vars_with_lp(&mut fs);
-
+	// println!("lifetimevis:467\t {:?}", vars);
     let mut lifetime_vis_svg_str = func_sig_str;
     let mut x_begin : u32 = 0;
     // calculate max y val beforehand

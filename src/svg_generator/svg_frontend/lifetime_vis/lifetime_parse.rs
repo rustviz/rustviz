@@ -120,6 +120,7 @@ pub fn parse_all_function_signature(source_file_pathname: &str, source_func_sign
             if is_struct_method && tmp_func_info.struct_group_name.is_none(){
                 tmp_func_info.struct_group_name = Some(struct_group_name.clone());
                 tmp_func_info.lifetime_param = Some(struct_group_lp_vec.clone());
+
             }
             match parse_one_line_variables(line.clone(), &mut tmp_func_info){
                 sig_parse_status::Finished => flag = false,
@@ -292,6 +293,19 @@ pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableS
     turn_semicolon_back_to_commas(&mut var_type);
     if var_name.find("self").is_some(){
         var_type = var_name.clone();
+    }
+    // lifetime declared in structs need to be considered for special case, such as "Book<'a>"
+    let pattern = r"<(.*?)>";
+    let regex = Regex::new(pattern).unwrap();
+    for capture in regex.captures_iter(&var_type) {
+        if let Some(content) = capture.get(1) {
+            let lp_content = content.as_str().to_string();
+            if lp_content.len() > 2{
+                eprintln!("The current lifetime visualization doesn't support variable struct with multiple lifetimes!");
+                exit(0);
+            }
+            var_lifetime_param = Some(lp_content.chars().nth(1).unwrap().to_string());
+        }
     }
     VariableSpec {  name: var_name.to_string(), lifetime_param: var_lifetime_param, data_type: var_type, lifetime_info: None, hover_messages: Vec::new(), data_hash: None }
 }

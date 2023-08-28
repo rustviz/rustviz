@@ -248,7 +248,7 @@ pub fn add_events(
                 exit(1);
             }
         };
-
+        // println!("251: {:?}", field);
         match field[0] {
             "Bind" => vd.append_external_event(
                 ExternalEvent::Bind{
@@ -357,7 +357,7 @@ fn create_lifetime_vis(half_one: &str, half_two: &str, vars: &HashMap<String, Re
         .filter(|s| !s.is_empty())
         .collect();
     let anno_data: Vec<&str> = annotation[0]
-        .split(|c| c == ':')
+        .splitn(2, ':')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
@@ -389,6 +389,7 @@ fn parse_lifetime(field: &str, vars: &HashMap<String, ResourceAccessPoint>) -> V
 }
 
 fn create_lifetime(input: &str, vars: &HashMap<String, ResourceAccessPoint>) -> Lifetime {
+
     let lifetime_data: Vec<&str> = input
         .split(|c| c == '{' || c == '}' || c == ':' || c == '*')
         .map(|s| s.trim())

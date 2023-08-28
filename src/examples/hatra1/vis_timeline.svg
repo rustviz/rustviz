@@ -211,17 +211,17 @@ object.code_panel {
 }
 
 [lifetime-body-hash="0"]{
-    fill: #9810e6;
-    stroke: #9810e6;
+    fill: #47b2df;
+    stroke: #47b2df;
 }
 
 [lifetime-dash-hash="0"]{
-    fill: #9810e6;
-    stroke: rgba(152,16,230,0.600);
+    fill: rgba(71,177,223,0.600);
+    stroke: rgba(71,177,223,0.600);
 }
 
 [lifetime-reg-hash="0"]{
-    stroke: rgba(152,16,230,0.600);
+    stroke: rgba(71,177,223,0.600);
 }
 
 [lifetime-body-hash="1"]{
@@ -425,23 +425,9 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-12">
-                <line class="lineNumDashLine" x1="30" y1="420" x2="895" y2="420" />
-                <text class="lineNum" x="30" y="420" text-anchor="start">#12</text>
-            </g>
-    
-
-    
-            <g id="dashed-line-9">
-                <line class="lineNumDashLine" x1="30" y1="330" x2="895" y2="330" />
-                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
-            </g>
-    
-
-    
-            <g id="dashed-line-14">
-                <line class="lineNumDashLine" x1="30" y1="480" x2="895" y2="480" />
-                <text class="lineNum" x="30" y="480" text-anchor="start">#14</text>
+            <g id="dashed-line-8">
+                <line class="lineNumDashLine" x1="30" y1="300" x2="895" y2="300" />
+                <text class="lineNum" x="30" y="300" text-anchor="start">#8</text>
             </g>
     
 
@@ -453,13 +439,6 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-10">
-                <line class="lineNumDashLine" x1="30" y1="360" x2="895" y2="360" />
-                <text class="lineNum" x="30" y="360" text-anchor="start">#10</text>
-            </g>
-    
-
-    
             <g id="dashed-line-7">
                 <line class="lineNumDashLine" x1="30" y1="270" x2="895" y2="270" />
                 <text class="lineNum" x="30" y="270" text-anchor="start">#7</text>
@@ -467,9 +446,30 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-8">
-                <line class="lineNumDashLine" x1="30" y1="300" x2="895" y2="300" />
-                <text class="lineNum" x="30" y="300" text-anchor="start">#8</text>
+            <g id="dashed-line-10">
+                <line class="lineNumDashLine" x1="30" y1="360" x2="895" y2="360" />
+                <text class="lineNum" x="30" y="360" text-anchor="start">#10</text>
+            </g>
+    
+
+    
+            <g id="dashed-line-14">
+                <line class="lineNumDashLine" x1="30" y1="480" x2="895" y2="480" />
+                <text class="lineNum" x="30" y="480" text-anchor="start">#14</text>
+            </g>
+    
+
+    
+            <g id="dashed-line-9">
+                <line class="lineNumDashLine" x1="30" y1="330" x2="895" y2="330" />
+                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
+            </g>
+    
+
+    
+            <g id="dashed-line-12">
+                <line class="lineNumDashLine" x1="30" y1="420" x2="895" y2="420" />
+                <text class="lineNum" x="30" y="420" text-anchor="start">#12</text>
             </g>
     
 

@@ -2,6 +2,7 @@ extern crate handlebars;
 
 use crate::data::{ExternalEvent, LINE_SPACE};
 use handlebars::Handlebars;
+use rand::seq::IteratorRandom;
 use std::{cmp::max, collections::BTreeMap};
 use std::fs::File;
 use std::io;
@@ -44,7 +45,7 @@ pub fn render_code_panel(
             /* automatically add line numbers to code */
             let fmt_line = format!(
                 "<tspan fill=\"#AAA\">{}  </tspan>{}",
-                line_of_code, line_string
+                line_of_code, escape_certain_chars(&line_string)
             );
             data.insert("LINE".to_string(), fmt_line);
             output.push_str(&handlebars.render("code_line_template", &data).unwrap());
@@ -73,4 +74,48 @@ pub fn render_code_panel(
     }
     output.push_str("    </g>\n");
     (output, line_of_code)
+}
+
+// will work if tspan doesn't contain another <...>
+fn escape_certain_chars( code_line: &String) -> String{
+    let _vs : Vec<char> = code_line.chars().collect();
+    let mut ret_str = String::new();
+    let mut flag_tspan = false;
+    for (idx,ch) in _vs.iter().enumerate(){
+        match ch {
+            '<' => {
+                // don't change if the following is tspan of /tspan
+                if idx + 6 < _vs.len()  {
+                    let s1 : String = _vs[idx+1..idx+6].iter().collect();
+                    if s1 == "tspan"{
+                        flag_tspan = true;
+                    }
+                    let s2 : String = _vs[idx+1..idx+7].iter().collect();
+                    if s2 == "/tspan"{
+                        flag_tspan = true;
+                    }
+
+                }
+                if flag_tspan {
+                    ret_str += "<";
+                }
+                else{
+                    ret_str += "&lt;";
+                }
+
+            },
+            '>' => {
+                    if flag_tspan == true{
+                        flag_tspan = false;
+                        ret_str += ">";
+                    }
+                    else{
+                        ret_str += "&gt;";
+                    }
+            },
+            '&' => ret_str += "&amp;",
+            _ => ret_str += ch.to_string().as_ref(),
+        }
+    }
+    ret_str
 }

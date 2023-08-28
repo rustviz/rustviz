@@ -135,7 +135,7 @@ pub fn render_svg(
         let (lifetime_render_str, width, height) = lifetime_vis::render_lifetime_panel(path_to_main_rs.to_str().unwrap().to_string(), path_to_source_rs.to_str().unwrap().to_string(), &lifetime_info_data[0]);
         // println!("width: {}, height: {}", width, height);
         svg_data.diagram = lifetime_render_str;
-        svg_data.height = height as i32;
+        svg_data.height = cmp::max(svg_data.height, height as i32);
         svg_data.tl_width = width as i32;
     }
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();

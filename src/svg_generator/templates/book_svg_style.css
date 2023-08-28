@@ -202,17 +202,17 @@ object.code_panel {
 }
 
 [lifetime-body-hash="0"]{
-    fill: #9810e6;
-    stroke: #9810e6;
+    fill: #47b2df;
+    stroke: #47b2df;
 }
 
 [lifetime-dash-hash="0"]{
-    fill: #9810e6;
-    stroke: rgba(152,16,230,0.600);
+    fill: rgba(71,177,223,0.600);
+    stroke: rgba(71,177,223,0.600);
 }
 
 [lifetime-reg-hash="0"]{
-    stroke: rgba(152,16,230,0.600);
+    stroke: rgba(71,177,223,0.600);
 }
 
 [lifetime-body-hash="1"]{
