@@ -1,7 +1,8 @@
 pub mod lifetime_parse;
 pub mod lifetime_render;
 pub mod lifetime_render_data_structures;
-use crate::data::{ ResourceAccessPoint};
+use crate::data::{ ResourceAccessPoint, LifetimeBind, self};
+use crate::hover_messages;
 use std::collections::{VecDeque, BTreeMap};
 use std::process::exit;
 use handlebars::Handlebars;
@@ -120,7 +121,9 @@ pub struct VariableSpec{
 	pub data_hash: Option<u32>,
 	/* variables that do not show up in function signature however related to this variable.
 	For example, instances possessed by container type such as VecDeque */
-
+	pub subordinates: Vec<VariableSpec>,
+	/* relationship between master and subordinates */
+	pub relationship: String,
 }
 
 
@@ -177,6 +180,79 @@ impl FuncSignatureSpec{
 	}
 
 	/**
+	 * Called when input and output VariableSpecs are set up correctly.
+	 * name and called name must be unified to called name in runtime!!!
+	 */
+	pub fn add_subordinate_to_vars_if_any(&mut self, parser_data: &LifetimeVisualization){
+		// deal first with input parameters
+		for  input_life  in parser_data.input_lives.iter() {
+			match input_life.rap{
+				ResourceAccessPoint::LifetimeBind(ref binding) => {
+					// go through all input parameters
+					for (idx, iv) in self.input_variables.iter_mut().enumerate(){
+						assert!(self.input_var_called_names[idx] == iv.name);
+						if iv.name == binding.bind_to_name{
+							let mut subordinate = FuncSignatureSpec::create_var_spec_using_parser_data(input_life);
+							subordinate.lifetime_param = iv.lifetime_param.clone();
+							iv.subordinates.push(subordinate);
+							iv.relationship = binding.relationship.clone();
+						}
+					}
+				}
+				ResourceAccessPoint::LifetimeVars(_) => (),
+				_ => {
+					eprintln!("Wrong variable definition! Should be related with Lifetime tag!");
+					exit(0);
+				}
+			}
+		}
+		// deal with output parameters
+		for  output_life  in parser_data.return_lives.iter() {
+			match output_life.rap{
+				ResourceAccessPoint::LifetimeBind(ref binding) => {
+					// go through all input parameters
+					for (idx, ov) in self.output_variables.iter_mut().enumerate(){
+						assert!(self.output_var_called_names[idx] == ov.name);
+						if ov.name == binding.bind_to_name{
+							let mut subordinate = FuncSignatureSpec::create_var_spec_using_parser_data(output_life);
+							subordinate.lifetime_param = ov.lifetime_param.clone();
+							ov.subordinates.push(subordinate);
+							ov.relationship = binding.relationship.clone();
+						}
+					}
+				}
+				ResourceAccessPoint::LifetimeVars(_) => (),
+				_ => {
+					eprintln!("Wrong variable definition! Should be related with Lifetime tag!");
+					exit(0);
+				}
+			}
+		}
+
+	}
+
+	/**
+	 * Need to update lifetime param if it has master;
+	 * Can elide data type;
+	 * Need to update data_hash;
+	 */
+	fn create_var_spec_using_parser_data(pv: &Lifetime) -> VariableSpec{
+		let name = match pv.rap{
+			ResourceAccessPoint::LifetimeBind(ref info) => info.name.clone(),
+			ResourceAccessPoint::LifetimeVars(ref info) => info.name.clone(),
+			_ => {
+				eprintln!("Wrong variable definition! Should be related with Lifetime tag!");
+				exit(0);
+			},
+		};
+		let lifetime_info = Some(LifetimeStartEndPoint{start: pv.start_line as u32, end: pv.end_line as u32});
+		let hover_messages = match pv.explanation{
+			Some(ref hvmsg) => hvmsg.clone(),
+			None => Vec::new(),
+		};
+		VariableSpec { name: name, lifetime_param: None, data_type: String::new(), lifetime_info: lifetime_info, hover_messages: hover_messages, data_hash: None, subordinates: Vec::new(), relationship: String::new() }
+	}
+	/**
 	 * overwrite input & output `VariableSpec.name` with [input | output] variable called name
 	 */
 	pub fn sync_var_name_with_invoked_name(&mut self){
@@ -193,7 +269,7 @@ impl FuncSignatureSpec{
 	 * Also, update hover messages shown on lifetime column
 	 * Now consider struct method ( need to relate struct instance name with `&self`).
 	 * If this function is about struct method invoked on struct instance, then the first input variable should be the struct instance:
-	* For example:
+	 * For example:
 	  	```
 		let ret = my_instance.clone(); /* ...my_instance(@lifetime info)... */
 
@@ -205,11 +281,14 @@ impl FuncSignatureSpec{
 			assert_eq!(self.output_variables[idx].name, String::from(""));
 			// variable name (stored in called name vector )
 			match &ov.rap{
-				ResourceAccessPoint::Owner(info) => self.output_var_called_names.push_back(info.name.clone()),
-				ResourceAccessPoint::StaticRef(info) => self.output_var_called_names.push_back(info.name.clone()),
-				ResourceAccessPoint::MutRef(info) => self.output_var_called_names.push_back(info.name.clone()),
-				ResourceAccessPoint::Struct(info) => self.output_var_called_names.push_back(info.name.clone()),
-				_ => {}
+				ResourceAccessPoint::LifetimeVars(info) => {
+					self.output_var_called_names.push_back(info.name.clone())
+				},
+				ResourceAccessPoint::LifetimeBind(_) => (),
+				_ => {
+					eprintln!("Wrong variable definition! Should be related with Lifetime tag!");
+					exit(0);
+				}
 			}
 			// update lifetime start and end point
 			self.output_variables[idx].lifetime_info = Some(LifetimeStartEndPoint { start: ov.start_line as u32, end: ov.end_line as u32 });
@@ -220,8 +299,19 @@ impl FuncSignatureSpec{
 		}
 
 		// update input variable lifetime
-		for (idx, iv) in parser_data.input_lives.iter().enumerate(){
-			self.input_variables[idx].lifetime_info = Some(LifetimeStartEndPoint { start: iv.start_line as u32, end: iv.end_line as u32 });
+		let mut idx = 0;
+		for  iv in parser_data.input_lives.iter(){
+			match iv.rap {
+				ResourceAccessPoint::LifetimeVars(_) => {
+					self.input_variables[idx].lifetime_info = Some(LifetimeStartEndPoint { start: iv.start_line as u32, end: iv.end_line as u32 });
+					idx += 1;
+				},
+				ResourceAccessPoint::LifetimeBind(_) => (),
+				_ => {
+					eprintln!("Wrong variable definition! Should be related with Lifetime tag!");
+					exit(0);
+				}
+			}
 		}
 		// if it's struct group, relate self with struct instance
 		/*
@@ -427,6 +517,11 @@ fn assign_hash_to_vars_with_lp(func_info: &mut FuncSignatureSpec) -> Vec<Variabl
             elem.data_hash = Some(data_hash);
             data_hash += 1;
             vars.push(elem.clone());
+			for subordinate in elem.subordinates.iter_mut(){
+				subordinate.data_hash = Some(data_hash);
+				vars.push(subordinate.clone());
+			}
+			data_hash += 1;
         }
        
     }
@@ -434,7 +529,12 @@ fn assign_hash_to_vars_with_lp(func_info: &mut FuncSignatureSpec) -> Vec<Variabl
         if elem.lifetime_info.is_some(){
             elem.data_hash = Some(data_hash);
             data_hash += 1;
-            vars.push(elem.clone())
+            vars.push(elem.clone());
+			for subordinate in elem.subordinates.iter_mut(){
+				subordinate.data_hash = Some(data_hash);
+				vars.push(subordinate.clone());
+			}
+			data_hash += 1;
         }
     }
     vars
@@ -469,6 +569,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
 	 */
 	let vars = assign_hash_to_vars_with_lp(&mut fs);
 	// println!("lifetimevis:467\t {:?}", vars);
+	println!("lifetimevis:467\t {:?}", fs);
     let mut lifetime_vis_svg_str = func_sig_str;
     let mut x_begin : u32 = 0;
     // calculate max y val beforehand

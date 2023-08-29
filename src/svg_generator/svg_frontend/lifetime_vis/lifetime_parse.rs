@@ -308,7 +308,7 @@ pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableS
         var_lifetime_param = Some(lps_set.iter().next().unwrap().to_owned());
     }
 
-    let ret = VariableSpec {  name: var_name.to_string(), lifetime_param: var_lifetime_param, data_type: var_type, lifetime_info: None, hover_messages: Vec::new(), data_hash: None };
+    let ret = VariableSpec {  name: var_name.to_string(), lifetime_param: var_lifetime_param, data_type: var_type, lifetime_info: None, hover_messages: Vec::new(), data_hash: None, subordinates : Vec::new(), relationship: String::new()};
     println!("varSpec: {:?}", ret);
     ret
 }
@@ -535,7 +535,7 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
 			exit(0)
 		}
 	}
-    // println!("update input names parse: {:?}", fs);
+    println!("update input names parse: {:?}", fs);
 	fs.update_output_var_name_and_update_vars_lifetimes(parser_data);
     fs.update_hover_messages_by_parser_data(parser_data);
     // println!("{:?}", fs);
@@ -543,6 +543,7 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
     // sync variable invoked name with signature name
     fs.sync_var_name_with_invoked_name();
     fs.update_struct_instance_name();
+    fs.add_subordinate_to_vars_if_any(parser_data);
     fs
 }
 
