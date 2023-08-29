@@ -381,14 +381,33 @@ impl FuncSignatureSpec{
 			if self.is_not_static_struct_method{
 				assert!(self.input_variables[0].name.find("self").is_some());
 			}
-			if let Some(hmsgs) = vinfo.explanation.as_ref(){
-				self.input_variables[idx].hover_messages = hmsgs.clone();
+			match vinfo.rap{
+				ResourceAccessPoint::LifetimeBind(_) => (),
+				ResourceAccessPoint::LifetimeVars(_) => {
+					if let Some(hmsgs) = vinfo.explanation.as_ref(){
+						self.input_variables[idx].hover_messages = hmsgs.clone();
+					}
+				}
+				_ => {
+					eprintln!("Wrong lifetime annotation!");
+					exit(0);
+				}
 			}
 		}
 		for (idx, ovinfo) in parser_data.return_lives.iter().enumerate(){
-			if let Some(hmsgs) = ovinfo.explanation.as_ref(){
-				self.output_variables[idx].hover_messages = hmsgs.clone();
+			match ovinfo.rap{
+				ResourceAccessPoint::LifetimeBind(_) => (),
+				ResourceAccessPoint::LifetimeVars(_) => {
+					if let Some(hmsgs) = ovinfo.explanation.as_ref(){
+						self.output_variables[idx].hover_messages = hmsgs.clone();
+					}
+				}
+				_ => {
+					eprintln!("Wrong lifetime annotation!");
+					exit(0);
+				}
 			}
+
 		}
 	}
 	/**
@@ -563,6 +582,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
     // println!("func sig info: {:?}", fs);
 
     let (width, y_end, func_sig_str) = render_function_lifetime_signature(&fs, &mut registry);
+	println!("width sig: {}", width);
 	/*
 	 * extract `vars: Vec<VariableSpec>` from `fs` and assign data-hash for those have lifetime parameters (i.e., related to lifetime parameter calculation)
 	 */
@@ -573,7 +593,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
 		println!("var: {}, lifetime: {:?}", vv.name, vv.lifetime_param);
 	}
     let mut lifetime_vis_svg_str = func_sig_str;
-    let mut x_begin : u32 = 0;
+    let mut x_begin : u32 = 30;
     // calculate max y val beforehand
     let mut max_y = 0;
     for var in &vars{
@@ -595,8 +615,10 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
             }
 
             let (w2, column_str) = render_lifetime_columns_one_for_lifetime_parameter(&var_same_lifetime, &registry, x_begin, &lifetime_hash, &max_y);
-            x_begin += w2 + 20;
+            x_begin += w2;
+			x_begin += 60;
             lifetime_vis_svg_str = lifetime_vis_svg_str + &column_str;
+			println!("column xbegin: {}", x_begin);
             // render lifetime region square
         }
         let dash_line_str = render_dashed_number_line(vars,x_begin, &registry);

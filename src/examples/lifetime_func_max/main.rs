@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-Owner a; Owner b; StaticRef r; StaticRef x; StaticRef y;
+LifetimeVars a; LifetimeVars b; LifetimeVars r; LifetimeVars x; LifetimeVars y;
 --- END Variable Definitions --- */
 fn main(){
     let a = 10;

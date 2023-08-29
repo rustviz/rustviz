@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-StaticRef &name; Owner serial_num; Owner rust_book;
+LifetimeVars &name; LifetimeVars serial_num; LifetimeVars rust_book;
 --- END Variable Definitions --- */
 struct Book<'a>{
     name: &'a String,

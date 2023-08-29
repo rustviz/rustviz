@@ -277,7 +277,6 @@ pub fn add_events(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-
         let mut field = Vec::new();
         if split.len() == 1 { // no "->"
             let idx = split[0].find("(").expect(&event_usage_err());
@@ -291,11 +290,11 @@ pub fn add_events(
             field.push(&split[0][idx+1..]); // from
             field.push(&split[1][..split[1].len()-1]); // to
         }
+        
         else { // uh oh, wrong
             eprintln!("{}", event_usage_err());
             exit(1);
         }
-
         // check for any empty fields
         for f in &field {
             if f.is_empty() {
@@ -303,7 +302,6 @@ pub fn add_events(
                 exit(1);
             }
         };
-        // println!("251: {:?}", field);
         match field[0] {
             "Bind" => vd.append_external_event(
                 ExternalEvent::Bind{
@@ -387,7 +385,19 @@ pub fn add_events(
                 },
                 &(event.0 as usize)
             ),
-            "Lifetime" => vd.append_lifetimes(create_lifetime_vis(&field[1], &field[2], &vars)),
+            "Lifetime" => {
+                // no return variable
+                if field.len() == 2{
+                    vd.append_lifetimes(create_lifetime_vis(&field[1], "", &vars))
+                }
+                else if field.len() > 2 {
+                    vd.append_lifetimes(create_lifetime_vis(&field[1], &field[2], &vars));
+                }
+                else{
+                    eprintln!("Something wrong with lifetime annotation syntax!");
+                    exit(1);
+                }
+            },
             _ => {
                 eprintln!("{} is not a valid event.", field[0]);
                 println!("{}", event_usage_err());
@@ -406,12 +416,17 @@ fn create_lifetime_vis(half_one: &str, half_two: &str, vars: &HashMap<String, Re
     };
     let half_one_string = half_one.to_string();
     let half_two_string = half_two.to_string();
-    let annotation: Vec<&str> = half_one_string
-        .split(|c| c == '<' || c == '>')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let anno_data: Vec<&str> = annotation[0]
+    // find first matching '>'
+    let mut anno_content = String::new();
+    let mut input_var_annotation_content = String::new();
+    if let Some(fmidx) = half_one_string.find('>'){
+        anno_content = half_one_string.get(half_one_string.find('<').unwrap()+1..fmidx).unwrap().to_string();
+        input_var_annotation_content = half_one_string.get(fmidx+1..).unwrap().to_string();
+    }
+    else{
+        eprintln!("Wrong lifetime annotation syntax!")
+    }
+    let anno_data: Vec<&str> = anno_content
         .splitn(2, ':')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
@@ -423,8 +438,16 @@ fn create_lifetime_vis(half_one: &str, half_two: &str, vars: &HashMap<String, Re
         "VAR" => livis.annotation_type = LifetimeType::Var(anno_data[1].to_string()),
         _ => eprintln!("Incorrect lifetime type!"),
     };
-    livis.input_lives = parse_lifetime(&annotation[1], &vars);
-    livis.return_lives = parse_lifetime(&half_two_string, &vars);
+    // println!("annotaion: {:?}", livis.annotation_type);
+    // println!("input_Var: {}", input_var_annotation_content);
+    // exit(0);
+    livis.input_lives = parse_lifetime(&input_var_annotation_content, &vars);
+    if half_two_string.len() == 0{
+        livis.return_lives = Vec::new();
+    }
+    else{
+        livis.return_lives = parse_lifetime(&half_two_string, &vars);
+    }
     livis
 
 
@@ -432,11 +455,13 @@ fn create_lifetime_vis(half_one: &str, half_two: &str, vars: &HashMap<String, Re
 fn parse_lifetime(field: &str, vars: &HashMap<String, ResourceAccessPoint>) -> Vec<Lifetime> {
     let field_string = field.to_string();
     let elements: Vec<&str> = field_string
-        .split(|c| c == '[' || c == ']' || c == '<' || c == '>')
+        .split(|c| c == '[' || c == ']')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
     let mut input_lives: Vec<Lifetime> = Vec::new();
+    // println!("input_lives: {:?}", elements);
+    // exit(0);
     for element in elements {
         input_lives.push(create_lifetime(element, &vars));
 }

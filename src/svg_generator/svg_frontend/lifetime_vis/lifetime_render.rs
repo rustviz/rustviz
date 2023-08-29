@@ -165,6 +165,7 @@ fn render_func_sig_helper(var_info: & VariableSpec, x_cursor: &mut u32, y_cursor
         for subordinate in var_info.subordinates.iter(){
             hover_message += &format!("{}, ", subordinate.name);
         }
+        hover_message += &format!("which all contribute to calculation of '{}.", var_info.lifetime_param.clone().unwrap());
         // only highlight variable name
         render_segments.insert(get_hash(),("func_signature_var_has_subordinate_template".to_string(),
         FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: var_sig_string, hover_msg: hover_message}));
@@ -271,6 +272,11 @@ pub fn render_lifetime_columns_one_for_lifetime_parameter(vars_lifetime: &Vec<Va
         if var_column_data.DRPT_msg.len() == 0 {
             var_column_data.DRPT_msg = format!("{} comes out of scope. Resource get dropped and self get destroyed.", var_info.name)
         }
+        // for reference created on the fly
+        if var_info.lifetime_info.clone().unwrap().start == var_info.lifetime_info.clone().unwrap().end{
+            let same_str = format!("{} is a temporary reference created on the fly, whose lifetime starts and ends one the same line on caller side.", var_info.name);
+            (var_column_data.BODY_msg, var_column_data.CRPT_msg ,var_column_data.DRPT_msg) = (same_str.clone(), same_str.clone(),same_str);
+        }
         /* finished layout computation! Let's added to the Map for later rendering! */
         var_lifetime_column_render_holer.insert(var_column_data.data_hash,
                                                 ("var_lifetime_label_start_body_end_template".to_string(),var_column_data));
@@ -290,9 +296,8 @@ pub fn render_lifetime_columns_one_for_lifetime_parameter(vars_lifetime: &Vec<Va
         w: x_cursor - x_begin - 5,
         h: *max_y,
         hover_msg: format!("lifetime calculation block for '{}", lp_name)
-    }).unwrap().as_str(),
-    ret);
-    (x_cursor, ret)
+    }).unwrap().as_str(),ret);
+    (x_cursor - x_begin, ret)
 }
 
 /**
