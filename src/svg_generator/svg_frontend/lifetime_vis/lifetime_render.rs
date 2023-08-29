@@ -150,12 +150,30 @@ fn render_func_sig_helper(var_info: & VariableSpec, x_cursor: &mut u32, y_cursor
     let Y_Space : u32 = 20;
     let mut x_update : u32 = 0;
     /* render code segment */
-    let var_sig_string = var_info.to_string();
+    let mut var_sig_string = var_info.to_string();
     // println!("name: {}", var_sig_string);
-    x_update =  (var_sig_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
+    if var_info.subordinates.len() == 0{
+        x_update =  (var_sig_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
+        render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+        FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: var_sig_string, hover_msg: String::new()}));
+    }
+    else{
+        var_sig_string = var_info.name.clone();
+        x_update =  (var_sig_string.len() as u32) * 9;
+        // generate hover message of info between master and subordinates
+        let mut hover_message = format!("*{}* {} ", var_info.name, var_info.relationship);
+        for subordinate in var_info.subordinates.iter(){
+            hover_message += &format!("{}, ", subordinate.name);
+        }
+        // only highlight variable name
+        render_segments.insert(get_hash(),("func_signature_var_has_subordinate_template".to_string(),
+        FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: var_sig_string, hover_msg: hover_message}));
+        // add variable type
+        render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+        FuncSignatureRenderHolder{ x_val: *x_cursor + x_update, y_val: *y_cursor, segment: format!(":{}", var_info.data_type), hover_msg: String::new()}));
+        x_update += var_info.data_type.len() as u32 * FUNC_SIG_CHAR_X_SPACE;
+    }
 
-    render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
-    FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: var_sig_string, hover_msg: String::new()}));
 
     if let Some(lifetime_param) = &var_info.lifetime_param{
         if let Some(lifetime_scope) = &var_info.lifetime_info{
@@ -390,6 +408,9 @@ pub fn prepare_registry(registry: &mut Handlebars){
     let func_signature_struct_instance_method_invoke_template =
     "       <text class=\"structInstance tooltip-trigger\" x=\"{{x_val}}\" y=\"{{y_val}}\" data-tooltip-text=\"{{hover_msg}}\">  {{segment}} </text>\n";
 
+    let func_signature_var_has_subordinate_template =
+    "       <text class=\"masterInstance tooltip-trigger\" x=\"{{x_val}}\" y=\"{{y_val}}\" data-tooltip-text=\"{{hover_msg}}\">  {{segment}} </text>\n";
+
     /* for variable lifetime start/end point, lifetime body rendering */
     let var_lifetime_label_start_body_end_template =
     "
@@ -438,6 +459,10 @@ pub fn prepare_registry(registry: &mut Handlebars){
 
     assert!(
         registry.register_template_string("func_signature_struct_instance_method_invoke_template", func_signature_struct_instance_method_invoke_template).is_ok()
+    );
+
+    assert!(
+        registry.register_template_string("func_signature_var_has_subordinate_template", func_signature_var_has_subordinate_template).is_ok()
     );
 
     assert!(

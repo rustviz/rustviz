@@ -520,10 +520,9 @@ fn assign_hash_to_vars_with_lp(func_info: &mut FuncSignatureSpec) -> Vec<Variabl
 			for subordinate in elem.subordinates.iter_mut(){
 				subordinate.data_hash = Some(data_hash);
 				vars.push(subordinate.clone());
+				data_hash += 1;
 			}
-			data_hash += 1;
         }
-       
     }
     for elem in func_info.output_variables.iter_mut(){
         if elem.lifetime_info.is_some(){
@@ -533,8 +532,8 @@ fn assign_hash_to_vars_with_lp(func_info: &mut FuncSignatureSpec) -> Vec<Variabl
 			for subordinate in elem.subordinates.iter_mut(){
 				subordinate.data_hash = Some(data_hash);
 				vars.push(subordinate.clone());
+				data_hash += 1;
 			}
-			data_hash += 1;
         }
     }
     vars
@@ -561,7 +560,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
 	 * Parse function/lifetime/variables info
 	 */
     let mut fs = translate_parser_data_to_function_signature_info(parser_data, &path_to_source_rs, &path_to_main_rs);
-    println!("func sig info: {:?}", fs);
+    // println!("func sig info: {:?}", fs);
 
     let (width, y_end, func_sig_str) = render_function_lifetime_signature(&fs, &mut registry);
 	/*
@@ -569,7 +568,10 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
 	 */
 	let vars = assign_hash_to_vars_with_lp(&mut fs);
 	// println!("lifetimevis:467\t {:?}", vars);
-	println!("lifetimevis:467\t {:?}", fs);
+	// println!("lifetimevis:467\t {:?}", fs);
+	for vv in vars.iter(){
+		println!("var: {}, lifetime: {:?}", vv.name, vv.lifetime_param);
+	}
     let mut lifetime_vis_svg_str = func_sig_str;
     let mut x_begin : u32 = 0;
     // calculate max y val beforehand
@@ -591,6 +593,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
                     }
                 }
             }
+
             let (w2, column_str) = render_lifetime_columns_one_for_lifetime_parameter(&var_same_lifetime, &registry, x_begin, &lifetime_hash, &max_y);
             x_begin += w2 + 20;
             lifetime_vis_svg_str = lifetime_vis_svg_str + &column_str;

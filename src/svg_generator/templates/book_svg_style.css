@@ -46,6 +46,15 @@ text.structInstance {
     font-weight: bold;
     font-size: 0.875em;
 }
+
+text.masterInstance {
+    fill: rgba(242,23,184,0.906);
+    white-space: pre;
+    font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-weight: bold;
+    font-size: 0.875em;
+}
+
 text.lifetime{
     fill: #eca163;
     white-space: pre;

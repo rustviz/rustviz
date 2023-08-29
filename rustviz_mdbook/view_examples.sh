@@ -53,6 +53,7 @@ declare -a targetExamples=(
     # "extra_credit"
     "lifetime_func_max"
     "lifetime_rustbook"
+    "lifetime_db"
 )
 
 EX="../src/examples"
