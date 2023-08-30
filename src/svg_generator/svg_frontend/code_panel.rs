@@ -7,12 +7,15 @@ use std::{cmp::max, collections::BTreeMap};
 use std::fs::File;
 use std::io;
 
+/**
+ * Return value: (String, i32, usize) => (code panel SVG string, #lines of code, width of code panel)
+ */
 pub fn render_code_panel(
     annotated_lines: io::Lines<io::BufReader<File>>,
     lines: io::Lines<io::BufReader<File>>,
     max_x_space: &mut i64,
     event_line_map: &BTreeMap<usize, Vec<ExternalEvent>>,
-) -> (String, i32) {
+) -> (String, i32, usize) {
     println!("\n{:#?}", event_line_map);
     /* Template creation */
     let mut handlebars = Handlebars::new();
@@ -24,11 +27,12 @@ pub fn render_code_panel(
     assert!(handlebars
         .register_template_string("code_line_template", line_template)
         .is_ok());
-    
+    let mut max_width: usize = 0;
     // figure out that max length
     for line in lines {
         if let Ok(line_string) = line {
             *max_x_space = max(line_string.len() as i64, *max_x_space);
+            max_width = max(line_string.len() * 10, max_width)
         }
     }
     
@@ -73,7 +77,7 @@ pub fn render_code_panel(
         line_of_code = line_of_code + 1;
     }
     output.push_str("    </g>\n");
-    (output, line_of_code)
+    (output, line_of_code, max_width)
 }
 
 // will work if tspan doesn't contain another <...>

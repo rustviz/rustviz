@@ -17,6 +17,7 @@ struct SvgData {
     tl_id: String,
     tl_width: i32,
     height: i32,
+    code_panel_width: usize,
 }
 
 pub fn render_svg(
@@ -104,12 +105,14 @@ pub fn render_svg(
 
     // data for code panel
     let mut max_x_space: i64 = 0;
+    let mut code_max_width: usize = 0;
     if let (Ok(annotated_lines),Ok(lines)) = 
     (utils::read_lines(input_path.to_owned() + "annotated_source.rs"), utils::read_lines(output_path.to_owned() + "source.rs")) {
-        let (output, line_of_code) =
+        let (output, line_of_code, width) =
             code_panel::render_code_panel(annotated_lines, lines, &mut max_x_space, &visualization_data.event_line_map);
         code_panel_string = output;
         num_lines = line_of_code;
+        code_max_width = width;
     }
 
     // data for tl panel
@@ -123,6 +126,7 @@ pub fn render_svg(
         tl_id: "tl_".to_owned() + input_path,
         tl_width: cmp::max(max_width, 200),
         height: (num_lines * LINE_SPACE as i32 + 80) + 50,
+        code_panel_width: code_max_width
     };
 
     // data for lifetime panel (optional)
