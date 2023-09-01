@@ -291,9 +291,9 @@ pub fn render_lifetime_columns_one_for_lifetime_parameter(vars_lifetime: &Vec<Va
     ret += &lp_render_string;
     ret = format!("{}\n{}", registry.render("lifetime_region_square_template", &LifetimeRegionSquareHoler{
         lifetime_hash: *lifetime_hash as u32,
-        x: x_begin + 10,
+        x: x_begin - 5,
         y: CODE_LINE_Y_START - 10,
-        w: x_cursor - x_begin - 5,
+        w: x_cursor - x_begin + 10 ,
         h: *max_y,
         hover_msg: format!("lifetime calculation block for '{}", lp_name)
     }).unwrap().as_str(),ret);

@@ -1,4 +1,4 @@
-<svg height="1840px" width="1350px" 
+<svg height="1810px" width="1350px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
     <desc>examples/lifetime_db/input/</desc>
@@ -280,62 +280,61 @@ object.code_panel {
     </g>
 
     <g id="code">
-        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn process_requests&lt;'i,'a&gt;(queue: &amp;'i mut VecDeque&lt;&amp;'i mut Request&lt;'i&gt;&gt;, max_process_unit: &amp;'a mut u32) -&gt; Option&lt;&amp;'i mut Request&lt;'i&gt;&gt;{ </text>
-        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    loop { </text>
-        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>        let front_request: Option&lt;&amp;mut Request&gt; = queue.pop_front(); </text>
-        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>        if let Some(request) = front_request{ </text>
-        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>            // if current max_process_unit is greater than current requests </text>
-        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>            if request.num_request_left &lt;= max_process_unit{ </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>                println!("Served #{} of {} requests.", request.num_request_left, request.request_type.to_string()); </text>
-        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>                // decrement the amount of resource spent on this request </text>
-        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>                *max_process_unit = *max_process_unit - *request.num_request_left; </text>
-        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>                // signify this request has been processed </text>
-        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>                *request.num_request_left = 0; </text>
-        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>            } </text>
-        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>            // not enough </text>
-        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>            else{ </text>
-        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>                // process as much as we can </text>
-        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>                *request.num_request_left = *request.num_request_left - *max_process_unit; </text>
-        <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>                // sad, no free resource anymore </text>
-        <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>                *max_process_unit = 0; </text>
-        <text class="code" x="20" y="630"> <tspan fill="#AAA">19  </tspan>                // enqueue the front request back to queue, hoping someone will handle it... </text>
-        <text class="code" x="20" y="660"> <tspan fill="#AAA">20  </tspan>                // queue.push_front(request); </text>
-        <text class="code" x="20" y="690"> <tspan fill="#AAA">21  </tspan>                return Option::Some(request); </text>
-        <text class="code" x="20" y="720"> <tspan fill="#AAA">22  </tspan>            } </text>
-        <text class="code" x="20" y="750"> <tspan fill="#AAA">23  </tspan>            // </text>
-        <text class="code" x="20" y="780"> <tspan fill="#AAA">24  </tspan>        } </text>
-        <text class="code" x="20" y="810"> <tspan fill="#AAA">25  </tspan>        else { </text>
-        <text class="code" x="20" y="840"> <tspan fill="#AAA">26  </tspan>            // no available request to process, ooh-yeah! </text>
-        <text class="code" x="20" y="870"> <tspan fill="#AAA">27  </tspan>            return Option::None; </text>
-        <text class="code" x="20" y="900"> <tspan fill="#AAA">28  </tspan> </text>
-        <text class="code" x="20" y="930"> <tspan fill="#AAA">29  </tspan>        } </text>
-        <text class="code" x="20" y="960"> <tspan fill="#AAA">30  </tspan>    } </text>
-        <text class="code" x="20" y="990"> <tspan fill="#AAA">31  </tspan>} </text>
-        <text class="code" x="20" y="1020"> <tspan fill="#AAA">32  </tspan> </text>
-        <text class="code" x="20" y="1050"> <tspan fill="#AAA">33  </tspan>fn main() { </text>
-        <text class="code" x="20" y="1080"> <tspan fill="#AAA">34  </tspan>    let mut request_queue: VecDeque&lt;&amp;mut Request&gt; = VecDeque::new(); </text>
-        <text class="code" x="20" y="1110"> <tspan fill="#AAA">35  </tspan>    // generating some requests </text>
-        <text class="code" x="20" y="1140"> <tspan fill="#AAA">36  </tspan>    let mut reads_cnt: u32 = 20; </text>
-        <text class="code" x="20" y="1170"> <tspan fill="#AAA">37  </tspan>    let mut read_request: Request = Request::new(&amp;mut reads_cnt, RequestType::READ); </text>
-        <text class="code" x="20" y="1200"> <tspan fill="#AAA">38  </tspan>    // enqueue read requests </text>
-        <text class="code" x="20" y="1230"> <tspan fill="#AAA">39  </tspan>    request_queue.push_back(&amp;mut read_request); </text>
-        <text class="code" x="20" y="1260"> <tspan fill="#AAA">40  </tspan>    let mut updates_cnt: u32 = 30; </text>
-        <text class="code" x="20" y="1290"> <tspan fill="#AAA">41  </tspan>    let mut update_request: Request = Request::new(&amp;mut updates_cnt, RequestType::UPDATE); </text>
-        <text class="code" x="20" y="1320"> <tspan fill="#AAA">42  </tspan>    request_queue.push_back(&amp;mut update_request); </text>
-        <text class="code" x="20" y="1350"> <tspan fill="#AAA">43  </tspan>    // enqueue update requests </text>
-        <text class="code" x="20" y="1380"> <tspan fill="#AAA">44  </tspan>    let mut deletes_cnt: u32 =50; </text>
-        <text class="code" x="20" y="1410"> <tspan fill="#AAA">45  </tspan>    let mut delete_request: Request = Request::new(&amp;mut deletes_cnt, RequestType::DELETE); </text>
-        <text class="code" x="20" y="1440"> <tspan fill="#AAA">46  </tspan>    request_queue.push_back(&amp;mut delete_request); </text>
-        <text class="code" x="20" y="1470"> <tspan fill="#AAA">47  </tspan>    // enqueue delete requests </text>
-        <text class="code" x="20" y="1500"> <tspan fill="#AAA">48  </tspan> </text>
-        <text class="code" x="20" y="1530"> <tspan fill="#AAA">49  </tspan>    // ..., process requests </text>
-        <text class="code" x="20" y="1560"> <tspan fill="#AAA">50  </tspan>    let mut available_resource: u32 = 10; </text>
-        <text class="code" x="20" y="1590"> <tspan fill="#AAA">51  </tspan>    let request_halfway = process_requests(&amp;mut request_queue, &amp;mut available_resource); </text>
-        <text class="code" x="20" y="1620"> <tspan fill="#AAA">52  </tspan>    if let Some(req) = request_halfway { </text>
-        <text class="code" x="20" y="1650"> <tspan fill="#AAA">53  </tspan>        println!("#{} of {} requests are left unprocessed!", req.num_request_left, req.request_type.to_string()); </text>
-        <text class="code" x="20" y="1680"> <tspan fill="#AAA">54  </tspan>    } </text>
-        <text class="code" x="20" y="1710"> <tspan fill="#AAA">55  </tspan>    println!("there are #{} free resource left.", available_resource); </text>
-        <text class="code" x="20" y="1740"> <tspan fill="#AAA">56  </tspan>} </text>
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>fn main() { </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    // requests, resources generated by main thread </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>    let mut available_resource: u32 = 60; </text>
+        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>    let mut request_queue: VecDeque&lt;&amp;mut Request&gt; = VecDeque::new(); </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>    let reads_cnt: u32 = 20; </text>
+        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    let mut RD_rq: Request = Request::new(reads_cnt, RequestType::READ); </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    request_queue.push_back(<tspan data-hash="2">&amp;mut RD_rq</tspan>); </text>
+        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let updates_cnt: u32 = 30; </text>
+        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>    let mut UD_rq: Request = Request::new(updates_cnt, RequestType::UPDATE); </text>
+        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>    request_queue.push_back(<tspan data-hash="3">&amp;mut UD_rq</tspan>); </text>
+        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>    let deletes_cnt: u32 =50; </text>
+        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>    let mut DL_rq: Request = Request::new(deletes_cnt, RequestType::DELETE); </text>
+        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>    request_queue.push_back(<tspan data-hash="4">&amp;mut DL_rq</tspan>); </text>
+        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>    // ..., process requests in multi-threading way ... </text>
+        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>    // this might be another thread that deal with request processing ... </text>
+        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>    let <tspan data-hash="5">ptr_to_resource</tspan> = &amp;mut available_resource; </text>
+        <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>    let <tspan data-hash="6">request_halfway</tspan> = process_requests(<tspan data-hash="1">&amp;mut request_queue</tspan>, <tspan data-hash="5">ptr_to_resource</tspan>); </text>
+        <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>    if let Some(req) = <tspan data-hash="6">request_halfway</tspan> { </text>
+        <text class="code" x="20" y="630"> <tspan fill="#AAA">19  </tspan>        println!("#{} of {} requests are left unprocessed!", req.num_request_left, req.request_type.to_string()); </text>
+        <text class="code" x="20" y="660"> <tspan fill="#AAA">20  </tspan>    } </text>
+        <text class="code" x="20" y="690"> <tspan fill="#AAA">21  </tspan>    println!("there are #{} free resource left.", available_resource); </text>
+        <text class="code" x="20" y="720"> <tspan fill="#AAA">22  </tspan>} </text>
+        <text class="code" x="20" y="750"> <tspan fill="#AAA">23  </tspan> </text>
+        <text class="code" x="20" y="780"> <tspan fill="#AAA">24  </tspan>fn process_requests&lt;'i,'a&gt;(queue: &amp;'i mut VecDeque&lt;&amp;'i mut Request&lt;'i&gt;&gt;, max_process_unit: &amp;'a mut u32) -&gt; Option&lt;&amp;'i mut Request&lt;'i&gt;&gt;{ </text>
+        <text class="code" x="20" y="810"> <tspan fill="#AAA">25  </tspan>    loop { </text>
+        <text class="code" x="20" y="840"> <tspan fill="#AAA">26  </tspan>        let front_request: Option&lt;&amp;mut Request&gt; = queue.pop_front(); </text>
+        <text class="code" x="20" y="870"> <tspan fill="#AAA">27  </tspan>        if let Some(request) = front_request{ </text>
+        <text class="code" x="20" y="900"> <tspan fill="#AAA">28  </tspan>            // if current max_process_unit is greater than current requests </text>
+        <text class="code" x="20" y="930"> <tspan fill="#AAA">29  </tspan>            if request.num_request_left &lt;= max_process_unit{ </text>
+        <text class="code" x="20" y="960"> <tspan fill="#AAA">30  </tspan>                println!("Served #{} of {} requests.", request.num_request_left, request.request_type.to_string()); </text>
+        <text class="code" x="20" y="990"> <tspan fill="#AAA">31  </tspan>                // decrement the amount of resource spent on this request </text>
+        <text class="code" x="20" y="1020"> <tspan fill="#AAA">32  </tspan>                *max_process_unit = *max_process_unit - *request.num_request_left; </text>
+        <text class="code" x="20" y="1050"> <tspan fill="#AAA">33  </tspan>                // signify this request has been processed </text>
+        <text class="code" x="20" y="1080"> <tspan fill="#AAA">34  </tspan>                *request.num_request_left = 0; </text>
+        <text class="code" x="20" y="1110"> <tspan fill="#AAA">35  </tspan>            } </text>
+        <text class="code" x="20" y="1140"> <tspan fill="#AAA">36  </tspan>            // not enough </text>
+        <text class="code" x="20" y="1170"> <tspan fill="#AAA">37  </tspan>            else{ </text>
+        <text class="code" x="20" y="1200"> <tspan fill="#AAA">38  </tspan>                // process as much as we can </text>
+        <text class="code" x="20" y="1230"> <tspan fill="#AAA">39  </tspan>                *request.num_request_left = *request.num_request_left - *max_process_unit; </text>
+        <text class="code" x="20" y="1260"> <tspan fill="#AAA">40  </tspan>                // sad, no free resource anymore </text>
+        <text class="code" x="20" y="1290"> <tspan fill="#AAA">41  </tspan>                *max_process_unit = 0; </text>
+        <text class="code" x="20" y="1320"> <tspan fill="#AAA">42  </tspan>                // enqueue the front request back to queue, hoping someone will handle it... </text>
+        <text class="code" x="20" y="1350"> <tspan fill="#AAA">43  </tspan>                // queue.push_front(request); </text>
+        <text class="code" x="20" y="1380"> <tspan fill="#AAA">44  </tspan>                return Option::Some(request); </text>
+        <text class="code" x="20" y="1410"> <tspan fill="#AAA">45  </tspan>            } </text>
+        <text class="code" x="20" y="1440"> <tspan fill="#AAA">46  </tspan>            // </text>
+        <text class="code" x="20" y="1470"> <tspan fill="#AAA">47  </tspan>        } </text>
+        <text class="code" x="20" y="1500"> <tspan fill="#AAA">48  </tspan>        else { </text>
+        <text class="code" x="20" y="1530"> <tspan fill="#AAA">49  </tspan>            // no available request to process, ooh-yeah! </text>
+        <text class="code" x="20" y="1560"> <tspan fill="#AAA">50  </tspan>            return Option::None; </text>
+        <text class="code" x="20" y="1590"> <tspan fill="#AAA">51  </tspan> </text>
+        <text class="code" x="20" y="1620"> <tspan fill="#AAA">52  </tspan>        } </text>
+        <text class="code" x="20" y="1650"> <tspan fill="#AAA">53  </tspan>    } </text>
+        <text class="code" x="20" y="1680"> <tspan fill="#AAA">54  </tspan>} </text>
+        <text class="code" x="20" y="1710"> <tspan fill="#AAA">55  </tspan> </text>
     </g>
 
    

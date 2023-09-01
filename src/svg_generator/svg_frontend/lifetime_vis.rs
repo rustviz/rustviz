@@ -590,7 +590,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
 	// println!("lifetimevis:467\t {:?}", vars);
 	// println!("lifetimevis:467\t {:?}", fs);
 	for vv in vars.iter(){
-		println!("var: {}, lifetime: {:?}", vv.name, vv.lifetime_param);
+		println!("var: {}, lifetime: {:?}", vv.name, vv.data_hash);
 	}
     let mut lifetime_vis_svg_str = func_sig_str;
     let mut x_begin : u32 = 30;
@@ -618,7 +618,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
             x_begin += w2;
 			x_begin += 60;
             lifetime_vis_svg_str = lifetime_vis_svg_str + &column_str;
-			println!("column xbegin: {}", x_begin);
+			// println!("column xbegin: {}", x_begin);
             // render lifetime region square
         }
         let dash_line_str = render_dashed_number_line(vars,x_begin, &registry);
