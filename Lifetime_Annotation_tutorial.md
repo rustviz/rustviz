@@ -1,2 +1,0 @@
-# Visualization of Lifetime Parameter is Online!
-It's exciting that RustViz now supports creating interactive SVG graphics for lifetime parameter visualization. In this tutorial, we are going to create our own visualization

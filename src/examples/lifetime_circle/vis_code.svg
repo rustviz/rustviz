@@ -287,9 +287,9 @@ object.code_panel {
         <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>fn main(){ </text>
         <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    let r1 = 10; </text>
         <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let r2 = 9; </text>
-        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let c = Circle::new(&amp;r1); </text>
+        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let <tspan data-hash="1">c</tspan> = Circle::new(&amp;r1); </text>
         <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>    let <tspan data-hash="3">opt</tspan> = <tspan data-hash="1">c</tspan>.cmp(<tspan data-hash="2">&amp;r2</tspan>); </text>
-        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>    println!("{} is larger", opt); </text>
+        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>    println!("{} is larger", <tspan data-hash="3">opt</tspan>); </text>
         <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>} </text>
         <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan> </text>
         <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>impl&lt;'i&gt; Circle&lt;'i&gt;{ </text>

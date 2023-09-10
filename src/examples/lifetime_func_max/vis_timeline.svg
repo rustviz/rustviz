@@ -377,9 +377,9 @@ object.code_panel {
                 <polygon class="tooltip-trigger" data-hash="2" points="310,335 305,330 315,330" data-tooltip-text="&lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;&#x27;a&lt;/span&gt; should be at least as large as lifetime of &lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;y&lt;/span&gt;." />
             </g>
     
-            <g id="dashed-line-6">
-                <line class="lineNumDashLine" x1="30" y1="240" x2="435" y2="240" />
-                <text class="lineNum" x="30" y="240" text-anchor="start">#6</text>
+            <g id="dashed-line-7">
+                <line class="lineNumDashLine" x1="30" y1="270" x2="435" y2="270" />
+                <text class="lineNum" x="30" y="270" text-anchor="start">#7</text>
             </g>
     
 
@@ -391,9 +391,9 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-7">
-                <line class="lineNumDashLine" x1="30" y1="270" x2="435" y2="270" />
-                <text class="lineNum" x="30" y="270" text-anchor="start">#7</text>
+            <g id="dashed-line-9">
+                <line class="lineNumDashLine" x1="30" y1="330" x2="435" y2="330" />
+                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
             </g>
     
 
@@ -405,9 +405,9 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-9">
-                <line class="lineNumDashLine" x1="30" y1="330" x2="435" y2="330" />
-                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
+            <g id="dashed-line-6">
+                <line class="lineNumDashLine" x1="30" y1="240" x2="435" y2="240" />
+                <text class="lineNum" x="30" y="240" text-anchor="start">#6</text>
             </g>
     
 

@@ -5,9 +5,9 @@ struct Circle<'i>{
 fn main(){
     let r1 = 10;
     let r2 = 9;
-    let c = Circle::new(&r1);
+    let <tspan data-hash="1">c</tspan> = Circle::new(&r1);
     let <tspan data-hash="3">opt</tspan> = <tspan data-hash="1">c</tspan>.cmp(<tspan data-hash="2">&r2</tspan>);
-    println!("{} is larger", opt);
+    println!("{} is larger", <tspan data-hash="3">opt</tspan>);
 }
 
 impl<'i> Circle<'i>{
