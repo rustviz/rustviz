@@ -54,6 +54,7 @@ declare -a targetExamples=(
     "lifetime_func_max"
     "lifetime_rustbook"
     "lifetime_db"
+    "lifetime_circle"
 )
 
 EX="../src/examples"
