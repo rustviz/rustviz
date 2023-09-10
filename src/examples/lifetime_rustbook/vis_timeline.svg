@@ -53,7 +53,7 @@ text.structInstance {
     white-space: pre;
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-weight: bold;
-    font-size: 0.875em;
+    font-size: 1em;
 }
 
 text.masterInstance {
@@ -362,16 +362,16 @@ object.code_panel {
                 <polygon class="tooltip-trigger" data-hash="1" points="360,365 355,360 365,360" data-tooltip-text="&lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;&#x27;a&lt;/span&gt; should be at least as large as lifetime of &lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;&amp;name&lt;/span&gt;." />
             </g>
     
-            <g id="dashed-line-12">
-                <line class="lineNumDashLine" x1="30" y1="420" x2="485" y2="420" />
-                <text class="lineNum" x="30" y="420" text-anchor="start">#12</text>
+            <g id="dashed-line-10">
+                <line class="lineNumDashLine" x1="30" y1="360" x2="485" y2="360" />
+                <text class="lineNum" x="30" y="360" text-anchor="start">#10</text>
             </g>
     
 
     
-            <g id="dashed-line-8">
-                <line class="lineNumDashLine" x1="30" y1="300" x2="485" y2="300" />
-                <text class="lineNum" x="30" y="300" text-anchor="start">#8</text>
+            <g id="dashed-line-12">
+                <line class="lineNumDashLine" x1="30" y1="420" x2="485" y2="420" />
+                <text class="lineNum" x="30" y="420" text-anchor="start">#12</text>
             </g>
     
 
@@ -383,9 +383,9 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-10">
-                <line class="lineNumDashLine" x1="30" y1="360" x2="485" y2="360" />
-                <text class="lineNum" x="30" y="360" text-anchor="start">#10</text>
+            <g id="dashed-line-8">
+                <line class="lineNumDashLine" x1="30" y1="300" x2="485" y2="300" />
+                <text class="lineNum" x="30" y="300" text-anchor="start">#8</text>
             </g>
     
 

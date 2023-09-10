@@ -53,7 +53,7 @@ text.structInstance {
     white-space: pre;
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-weight: bold;
-    font-size: 0.875em;
+    font-size: 1em;
 }
 
 text.masterInstance {
@@ -391,13 +391,6 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-9">
-                <line class="lineNumDashLine" x1="30" y1="330" x2="435" y2="330" />
-                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
-            </g>
-    
-
-    
             <g id="dashed-line-7">
                 <line class="lineNumDashLine" x1="30" y1="270" x2="435" y2="270" />
                 <text class="lineNum" x="30" y="270" text-anchor="start">#7</text>
@@ -408,6 +401,13 @@ object.code_panel {
             <g id="dashed-line-4">
                 <line class="lineNumDashLine" x1="30" y1="180" x2="435" y2="180" />
                 <text class="lineNum" x="30" y="180" text-anchor="start">#4</text>
+            </g>
+    
+
+    
+            <g id="dashed-line-9">
+                <line class="lineNumDashLine" x1="30" y1="330" x2="435" y2="330" />
+                <text class="lineNum" x="30" y="330" text-anchor="start">#9</text>
             </g>
     
 

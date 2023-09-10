@@ -32,7 +32,8 @@ pub const RIGHT_ANGLE_BR : &'static str = ">";
 // set style for code string
 pub const SPAN_BEGIN : &'static str = "<span style=\"font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;\">";
 pub const SPAN_END : &'static str = "</span>";
-
+pub const SPAN_BOLD_BEGIN : &'static str = "<span style=\"font-style: italic;font-weight: bold\">";
+pub const NEW_LINE: &'static str = "<br />";
 
 /**********************
                         Function Signature Rendering
@@ -78,9 +79,14 @@ pub fn render_function_lifetime_signature( func_info: & FuncSignatureSpec , regi
         let struct_instance_info = &func_info.input_variables[0];
         assert!(struct_instance_info.data_type.find("self").is_some());
         let mut x_update:u32 = 0;
-        x_update = (struct_instance_info.name.len() as u32 ) * FUNC_SIG_CHAR_X_SPACE + 4;
+        x_update = (struct_instance_info.name.len() as u32 ) * FUNC_SIG_CHAR_X_SPACE + 8;
         ret += registry.render("func_signature_struct_instance_method_invoke_template", &FuncSignatureStructInstanceHolder{
-            x_val:x_cursor, y_val:y_cursor, segment:struct_instance_info.name.clone(), hover_msg: format!("{}{}{}", SPAN_BEGIN, struct_instance_info.data_type, SPAN_END)
+            x_val:x_cursor, y_val:y_cursor, segment:struct_instance_info.name.clone(),
+            hover_msg: format!("{}{}{}{}Invocation of {}{}{} is dependent on struct instance {}{}{},{} which contributes to calculation of lifetime parameter as well.",
+                                SPAN_BOLD_BEGIN, struct_instance_info.data_type, SPAN_END, NEW_LINE,
+                                SPAN_BOLD_BEGIN, func_info.function_name, SPAN_END,
+                                SPAN_BOLD_BEGIN, struct_instance_info.name, SPAN_END, NEW_LINE
+            )
         }).unwrap().as_str();
         // render dot, function name and opening parenthesis
         let func_name_str = String::from(".") + &func_info.function_name + "( ";

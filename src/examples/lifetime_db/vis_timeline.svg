@@ -53,7 +53,7 @@ text.structInstance {
     white-space: pre;
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-weight: bold;
-    font-size: 0.875em;
+    font-size: 1em;
 }
 
 text.masterInstance {
@@ -434,30 +434,9 @@ object.code_panel {
                 <polygon class="tooltip-trigger" data-hash="5" points="1513,605 1508,600 1518,600" data-tooltip-text="&lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;&#x27;a&lt;/span&gt; should be at least as large as lifetime of &lt;span style&#x3D;&quot;font-family: &#x27;Source Code Pro&#x27;, Consolas, &#x27;Ubuntu Mono&#x27;, Menlo, &#x27;DejaVu Sans Mono&#x27;, monospace, monospace !important;&quot;&gt;ptr_to_resource&lt;/span&gt;." />
             </g>
     
-            <g id="dashed-line-13">
-                <line class="lineNumDashLine" x1="30" y1="450" x2="1638" y2="450" />
-                <text class="lineNum" x="30" y="450" text-anchor="start">#13</text>
-            </g>
-    
-
-    
             <g id="dashed-line-18">
                 <line class="lineNumDashLine" x1="30" y1="600" x2="1638" y2="600" />
                 <text class="lineNum" x="30" y="600" text-anchor="start">#18</text>
-            </g>
-    
-
-    
-            <g id="dashed-line-16">
-                <line class="lineNumDashLine" x1="30" y1="540" x2="1638" y2="540" />
-                <text class="lineNum" x="30" y="540" text-anchor="start">#16</text>
-            </g>
-    
-
-    
-            <g id="dashed-line-7">
-                <line class="lineNumDashLine" x1="30" y1="270" x2="1638" y2="270" />
-                <text class="lineNum" x="30" y="270" text-anchor="start">#7</text>
             </g>
     
 
@@ -469,9 +448,9 @@ object.code_panel {
     
 
     
-            <g id="dashed-line-17">
-                <line class="lineNumDashLine" x1="30" y1="570" x2="1638" y2="570" />
-                <text class="lineNum" x="30" y="570" text-anchor="start">#17</text>
+            <g id="dashed-line-7">
+                <line class="lineNumDashLine" x1="30" y1="270" x2="1638" y2="270" />
+                <text class="lineNum" x="30" y="270" text-anchor="start">#7</text>
             </g>
     
 
@@ -479,6 +458,27 @@ object.code_panel {
             <g id="dashed-line-10">
                 <line class="lineNumDashLine" x1="30" y1="360" x2="1638" y2="360" />
                 <text class="lineNum" x="30" y="360" text-anchor="start">#10</text>
+            </g>
+    
+
+    
+            <g id="dashed-line-13">
+                <line class="lineNumDashLine" x1="30" y1="450" x2="1638" y2="450" />
+                <text class="lineNum" x="30" y="450" text-anchor="start">#13</text>
+            </g>
+    
+
+    
+            <g id="dashed-line-17">
+                <line class="lineNumDashLine" x1="30" y1="570" x2="1638" y2="570" />
+                <text class="lineNum" x="30" y="570" text-anchor="start">#17</text>
+            </g>
+    
+
+    
+            <g id="dashed-line-16">
+                <line class="lineNumDashLine" x1="30" y1="540" x2="1638" y2="540" />
+                <text class="lineNum" x="30" y="540" text-anchor="start">#16</text>
             </g>
     
 

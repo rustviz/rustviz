@@ -52,7 +52,7 @@ text.structInstance {
     white-space: pre;
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-weight: bold;
-    font-size: 0.875em;
+    font-size: 1em;
 }
 
 text.masterInstance {

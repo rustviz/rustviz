@@ -438,7 +438,7 @@ impl FuncSignatureSpec{
 				// only parse the one with Lifetime annotation
 				if call_line.find("Lifetime").is_some(){
 					// find if it's struct method
-					if self.is_not_static_struct_method == false{
+					if self.is_not_static_struct_method == true{
 						self.update_first_input_var_if_struct_instance_method(call_line.clone());
 					}
 					// if call_line.find(format!("{}(", self.function_name).as_str()).is_some(){

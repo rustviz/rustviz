@@ -1,7 +1,7 @@
-<svg height="790px" width="620px" 
+<svg height="1000px" width="480px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
-    <desc>examples/lifetime_rustbook/input/</desc>
+    <desc>examples/lifetime_circle/input/</desc>
 
     <defs>
         <style type="text/css">
@@ -280,27 +280,34 @@ object.code_panel {
     </g>
 
     <g id="code">
-        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>struct Book&lt;'a&gt;{ </text>
-        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    name: &amp;'a String, </text>
-        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>    serial_num: i32 </text>
-        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>} </text>
-        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan> </text>
-        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>fn main(){ </text>
-        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let mut  name = String::from("The Rust Book"); </text>
-        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let serial_num = 1140987; </text>
-        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>    { </text>
-        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>        let <tspan data-hash="3">rust_book</tspan> = Book::new(<tspan data-hash="1">&amp;name</tspan>, serial_num); </text>
-        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>        println!("The name of the book is {}", <tspan data-hash="3">rust_book.name</tspan>); </text>
-        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>    } </text>
-        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>    name = String::from("Behind Borrow Checker"); </text>
-        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>    println!("New name: {}",name); </text>
-        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>} </text>
-        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan> </text>
-        <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>impl&lt;'a&gt; Book&lt;'a&gt;{ </text>
-        <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan>    fn new(_name: &amp;'a String, _serial_num: i32) -&gt; Book&lt;'a&gt;{ </text>
-        <text class="code" x="20" y="630"> <tspan fill="#AAA">19  </tspan>        Book { name: _name, serial_num: _serial_num } </text>
-        <text class="code" x="20" y="660"> <tspan fill="#AAA">20  </tspan>    } </text>
-        <text class="code" x="20" y="690"> <tspan fill="#AAA">21  </tspan>} </text>
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>struct Circle&lt;'i&gt;{ </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    r: &amp;'i i32, </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>} </text>
+        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan> </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>fn main(){ </text>
+        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    let r1 = 10; </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let r2 = 9; </text>
+        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let c = Circle::new(&amp;r1); </text>
+        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>    let <tspan data-hash="3">opt</tspan> = <tspan data-hash="1">c</tspan>.cmp(<tspan data-hash="2">&amp;r2</tspan>); </text>
+        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>    println!("{} is larger", opt); </text>
+        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>} </text>
+        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan> </text>
+        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>impl&lt;'i&gt; Circle&lt;'i&gt;{ </text>
+        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>    fn new(_r: &amp;'i i32) -&gt; Circle { </text>
+        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>        Circle{r: _r} </text>
+        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>    } </text>
+        <text class="code" x="20" y="570"> <tspan fill="#AAA">17  </tspan>} </text>
+        <text class="code" x="20" y="600"> <tspan fill="#AAA">18  </tspan> </text>
+        <text class="code" x="20" y="630"> <tspan fill="#AAA">19  </tspan>impl&lt;'i&gt; Circle&lt;'i&gt;{ </text>
+        <text class="code" x="20" y="660"> <tspan fill="#AAA">20  </tspan>    fn cmp(&amp;self, other: &amp;'i i32) -&gt; &amp;'i i32{ </text>
+        <text class="code" x="20" y="690"> <tspan fill="#AAA">21  </tspan>        if self.r &gt; other{ </text>
+        <text class="code" x="20" y="720"> <tspan fill="#AAA">22  </tspan>            self.r </text>
+        <text class="code" x="20" y="750"> <tspan fill="#AAA">23  </tspan>        } </text>
+        <text class="code" x="20" y="780"> <tspan fill="#AAA">24  </tspan>        else{ </text>
+        <text class="code" x="20" y="810"> <tspan fill="#AAA">25  </tspan>            other </text>
+        <text class="code" x="20" y="840"> <tspan fill="#AAA">26  </tspan>        } </text>
+        <text class="code" x="20" y="870"> <tspan fill="#AAA">27  </tspan>    } </text>
+        <text class="code" x="20" y="900"> <tspan fill="#AAA">28  </tspan>} </text>
     </g>
 
    
