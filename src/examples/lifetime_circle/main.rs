@@ -1,5 +1,5 @@
 /* --- BEGIN Variable Definitions ---
-LifetimeVars opt; LifetimeVars c; LifetimeVars &r2;
+LifetimeVars &r2; LifetimeVars opt; LifetimeVars c;
 --- END Variable Definitions --- */
 struct Circle<'i>{
     r: &'i i32,
