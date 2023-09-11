@@ -384,6 +384,13 @@ object.code_panel {
     
 
     
+            <g id="dashed-line-11">
+                <line class="lineNumDashLine" x1="30" y1="390" x2="435" y2="390" />
+                <text class="lineNum" x="30" y="390" text-anchor="start">#11</text>
+            </g>
+    
+
+    
             <g id="dashed-line-6">
                 <line class="lineNumDashLine" x1="30" y1="240" x2="435" y2="240" />
                 <text class="lineNum" x="30" y="240" text-anchor="start">#6</text>
@@ -401,13 +408,6 @@ object.code_panel {
             <g id="dashed-line-7">
                 <line class="lineNumDashLine" x1="30" y1="270" x2="435" y2="270" />
                 <text class="lineNum" x="30" y="270" text-anchor="start">#7</text>
-            </g>
-    
-
-    
-            <g id="dashed-line-11">
-                <line class="lineNumDashLine" x1="30" y1="390" x2="435" y2="390" />
-                <text class="lineNum" x="30" y="390" text-anchor="start">#11</text>
             </g>
     
 
