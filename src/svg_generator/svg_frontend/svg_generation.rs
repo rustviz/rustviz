@@ -7,13 +7,14 @@ use serde::Serialize;
 use std::cmp;
 use std::collections::BTreeMap;
 
-// visualization_name: The name of the visualization.
-// css: CSS styles for the visualization.
-// code: The code for generating the SVG.
-// diagram: The code for the SVG diagram.
-// tl_id: The ID of the timeline in the SVG.
-// tl_width: The width of the timeline.
-// height: The height of the SVG.
+/* visualization_name: The name of the visualization.
+   css: CSS styles for the visualization.
+   code: The code for generating the SVG.
+   diagram: The code for the SVG diagram.
+   tl_id: The ID of the timeline in the SVG.
+   tl_width: The width of the timeline.
+   height: The height of the SVG.
+*/
 #[derive(Serialize)]
 struct SvgData {
     visualization_name: String,
