@@ -11,7 +11,7 @@ RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/)
 
 ![alt tag](https://github.com/rustviz/rustviz/blob/master/src/svg_generator/example.png)
 
-You can read more about it in [our draft paper](https://web.eecs.umich.edu/~comar/rustviz-hatra20.pdf). Note that the section on generating visualizations is out of date, see below.
+You can read more about it in [our VL/HCC 2022 paper](https://web.eecs.umich.edu/~comar/rustviz-vlhcc22.pdf). Note that the section on generating visualizations is out of date, see below.
 
 ## Usage
 *RustViz* is capable of generating visualizations for simple Rust programs (albeit with certain limitations) that have been annotated by the user. We are not currently attempting to generate visualizations automatically. In this section, we'll showcase how to generate SVG renderings of examples provided by us.
