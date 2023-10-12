@@ -33,11 +33,12 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-// First Create the file, then write content into it.
-// Arguments:
-//      file_path:  any object that can be converted to a path
-//              Notable examples including String, str, Path, PathBuf, OsString.
-//      content:    a String that needs to be written.
+/* First Create the file, then write content into it.
+   Arguments:
+        file_path:  any object that can be converted to a path
+                Notable examples including String, str, Path, PathBuf, OsString.
+        content:    a String that needs to be written.
+*/
 pub fn create_and_write_to_file<P>(content: &String, file_path: P)
 where
     P: AsRef<Path>,

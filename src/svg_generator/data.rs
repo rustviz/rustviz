@@ -51,6 +51,9 @@ pub enum ResourceAccessPoint {
 }
 
 // when something is not a reference
+// name: String, identifier in the source code
+// hash: u64, unique identifier for tracking
+// is_mut: bool, flag indicating if the variable is mutable
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Owner {
     pub name: String,
@@ -59,6 +62,11 @@ pub struct Owner {
 }
 
 // when something is a struct member
+// name: String, identifier in the source code
+// hash: u64, unique identifier for tracking
+// owner: u64, hash of the struct the member belongs to
+// is_mut: bool, flag indicating if the struct member is mutable
+// is_member: bool, flag confirming if it's a struct member
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Struct {
     pub name: String,
@@ -69,6 +77,9 @@ pub struct Struct {
 }
 
 // a reference of type &mut T
+// name: String, identifier in the source code
+// hash: u64, unique identifier for tracking
+// is_mut: bool, flag indicating if the reference is mutable (always true)
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct MutRef {         // let (mut) r1 = &mut a;
     pub name: String,
@@ -77,6 +88,9 @@ pub struct MutRef {         // let (mut) r1 = &mut a;
 }
 
 // a reference of type & T
+// name: String, identifier in the source code
+// hash: u64, unique identifier for tracking
+// is_mut: bool, flag indicating if the reference is mutable (always false)
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct StaticRef {                // let (mut) r1 = & a;
     pub name: String,
@@ -84,6 +98,8 @@ pub struct StaticRef {                // let (mut) r1 = & a;
     pub is_mut: bool,
 }
 
+// name: String, identifier in the source code
+// hash: u64, unique identifier for tracking
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Function {
     pub name: String,

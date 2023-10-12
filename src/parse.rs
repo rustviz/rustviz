@@ -8,12 +8,13 @@ use rustviz_lib::data::{
     ResourceAccessPoint, StaticRef, VisualizationData, Visualizable
 };
 
-// Requires: Valid file path
-//           Variables specified within BEGIN and END statements
-// Modifies: Nothing, unchanged
-// Effects: Parses variable definitions into HashMap with
-//          {key, value} pair = {name, ResourceAccessPoint}
-//          Returns std::io::Line iterator to file
+/* Requires: Valid file path
+             Variables specified within BEGIN and END statements
+   Modifies: Nothing, unchanged
+   Effects: Parses variable definitions into HashMap with
+            {key, value} pair = {name, ResourceAccessPoint}
+            Returns std::io::Line iterator to file
+*/
 pub fn parse_vars_to_map<P>(fpath: P) -> (
     Lines, u64, HashMap<String, ResourceAccessPoint>
 ) where
@@ -55,11 +56,12 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
     (fin_lines, num_lines, vec_to_map(vars))
 }
 
-// Requires: Well-formatted variable definitions in the form:
-//           ResourceAccessPoint name{field1,field2}
-// Modifies: Nothing, unchanged
-// Effects: Uses strings to build HashMap with
-//          {key, value} pair = {name, ResourceAccessPoint}
+/* Requires: Well-formatted variable definitions in the form:
+             ResourceAccessPoint name{field1,field2}
+   Modifies: Nothing, unchanged
+   Effects: Uses strings to build HashMap with
+            {key, value} pair = {name, ResourceAccessPoint}
+*/
 fn vec_to_map(vars_str: Vec<String>) -> HashMap<String, ResourceAccessPoint> {
     // iterate over all parsed strings
     let mut vars_map = HashMap::<String, ResourceAccessPoint>::new();
@@ -208,9 +210,10 @@ pub fn extract_events(
     ).collect::<Vec<(u64, String)>>() // return vec<(line_num, event_string)>
 }
 
-// Requires: Well-formatted events, HashMap of ResourceAccessPoints
-// Modifies: VisualizationData
-// Effects: Creates ExternalEvents and appends to VisualizationData
+/* Requires: Well-formatted events, HashMap of ResourceAccessPoints
+   Modifies: VisualizationData
+   Effects: Creates ExternalEvents and appends to VisualizationData
+*/
 pub fn add_events(
     vd: &mut VisualizationData,
     vars: HashMap<String, ResourceAccessPoint>,
@@ -341,9 +344,10 @@ pub fn add_events(
     }
 }
 
-// Requires: Valid, existant ResourceAccessPoint name
-// Modifies: Nothing, unchanged
-// Effects: Returns clone of ResourceAccessPoint
+/* Requires: Valid, existant ResourceAccessPoint name
+   Modifies: Nothing, unchanged
+   Effects: Returns clone of ResourceAccessPoint
+*/
 fn get_resource(
     vars: &HashMap<String, ResourceAccessPoint>, name: &str
 ) -> Option<ResourceAccessPoint> {
@@ -362,18 +366,20 @@ fn get_resource(
     }
 }
 
-// Requires: Nothing
-// Modifies: Nothing, unchanged
-// Effects: Returns name string from field vector
+/* Requires: Nothing
+   Modifies: Nothing, unchanged
+   Effects: Returns name string from field vector
+*/
 fn get_name_field(fields: &Vec<&str>) -> String {
     (if fields.len() == 2 { fields[1] }
     else { fields[2] }).to_string()
 }
 
-// Requires: Nothing
-// Modifies: Nothing, unchanged
-// Effects: Returns mut bool from field vector
-//          If qualifier not recognized, exit program
+/* Requires: Nothing
+   Modifies: Nothing, unchanged
+   Effects: Returns mut bool from field vector
+            If qualifier not recognized, exit program
+*/
 fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
     if fields.len() == 2 { false }
     else if fields[1] == "mut" { true }
@@ -387,10 +393,11 @@ fn get_mut_qualifier(fields: &Vec<&str>) -> bool {
     }
 }
 
-// Requires: Non-empty fields vector
-// Modifies: Current hash number, ResourceAccessPoint HashMap
-// Effects: Parses struct instance + member variables into independent
-//          ResourceAccessPoints and inserts into vars HashMap
+/* Requires: Non-empty fields vector
+   Modifies: Current hash number, ResourceAccessPoint HashMap
+   Effects: Parses struct instance + member variables into independent
+            ResourceAccessPoints and inserts into vars HashMap
+*/
 fn get_structs(
     hash: &mut u64,
     fields: &Vec<&str>,
@@ -447,9 +454,10 @@ fn get_structs(
     }
 }
 
-// Requires: Nothing
-// Modifies: Nothing
-// Effects: Prints variable usage message to io::stderr
+/* Requires: Nothing
+   Modifies: Nothing
+   Effects: Prints variable usage message to io::stderr
+*/
 fn print_var_usage_error(fields: &Vec<&str>) {
     eprintln!("Incorrect variable formatting '{}'!\
         \nUsage (':' denotes optional field):\
@@ -461,9 +469,10 @@ fn print_var_usage_error(fields: &Vec<&str>) {
     );
 }
 
-// Requires: Nothing
-// Modifies: Nothing
-// Effects: Returns event usage message as String
+/* Requires: Nothing
+   Modifies: Nothing
+   Effects: Returns event usage message as String
+*/
 fn event_usage_err() -> String {
     String::from(
         "ExternalEvents Usage:\

@@ -10,6 +10,14 @@ use std::cmp;
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
 static SPAN_END : &'static str = "&lt;/span&gt;";
+/* name: The name of the column.
+   x_val: The x-coordinate of the column.
+   title: The title of the column.
+   is_ref: A boolean indicating if the column represents a reference.
+   is_struct_group: A boolean indicating if the column represents a group of structs.
+   is_member: A boolean indicating if the column represents a member of a struct.
+   owner: The ID of the owner of the column.
+*/
 #[derive(Debug)]
 struct TimelineColumnData {
     name: String,
@@ -20,7 +28,12 @@ struct TimelineColumnData {
     is_member: bool,
     owner: u64
 }
-
+/* labels: A string containing the HTML code for rendering the labels.
+   dots: A string containing the HTML code for rendering the dots representing events.
+   timelines: A string containing the HTML code for rendering the timelines.
+   ref_line: A string containing the HTML code for rendering the reference lines.
+   arrows: A string containing the HTML code for rendering the arrows representing
+*/
 #[derive(Serialize)]
 struct TimelinePanelData {
     labels: String,
@@ -29,7 +42,11 @@ struct TimelinePanelData {
     ref_line: String,
     arrows: String
 }
-
+/* x_val: The x-coordinate of the label.
+   hash: The hash value of the resource.
+   name: The name of the resource.
+   title: The title of the resource.
+*/
 #[derive(Serialize)]
 struct ResourceAccessPointLabelData {
     x_val: i64,
@@ -37,7 +54,11 @@ struct ResourceAccessPointLabelData {
     name: String,
     title: String
 }
-
+/* hash: The hash value of the event.
+   dot_x: The x-coordinate of the dot.
+   dot_y: The y-coordinate of the dot.
+   title: The title of the event.
+*/
 #[derive(Serialize)]
 struct EventDotData {
     hash: u64,
@@ -45,7 +66,11 @@ struct EventDotData {
     dot_y: i64,
     title: String,
 }
-
+/* hash: The hash value of the function.
+   x: The x-coordinate of the dot.
+   y: The y-coordinate of the dot.
+   title: The title of the function.
+*/
 #[derive(Serialize)]
 struct FunctionDotData {
     hash: u64,
@@ -53,14 +78,22 @@ struct FunctionDotData {
     y: i64,
     title: String
 }
-
+/* coordinates: A vector of (x, y) coordinates defining the path of the arrow.
+   coordinates_hbs: A string containing the HTML code for rendering the arrow coordinates.
+   title: The title of the arrow.
+*/
 #[derive(Serialize)]
 struct ArrowData {
     coordinates: Vec<(f64, f64)>,
     coordinates_hbs: String,
     title: String
 }
-
+/* 
+   hash: The hash value of the function.
+   x: The x-coordinate of the logo.
+   y: The y-coordinate of the logo.
+   title: The title of the function.
+*/
 #[derive(Serialize)]
 struct FunctionLogoData {
     hash: u64,
@@ -68,7 +101,13 @@ struct FunctionLogoData {
     y: i64,
     title: String
 }
-
+/* name: The name of the box.
+   hash: The hash value of the box.
+   x: The x-coordinate of the box.
+   y: The y-coordinate of the box.
+   w: The width of the box.
+   h: The height of the box.
+*/
 #[derive(Serialize)]
 struct BoxData {
     name: u64,
@@ -80,12 +119,20 @@ struct BoxData {
     title: String
 }
 
+/* struct_name: The name of the struct.
+   struct_members: A string representing the struct members.
+*/
 #[derive(Serialize)]
 struct StructTimelinePanelData {
     struct_name: String,
     struct_members: String
 }
 
+/* line_class: The class of the line (probably for CSS styling).
+   hash: The hash value associated with the line.
+   x1, x2, y1, y2: The start and end coordinates of the line.
+   title: The title of the line.
+*/
 #[derive(Serialize, Clone)]
 struct VerticalLineData {
     line_class: String,
@@ -97,6 +144,15 @@ struct VerticalLineData {
     title: String
 }
 
+/* line_class: The class of the line (probably for CSS styling).
+   hash: The hash value associated with the line.
+   x1, x2, y1, y2: The start and end coordinates of the line.
+   dx, dy: The differences in x and y coordinates between the start and end of the line.
+   v: A variable for additional data, perhaps for storing the magnitude of the reference.
+   title: The title of the line.
+   The struct is marked with #[derive(Serialize)], indicating that 
+   instances of OutputStringData can be converted (serialized) to a format such as JSON or TOML.
+*/
 #[derive(Serialize, Clone)]
 struct RefLineData {
     line_class: String,
@@ -111,6 +167,10 @@ struct RefLineData {
     title: String
 }
 
+/* struct_name: This field stores the name of the struct. This would be the type of the struct in the source code.
+   struct_instance: This field is likely to store the instance name of the struct. This would be the variable name in the source code.
+   struct_members: This field is a string representation of the struct members. It likely contains the members (fields and their associated values) of the struct.
+*/
 #[derive(Serialize)]
 struct OutputStringData {
     struct_name: String,
@@ -717,52 +777,6 @@ fn determine_owner_line_styles(
     }
 }
 
-// DEAD CODE
-fn _determine_stat_ref_line_styles(
-    rap: &ResourceAccessPoint,
-    state: &State
-) -> (RefDataLine, RefValueLine) {
-    match (state, rap.is_mut()) {
-        (State::FullPrivilege, _) => (
-            RefDataLine::Solid,
-            if rap.is_mut() {RefValueLine::Reassignable} else {RefValueLine::NotReassignable},
-        ),
-        (State::PartialPrivilege{..}, false) => (
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
-        ),
-        (State::PartialPrivilege{..}, true) => (
-            RefDataLine::Hollow,
-            RefValueLine::Reassignable,     // potentially wrong. Not taking second level 
-                                            // borrowing into account
-        ),
-        _ => (                              // TODO: not finished
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
-        )
-    }
-}
-
-// DEAD CODE
-fn _determine_mut_ref_line_styles(
-    rap: &ResourceAccessPoint,
-    state: &State
-) -> (RefDataLine, RefValueLine) {
-    match (state, rap.is_mut()) {
-        (State::FullPrivilege, false) => (
-            RefDataLine::Solid,
-            RefValueLine::NotReassignable,
-        ),
-        (State::FullPrivilege, true) => (
-            RefDataLine::Solid,
-            RefValueLine::Reassignable,
-        ),
-        _ => ( // TODO: not finished
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
-        )
-    }
-}
 
 // generate a Owner Line string from the RAP and its State
 fn create_owner_line_string(

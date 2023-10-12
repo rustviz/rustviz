@@ -16,15 +16,16 @@ fn fmt_style(plain: &String) -> String {
    ... happens
  */
 
-// 1   0 （0 is initialized by let 0 = &1)
-//     |
-//     *   the star event
-// 
-// example: 
-// fn calculate_length(s: &String) -> usize { // s is a reference to a String
-//     s.len()      // a REF_GO_OUT_OF_SCOPE event
-// } // Here, s goes out of scope. But because it does not have ownership of what
-//   // it refers to, nothing happens.
+/* 1   0 （0 is initialized by let 0 = &1)
+       |
+       *   the star event
+   
+   example: 
+   fn calculate_length(s: &String) -> usize { // s is a reference to a String
+       s.len()      // a REF_GO_OUT_OF_SCOPE event
+   } // Here, s goes out of scope. But because it does not have ownership of what
+     // it refers to, nothing happens.
+*/
 pub fn event_dot_ref_go_out_out_scope(my_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
@@ -492,16 +493,17 @@ pub fn state_full_privilege(my_name: &String) -> String {
     )
 }
 
-// More than one ResourceOwner has access to the underlying resource
-// This means that it is not possible to create a mutable reference
-// on the next line.
-// About borrow_count: this value is at least one at any time.
-//      When the first static reference of this ResourceOwner is created,
-//          this value is set to 1;
-//      When a new static reference is borrowed from this variable, increment by 1;
-//      When a static reference goes out of scope, decrement this value by 1;
-//      When a decrement happens while the borrow_count is 1, the state becomes
-//          FullPrivilege once again.
+/* More than one ResourceOwner has access to the underlying resource
+   This means that it is not possible to create a mutable reference
+   on the next line.
+   About borrow_count: this value is at least one at any time.
+        When the first static reference of this ResourceOwner is created,
+            this value is set to 1;
+        When a new static reference is borrowed from this variable, increment by 1;
+        When a static reference goes out of scope, decrement this value by 1;
+        When a decrement happens while the borrow_count is 1, the state becomes
+            FullPrivilege once again.
+*/
 pub fn state_partial_privilege(my_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
