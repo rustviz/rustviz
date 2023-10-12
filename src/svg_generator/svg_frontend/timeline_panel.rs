@@ -1,7 +1,7 @@
 extern crate handlebars;
 
 use crate::data::{StructsInfo, VisualizationData, Visualizable, ExternalEvent, State, ResourceAccessPoint, Event, LINE_SPACE};
-use crate::svg_frontend::line_styles::{RefDataLine, RefValueLine, OwnerLine};
+use crate::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
 use std::collections::BTreeMap;
 use serde::Serialize;
@@ -714,53 +714,6 @@ fn determine_owner_line_styles(
         // partialprivilege ~= immutable, otherwise it would be an error
         (State::PartialPrivilege{..}, _) => OwnerLine::Hollow, // let (mut) a = 5;
         _ => OwnerLine::Empty, // Otherwise its empty
-    }
-}
-
-// DEAD CODE
-fn _determine_stat_ref_line_styles(
-    rap: &ResourceAccessPoint,
-    state: &State
-) -> (RefDataLine, RefValueLine) {
-    match (state, rap.is_mut()) {
-        (State::FullPrivilege, _) => (
-            RefDataLine::Solid,
-            if rap.is_mut() {RefValueLine::Reassignable} else {RefValueLine::NotReassignable},
-        ),
-        (State::PartialPrivilege{..}, false) => (
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
-        ),
-        (State::PartialPrivilege{..}, true) => (
-            RefDataLine::Hollow,
-            RefValueLine::Reassignable,     // potentially wrong. Not taking second level 
-                                            // borrowing into account
-        ),
-        _ => (                              // TODO: not finished
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
-        )
-    }
-}
-
-// DEAD CODE
-fn _determine_mut_ref_line_styles(
-    rap: &ResourceAccessPoint,
-    state: &State
-) -> (RefDataLine, RefValueLine) {
-    match (state, rap.is_mut()) {
-        (State::FullPrivilege, false) => (
-            RefDataLine::Solid,
-            RefValueLine::NotReassignable,
-        ),
-        (State::FullPrivilege, true) => (
-            RefDataLine::Solid,
-            RefValueLine::Reassignable,
-        ),
-        _ => ( // TODO: not finished
-            RefDataLine::Hollow,
-            RefValueLine::NotReassignable,
-        )
     }
 }
 
