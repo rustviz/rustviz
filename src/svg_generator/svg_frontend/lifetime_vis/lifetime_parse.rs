@@ -250,7 +250,7 @@ pub fn parse_one_line_variables(mut line: String, func_info: &mut FuncSignatureS
  *
  * */
 pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableSpec{
-    println!("single cell: {}", elem);
+    // println!("single cell: {}", elem);
     let mut var_name = String::from("");
     let mut var_lifetime_param: Option<String> = None;
     let mut var_type = String::from("");
@@ -309,7 +309,7 @@ pub fn parse_variable_single_cell(elem: String, mut no_colon: bool) -> VariableS
     }
 
     let ret = VariableSpec {  name: var_name.to_string(), lifetime_param: var_lifetime_param, data_type: var_type, lifetime_info: None, hover_messages: Vec::new(), data_hash: None, subordinates : Vec::new(), relationship: String::new()};
-    println!("varSpec: {:?}", ret);
+    // println!("varSpec: {:?}", ret);
     ret
 }
 
@@ -535,7 +535,7 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
 			exit(0)
 		}
 	}
-    println!("update input names parse: {:?}", fs);
+    // println!("update input names parse: {:?}", fs);
 	fs.update_output_var_name_and_update_vars_lifetimes(parser_data);
     fs.update_hover_messages_by_parser_data(parser_data);
     // println!("{:?}", fs);

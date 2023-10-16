@@ -479,7 +479,7 @@ impl FuncSignatureSpec{
 		let tmp_vec: Vec<String> = line.split(";").map(|x| x.trim().to_string()).collect();
 		// make sure all comments are removed
 		line = tmp_vec[0].clone();
-		println!("update_self_input_var: lnn: {}", line);
+		// println!("update_self_input_var: lnn: {}", line);
 
 		// check whether there are output variables in this function signature
 		if let Some(eq_idx) = line.find("="){
@@ -582,7 +582,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
     // println!("func sig info: {:?}", fs);
 
     let (width, y_end, func_sig_str) = render_function_lifetime_signature(&fs, &mut registry);
-	println!("width sig: {}", width);
+	// println!("width sig: {}", width);
 	/*
 	 * extract `vars: Vec<VariableSpec>` from `fs` and assign data-hash for those have lifetime parameters (i.e., related to lifetime parameter calculation)
 	 */
@@ -590,7 +590,7 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
 	// println!("lifetimevis:467\t {:?}", vars);
 	// println!("lifetimevis:467\t {:?}", fs);
 	for vv in vars.iter(){
-		println!("var: {}, lifetime: {:?}", vv.name, vv.data_hash);
+		// println!("var: {}, lifetime: {:?}", vv.name, vv.data_hash);
 	}
     let mut lifetime_vis_svg_str = func_sig_str;
     let mut x_begin : u32 = 30;

@@ -53,7 +53,7 @@ pub fn parse_vars_to_map<P>(fpath: P) -> (
         .collect();
 
     // return Lines iterator
-    println!("vars_string: {:?}", vars_string);
+    // println!("vars_string: {:?}", vars_string);
     (fin_lines, num_lines, vec_to_map(vars))
 }
 
@@ -400,7 +400,7 @@ pub fn add_events(
             },
             _ => {
                 eprintln!("{} is not a valid event.", field[0]);
-                println!("{}", event_usage_err());
+                eprintln!("{}", event_usage_err());
                 exit(1);
             }
         }

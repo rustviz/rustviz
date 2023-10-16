@@ -1,4 +1,4 @@
-<svg height="1075px" 
+<svg height="280px" width="140px" 
         xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
     <desc>examples/copy/input/</desc>
@@ -52,8 +52,17 @@ text.structInstance {
     white-space: pre;
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-weight: bold;
+    font-size: 1em;
+}
+
+text.masterInstance {
+    fill: rgba(242,23,184,0.906);
+    white-space: pre;
+    font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-weight: bold;
     font-size: 0.875em;
 }
+
 text.lifetime{
     fill: #eca163;
     white-space: pre;
