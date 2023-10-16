@@ -1,0 +1,302 @@
+<svg height="640px" width="480px" 
+        xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+
+    <desc>examples/lifetime_cpy/input/</desc>
+
+    <defs>
+        <style type="text/css">
+        <![CDATA[
+        /* general setup */
+:root {
+    --bg-color:#f1f1f1;
+    --text-color: #6e6b5e;
+}
+
+svg {
+    background-color: var(--bg-color);
+}
+
+text {
+    vertical-align: baseline;
+    text-anchor: start;
+}
+
+#heading {
+    font-size: 24px;
+    font-weight: bold;
+}
+
+#caption {
+    font-size: 0.875em;
+    font-family: "Open Sans", sans-serif;
+    font-style: italic;
+}
+
+/* code related styling */
+text.code {
+    fill: #6e6b5e;
+    white-space: pre;
+    font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-size: 0.875em;
+}
+text.funcSigCode {
+    fill: #13b516;
+    font-weight: bold;
+    white-space: pre;
+    font-family: monospace;
+    font-size: 1.2em;
+}
+
+text.structInstance {
+    fill: rgba(10,29,242,0.906);
+    white-space: pre;
+    font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-weight: bold;
+    font-size: 1em;
+}
+
+text.masterInstance {
+    fill: rgba(242,23,184,0.906);
+    white-space: pre;
+    font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-weight: bold;
+    font-size: 0.875em;
+}
+
+text.lifetime{
+    fill: #eca163;
+    white-space: pre;
+    font-family: monospace;
+    font-size: 1em;
+}
+
+text.label {
+    font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-size: 0.875em;
+}
+text.label_lifetime{
+    font-family: "Source Code Pro", Monaco, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+    font-size: 0.875em;
+
+}
+
+
+/* timeline/event interaction styling */
+.solid {
+    stroke-width: 5px;
+}
+
+.hollow {
+    stroke-width: 1.5;
+}
+
+.dotted {
+    stroke-width: 5px;
+    stroke-dasharray: "2 1";
+}
+
+.extend {
+    stroke-width: 1px;
+    stroke-dasharray: "2 1";
+}
+
+.functionIcon {
+    paint-order: stroke;
+    stroke-width: 3px;
+    fill: var(--bg-color);
+    font-size: 20px;
+    font-family: times;
+    font-weight: lighter;
+    dominant-baseline: central;
+    text-anchor: start;
+    font-style: italic;
+}
+
+.functionLogo {
+    font-size: 20px;
+    font-style: italic;
+    paint-order: stroke;
+    stroke-width: 3px;
+    fill: var(--bg-color) !important;
+}
+
+/* flex related styling */
+.flex-container {
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+}
+
+.lineNumDashLine{
+    stroke: #6c6a6a; 
+    stroke-width: 2; 
+    stroke-dasharray: 5 3; 
+    stroke-opacity: 0.5;
+}
+
+
+
+text.lineNum{
+    fill: rgba(90,92,90,0.795);
+    font-family: monospace;
+    font-size: 0.875em;
+}
+object.tl_panel {
+    flex-grow: 1;
+}
+
+object.code_panel {
+    flex-grow: 0;
+}
+
+.tooltip-trigger {
+    cursor: default;
+}
+
+.tooltip-trigger:hover{
+    filter: url(#glow);
+}
+
+/* hash based styling */
+[data-hash="0"] {
+    fill: #6e6b5e;
+}
+
+[data-hash="1"] {
+    fill: #1893ff;
+    stroke: #1893ff;
+}
+
+[data-hash="2"] {
+    fill: #ff7f50;
+    stroke: #ff7f50;
+}
+
+[data-hash="3"] {
+    fill: #8635ff;
+    stroke: #8635ff;
+}
+
+[data-hash="4"] {
+    fill: #dc143c;
+    stroke: #dc143c;
+}
+
+[data-hash="5"] {
+    fill: #0a810a;
+    stroke: #0a810a;
+}
+
+[data-hash="6"] {
+    fill: #008080;
+    stroke: #008080;
+}
+
+[data-hash="7"] {
+    fill: #ff6cce;
+    stroke: #ff6cce;
+}
+
+[data-hash="8"] {
+    fill: #00d6fc;
+    stroke: #00d6fc;
+}
+
+[data-hash="9"] {
+    fill: #b99f35;
+    stroke: #b99f35;
+}
+
+[lifetime-body="a"]{
+    fill: #dc143c;
+    stroke: #dc143c;
+}
+[lifetime-dash="a"]{
+    fill: rgba(220,20,60,0.451);
+    stroke: rgba(220,20,60,0.469);
+}
+
+[lifetime-body-hash="0"]{
+    fill: #47b2df;
+    stroke: #47b2df;
+}
+
+[lifetime-dash-hash="0"]{
+    fill: rgba(71,177,223,0.600);
+    stroke: rgba(71,177,223,0.600);
+}
+
+[lifetime-reg-hash="0"]{
+    stroke: rgba(71,177,223,0.600);
+}
+
+[lifetime-body-hash="1"]{
+    fill: #03b72a;
+    stroke: #03b72a;
+}
+[lifetime-dash-hash="1"]{
+    fill: rgba(3,183,42,0.600);
+    stroke:rgba(3,183,42,0.600);
+}
+
+[lifetime-reg-hash="1"]{
+    stroke:rgba(3,183,42,0.600);
+}
+
+[lifetime-body-hash="2"]{
+    fill: #e98615;
+    stroke: #e98615;
+}
+[lifetime-dash-hash="2"]{
+    fill: rgba(233,134,21,0.600);
+    stroke: rgba(233,134,21,0.600);
+}
+
+[lifetime-reg-hash="2"]{
+    stroke: rgba(233,134,21,0.600);
+}
+
+[lifetime-body-hash="3"]{
+    fill: #f10dde;
+    stroke: #f10dde;
+}
+[lifetime-dash-hash="3"]{
+    fill: rgba(241,13,222,0.600);
+    stroke: rgba(241,13,222,0.600);
+}
+
+[lifetime-reg-hash="3"]{
+    stroke: rgba(241,13,222,0.600);
+}
+        ]]>
+        </style>
+    </defs>
+
+    <g>
+        <text id="caption" x="30" y="30">Hover over timeline events (dots), states (vertical lines),</text>
+        <text id="caption" x="30" y="50">and actions (arrows) for extra information.</text>
+    </g>
+
+    <g id="code">
+        <text class="code" x="20" y="90"> <tspan fill="#AAA">1  </tspan>struct Circle&lt;'i&gt;{ </text>
+        <text class="code" x="20" y="120"> <tspan fill="#AAA">2  </tspan>    r: &amp;'i i32, </text>
+        <text class="code" x="20" y="150"> <tspan fill="#AAA">3  </tspan>} </text>
+        <text class="code" x="20" y="180"> <tspan fill="#AAA">4  </tspan>fn main(){ </text>
+        <text class="code" x="20" y="210"> <tspan fill="#AAA">5  </tspan>    let r1 = 10; </text>
+        <text class="code" x="20" y="240"> <tspan fill="#AAA">6  </tspan>    let r2 = 9; </text>
+        <text class="code" x="20" y="270"> <tspan fill="#AAA">7  </tspan>    let <tspan data-hash="1">c</tspan> = Circle{r: &amp;r1 }; </text>
+        <text class="code" x="20" y="300"> <tspan fill="#AAA">8  </tspan>    let <tspan data-hash="3">opt</tspan> = <tspan data-hash="1">c</tspan>.cmp(<tspan data-hash="2">&amp;r2</tspan>); </text>
+        <text class="code" x="20" y="330"> <tspan fill="#AAA">9  </tspan>    println!("{} is larger", <tspan data-hash="3">opt</tspan>); </text>
+        <text class="code" x="20" y="360"> <tspan fill="#AAA">10  </tspan>} </text>
+        <text class="code" x="20" y="390"> <tspan fill="#AAA">11  </tspan>impl&lt;'i&gt; Circle&lt;'i&gt;{ </text>
+        <text class="code" x="20" y="420"> <tspan fill="#AAA">12  </tspan>    fn cmp(&amp;'i self, other: &amp;'i i32) -&gt; &amp;'i i32{ </text>
+        <text class="code" x="20" y="450"> <tspan fill="#AAA">13  </tspan>        if self.r &gt; other {self.r} </text>
+        <text class="code" x="20" y="480"> <tspan fill="#AAA">14  </tspan>        else{other} </text>
+        <text class="code" x="20" y="510"> <tspan fill="#AAA">15  </tspan>    } </text>
+        <text class="code" x="20" y="540"> <tspan fill="#AAA">16  </tspan>} </text>
+    </g>
+
+   
+</svg>
