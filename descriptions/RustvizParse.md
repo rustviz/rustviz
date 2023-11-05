@@ -2,7 +2,7 @@
 
 **Parse.rs** parse through the AST tree provided by syn library and in turn make the header for future steps(information about Owners and functions). The purpose of parse.rs seems to be to fill the preprocess_external_events member of the visualization data struct (what is needed for svg rendering)
 
-### 1.Hearders
+### 1.Headers
 
 **syn** is a parsing library for parsing a stream of Rust tokens into a syntax tree of Rust source code.
 **log** provides macros to log at various levels, capture information about the running program.

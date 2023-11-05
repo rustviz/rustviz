@@ -53,7 +53,7 @@ declare -a targetExamples=(
     "extra_credit"
 )
 
-EX="../src/examples"
+EX="../rv_bin/examples/"
 # Loop through the specified examples
 for target in ${targetExamples[@]}; do
     printf "building %s..." $target
@@ -69,7 +69,7 @@ for target in ${targetExamples[@]}; do
             cargo run "$EX/$target/source.rs" >/dev/null 2>&1
         fi
 
-        cd ../src # switch to appropriate folder
+        cd ../rv_bin/ # switch to appropriate folder
         # Run svg generation for example
         cargo run $target >/dev/null 2>&1
 
