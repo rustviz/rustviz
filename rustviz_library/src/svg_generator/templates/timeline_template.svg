@@ -1,0 +1,53 @@
+<svg width="{{tl_width}}px" height="{{height}}px" 
+        xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
+        id="{{tl_id}}">
+
+    <desc>{{ visualization_name }}</desc>
+
+    <defs>
+        <style type="text/css">
+        <![CDATA[
+        {{ css }}
+        
+        text {
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+        }
+        ]]>
+        </style>
+        <!-- used when pass to function by ref -->
+        <g id="functionDot">
+             <circle cx="0" cy="0" r="5" fill="transparent"/>
+             <text class="functionIcon" dx="-3.5" dy="0" fill="#6e6b5e">f</text>
+        </g>
+        <marker id="arrowHead" viewBox="0 0 10 10"
+            refX="0" refY="4"
+            markerUnits="strokeWidth"
+            markerWidth="3px" markerHeight="3px"
+            orient="auto" fill="gray">
+            <path d="M 0 0 L 8.5 4 L 0 8 z" fill="inherit"/>
+        </marker>
+        <!-- glow highlight filter -->
+        <filter id="glow" x="-5000%" y="-5000%" width="10000%" height="10000%" filterUnits="userSpaceOnUse">
+            <feComposite in="flood" result="mask" in2="SourceGraphic" operator="in"></feComposite>
+            <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+            <feMerge>
+                <feMergeNode in="coloredBlur"></feMergeNode>
+                <feMergeNode in="coloredBlur"></feMergeNode>
+                <feMergeNode in="coloredBlur"></feMergeNode>
+                <feMergeNode in="SourceGraphic"></feMergeNode>
+            </feMerge>
+            <!-- increase brightness -->
+            <feComponentTransfer>
+                <feFuncR type="linear" slope="2"/>
+                <feFuncG type="linear" slope="2"/>
+                <feFuncB type="linear" slope="2"/>
+            </feComponentTransfer>
+        </filter>
+    </defs>
+
+{{ diagram }}
+
+</svg>
