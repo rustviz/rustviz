@@ -38,6 +38,101 @@ pub const NEW_LINE: &'static str = "<br />";
 /**********************
                         Function Signature Rendering
                                                         ***********************/
+
+pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignatureSpec , registry: &mut Handlebars) -> (u32, u32, String){
+    prepare_registry(registry);
+    let mut x_cursor : u32 = X_START;
+    let mut y_cursor : u32 = Y_START;
+    /* store mapping: render_template_string -> FuncSignatureRenderHolder */
+    let mut render_segments: BTreeMap<u32, (String, FuncSignatureRenderHolder)> = BTreeMap::new();
+    let mut ret = String::new();
+
+    /***** render function name, its generic annotation and left parenthesis e.g. max<'a>( *****/
+    
+    helper_render_func_name_generic_type(func_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut ret, registry);
+
+    for (key, strc) in render_segments.iter(){
+        let tmp = registry.render(strc.0.as_str(), &strc.1).unwrap();
+        ret += tmp.as_str();
+    }
+    
+    (x_cursor, y_cursor, ret)
+
+
+}
+
+/**
+ * If this function is struct method, then render struct instance name, double colon, function name, dot, lifetime parameters and open left parenthesis.
+ * * E.g. `MyStruct::my_method<'i,'a>(`
+ */
+fn helper_render_func_name_generic_type(func_info: & FuncSignatureSpec, x_cursor: &mut u32, y_cursor: &mut u32, render_segments: &mut BTreeMap<u32, (String, FuncSignatureRenderHolder)>, ret: &mut String, registry: &mut Handlebars){
+
+
+    if func_info.is_not_static_struct_method{
+        // render struct instance name
+        let struct_instance_info = &func_info.input_variables[0];
+        let struct_group_name = func_info.struct_group_name.clone().unwrap();
+        assert!(struct_instance_info.data_type.find("self").is_some());
+        let mut x_update:u32 = 0;
+        x_update = (struct_group_name.len() as u32 ) * FUNC_SIG_CHAR_X_SPACE + 8;
+        *ret += registry.render("func_signature_struct_instance_method_invoke_template", &FuncSignatureStructInstanceHolder{
+            x_val: *x_cursor, y_val: *y_cursor, segment:struct_group_name,
+            hover_msg: format!("{}{}{}{}Invocation of {}{}{} is dependent on struct instance {}{}{},{} which contributes to calculation of lifetime parameter as well.",
+                                SPAN_BOLD_BEGIN, struct_instance_info.data_type, SPAN_END, NEW_LINE,
+                                SPAN_BOLD_BEGIN, func_info.function_name, SPAN_END,
+                                SPAN_BOLD_BEGIN, struct_instance_info.name, SPAN_END, NEW_LINE
+            )
+        }).unwrap().as_str();
+        // render double colon, function name with lifetime annotation and opening parenthesis
+        let mut func_name_str = String::from("::") + &func_info.function_name;
+        // add up lifetime parameters
+        if func_info.lifetime_param.is_some(){
+            for (i, lp) in func_info.lifetime_param.clone().unwrap().iter().enumerate(){
+                if i == 0{
+                    func_name_str += &format!("<{}", lp);
+                }
+                else if i == func_info.lifetime_param.clone().unwrap().len() - 1 && func_info.lifetime_param.clone().unwrap().len() > 1{
+                    func_name_str += &format!(",{}>(", lp);
+                }
+                else{
+                    func_name_str += &format!(",{}", lp);
+                }
+                if i == func_info.lifetime_param.clone().unwrap().len() - 1 &&  func_info.lifetime_param.clone().unwrap().len() == 1{
+                    func_name_str += &format!(">(");
+                }
+            }
+        }
+
+        render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+                            FuncSignatureRenderHolder{ x_val: *x_cursor + x_update, y_val: *y_cursor, segment: func_name_str.clone(), hover_msg:String::new()}));
+        x_update += func_name_str.len() as u32 * FUNC_SIG_CHAR_X_SPACE;
+        *x_cursor += x_update;
+    }
+    else{
+        let mut func_name_str = func_info.function_name.clone();
+        // add up lifetime parameters
+        if func_info.lifetime_param.is_some(){
+            for (i, lp) in func_info.lifetime_param.clone().unwrap().iter().enumerate(){
+                if i == 0{
+                    func_name_str += &format!("<{}", lp);
+                }
+                else if i == func_info.lifetime_param.clone().unwrap().len() - 1 &&  func_info.lifetime_param.clone().unwrap().len()  > 1{
+                    func_name_str += &format!(",{}>(", lp);
+                }
+                else{
+                    func_name_str += &format!(",{}", lp);
+                }
+                if i == func_info.lifetime_param.clone().unwrap().len() - 1 &&  func_info.lifetime_param.clone().unwrap().len() == 1{
+                    func_name_str += &format!(">(");
+                }
+            }
+        }
+        render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+                            FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: func_name_str.clone(), hover_msg: String::new()}));
+        *x_cursor += (func_name_str.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
+    }
+}
+
 /**
  * Require: Make sure output variable names as well as real input variable name has been updated
  * Effect Special:
