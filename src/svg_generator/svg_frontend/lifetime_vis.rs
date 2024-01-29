@@ -581,8 +581,8 @@ pub fn render_lifetime_panel(path_to_main_rs: String, path_to_source_rs: String,
     let mut fs = translate_parser_data_to_function_signature_info(parser_data, &path_to_source_rs, &path_to_main_rs);
     // println!("func sig info: {:?}", fs);
 
-    let (width, y_end, func_sig_str) = render_function_lifetime_signature(&fs, &mut registry);
-    // let (width, y_end, func_sig_str) = render_function_lifetime_signature_lifetime_type(&fs, &mut registry);
+    // let (width, y_end, func_sig_str) = render_function_lifetime_signature(&fs, &mut registry);
+    let (width, y_end, func_sig_str) = render_function_lifetime_signature_lifetime_type(&fs, &mut registry);
 
 	// println!("width sig: {}", width);
 	/*

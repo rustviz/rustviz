@@ -19,9 +19,10 @@ pub const SIG_LT_CMP_CHAR_X_SPACE: u32 = 8;
 pub const X_START: u32 = 10;
 pub const Y_START: u32 = 20;
 pub const CODE_VERTICAL_LINE_SPACE: u32 = 30;
-pub const LABEL_Y_VAL: u32 = 70;
-pub const CODE_LINE_Y_START: u32 = 90;
+pub const LABEL_Y_VAL: u32 = 90;
+pub const CODE_LINE_Y_START: u32 = 110;
 pub const DASH_NUM_LINE_X_START: u32 = 30;
+pub const USE_VAR_NAME_AS_LP_NAME: bool = true;
 static mut hash : u32 = 0;
 // pub static AMPERSAND : &'static str = "&amp;";
 // pub static LEFT_ANGLE_BR : &'static str = "&lt;";
@@ -53,10 +54,7 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
     
     helper_render_func_name_generic_type(func_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut ret, registry);
 
-    for (key, strc) in render_segments.iter(){
-        let tmp = registry.render(strc.0.as_str(), &strc.1).unwrap();
-        ret += tmp.as_str();
-    }
+
 
     /****** render function input variables, closing parenthesis ******/
     for (idx, input_var_info) in func_info.input_variables.iter().enumerate(){
@@ -66,38 +64,71 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
             continue;
         }
         assert!(input_var_info.name == func_info.input_var_called_names[idx]);
-        render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict);
         if func_info.input_variables.len() > 1 && idx < func_info.input_variables.len() - 1{
-            /* render connecting commas */
-            func_sig_render_patches(&mut x_cursor, &y_cursor, ",".to_string(), &mut render_segments);
+            render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(","));
         }
+        else{
+            render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(")"));
+        }
+        // if func_info.input_variables.len() > 1 && idx < func_info.input_variables.len() - 1{
+        //     /* render connecting commas */
+        //     func_sig_render_patches(&mut x_cursor, &y_cursor, ",".to_string(), &mut render_segments);
+        // }
     }
-    
+
+    for (key, strc) in render_segments.iter(){
+        let tmp = registry.render(strc.0.as_str(), &strc.1).unwrap();
+        ret += tmp.as_str();
+    }
     (x_cursor, y_cursor, ret)
 
 
 }
 
-fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32, y_cursor: &mut u32, render_segments: &mut BTreeMap<u32, (String, FuncSignatureRenderHolder)>, sub_lifetime_notation_dict: &mut HashMap<String, i32>) {
+fn is_mutable_reference(s: &str) -> bool {
+    let re = Regex::new(r"^\s*&\s*('[_a-zA-Z][_a-zA-Z0-9]*)?\s*mut\s+\w+\s*$").unwrap();
+    re.is_match(s)
+}
+
+fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32, y_cursor: &mut u32, render_segments: &mut BTreeMap<u32, (String, FuncSignatureRenderHolder)>, sub_lifetime_notation_dict: &mut HashMap<String, i32>, connect_ch: String) {
     let Y_Space : u32 = 20;
     let mut x_update : u32 = 0;
     let mut x_update_type_seg : u32 = 0;
     let mut x_update_var_type_seg : u32 = 0;
     let mut x_update_var_lp_cmp_seg : u32 = 0;
     /* render original signature segment . E.g. &'a i32 */
-    let param_type_string = var_info.data_type.clone() + ",";
+    let param_type_string = var_info.data_type.clone() + &connect_ch;
     x_update_type_seg =  (param_type_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
     render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
         FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: param_type_string, hover_msg: String::new()}));
     
+    /* check whether it has lifetime parameter */
+    if var_info.lifetime_param.is_none(){
+        *x_cursor += x_update_type_seg;
+        return;
+    }
     /* render variable name segment with lifetime parameter . E.g. x: &'x i32 */
-    let mut var_lp_string = var_info.to_string();
+    let var_lp_string_old = var_info.to_string();
+    //println!("lp_string_old: {}", var_lp_string_old);
     // substitute lifetime parameter with variable name first letter
-    let tick_index = var_lp_string.find("'").unwrap_or(0);
-    let first_space_index = var_lp_string.find(' ').unwrap_or(0);
-    var_lp_string = format!("{}{}", &var_lp_string[..tick_index+1], &var_lp_string[first_space_index..]);
+    let tick_index = var_lp_string_old.find("'").unwrap_or(0);
+    // find all whitespace index
+    let whitespace_idxs : Vec<usize> = var_lp_string_old.chars().enumerate()
+                                        .filter(|&(_, c)| c.is_whitespace())
+                                        .map(|(i, _)| i)
+                                        .collect();
+    let mut first_space_index = 0;
+    for idx in whitespace_idxs.iter(){
+        if *idx > tick_index{
+            first_space_index = *idx;
+            break;
+        }
+    }
+    //println!("tick_index: {}, first_space_index: {}", tick_index, first_space_index);
+    let mut var_lp_string = format!("{}{}", &var_lp_string_old[..tick_index+1], &var_lp_string_old[first_space_index..]);
+    //println!("lp_string: {}", var_lp_string);
     // calculate local sub lifetime parameter index
-    let first_ch: String = format!("{}", &var_info.name[..1]);
+    let first_ch: String = if var_info.name.chars().nth(0).unwrap() == '&' {var_info.name.chars().nth(1).unwrap().to_string()} else {var_info.name.chars().nth(0).unwrap().to_string()};
     let mut lp_idx = 1;
     if sub_lifetime_notation_dict.contains_key(&first_ch){
         lp_idx = sub_lifetime_notation_dict.get(&first_ch).unwrap().clone() + 1;
@@ -107,24 +138,29 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
         sub_lifetime_notation_dict.insert(first_ch.clone(), 1);
     }
     // substitute lifetime parameter with local sub lifetime parameter index
-    var_lp_string.insert_str(tick_index+1, &format!("{}{}", &first_ch, lp_idx));
-    x_update_var_type_seg =  (var_lp_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
-    render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
-        FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor + Y_Space, segment: var_lp_string, hover_msg: String::new()}));
-
-
-
-    /* render code segment */
-    let mut var_sig_string = var_info.to_string();
-    // println!("name: {}", var_sig_string);
-    if var_info.subordinates.len() == 0{
-        x_update =  (var_sig_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
-        render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
-        FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: var_sig_string, hover_msg: String::new()}));
+    let mut sub_lifetime : String = format!("{}{}", &first_ch, lp_idx);
+    if USE_VAR_NAME_AS_LP_NAME {
+        //println!("var_name: {}", var_info.name);
+        let var_name_full: String = if var_info.name.chars().nth(0).unwrap() == '&' && !is_mutable_reference(&var_info.name) {var_info.name[1..].to_string()}
+                                    else if is_mutable_reference(&var_info.name){var_info.name.clone().trim_start()[4..].to_string().trim_start().to_string()}
+                                    else {var_info.name.clone()};
+        var_lp_string.insert_str(tick_index+1, &format!("{}", &var_name_full));
+        sub_lifetime = format!("{}", &var_name_full);
+        //println!("var_name_full: {}", var_name_full);
     }
     else{
-        var_sig_string = var_info.name.clone();
-        x_update =  (var_sig_string.len() as u32) * 9;
+        var_lp_string.insert_str(tick_index+1, &format!("{}{}", &first_ch, lp_idx));
+    }
+    
+    x_update_var_type_seg =  (var_lp_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
+    if var_info.subordinates.len() == 0 {
+    render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+        FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor + Y_Space, segment: var_lp_string, hover_msg: String::new()}));
+    }
+    else {
+        let var_name_string = var_info.name.clone().trim_start().to_string();
+        println!("var_name_string: {}", var_name_string);
+        x_update_var_type_seg =  (var_name_string.len() as u32) * 9;
         // generate hover message of info between master and subordinates
         let mut hover_message = format!("*{}* {} ", var_info.name, var_info.relationship);
         for subordinate in var_info.subordinates.iter(){
@@ -133,26 +169,22 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
         hover_message += &format!("which all contribute to calculation of '{}.", var_info.lifetime_param.clone().unwrap());
         // only highlight variable name
         render_segments.insert(get_hash(),("func_signature_var_has_subordinate_template".to_string(),
-        FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: var_sig_string, hover_msg: hover_message}));
+        FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor + Y_Space, segment: var_name_string.clone(), hover_msg: hover_message}));
         // add variable type
         render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
-        FuncSignatureRenderHolder{ x_val: *x_cursor + x_update, y_val: *y_cursor, segment: format!(":{}", var_info.data_type), hover_msg: String::new()}));
-        x_update += var_info.data_type.len() as u32 * FUNC_SIG_CHAR_X_SPACE;
+        FuncSignatureRenderHolder{ x_val: *x_cursor + x_update_var_type_seg, y_val: *y_cursor + Y_Space, segment: var_lp_string[var_name_string.len()..].to_string(), hover_msg: String::new()}));
+        x_update_var_type_seg += var_lp_string[var_name_string.len()..].to_string().len() as u32 * FUNC_SIG_CHAR_X_SPACE;
     }
+    /* render lifetime compare inequality. E.g.  'x1 <= 'a */
+    let lifetime_cmp_string = format!("'{} <= '{}", &sub_lifetime, var_info.lifetime_param.clone().unwrap());
+    x_update_var_lp_cmp_seg =  (lifetime_cmp_string.len() as u32) * SIG_LT_CMP_CHAR_X_SPACE;
+    render_segments.insert(get_hash(),("func_signature_LP_cmp_template".to_string(),
+    FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor + 2 * Y_Space + 3, segment: lifetime_cmp_string,
+                               hover_msg: format!("lifetime of {} should be less than '{}", var_info.name, &var_info.lifetime_param.clone().unwrap())}));
 
-
-    if let Some(lifetime_param) = &var_info.lifetime_param{
-        if let Some(lifetime_scope) = &var_info.lifetime_info{
-            // generate lifetime scope vs lifetime param string: [3,9] <= 'a
-            let cmp = format!("[{},{}] {}= '{}", lifetime_scope.start, lifetime_scope.end, LEFT_ANGLE_BR, lifetime_param );
-            x_update = if x_update > ((cmp.len() as u32) * SIG_LT_CMP_CHAR_X_SPACE) {x_update} else {(cmp.len() as u32) * SIG_LT_CMP_CHAR_X_SPACE};
-            render_segments.insert(get_hash(),("func_signature_LP_cmp_template".to_string(),
-            FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor + Y_Space, segment: cmp,
-                                       hover_msg: format!("lifetime of {} should be less than '{}", var_info.name, lifetime_param)}));
-        }
-    }
     // update x_cursor
-    *x_cursor += x_update;
+    *x_cursor += cmp::max(cmp::max(x_update_type_seg, x_update_var_type_seg), x_update_var_lp_cmp_seg) + 5;
+
 
 }
 /**
@@ -346,7 +378,7 @@ fn render_func_sig_helper(var_info: & VariableSpec, x_cursor: &mut u32, y_cursor
     let mut x_update : u32 = 0;
     /* render code segment */
     let mut var_sig_string = var_info.to_string();
-    // println!("name: {}", var_sig_string);
+    // //println!("name: {}", var_sig_string);
     if var_info.subordinates.len() == 0{
         x_update =  (var_sig_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
         render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
