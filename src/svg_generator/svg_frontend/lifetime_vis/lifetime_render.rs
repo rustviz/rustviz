@@ -111,7 +111,6 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
     /****** render seperating lines ******/
     let length = (x_cursor) / FUNC_SIG_CHAR_X_SPACE;
     let spe_str = "-".repeat(length as usize);
-    println!("length: {}\nspe_str: {}", length, spe_str);
     render_segments.insert(get_hash(),("func_signature_code_sep_template".to_string(),
                             FuncSignatureRenderHolder{ x_val: 10, y_val: Y_START + 29, segment: spe_str, hover_msg: String::new()}));
 
@@ -127,6 +126,14 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
 
 fn is_mutable_reference(s: &str) -> bool {
     let re = Regex::new(r"^\s*&\s*('[_a-zA-Z][_a-zA-Z0-9]*)?\s*mut\s+\w+\s*$").unwrap();
+    re.is_match(s)
+}
+
+fn is_reference(s: &str) -> bool {
+    // Define a regex pattern to match references
+    let re = Regex::new(r"^&\s*('[_a-zA-Z][_a-zA-Z0-9]*)?\s*(mut)?\s*\w*\s*$").unwrap();
+
+    // Check if the string matches the regex pattern
     re.is_match(s)
 }
 
@@ -149,7 +156,7 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
     }
     /* render variable name segment with lifetime parameter . E.g. x: &'x i32 */
     let var_lp_string_old = var_info.to_string();
-    //println!("lp_string_old: {}", var_lp_string_old);
+    println!("lp_string_old: {}", var_lp_string_old);
     // substitute lifetime parameter with variable name first letter
     let tick_index = var_lp_string_old.find("'").unwrap_or(0);
     // find all whitespace index
@@ -164,9 +171,9 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
             break;
         }
     }
-    //println!("tick_index: {}, first_space_index: {}", tick_index, first_space_index);
+    println!("tick_index: {}, first_space_index: {}", tick_index, first_space_index);
     let mut var_lp_string = format!("{}{}", &var_lp_string_old[..tick_index+1], &var_lp_string_old[first_space_index..]);
-    //println!("lp_string: {}", var_lp_string);
+    println!("lp_string: {}", var_lp_string);
     // calculate local sub lifetime parameter index
     let first_ch: String = if var_info.name.chars().nth(0).unwrap() == '&' {var_info.name.chars().nth(1).unwrap().to_string()} else {var_info.name.chars().nth(0).unwrap().to_string()};
     let mut lp_idx = 1;
@@ -180,13 +187,20 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
     // substitute lifetime parameter with local sub lifetime parameter index
     let mut sub_lifetime : String = format!("{}{}", &first_ch, lp_idx);
     if USE_VAR_NAME_AS_LP_NAME {
-        //println!("var_name: {}", var_info.name);
+        println!("var_name: {}", var_info.name);
+        // trying to get rid of '&mut' before real variable name
         let var_name_full: String = if var_info.name.chars().nth(0).unwrap() == '&' && !is_mutable_reference(&var_info.name) {var_info.name[1..].to_string()}
                                     else if is_mutable_reference(&var_info.name){var_info.name.clone().trim_start()[4..].to_string().trim_start().to_string()}
                                     else {var_info.name.clone()};
-        var_lp_string.insert_str(tick_index+1, &format!("{}", &var_name_full));
+        // if this var has lifetime parameter but it's not a reference, then it must be generic type such as Struct<T>
+        if !is_reference(var_info.data_type.as_str()){
+            var_lp_string = format!("{}: '{} {}", &var_info.name ,&var_name_full, &var_info.data_type);
+        }
+        else{
+            var_lp_string.insert_str(tick_index+1, &format!("{}", &var_name_full));
+        }
         sub_lifetime = format!("{}", &var_name_full);
-        //println!("var_name_full: {}", var_name_full);
+        println!("var_name_full: {}", var_name_full);
     }
     else{
         var_lp_string.insert_str(tick_index+1, &format!("{}{}", &first_ch, lp_idx));
