@@ -70,13 +70,53 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
         else{
             render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(")"));
         }
-        // if func_info.input_variables.len() > 1 && idx < func_info.input_variables.len() - 1{
-        //     /* render connecting commas */
-        //     func_sig_render_patches(&mut x_cursor, &y_cursor, ",".to_string(), &mut render_segments);
-        // }
+ 
     }
 
-    for (key, strc) in render_segments.iter(){
+    /****** render return variables if there is any ******/
+    if func_info.output_variables.len() > 0{
+        /* render arrow */
+        render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
+                            FuncSignatureRenderHolder{ x_val: x_cursor, y_val: y_cursor, segment: "->".to_string(), hover_msg: String::new()}));
+        x_cursor += 5 * FUNC_SIG_CHAR_X_SPACE;
+        /* render return variables */
+        if func_info.output_variables.len() > 1{
+            /* render open parenthesis */
+            render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
+                            FuncSignatureRenderHolder{ x_val: x_cursor, y_val: y_cursor, segment: "(".to_string(), hover_msg: String::new()}));
+            x_cursor += 1 * FUNC_SIG_CHAR_X_SPACE;
+        }
+        for (idx, var_info) in func_info.output_variables.iter().enumerate(){
+            assert!(var_info.name == func_info.output_var_called_names[idx]);
+            
+            if  func_info.output_variables.len() > 1 && idx < func_info.output_variables.len() - 1{
+                render_func_sig_helper_type_new(var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(","));
+            }
+            else if func_info.output_variables.len() > 1 && idx == func_info.output_variables.len() - 1{
+                render_func_sig_helper_type_new(var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(")"));
+            }
+            else{
+                render_func_sig_helper_type_new(var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(""));
+            }
+        }
+
+        if func_info.output_variables.len() > 1{
+            /* render closing parenthesis */
+            render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
+                            FuncSignatureRenderHolder{ x_val: x_cursor, y_val: y_cursor, segment: ")".to_string(), hover_msg: String::new()}));
+            x_cursor += 1 * FUNC_SIG_CHAR_X_SPACE;
+        }
+    }
+
+    /****** render seperating lines ******/
+    let length = (x_cursor) / FUNC_SIG_CHAR_X_SPACE;
+    let spe_str = "-".repeat(length as usize);
+    println!("length: {}\nspe_str: {}", length, spe_str);
+    render_segments.insert(get_hash(),("func_signature_code_sep_template".to_string(),
+                            FuncSignatureRenderHolder{ x_val: 10, y_val: Y_START + 29, segment: spe_str, hover_msg: String::new()}));
+
+
+    for (_, strc) in render_segments.iter(){
         let tmp = registry.render(strc.0.as_str(), &strc.1).unwrap();
         ret += tmp.as_str();
     }
@@ -99,7 +139,7 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
     /* render original signature segment . E.g. &'a i32 */
     let param_type_string = var_info.data_type.clone() + &connect_ch;
     x_update_type_seg =  (param_type_string.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
-    render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+    render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
         FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: param_type_string, hover_msg: String::new()}));
     
     /* check whether it has lifetime parameter */
@@ -180,7 +220,7 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
     x_update_var_lp_cmp_seg =  (lifetime_cmp_string.len() as u32) * SIG_LT_CMP_CHAR_X_SPACE;
     render_segments.insert(get_hash(),("func_signature_LP_cmp_template".to_string(),
     FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor + 2 * Y_Space + 3, segment: lifetime_cmp_string,
-                               hover_msg: format!("lifetime of {} should be less than '{}", var_info.name, &var_info.lifetime_param.clone().unwrap())}));
+                               hover_msg: format!("lifetime of {} should be contained by '{}", var_info.name, &var_info.lifetime_param.clone().unwrap())}));
 
     // update x_cursor
     *x_cursor += cmp::max(cmp::max(x_update_type_seg, x_update_var_type_seg), x_update_var_lp_cmp_seg) + 5;
@@ -229,7 +269,7 @@ fn helper_render_func_name_generic_type(func_info: & FuncSignatureSpec, x_cursor
             }
         }
 
-        render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+        render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
                             FuncSignatureRenderHolder{ x_val: *x_cursor + x_update, y_val: *y_cursor, segment: func_name_str.clone(), hover_msg:String::new()}));
         x_update += func_name_str.len() as u32 * FUNC_SIG_CHAR_X_SPACE;
         *x_cursor += x_update;
@@ -253,7 +293,7 @@ fn helper_render_func_name_generic_type(func_info: & FuncSignatureSpec, x_cursor
                 }
             }
         }
-        render_segments.insert(get_hash(),("func_signature_code_template".to_string(),
+        render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
                             FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor, segment: func_name_str.clone(), hover_msg: String::new()}));
         *x_cursor += (func_name_str.len() as u32) * FUNC_SIG_CHAR_X_SPACE;
     }
@@ -632,8 +672,12 @@ pub fn render_dashed_number_line(vars: Vec<VariableSpec>, max_width: u32, regist
 pub fn prepare_registry(registry: &mut Handlebars){
 
     /* function signature related */
+    let func_signature_code_param_template =
+    "       <text class=\"funcSigCodeParam\" x=\"{{x_val}}\" y=\"{{y_val}}\"> {{segment}} </text>\n";
+    let func_signature_code_sep_template =
+    "       <text class=\"funcSigCodeSep\" x=\"{{x_val}}\" y=\"{{y_val}}\"> {{segment}} </text>\n";
     let func_signature_code_template =
-    "       <text class=\"funcSigCode\" x=\"{{x_val}}\" y=\"{{y_val}}\"> {{segment}} </text>\n";
+    "       <text class=\"funcSigCodeType\" x=\"{{x_val}}\" y=\"{{y_val}}\"> {{segment}} </text>\n";
     let func_signature_lp_cmp_template =
     "       <text class=\"lifetime tooltip-trigger\" x=\"{{x_val}}\" y=\"{{y_val}}\" data-tooltip-text=\"{{hover_msg}}\"> {{segment}} </text>\n";
 
@@ -688,6 +732,14 @@ pub fn prepare_registry(registry: &mut Handlebars){
     "
     <rect class=\"tooltip-trigger\" lifetime-reg-hash=\"{{lifetime_hash}}\" stroke-width=\"3\" stroke-dasharray=\"5,2\" x=\"{{x}}\" y=\"{{y}}\"  width=\"{{w}}\" height=\"{{h}}\" fill=\"none\" data-tooltip-text=\"{{hover_msg}}\"/>\n
     ";
+
+    assert!(
+        registry.register_template_string("func_signature_code_param_template", func_signature_code_param_template).is_ok()
+    );
+
+    assert!(
+        registry.register_template_string("func_signature_code_sep_template", func_signature_code_sep_template).is_ok()
+    );
 
     assert!(
         registry.register_template_string("func_signature_struct_instance_method_invoke_template", func_signature_struct_instance_method_invoke_template).is_ok()

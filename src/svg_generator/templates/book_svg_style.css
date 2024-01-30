@@ -31,9 +31,25 @@ text.code {
     font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
     font-size: 0.875em;
 }
-text.funcSigCode {
+
+text.funcSigCodeParam {
+    fill: #000300;
+    font-weight: bold;
+    white-space: pre;
+    font-family: monospace;
+    font-size: 1.2em;
+}
+
+text.funcSigCodeType {
     fill: #13b516;
     font-weight: bold;
+    white-space: pre;
+    font-family: monospace;
+    font-size: 1.2em;
+}
+
+text.funcSigCodeSep {
+    fill: #79bff1e9;
     white-space: pre;
     font-family: monospace;
     font-size: 1.2em;
