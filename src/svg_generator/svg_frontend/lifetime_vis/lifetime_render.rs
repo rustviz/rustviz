@@ -11,7 +11,20 @@ use serde::Serialize;
 use super::*;
 use super::lifetime_render_data_structures::{FuncSignatureRenderHolder, LineNumberDashHolder, VarLifetimeColumnHoler, LifetimeParameterColumnSetHoler, LifetimeRegionSquareHoler};
 use std::cmp;
+use syn::parse_quote;
+use syn::Type;
 
+fn is_reference(s: &str) -> bool {
+    // Parse the input string as a Rust type
+    let ty: Result<Type, _> = syn::parse_str(s);
+    
+    // Check if the parsed type is a reference
+    if let Ok(Type::Reference(_)) = ty {
+        true
+    } else {
+        false
+    }
+}
 
 /*** global setting for rendering ***/
 pub const FUNC_SIG_CHAR_X_SPACE: u32 = 10;
@@ -129,13 +142,7 @@ fn is_mutable_reference(s: &str) -> bool {
     re.is_match(s)
 }
 
-fn is_reference(s: &str) -> bool {
-    // Define a regex pattern to match references
-    let re = Regex::new(r"^&\s*('[_a-zA-Z][_a-zA-Z0-9]*)?\s*(mut)?\s*\w*\s*$").unwrap();
 
-    // Check if the string matches the regex pattern
-    re.is_match(s)
-}
 
 fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32, y_cursor: &mut u32, render_segments: &mut BTreeMap<u32, (String, FuncSignatureRenderHolder)>, sub_lifetime_notation_dict: &mut HashMap<String, i32>, connect_ch: String) {
     let Y_Space : u32 = 20;
@@ -187,14 +194,14 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
     // substitute lifetime parameter with local sub lifetime parameter index
     let mut sub_lifetime : String = format!("{}{}", &first_ch, lp_idx);
     if USE_VAR_NAME_AS_LP_NAME {
-        println!("var_name: {}", var_info.name);
+        println!("var_name: {} var_data_type: {}", var_info.name, var_info.data_type);
         // trying to get rid of '&mut' before real variable name
         let var_name_full: String = if var_info.name.chars().nth(0).unwrap() == '&' && !is_mutable_reference(&var_info.name) {var_info.name[1..].to_string()}
                                     else if is_mutable_reference(&var_info.name){var_info.name.clone().trim_start()[4..].to_string().trim_start().to_string()}
                                     else {var_info.name.clone()};
-        // if this var has lifetime parameter but it's not a reference, then it must be generic type such as Struct<T>
+        // if this var has lifetime parameter but it's not a reference, then it must be generic type such as Struct<T>. In this case, no need to add outer lifetime parameter
         if !is_reference(var_info.data_type.as_str()){
-            var_lp_string = format!("{}: '{} {}", &var_info.name ,&var_name_full, &var_info.data_type);
+            var_lp_string = format!("{}: {}", &var_info.name, &var_info.data_type);
         }
         else{
             var_lp_string.insert_str(tick_index+1, &format!("{}", &var_name_full));
@@ -230,7 +237,14 @@ fn render_func_sig_helper_type_new(var_info: & VariableSpec, x_cursor: &mut u32,
         x_update_var_type_seg += var_lp_string[var_name_string.len()..].to_string().len() as u32 * FUNC_SIG_CHAR_X_SPACE;
     }
     /* render lifetime compare inequality. E.g.  'x1 <= 'a */
-    let lifetime_cmp_string = format!("'{} <= '{}", &sub_lifetime, var_info.lifetime_param.clone().unwrap());
+    // if its struct or other generic type, use words "the scope of xxx  <= 'a"
+    let mut lifetime_cmp_string = String::new();
+    if !is_reference(var_info.data_type.as_str()){
+        lifetime_cmp_string = format!("(scope of {}) <= '{}", &var_info.name, var_info.lifetime_param.clone().unwrap());
+    }
+    else{
+        lifetime_cmp_string = format!("'{} <= '{}", &sub_lifetime, var_info.lifetime_param.clone().unwrap());
+    }
     x_update_var_lp_cmp_seg =  (lifetime_cmp_string.len() as u32) * SIG_LT_CMP_CHAR_X_SPACE;
     render_segments.insert(get_hash(),("func_signature_LP_cmp_template".to_string(),
     FuncSignatureRenderHolder{ x_val: *x_cursor, y_val: *y_cursor + 2 * Y_Space + 3, segment: lifetime_cmp_string,
