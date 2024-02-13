@@ -27,7 +27,7 @@ debug = false
 [dependencies]
 handlebars = "4.3.7"
 serde = { version = "1.0", features = ["derive"] }
-syn = "2.0.22"
+syn = { version = "2.0.22", features = ["extra-traits", "full"] }
 quote = "1.0.28"
 regex = "1.8.4"
 rand = "0.8.5"

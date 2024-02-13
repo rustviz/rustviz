@@ -3,7 +3,7 @@ pub mod lifetime_render;
 pub mod lifetime_render_data_structures;
 use crate::data::{ ResourceAccessPoint, LifetimeBind, self};
 use crate::hover_messages;
-use std::collections::{VecDeque, BTreeMap};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::process::exit;
 use handlebars::Handlebars;
 use lifetime_parse::*;
@@ -13,6 +13,7 @@ use std::{fs, cmp};
 use std::io::{BufReader, BufRead};
 use regex::*;
 use serde::Serialize;
+use syn::{parse_file, Item, ItemStruct, Field, Type};
 
 /*********************
 						LIFETIME ANNOTATION SPEC (cont.)
@@ -319,6 +320,64 @@ impl FuncSignatureSpec{
 		 * include `&self` at the first position of input variables
 		 */
 	}
+	/** returns (type name, lifetime parameter[empty if none]) */
+	fn helper_parse_field_type(field_type: &Type) -> (String, String){
+		match field_type {
+			Type::Reference(reference) => {
+				// Check if the reference has a lifetime
+				if let Some(lifetime) = &reference.lifetime {
+					let lifetime_name = lifetime.ident.to_string();
+					let inner_type = Self::helper_parse_field_type(&*reference.elem);
+					( format!("&'{} {}", &lifetime_name, &inner_type.0), lifetime_name)
+				} else {
+					// If the reference does not have a lifetime, parse the inner type
+					Self::helper_parse_field_type(&*reference.elem)
+				}
+			}
+			_ => (quote::quote! { #field_type }.to_string(), String::new()),
+		}
+	}
+	fn parse_struct(&mut self, path_to_source_rs: &String){
+		if self.struct_group_name.is_none(){
+			eprintln!("struct group name is not set yet!");
+			exit(0);
+		}
+		// Read the source file
+		let source_code = fs::read_to_string(path_to_source_rs).expect("Unable to read file");
+		// println!("source code: {}", source_code);
+
+		// Parse the source code into a syntax tree
+		let syntax_tree = parse_file(&source_code).expect("Unable to parse file");
+
+		// Iterate through the items in the syntax tree
+		let mut lp_set: HashSet<String> = HashSet::new();
+		for item in syntax_tree.items {
+			if let Item::Struct(item_struct) = item {
+				// Check if the item is the target struct
+				if item_struct.ident.to_string() == self.struct_group_name.clone().unwrap() {
+					// Parse fields of the target struct
+					for field in item_struct.fields.iter() {
+						let field_name = field.ident.as_ref().expect("Field does not have an identifier").to_string();
+						let field_type_lp = Self::helper_parse_field_type(&field.ty);
+						let field_type = field_type_lp.0;
+						let tmp_lifetime_param = if field_type_lp.1.is_empty() { None } else { Some(field_type_lp.1) };
+						let var = VariableSpec { name: field_name, lifetime_param: tmp_lifetime_param.clone(), data_type: field_type, lifetime_info: None, hover_messages: Vec::new(), data_hash: None, subordinates: Vec::new(), relationship: String::new() };
+						self.input_variables.push_back(var);
+						if let Some(lp) = tmp_lifetime_param{
+							lp_set.insert(format!("'{}", lp));
+						}
+					}
+					break;
+				}
+			}
+		}
+		// update default constructor lifetime parameter(s)
+		let lp_vec: Vec<String> = lp_set.iter().map(|x| x.clone()).collect();
+		if lp_vec.len() > 0{
+			self.lifetime_param = Some(lp_vec);
+		}
+
+	}
 	/**
 	 * Update function signature based on `self.function_name`, `self.struct_group_name` and `is_not_static_struct_method`, which is given by the parser.
 	 * complete function signature struct, except for `input_var_called_names` and `output_var_called_names`. Those two are updated in `update_input_names_main_rs`.
@@ -331,6 +390,11 @@ impl FuncSignatureSpec{
 			return Result::Err("function name unknown! No clue which function signature to extract!".to_string());
 		}
 		let mut source_func_signatures_infos : BTreeMap<String, FuncSignatureSpec> = BTreeMap::new();
+		/* special case for struct default constructor */
+		if self.function_name.eq("default_constructor") {
+			Self::parse_struct(self, &path_to_source_rs);
+			return Ok("update success on struct default constructor".to_string());
+		}
 		/* parse source file function definitions */
 		parse_all_function_signature(&path_to_source_rs, &mut source_func_signatures_infos);
 		for (func_name, func_info) in &source_func_signatures_infos{
@@ -339,6 +403,8 @@ impl FuncSignatureSpec{
 				found = true;
 			}
 		}
+
+		// println!("replenish parse inside\nfs: {:#?}", self);
 		/* if output is tuple, then further tear down the tuple structure */
 		if self.output_variables.len() > 0 && self.output_variables[0].data_type.find("(").is_some(){
 			let orig_tuple = self.output_variables.pop_front().unwrap();
@@ -416,14 +482,32 @@ impl FuncSignatureSpec{
 	 * Because there might be multiple same function calls within `main`, so only the function with lifetime annotation will be parsed!!!
 	 * If there is `self`, then the input variable called name will be exactly the same as `self`
 	 */
-	pub fn update_input_names_main_rs(&mut self, path_to_main_rs: String) -> Result<String, String> {
+	pub fn update_input_names_main_rs(&mut self, path_to_main_rs: String,  parser_data: &LifetimeVisualization) -> Result<String, String> {
 		if self.function_name.len() == 0{
 			return Result::Err("function name unknown! No clue which line in main.rs to match!".to_string());
+		}
+		// special case: struct default constructor
+		if self.function_name == "default_constructor" {
+			for input_var_name in parser_data.input_lives.iter(){
+				match input_var_name.rap{
+					ResourceAccessPoint::LifetimeVars(ref info) => {
+						self.input_var_called_names.push_back(info.name.clone());
+					},
+					ResourceAccessPoint::LifetimeBind(ref info) => {
+						self.input_var_called_names.push_back(info.name.clone());
+					},
+					_ => {
+						eprintln!("Wrong variable definition! Should be related with Lifetime tag!");
+						exit(0);
+					}
+				}
+			}
+			return Ok("updated struct default constructor input variables".to_string());
 		}
 		let file = fs::File::open(&path_to_main_rs).expect((String::from("error opening ") + &path_to_main_rs).as_str());
 		let reader = BufReader::new(file);
 		let pattern = self.function_name.clone() + r"\((.*?)\)";
-		let re = regex::Regex::new(&pattern ).unwrap();
+		let re: Regex = regex::Regex::new(&pattern ).unwrap();
 
 		let lines_vec : Vec<String>  = reader.lines().map(|ln| {
 			match ln {
@@ -450,6 +534,13 @@ impl FuncSignatureSpec{
 					}
 				}
 			}
+			// special case: struct default constructor
+			// if self.function_name == "default_constructor" {
+			// 	match self.update_self_input_variables(call_line.clone()) {
+			// 		Ok(_) => return Ok("".to_string()),
+			// 		_ => return Err("failed to update input parameter from main.rs! No Lifetime annotation or no matching function call from Lifetime annotation!".to_string()),
+			// 	}
+			// }
 			l_idx += 1;
 		}
 		Err("no matching function definition in source.rs!".to_string())

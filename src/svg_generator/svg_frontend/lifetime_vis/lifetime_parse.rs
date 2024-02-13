@@ -513,6 +513,7 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
         LifetimeType::None => {eprintln!("No annotation!"); exit(0)}
     }
 
+    // println!("step 1\nreplenish parse: {:#?}", fs);
     /* Step 2
      *  Based on function/method name, parse function signature based on function definition found in source.rs.
      *  Note that this step doesn't parse input/output variable names when this function is invoked
@@ -524,11 +525,11 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
 			exit(0)
 		}
 	}
-    // println!("replenish parse: {:?}", fs);
+    // println!("step 2\nreplenish parse: {:#?}", fs);
     /* Step 3
      *  Update input variable names, based on where `@Lifetime` syntax is invoked.
      */
-    match fs.update_input_names_main_rs(path_to_main_rs.clone()){
+    match fs.update_input_names_main_rs(path_to_main_rs.clone(), parser_data){
 		Ok(_) =>{},
 		Err(err_msg) => {
 			eprintln!("{}",err_msg);
@@ -538,7 +539,7 @@ pub fn translate_parser_data_to_function_signature_info(parser_data: &LifetimeVi
     // println!("update input names parse: {:?}", fs);
 	fs.update_output_var_name_and_update_vars_lifetimes(parser_data);
     fs.update_hover_messages_by_parser_data(parser_data);
-    // println!("{:?}", fs);
+    println!("final version FS:\n{:#?}", fs);
 
     // sync variable invoked name with signature name
     fs.sync_var_name_with_invoked_name();

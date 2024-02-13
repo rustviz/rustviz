@@ -70,7 +70,8 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
 
 
     /****** render function input variables, closing parenthesis ******/
-    for (idx, input_var_info) in func_info.input_variables.iter().enumerate(){
+    let special_case_default_constructor = func_info.function_name == "default_constructor";
+    for (idx, input_var_info) in func_info.input_variables.iter().enumerate() {
         /* if it's `self`, then continue. IT HAS ALREADY RENDERED IN HOVER MESSAGE!!! */
         if input_var_info.data_type.find("self").is_some(){
             assert!(idx == 0);
@@ -81,7 +82,12 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
             render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(","));
         }
         else{
-            render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(")"));
+            if special_case_default_constructor{
+                render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(" }}"));
+            }
+            else{
+                render_func_sig_helper_type_new(input_var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(" )"));
+            }
         }
  
     }
@@ -112,27 +118,25 @@ pub fn render_function_lifetime_signature_lifetime_type( func_info: & FuncSignat
                 render_func_sig_helper_type_new(var_info, &mut x_cursor, &mut y_cursor, &mut render_segments, &mut sub_lifetime_notation_dict, format!(""));
             }
         }
-
-        if func_info.output_variables.len() > 1{
-            /* render closing parenthesis */
-            render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
-                            FuncSignatureRenderHolder{ x_val: x_cursor, y_val: y_cursor, segment: ")".to_string(), hover_msg: String::new()}));
-            x_cursor += 1 * FUNC_SIG_CHAR_X_SPACE;
-        }
     }
+
+    // /* render closing parenthesis */
+    // render_segments.insert(get_hash(),("func_signature_code_param_template".to_string(),
+    //                 FuncSignatureRenderHolder{ x_val: x_cursor, y_val: y_cursor, segment: ")".to_string(), hover_msg: String::new()}));
+    // x_cursor += 6 * FUNC_SIG_CHAR_X_SPACE;
 
     /****** render seperating lines ******/
     let length = (x_cursor) / FUNC_SIG_CHAR_X_SPACE;
     let spe_str = "-".repeat(length as usize);
     render_segments.insert(get_hash(),("func_signature_code_sep_template".to_string(),
-                            FuncSignatureRenderHolder{ x_val: 10, y_val: Y_START + 29, segment: spe_str, hover_msg: String::new()}));
+                            FuncSignatureRenderHolder{ x_val: 10, y_val: Y_START + 31, segment: spe_str, hover_msg: String::new()}));
 
 
     for (_, strc) in render_segments.iter(){
         let tmp = registry.render(strc.0.as_str(), &strc.1).unwrap();
         ret += tmp.as_str();
     }
-    (x_cursor, y_cursor, ret)
+    (x_cursor + 5, y_cursor, ret)
 
 
 }
@@ -286,13 +290,13 @@ fn helper_render_func_name_generic_type(func_info: & FuncSignatureSpec, x_cursor
                     func_name_str += &format!("<{}", lp);
                 }
                 else if i == func_info.lifetime_param.clone().unwrap().len() - 1 && func_info.lifetime_param.clone().unwrap().len() > 1{
-                    func_name_str += &format!(",{}>(", lp);
+                    func_name_str += &format!(",{}> (", lp);
                 }
                 else{
                     func_name_str += &format!(",{}", lp);
                 }
                 if i == func_info.lifetime_param.clone().unwrap().len() - 1 &&  func_info.lifetime_param.clone().unwrap().len() == 1{
-                    func_name_str += &format!(">(");
+                    func_name_str += &format!("> (");
                 }
             }
         }
@@ -304,6 +308,10 @@ fn helper_render_func_name_generic_type(func_info: & FuncSignatureSpec, x_cursor
     }
     else{
         let mut func_name_str = func_info.function_name.clone();
+        let special_case_default_constructor = func_info.function_name == "default_constructor";
+        if special_case_default_constructor{
+            func_name_str = func_info.struct_group_name.clone().unwrap_or("Error: no struct name".to_string());
+        }
         // add up lifetime parameters
         if func_info.lifetime_param.is_some(){
             for (i, lp) in func_info.lifetime_param.clone().unwrap().iter().enumerate(){
@@ -311,13 +319,23 @@ fn helper_render_func_name_generic_type(func_info: & FuncSignatureSpec, x_cursor
                     func_name_str += &format!("<{}", lp);
                 }
                 else if i == func_info.lifetime_param.clone().unwrap().len() - 1 &&  func_info.lifetime_param.clone().unwrap().len()  > 1{
-                    func_name_str += &format!(",{}>(", lp);
+                    if special_case_default_constructor{
+                        func_name_str += &format!(",{}> {{", lp);
+                    }
+                    else{
+                        func_name_str += &format!(",{}> (", lp);
+                    }
                 }
                 else{
                     func_name_str += &format!(",{}", lp);
                 }
                 if i == func_info.lifetime_param.clone().unwrap().len() - 1 &&  func_info.lifetime_param.clone().unwrap().len() == 1{
-                    func_name_str += &format!(">(");
+                    if special_case_default_constructor{
+                        func_name_str += &format!("> {{");
+                    }
+                    else{
+                        func_name_str += &format!("> (");
+                    }
                 }
             }
         }
