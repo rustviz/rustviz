@@ -374,9 +374,12 @@ impl FuncSignatureSpec{
 		// update default constructor lifetime parameter(s)
 		let lp_vec: Vec<String> = lp_set.iter().map(|x| x.clone()).collect();
 		if lp_vec.len() > 0{
-			self.lifetime_param = Some(lp_vec);
+			self.lifetime_param = Some(lp_vec.clone());
 		}
-
+		// output variable must be the struct instance
+		let lp_annotation = lp_vec.join(",");
+		let output_var = VariableSpec { name: "".to_string(), lifetime_param: Some(lp_vec[0].clone()[1..].to_string()), data_type: format!("{}<{}>", &self.struct_group_name.clone().unwrap(), lp_annotation), lifetime_info: None, hover_messages: Vec::new(), data_hash: None, subordinates: Vec::new(), relationship: String::new() };
+		self.output_variables.push_back(output_var);
 	}
 	/**
 	 * Update function signature based on `self.function_name`, `self.struct_group_name` and `is_not_static_struct_method`, which is given by the parser.
@@ -502,7 +505,21 @@ impl FuncSignatureSpec{
 					}
 				}
 			}
-			return Ok("updated struct default constructor input variables".to_string());
+			for output_var_name in parser_data.return_lives.iter(){
+				match output_var_name.rap{
+					ResourceAccessPoint::LifetimeVars(ref info) => {
+						self.output_var_called_names.push_back(info.name.clone());
+					},
+					ResourceAccessPoint::LifetimeBind(ref info) => {
+						self.output_var_called_names.push_back(info.name.clone());
+					},
+					_ => {
+						eprintln!("Wrong variable definition! Should be related with Lifetime tag!");
+						exit(0);
+					}
+				}
+			}
+			return Ok("updated struct default constructor output variables".to_string());
 		}
 		let file = fs::File::open(&path_to_main_rs).expect((String::from("error opening ") + &path_to_main_rs).as_str());
 		let reader = BufReader::new(file);
