@@ -308,3 +308,57 @@ jobs:
               ].join('\n'),
               labels: ['deploy-failure'],
             });
+
+  # Re-deploy the rustviz/tutorial book whenever a push to main here
+  # touches anything the tutorial actually depends on (the rustc plugin,
+  # the mdbook preprocessor, the rustviz2 lib, or the toolchain pin).
+  # The tutorial's own deploy workflow `git clone`s rustviz/rustviz to
+  # build the plugin from source, so any plugin-side change should
+  # trigger a tutorial rebuild — otherwise the deployed tutorial would
+  # silently lag behind the plugin until something pushes to its own
+  # repo.
+  #
+  # Auth: GITHUB_TOKEN can't dispatch workflows in another repo, so we
+  # use a PAT (TUTORIAL_DISPATCH_TOKEN) with Actions: write on
+  # rustviz/tutorial. See the project README for how it was minted.
+  #
+  # Path filtering happens inside the job (not at the workflow `paths:`
+  # level) because the workflow-level filter would skip the whole run,
+  # including `build` — and we still want every push exercised by CI.
+  dispatch-tutorial:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+        # Need the parent commit so `git diff HEAD^ HEAD` works. The
+        # default fetch-depth is 1 (shallow clone, no parent).
+        with:
+          fetch-depth: 2
+
+      - name: Detect plugin-affecting changes
+        id: changes
+        run: |
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            changed=$(git diff --name-only HEAD^ HEAD)
+          else
+            # First commit on the branch (very rare for main); treat as
+            # affecting so the tutorial picks up the new baseline.
+            changed=$(git ls-files)
+          fi
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+          if echo "$changed" | grep -qE '^(rustviz2-plugin/|mdbook-rustviz/|rustviz2/|rust-toolchain\.toml$)'; then
+            echo "affected=true" >> "$GITHUB_OUTPUT"
+            echo "==> tutorial will be rebuilt"
+          else
+            echo "affected=false" >> "$GITHUB_OUTPUT"
+            echo "==> no plugin-side changes; skipping tutorial dispatch"
+          fi
+
+      - name: Trigger rustviz/tutorial deploy
+        if: steps.changes.outputs.affected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TUTORIAL_DISPATCH_TOKEN }}
+        run: gh workflow run deploy.yml --repo rustviz/tutorial --ref master
