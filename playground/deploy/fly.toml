@@ -14,6 +14,10 @@ primary_region = 'ord'
   privileged = true
 
 [build]
+  # Dockerfile path is relative to this fly.toml; the actual build
+  # context is whatever cwd `fly deploy` was invoked from (the
+  # repo root, per deploy.sh — its `COPY rustviz2-plugin/…` etc.
+  # need to reach the workspace crates).
   dockerfile = 'Dockerfile'
 
 [env]
@@ -23,7 +27,7 @@ primary_region = 'ord'
   RV_RUNNER = 'docker'
 
 # No `[[mounts]]` block: dockerd uses the fuse-overlayfs storage driver
-# (configured in deploy/entrypoint.sh and packaged in the deploy image),
+# (configured in entrypoint.sh and packaged in the deploy image),
 # which works on top of the Fly Machine's overlay rootfs without needing
 # a per-Machine ext4 volume. The kernel doesn't support nested overlay2
 # (which is why the previous /var/lib/docker volume existed); fuse-overlayfs
@@ -35,7 +39,7 @@ primary_region = 'ord'
 #     source = 'rustviz_docker'
 #     destination = '/var/lib/docker'
 #     initial_size = '3gb'
-# and switch the storage driver back in deploy/entrypoint.sh.
+# and switch the storage driver back in entrypoint.sh.
 
 [http_service]
   internal_port = 8080
@@ -52,7 +56,7 @@ primary_region = 'ord'
   # complete.
   #
   # Steady-state idling is achieved per-Machine after deploy:
-  # deploy/deploy.sh runs `fly machine update --autostop=stop` against
+  # deploy.sh runs `fly machine update --autostop=stop` against
   # every Machine once they're healthy, so the running fleet *does*
   # auto-stop when idle (~$2-3/mo cost). The per-Machine override
   # outlives this fly.toml setting — Fly's edge proxy reads the
@@ -85,7 +89,7 @@ primary_region = 'ord'
   # has come up and the runner image is pulled — so a passing check means
   # the Machine is genuinely ready to serve, not just half-bootstrapped.
   #
-  # During phase 1 of deploy/deploy.sh, Machines pull the ~1 GiB runner
+  # During phase 1 of deploy.sh, Machines pull the ~1 GiB runner
   # image from GHCR and extract through fuse-overlayfs (10-30 min on
   # cold start). The 1m grace_period is NOT what protects us during that
   # window — fly clamps grace_period to 1 minute regardless of what we
@@ -115,7 +119,7 @@ primary_region = 'ord'
   memory = '2gb'
   # Default is 'never' — the rootfs is wiped on every restart and every
   # `fly machine update`, including the post-deploy auto_stop flip in
-  # deploy/deploy.sh. With 'never', dockerd's storage at /var/lib/docker
+  # deploy.sh. With 'never', dockerd's storage at /var/lib/docker
   # vanishes between restarts, so each restart triggers a fresh ~1 GiB
   # runner-image pull from GHCR (5-15 min via fuse-overlayfs). With
   # 'always', the rootfs survives both stop/start cycles AND

@@ -51,7 +51,7 @@ Production runs in two pieces:
   state when concurrency thresholds (`fly.toml::http_service.concurrency`)
   are crossed. dockerd uses the `fuse-overlayfs` storage driver so
   Machines don't need a per-Machine ext4 volume for `/var/lib/docker`
-  (see `fly.toml` and `deploy/entrypoint.sh` for context). Idle cost
+  (see `fly.toml` and `playground/deploy/entrypoint.sh` for context). Idle cost
   ~$2–3/mo total; an HN-spike day adds ~$5–10 of Machine compute.
   Allowed origins for cross-origin requests are listed in
   `playground/src/main.rs::cors`.
@@ -60,7 +60,12 @@ Production runs in two pieces:
 
 ```sh
 fly auth login                                  # browser OAuth
-fly launch --copy-config --no-deploy            # creates the app
+
+# fly.toml lives at playground/deploy/fly.toml; pass --config so
+# `fly launch` finds it. The rest of the fly commands below run
+# from repo root via deploy.sh, which cds into playground/deploy/
+# itself.
+fly launch --config playground/deploy/fly.toml --copy-config --no-deploy
 
 # Trigger the runner-image workflow manually for the first publication.
 # It also auto-fires on every push to main that touches runner/** or
@@ -76,14 +81,14 @@ gh run watch                                    # blocks until the run finishes
 # This step has to happen before the next command, otherwise the deploy's
 # first-boot `docker pull` fails.
 
-../deploy/deploy.sh                             # two-phase Fly deploy
+./playground/deploy/deploy.sh                             # two-phase Fly deploy
 ```
 
 The first boot of each Fly Machine pulls the `rustviz/rustviz-runner`
 image from GHCR (~30 s for ~600 MB). It's then cached on the Machine's
 local filesystem; subsequent cold starts after auto-stop take ~10 s.
 
-`./deploy/deploy.sh` also ensures the fleet stays at 10 Machines (override
+`./playground/deploy/deploy.sh` also ensures the fleet stays at 10 Machines (override
 with `RV_FLY_MACHINES=N`). With auto-stop on, idle Machines are free; the
 extra capacity exists so the edge proxy has somewhere to spill load when
 one Machine gets saturated. No need to manually scale up before posting
@@ -92,17 +97,17 @@ the URL somewhere.
 ### Routine deploys
 
 ```sh
-../deploy/deploy.sh
+./playground/deploy/deploy.sh
 ```
 
 When you change `runner/**` or `rustviz2-plugin/**`,
 `.github/workflows/runner-image.yml` automatically republishes the
-sandbox image to GHCR; the next `./deploy/deploy.sh` picks it up on
+sandbox image to GHCR; the next `./playground/deploy/deploy.sh` picks it up on
 each Machine's first boot.
 
 Every push to `main` triggers `.github/workflows/build.yml`. The
 workflow runs the build + tests first (also on every PR), then on
-`main` pushes only a downstream `deploy` job runs `./deploy/deploy.sh`
+`main` pushes only a downstream `deploy` job runs `./playground/deploy/deploy.sh`
 on a hosted runner (requires a `FLY_API_TOKEN` repo secret). Because
 `deploy` declares `needs: build`, a failing test suite blocks the
 deploy. The deploy job opens a `deploy-failure`-labelled issue on
@@ -157,7 +162,7 @@ the playground binary ever binds `:8080` — `fly deploy` would deadlock.
 So `'off'` is the only value that lets a fresh deploy actually finish.
 
 The cost-saving auto-stop behavior is applied per-Machine after
-deploy. `deploy/deploy.sh` does a destroy-and-recreate every time:
+deploy. `playground/deploy/deploy.sh` does a destroy-and-recreate every time:
 
 1. Destroys every existing Machine (parallel `fly machine destroy --force`).
 2. Runs `fly scale count` and `fly deploy --strategy immediate`, then
