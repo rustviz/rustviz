@@ -6,8 +6,8 @@ snippet and see exactly when each binding becomes the resource owner, when
 references go in and out of scope, and which lines those events correspond
 to.
 
-This repository ("RustViz 2") is the compiler-integrated rewrite. Earlier
-versions of RustViz read hand-annotated source; this one plugs into `rustc`
+This repository is now the compiler-integrated rewrite. Earlier
+versions of RustViz, deployed in the classroom and described in [our VL/HCC 2022 paper](https://web.eecs.umich.edu/~comar/rustviz-vlhcc22.pdf), read hand-annotated source; this one plugs into `rustc`
 directly and walks HIR/MIR, so the diagram reflects the real borrow
 checker's view of the program rather than a hand-curated approximation.
 
