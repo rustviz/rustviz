@@ -1,0 +1,29 @@
+# `.dockerignore` lives at the *build context* root. The playground's
+# Dockerfile sits at playground/deploy/Dockerfile, but its build
+# context is the repo root (set by playground/deploy/deploy.sh's
+# `(cd "$REPO_ROOT" && fly deploy …)` wrapper) so the Dockerfile's
+# `COPY rustviz2-plugin/` etc. paths resolve. Without this file,
+# the deploy context would slurp multi-GiB target/ + node_modules/
+# trees on every build.
+
+**/target/
+**/node_modules/
+**/dist/
+**/build/
+
+.git/
+.github/
+.vscode/
+
+# Generated mdbook output (per-build, not source)
+mdbook-rustviz/test-book/book/
+
+# Frontend caches
+**/.parcel-cache/
+**/.vite/
+**/.tsbuildinfo
+**/*.tsbuildinfo
+
+# OS / editor noise
+**/.DS_Store
+**/*.swp

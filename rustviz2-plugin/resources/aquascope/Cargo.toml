@@ -1,0 +1,45 @@
+[package]
+name = "aquascope"
+version = "0.1.0"
+license = "MIT"
+edition = "2021"
+authors = [
+  "Gavin Gray <gavinleroy6@gmail.com>",
+  "Will Crichton <wcrichto@cs.stanford.edu>"
+]
+description = "Permissions analyzer for Rust code"
+repository = "https://github.com/cognitive-engineering-lab/aquascope"
+publish = false
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[features]
+testing = []
+
+[dependencies]
+anyhow = "1.0.0"
+log = "0.4"
+itertools = "0.10.5"
+serde = { version = "1.0", features = ["derive"] }
+ts-rs = "6.2"
+regex = "1"
+fluid-let = "1.0"
+rustc_utils = {version = "0.6.0-nightly-2023-04-12", features = ["graphviz", "ts-rs", "serde", "test"]}
+
+# interpret module
+miri = {git = "https://github.com/rust-lang/miri.git", rev = "35d6927663065d7fdeeaed45dda7e7748fc9f222"}
+aquascope_workspace_utils = { version = "0.2", path = "../aquascope_workspace_utils" }
+
+# testing utils
+lazy_static = { version = "1.4" }
+
+[dev-dependencies]
+insta = { version = "1.22.0", features = ["json", "yaml", "redactions"] }
+aquascope = { path = ".", features = ["testing"] }
+env_logger = "0.9.3"
+test-log = "0.2.11"
+
+[dependencies.libffi-sys]
+version = "2.3.0"
+features = ["system"]

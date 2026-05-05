@@ -1,0 +1,174 @@
+body {
+  font: 16px "Helvetica Neue", "Open Sans", Arial, sans-serif;  
+}
+
+
+h1 {
+  margin-top: 0;
+  font-weight: bold;
+  text-align: center;
+}
+
+p {
+  max-width: 800px;
+  margin-left: 50px;
+}
+
+
+/* Sized to fit ~120 monospace characters of code + the line-number
+   gutter + the 5px border on each side, using a fixed pixel width
+   instead of `width: 50%`. With the percentage-based width the box
+   resized whenever the viewport did, so the right edge floated
+   relative to the prose; users now get a predictable column the
+   same way real code editors do. The `max-width` is a guard for
+   narrow windows: it lets the box shrink below 1060 px when the
+   viewport gets too small to fit, instead of overflowing past the
+   right edge.
+   The 1060 px figure is approximate — derived from a 14 px monospace
+   font where '0' is ~8.4 px wide, so 120 chars ≈ 1008 px, plus ~40 px
+   for a 4-digit line-number gutter, plus 10 px of border. Tweak if a
+   future font change throws the alignment off. */
+#editor {
+    height: 300px;
+    width: 1060px;
+    max-width: calc(100% - 100px);
+    margin-left: 50px;
+}
+
+/* Stretch editor to fit inside its containing div */
+.cm-editor {
+    height: 100%;
+    width: 100%;
+    border-style: solid;
+    border-width: 5px;
+    border-radius: 5px;
+    /* Pin the font-size so the column width above (1060 px) remains a
+       reasonable approximation of "120 chars". Without this the box
+       would render at the user-agent default (often 16 px), which
+       would make 120 chars overflow the box. */
+    font-size: 14px;
+}
+
+/* Button styles */
+.large-button {
+  padding: 20px 40px; /* Increase padding to make the button larger */
+  margin: 50px; /* Add a 50px margin on all sides */
+  font-size: 16px; /* Increase the font size for better readability */
+  /* Hold the button width steady so it doesn't visibly shrink when its
+     label switches from "Generate Visualization" to "Generating…". */
+  min-width: 280px;
+}
+
+.cm-button {
+  background-color: #cc7116; /* Example background color */
+  color: white; /* Example text color */
+  border: none; /* Remove default border */
+  border-radius: 5px; /* Example border radius */
+  cursor: pointer; /* Change cursor on hover */
+  /* Add other styles as needed */
+}
+
+.cm-button:disabled {
+  background-color: #ccc; /* Change background color when disabled */
+  cursor: not-allowed; /* Change cursor when disabled */
+}
+
+.loader {
+  border: 2px solid rgba(0, 0, 0, 0.1);
+  border-left-color: #000;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Loading status block under the rust-version note while a /submit-code
+   request is in flight. The button's own animated label indicates
+   "doing work"; this block adds a textual cue + a note about the
+   cold-start latency the Fly compile server can introduce after
+   auto-stop. Stacks naturally under .rust-version (rust-version's
+   bottom margin provides the gap). */
+.loading-status {
+  margin-top: 0;
+}
+.loading-message {
+  font-size: 18px;
+  margin-bottom: 4px;
+}
+/* Animated ellipsis: render fixed "..." but reveal one dot at a time by
+   animating the visible width in 4 steps (0 → 3 dots, then loops). */
+.ellipsis::after {
+  display: inline-block;
+  vertical-align: bottom;
+  overflow: hidden;
+  width: 0;
+  content: "...";
+  animation: ellipsis 1.5s steps(4, end) infinite;
+}
+@keyframes ellipsis {
+  to { width: 1.5em; }
+}
+.loading-note {
+  font-size: 14px;
+  color: #666;
+  margin-top: 0;
+}
+
+/* Toolchain note under the button. Small + subdued because it's
+   informational metadata, not user-facing UI; we want users to glance
+   at it and immediately know which rustc their snippet runs against
+   without it competing with the editor and visualization for
+   attention.
+   margin-top: -50px fully cancels the button's 50px bottom margin so
+   this paragraph sits directly under the button with no gap; the
+   loading-status block (when present) and the result panel both stack
+   below it using rust-version's own bottom margin as the gap, so
+   they can never overlap. */
+.rust-version {
+  font-size: 13px;
+  color: #888;
+  margin-top: -50px;
+  margin-bottom: 16px;
+}
+.rust-version code {
+  font-size: 13px;
+}
+
+/* Preloaded-example dropdown above the editor. Aligned with the
+   editor's left margin (50px) so it visually anchors to the same
+   column as the code box and the rest of the prose. */
+.example-picker {
+  margin: 0 0 8px 50px;
+  font-size: 14px;
+}
+.example-picker label {
+  margin-right: 8px;
+}
+.example-picker select {
+  font-size: 14px;
+  padding: 4px 8px;
+  max-width: 360px;
+}
+
+
+/* 
+.flex-container {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+.tl_panel {
+  flex-grow: 0;
+}
+
+.code_panel {
+  flex-grow: 1;
+} */

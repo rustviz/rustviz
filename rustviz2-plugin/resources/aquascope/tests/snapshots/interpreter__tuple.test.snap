@@ -1,0 +1,224 @@
+---
+source: crates/aquascope/tests/interpreter.rs
+description: tuple.test
+---
+steps:
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 67
+            filename:
+              private: 0
+          location:
+            start: 0
+            end: 9
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 67
+            filename:
+              private: 0
+          location:
+            start: 14
+            end: 53
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Tuple
+                value:
+                  - type: Int
+                    value: 0
+                  - type: Adt
+                    value:
+                      name: String
+                      variant: ~
+                      fields:
+                        - - vec
+                          - type: Adt
+                            value:
+                              name: Vec
+                              variant: ~
+                              fields:
+                                - - buf
+                                  - type: Adt
+                                    value:
+                                      name: RawVec
+                                      variant: ~
+                                      fields:
+                                        - - ptr
+                                          - type: Adt
+                                            value:
+                                              name: Unique
+                                              variant: ~
+                                              fields:
+                                                - - pointer
+                                                  - type: Adt
+                                                    value:
+                                                      name: NonNull
+                                                      variant: ~
+                                                      fields:
+                                                        - - pointer
+                                                          - type: Pointer
+                                                            value:
+                                                              path:
+                                                                segment:
+                                                                  type: Heap
+                                                                  value:
+                                                                    index: 0
+                                                                parts:
+                                                                  - type: Index
+                                                                    value: 0
+                                                              range: ~
+                                                      alloc_kind: ~
+                                              alloc_kind: ~
+                                        - - cap
+                                          - type: Uint
+                                            value: 5
+                                      alloc_kind: ~
+                                - - len
+                                  - type: Uint
+                                    value: 5
+                              alloc_kind: ~
+                      alloc_kind:
+                        type: String
+                        value:
+                          len: 5
+              moved_paths: []
+    heap:
+      locations:
+        - type: Array
+          value:
+            type: All
+            value:
+              - type: Char
+                value: 72
+              - type: Char
+                value: 101
+              - type: Char
+                value: 108
+              - type: Char
+                value: 108
+              - type: Char
+                value: 111
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 67
+            filename:
+              private: 0
+          location:
+            start: 56
+            end: 65
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Tuple
+                value:
+                  - type: Int
+                    value: 1
+                  - type: Adt
+                    value:
+                      name: String
+                      variant: ~
+                      fields:
+                        - - vec
+                          - type: Adt
+                            value:
+                              name: Vec
+                              variant: ~
+                              fields:
+                                - - buf
+                                  - type: Adt
+                                    value:
+                                      name: RawVec
+                                      variant: ~
+                                      fields:
+                                        - - ptr
+                                          - type: Adt
+                                            value:
+                                              name: Unique
+                                              variant: ~
+                                              fields:
+                                                - - pointer
+                                                  - type: Adt
+                                                    value:
+                                                      name: NonNull
+                                                      variant: ~
+                                                      fields:
+                                                        - - pointer
+                                                          - type: Pointer
+                                                            value:
+                                                              path:
+                                                                segment:
+                                                                  type: Heap
+                                                                  value:
+                                                                    index: 0
+                                                                parts:
+                                                                  - type: Index
+                                                                    value: 0
+                                                              range: ~
+                                                      alloc_kind: ~
+                                              alloc_kind: ~
+                                        - - cap
+                                          - type: Uint
+                                            value: 5
+                                      alloc_kind: ~
+                                - - len
+                                  - type: Uint
+                                    value: 5
+                              alloc_kind: ~
+                      alloc_kind:
+                        type: String
+                        value:
+                          len: 5
+              moved_paths: []
+    heap:
+      locations:
+        - type: Array
+          value:
+            type: All
+            value:
+              - type: Char
+                value: 72
+              - type: Char
+                value: 101
+              - type: Char
+                value: 108
+              - type: Char
+                value: 108
+              - type: Char
+                value: 111
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 67
+            filename:
+              private: 0
+          location:
+            start: 66
+            end: 67
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+result:
+  type: Success
+

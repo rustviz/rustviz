@@ -1,0 +1,134 @@
+# fly.toml app configuration file generated for rustviz-playground on 2026-04-27T00:06:33+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'rustviz-playground'
+primary_region = 'ord'
+
+[experimental]
+  # Required: the deploy image runs Docker-in-Docker so playground can shell out
+  # to a per-request sandboxed runner (see ../SECURITY.md). The inner dockerd
+  # needs to manage cgroups / namespaces / overlayfs, which only works when
+  # the Fly Machine itself is privileged.
+  privileged = true
+
+[build]
+  # Dockerfile path is relative to this fly.toml; the actual build
+  # context is whatever cwd `fly deploy` was invoked from (the
+  # repo root, per deploy.sh — its `COPY rustviz2-plugin/…` etc.
+  # need to reach the workspace crates).
+  dockerfile = 'Dockerfile'
+
+[env]
+  RV_BIND = '0.0.0.0:8080'
+  RV_RATE_BURST = '5'
+  RV_RATE_SECONDS_PER_REQUEST = '2'
+  RV_RUNNER = 'docker'
+
+# No `[[mounts]]` block: dockerd uses the fuse-overlayfs storage driver
+# (configured in entrypoint.sh and packaged in the deploy image),
+# which works on top of the Fly Machine's overlay rootfs without needing
+# a per-Machine ext4 volume. The kernel doesn't support nested overlay2
+# (which is why the previous /var/lib/docker volume existed); fuse-overlayfs
+# sidesteps the limitation by doing the overlay in userspace via FUSE.
+#
+# If you need to fall back to overlay2 + a volume (e.g. fuse-overlayfs
+# turns out to be too slow under real load), reinstate:
+#   [[mounts]]
+#     source = 'rustviz_docker'
+#     destination = '/var/lib/docker'
+#     initial_size = '3gb'
+# and switch the storage driver back in entrypoint.sh.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # auto_stop_machines = 'off' is intentional for the *deploy-time*
+  # config recorded here, even though the *steady-state* intent is for
+  # idle Machines to stop. Reason: Fly's autoscaler stops a Machine
+  # after ~40 s of "no incoming traffic", but our entrypoint takes
+  # 5-15 min on a fresh Machine to extract the ~1 GiB runner image
+  # through fuse-overlayfs. With auto_stop_machines = 'stop' set at
+  # deploy time, every fresh Machine would be killed mid-bootstrap
+  # before playground ever binds :8080 — fly deploy just deadlocks. So
+  # 'off' is the only value that makes a fresh fly deploy actually
+  # complete.
+  #
+  # Steady-state idling is achieved per-Machine after deploy:
+  # deploy.sh runs `fly machine update --autostop=stop` against
+  # every Machine once they're healthy, so the running fleet *does*
+  # auto-stop when idle (~$2-3/mo cost). The per-Machine override
+  # outlives this fly.toml setting — Fly's edge proxy reads the
+  # per-Machine service config when deciding whether to auto-stop, so
+  # what's recorded here only affects new Machines created by the
+  # *next* fly deploy (which deploy.sh will re-flip post-deploy).
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  # Stays at 0; per-Machine 'stop' (applied after deploy) lets every
+  # Machine idle. min=1 used to live here as bootstrap protection, but
+  # Fly's autoscaler stops Machines before they register in the
+  # min-pool, so min=1 doesn't actually keep anything alive.
+  min_machines_running = 0
+
+  # Concurrency thresholds the edge proxy uses to decide when to spill load
+  # to a second Machine in the fleet. Defaults are tuned for cheap web apps
+  # (~hundreds of concurrent connections per Machine) — way too high for our
+  # workload, where each Machine maxes out at ~4 concurrent compile
+  # containers. With these values, Fly starts spilling to a second Machine
+  # the moment a fourth concurrent /submit-code lands, and avoids piling
+  # an HN-class spike onto a single Machine until OOM. Fleet size itself is
+  # set server-side via `fly scale count N` and maintained by deploy.sh.
+  [http_service.concurrency]
+    type = 'requests'
+    soft_limit = 3
+    hard_limit = 5
+
+  # HTTP check: only route requests to a Machine once GET / returns 200.
+  # playground binds 8080 only at the very end of entrypoint.sh — after dockerd
+  # has come up and the runner image is pulled — so a passing check means
+  # the Machine is genuinely ready to serve, not just half-bootstrapped.
+  #
+  # During phase 1 of deploy.sh, Machines pull the ~1 GiB runner
+  # image from GHCR and extract through fuse-overlayfs (10-30 min on
+  # cold start). The 1m grace_period is NOT what protects us during that
+  # window — fly clamps grace_period to 1 minute regardless of what we
+  # set here ("WARN Service HTTP check has a grace period greater than 1
+  # minute … this will be lowered to 1 minute"). What actually protects
+  # the bootstrap is `auto_stop_machines = 'off'` set by deploy.sh in
+  # phase 1, plus deploy.sh's per-Machine health-check polling loop with
+  # its own RV_DEPLOY_TIMEOUT_SECS (default 30 min). Setting grace_period
+  # any higher than 1m here just creates a misleading config + a noisy
+  # validate-time warning.
+  [[http_service.checks]]
+    # 60s rather than the default 10s: at 10 Machines × 6 checks/min the
+    # default produces ~86k log lines per Machine per day of pure noise
+    # (User-Agent: "Consul Health Check") and burns CPU on dind for nothing
+    # interesting. 60s still detects a wedged Machine within a minute,
+    # which is fine for a research tool with sparse traffic. These checks
+    # come over Fly's private 6PN network, not through fly-proxy, so they
+    # don't interfere with auto_stop's idle-traffic accounting.
+    interval = '60s'
+    grace_period = '1m'
+    method = 'GET'
+    path = '/'
+    timeout = '5s'
+
+[[vm]]
+  size = 'shared-cpu-2x'
+  memory = '2gb'
+  # Default is 'never' — the rootfs is wiped on every restart and every
+  # `fly machine update`, including the post-deploy auto_stop flip in
+  # deploy.sh. With 'never', dockerd's storage at /var/lib/docker
+  # vanishes between restarts, so each restart triggers a fresh ~1 GiB
+  # runner-image pull from GHCR (5-15 min via fuse-overlayfs). With
+  # 'always', the rootfs survives both stop/start cycles AND
+  # `fly machine update` calls, so the runner image stays cached
+  # locally — phase 2's auto_stop flip becomes a fast bounce, and
+  # steady-state auto-stop/auto-start cold starts take ~10 s instead of
+  # 5-15 min. Fly explicitly warns that rootfs isn't a *reliable* place
+  # for critical data (maintenance can still wipe it), but the runner
+  # image is in GHCR — entrypoint.sh just re-pulls if it's gone — so
+  # the residual risk is purely a one-time slow cold start, not
+  # data loss.
+  persist_rootfs = 'always'
