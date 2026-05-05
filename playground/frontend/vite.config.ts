@@ -16,17 +16,21 @@ const channelMatch = rustToolchainContent.match(/channel\s*=\s*"([^"]+)"/);
 const rustVersion = channelMatch ? channelMatch[1] : 'unknown';
 
 // Two build modes:
-//   * default (`npm run build`): emits a same-origin SPA at base = '/'
-//     intended to be served by rv-serve from frontend/dist/.
-//   * pages (`npm run build:pages`, --mode pages): emits an SPA at
-//     base = '/playground/' intended to be served by GitHub Pages at
-//     https://rustviz.github.io/playground/, with API requests pointed
-//     at the Fly origin via VITE_API_BASE in .env.pages.
+//   * default (`npm run build`): emits a same-origin SPA intended to
+//     be served by the playground binary from frontend/dist/.
+//   * pages (`npm run build:pages`, --mode pages): emits an SPA
+//     intended to be served by GitHub Pages at
+//     https://rustviz.github.io/, with API requests pointed at the
+//     Fly origin via VITE_API_BASE in .env.pages.
 //
-// `npm run dev` proxies API + asset paths to a locally-running rv-serve
-// at :8080 so you can iterate without CORS plumbing.
+// Both modes use base = '/'. The Pages site is hosted at the org
+// root (rustviz/rustviz.github.io repo), not under a /playground
+// path prefix, so no asset rewriting is needed in either case.
+//
+// `npm run dev` proxies API + asset paths to a locally-running
+// playground at :8080 so you can iterate without CORS plumbing.
 export default defineConfig(({ mode }) => ({
-  base: mode === 'pages' ? '/playground/' : '/',
+  base: '/',
   plugins: [react()],
   define: {
     __RUST_VERSION__: JSON.stringify(rustVersion),

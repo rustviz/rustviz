@@ -3,7 +3,7 @@
 The playground is a small web app — a CodeMirror editor that POSTs Rust
 snippets to a sandboxed backend, which renders them through the RustViz
 plugin and returns the two SVG panels. Hosted at
-<https://rustviz.github.io/playground/> with the compile API at
+<https://rustviz.github.io/> with the compile API at
 <https://rustviz-playground.fly.dev/>.
 
 The same `rustviz-playground` binary works as an all-in-one server (SPA + API
@@ -41,9 +41,9 @@ set `RV_RUNNER=local`. **Never** do this on a public deployment — see
 
 Production runs in two pieces:
 
-- **Static SPA on GitHub Pages**, at <https://rustviz.github.io/playground/>.
+- **Static SPA on GitHub Pages**, at <https://rustviz.github.io/>.
   Built from `playground/frontend/` by `.github/workflows/pages.yml` and
-  pushed to the `rustviz/playground` repo on every change. Loads instantly
+  pushed to the `rustviz/rustviz.github.io` repo on every change. Loads instantly
   even when no one has visited recently.
 - **Compile API on Fly.io**, at <https://rustviz-playground.fly.dev/>.
   Ten Machines provisioned, all auto-stopping when idle; the edge proxy
@@ -117,17 +117,17 @@ failure, in addition to GitHub's default email-on-failure notification.
 
 ```sh
 # 1. Create the receiving repo
-gh repo create rustviz/playground --public \
+gh repo create rustviz/rustviz.github.io --public \
   --description "Static front-end for the RustViz playground"
 
-# 2. Enable Pages on rustviz/playground via Settings → Pages →
+# 2. Enable Pages on rustviz/rustviz.github.io via Settings → Pages →
 #    Source: Deploy from a branch → main / root.
 
 # 3. Generate a deploy keypair
 ssh-keygen -t ed25519 -f /tmp/playground_deploy_key -N "" -C playground-deploy
 
-# 4. Add the *public* key as a write-enabled deploy key on rustviz/playground
-gh api -X POST repos/rustviz/playground/keys \
+# 4. Add the *public* key as a write-enabled deploy key on rustviz/rustviz.github.io
+gh api -X POST repos/rustviz/rustviz.github.io/keys \
   -f title=playground-deploy -F read_only=false \
   -f key="$(cat /tmp/playground_deploy_key.pub)"
 
@@ -141,8 +141,8 @@ rm /tmp/playground_deploy_key /tmp/playground_deploy_key.pub
 After that, every push to `main` (when the change touches
 `playground/frontend/**`) triggers `.github/workflows/pages.yml`, which
 builds the SPA in `pages` mode and pushes the `dist/` tree to
-`rustviz/playground` for serving at
-<https://rustviz.github.io/playground/>.
+`rustviz/rustviz.github.io` for serving at
+<https://rustviz.github.io/>.
 
 ### Adding a new SPA origin
 

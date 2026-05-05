@@ -19,7 +19,7 @@ checker's view of the program rather than a hand-curated approximation.
 RustViz is a project of the [Future of Programming Lab](https://fplab.mplse.org/)
 at the University of Michigan.
 
-> **Try it live:** <https://rustviz.github.io/playground/>
+> **Try it live:** <https://rustviz.github.io/>
 
 ![screenshot placeholder](rustviz2-plugin/src/svg_generator/rv2_example.png)
 
@@ -64,7 +64,7 @@ default it spares the rustup toolchain and the cargo `target/` tree).
 
 The hosted playground lets you paste a snippet into a CodeMirror editor and
 get back the visualization with no local install. Available at
-<https://rustviz.github.io/playground/>; the SPA loads from GitHub Pages
+<https://rustviz.github.io/>; the SPA loads from GitHub Pages
 and the compile API is on Fly.io. You can also run the same playground
 locally — it's the [`playground/`](playground/) crate in this workspace.
 
@@ -149,7 +149,7 @@ top-level directory:
 | **`rustviz2-plugin/`**| The rustc plugin — the heart of the project. Walks HIR/MIR for a single-file crate and emits a code-panel + timeline-panel SVG on stdout. Built on Will Crichton's `rustc_plugin` / `rustc_utils` crates (same family as Flowistry / Aquascope). Produces the `cargo-rv-plugin` and `rv-plugin-driver` binaries. Pinned to nightly-2025-08-20 via `rust-toolchain.toml`. |
 | **`rustviz2/`**       | User-facing Rust library + the `rustviz` CLI. The library exposes `Rustviz::new(code)` which shells out to the plugin; the CLI (`rustviz svg`, `rustviz html`, `rustviz init`) wraps it with file I/O and self-contained-HTML output. The shared tooltip JS for hover behavior also lives here, exported as `rustviz2::HELPERS_JS`. |
 | **`mdbook-rustviz/`** | An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor. Replaces ` ```rv ` fenced code blocks with embedded RustViz SVGs at build time. Includes a `test-book/` worked example. The full hands-on tutorial that uses it is in a [separate repo](https://github.com/rustviz/tutorial). |
-| **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/playground/> with the compile API at <https://rustviz-playground.fly.dev/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. |
+| **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/> with the compile API at <https://rustviz-playground.fly.dev/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. |
 | `setup.sh`            | One-shot dev bootstrap: installs the toolchain, builds the plugin, builds the frontend, builds the runner image. Run once after cloning. |
 | `uninstall.sh`        | Reverse of `setup.sh`. Removes the cargo-installed binaries + the local docker runner image + frontend artifacts; spares the rustup toolchain and `target/` by default (override with `--toolchain` / `--target` / `--everything`). |
 
