@@ -53,6 +53,19 @@ async fn submit_code(payload: web::Json<SubmitCodePayload>) -> HttpResponse {
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
+    // The playground compiles arbitrary user-supplied Rust, so it
+    // MUST run the plugin in the sandboxed Docker runner unless an
+    // operator explicitly opts out (local dev). The rustviz2 lib's
+    // default flipped to `local` in PR C of the reorg — that's the
+    // right choice for library callers + the CLI, but for this
+    // binary specifically we want Docker-by-default to preserve
+    // the prior security posture. Production (Fly) sets RV_RUNNER
+    // explicitly via fly.toml; this guard catches the local-dev
+    // case where the env var is unset.
+    if std::env::var("RV_RUNNER").is_err() {
+        std::env::set_var("RV_RUNNER", "docker");
+    }
+
     let bind_addr = std::env::var("RV_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
 
     // Per-IP token bucket. `seconds_per_replenish` controls the steady-state

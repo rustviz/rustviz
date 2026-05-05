@@ -8,5 +8,11 @@ license = "MIT"
 description = "An interface that allows users to easily generate RustViz visualizations by utilizing the rustviz2-plugin"
 readme = "README.md"
 
+[[bin]]
+name = "rustviz"
+path = "src/bin/rustviz.rs"
+
 [dependencies]
 tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

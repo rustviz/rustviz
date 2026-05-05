@@ -1,19 +1,45 @@
 //! Public interface to the rustviz2 plugin.
 //!
-//! `Rustviz::new(code)` runs the plugin against a single-file crate built
+//! [`Rustviz::new`] runs the plugin against a single-file crate built
 //! from `code` and returns the rendered code-panel and timeline-panel SVGs.
 //!
-//! There are two execution backends, selected by the `RV_RUNNER` env var:
+//! # Example
 //!
-//! - `RV_RUNNER=docker` (default) runs the plugin inside the
-//!   `rustviz/rustviz-runner` image with no network, a read-only filesystem,
-//!   tmpfs-backed `/work`, and capped memory / CPU / pids / wall-time. This
-//!   is the only backend appropriate for untrusted input — proc-macro
-//!   expansion in user code is arbitrary code execution, so the plugin must
-//!   not run unsandboxed.
-//! - `RV_RUNNER=local` runs the plugin in-process by shelling out to a
-//!   tempdir and `cargo rv-plugin`. Convenient for development, **never
-//!   safe for untrusted input**.
+//! ```no_run
+//! use rustviz2::Rustviz;
+//!
+//! let code = r#"
+//! fn main() {
+//!     let s = String::from("hello");
+//!     let t = s;
+//!     println!("{}", t);
+//! }
+//! "#;
+//!
+//! let rv = Rustviz::new(code).expect("plugin invocation failed");
+//! std::fs::write("code.svg", rv.code_panel_string()).unwrap();
+//! std::fs::write("timeline.svg", rv.timeline_panel_string()).unwrap();
+//! ```
+//!
+//! # Execution backends
+//!
+//! There are two backends, selected by the `RV_RUNNER` env var:
+//!
+//! - `RV_RUNNER=local` (default) shells out to `cargo rv-plugin` against
+//!   a generated tempdir crate. Fast, no Docker dependency. **Not safe for
+//!   untrusted input** — proc-macro expansion in user code is arbitrary
+//!   code execution. Right choice for library callers, the CLI, mdbook
+//!   builds, and any other context where the input is trusted.
+//! - `RV_RUNNER=docker` runs the plugin inside the
+//!   `rustviz/rustviz-runner` image with no network, a read-only
+//!   filesystem, tmpfs-backed `/work`, and capped memory / CPU / pids /
+//!   wall-time. The only backend appropriate for untrusted input; the
+//!   playground server explicitly opts into it. See `SECURITY.md` for
+//!   the full sandboxing contract.
+//!
+//! The default flipped from `docker` to `local` in PR C of the reorg —
+//! library use is the common case, and the previous default forced every
+//! caller to either install Docker or set the env var.
 
 use std::{
     env,
@@ -32,6 +58,19 @@ components = ["rust-src", "rustc-dev", "llvm-tools-preview"]"#;
 
 /// Default image tag for the docker backend.
 const DEFAULT_RUNNER_IMAGE: &str = "rustviz/rustviz-runner:latest";
+
+/// Tooltip + cross-panel highlighting glue for RustViz visualizations,
+/// as a raw JS string. Embed this between `<script>…</script>` tags
+/// in any HTML page that hosts a code panel + timeline panel pair
+/// (whether they're rendered as `<object>` tags loading external
+/// SVGs, or inlined directly as `<svg>` elements). Each visualization
+/// pair is identified by a shared CSS class plus the `code_panel` /
+/// `tl_panel` discriminator (e.g. `class="example-1 code_panel"`).
+///
+/// Both consumers — the mdbook preprocessor and the `rustviz` CLI's
+/// `--html` mode — pull the same JS from here so we have one place
+/// to update if the SVG schema shifts.
+pub const HELPERS_JS: &str = include_str!("helpers.js");
 
 /// Hard wall-clock cap on a single visualization request, in seconds.
 /// Compilation of legitimate examples completes well under a second; this is
@@ -61,6 +100,13 @@ impl fmt::Display for RvError {
 
 impl Error for RvError {}
 
+/// A rendered RustViz visualization: the code panel, the timeline
+/// panel, and the SVG height needed to display them together.
+///
+/// Construct via [`Rustviz::new`]. The two SVG strings are designed
+/// to be rendered side by side; see [`HELPERS_JS`] for the tooltip
+/// + cross-panel-highlighting glue you'll want to drop on the page
+/// alongside them.
 #[derive(Debug)]
 pub struct Rustviz {
     code_panel: String,
@@ -69,6 +115,14 @@ pub struct Rustviz {
 }
 
 impl Rustviz {
+    /// Render `code_str` (a single Rust source file's contents)
+    /// through the RustViz plugin and return the two SVG panels.
+    ///
+    /// Backend selection is governed by the `RV_RUNNER` env var
+    /// (default `local` — see crate-level docs for the security
+    /// implications). Both backends require the nightly toolchain
+    /// pinned by `rust-toolchain.toml`; the `local` backend
+    /// additionally needs `cargo rv-plugin` on `PATH`.
     pub fn new(code_str: &str) -> Result<Rustviz, Box<dyn Error>> {
         let raw = match runner_backend()?.as_str() {
             "docker" => run_docker(code_str)?,
@@ -83,19 +137,33 @@ impl Rustviz {
         parse_output(&raw)
     }
 
+    /// SVG markup for the code panel — the source listing with
+    /// per-variable colored spans that the helpers script
+    /// highlights on hover.
     pub fn code_panel_string(&self) -> String {
         self.code_panel.clone()
     }
+
+    /// SVG markup for the timeline panel — one column per RAP
+    /// (resource access point), with arrows for ownership transfers
+    /// and dots for events.
     pub fn timeline_panel_string(&self) -> String {
         self.timeline_panel.clone()
     }
+
+    /// Height in pixels needed to render both panels without
+    /// clipping. The two panels share this height; pass it to your
+    /// container element when laying them out side by side.
     pub fn height(&self) -> i32 {
         self.height
     }
 }
 
 fn runner_backend() -> Result<String, Box<dyn Error>> {
-    Ok(env::var("RV_RUNNER").unwrap_or_else(|_| "docker".to_string()))
+    // Default = `local` (fast, no Docker dep). Callers that handle
+    // untrusted input — i.e. the playground — explicitly set
+    // `RV_RUNNER=docker` to opt into the sandboxed backend.
+    Ok(env::var("RV_RUNNER").unwrap_or_else(|_| "local".to_string()))
 }
 
 /// Production path: spawn a sandboxed container, pipe the user's source on

@@ -83,7 +83,21 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# Layout: this script + fly.toml + Dockerfile all live under
+# playground/deploy/. cwd defaults here so most `fly` commands
+# (machine update, status, scale, …) find fly.toml in cwd
+# without needing --config. The exception is `fly deploy`, which
+# uses cwd as the Docker build context — the Dockerfile reaches
+# into the workspace crates via `COPY rustviz2-plugin/…` etc.,
+# so deploy needs to run from the repo root with fly.toml passed
+# explicitly. `fly_deploy` below wraps that.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$SCRIPT_DIR"
+
+fly_deploy() {
+    (cd "$REPO_ROOT" && "$FLY" deploy --config "$SCRIPT_DIR/fly.toml" "$@")
+}
 
 # --- arg parsing --------------------------------------------------------
 KEEP_WARM=0
@@ -258,7 +272,7 @@ DESIRED_COUNT="${RV_FLY_MACHINES:-10}"
 say "==> fly deploy (creates HA-default initial Machines in the 'app' group)"
 # --strategy immediate: with no existing Machines this just means
 # "apply the new release as fast as possible to whatever fly creates".
-"$FLY" deploy --strategy immediate
+fly_deploy --strategy immediate
 
 if [ "$DESIRED_COUNT" -gt 1 ]; then
     say "==> Scaling fleet up to ${DESIRED_COUNT} Machine(s)"

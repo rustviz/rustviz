@@ -108,16 +108,20 @@ arbitrary websites.
 
 `RV_RUNNER=local` runs the plugin in-process against a tempdir on the host.
 This is convenient for local iteration but **must never be used for a public
-deployment**. The production `Dockerfile` and deploy config set
-`RV_RUNNER=docker`.
+deployment**. The `rustviz2` library defaults to `local` (the common case is
+trusted callers like the CLI or mdbook); the `playground` binary specifically
+overrides that default to `docker` at startup if the env var is unset, so
+you'd have to actively pass `RV_RUNNER=local` to the playground process to
+hit the unsafe path. The production deploy config sets `RV_RUNNER=docker`
+explicitly via `fly.toml`.
 
 ## Operator checklist
 
 Before exposing `playground` to the public internet:
 
 1. Build and push the runner image: `docker build -t rustviz/rustviz-runner:latest -f runner/Dockerfile .`
-2. Run `playground` with `RV_RUNNER=docker` (the default) and
-   `RV_BIND=0.0.0.0:$PORT`.
+2. Run `playground` with `RV_RUNNER=docker` (the playground's built-in
+   default if unset) and `RV_BIND=0.0.0.0:$PORT`.
 3. Tune `RV_RATE_SECONDS_PER_REQUEST` and `RV_RATE_BURST` for your expected
    traffic profile. Defaults assume single-user research workloads.
 4. Front the service with a reverse proxy that terminates TLS, sets

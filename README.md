@@ -1,23 +1,102 @@
-# RustViz 2
+# RustViz
 
 **RustViz** generates interactive timeline visualizations of ownership and
 borrowing for short Rust programs. It is meant as a teaching aid: paste a
-snippet, see exactly when each binding becomes the resource owner, when
+snippet and see exactly when each binding becomes the resource owner, when
 references go in and out of scope, and which lines those events correspond
 to.
 
-RustViz 2 is the compiler-integrated rewrite of the project. Earlier RustViz
-read hand-annotated source; RustViz 2 plugs into `rustc` directly and walks
-HIR/MIR, so the diagram reflects the real borrow checker's view of your
-program rather than a hand-curated approximation.
+This repository ("RustViz 2") is the compiler-integrated rewrite. Earlier
+versions of RustViz read hand-annotated source; this one plugs into `rustc`
+directly and walks HIR/MIR, so the diagram reflects the real borrow
+checker's view of the program rather than a hand-curated approximation.
 
-RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/)
+RustViz is a project of the [Future of Programming Lab](https://fplab.mplse.org/)
 at the University of Michigan.
 
 > **Try it live:** <https://rustviz.github.io/playground/>
-> (compile API at <https://rustviz-playground.fly.dev/>)
 
 ![screenshot placeholder](rustviz2-plugin/src/svg_generator/rv2_example.png)
+
+---
+
+## Four ways to use RustViz
+
+### 1. The playground
+
+The hosted playground lets you paste a snippet into a CodeMirror editor and
+get back the visualization with no local install. Available at
+<https://rustviz.github.io/playground/>; the SPA loads from GitHub Pages
+and the compile API is on Fly.io. You can also run the same playground
+locally — it's the [`playground/`](playground/) crate in this workspace.
+
+See [`playground/README.md`](playground/README.md) for the local quick-start
+and the operational notes for the production deploy.
+
+### 2. The mdbook preprocessor
+
+Embed RustViz visualizations directly in an [mdBook](https://rust-lang.github.io/mdBook/)
+by tagging code blocks with ` ```rv ` instead of ` ```rust `. The
+preprocessor compiles each snippet through the plugin at build time and
+inlines the resulting SVGs into the rendered HTML, with tooltip glue for
+hover-driven exploration.
+
+```toml
+# book.toml
+[preprocessor.rustviz]
+```
+
+````markdown
+```rv
+fn main() {
+    let s = String::from("hello");
+    println!("{}", s);
+}
+```
+````
+
+See [`mdbook-rustviz/README.md`](mdbook-rustviz/README.md) for setup
+instructions and the bundled `test-book/` for a small worked example.
+The hands-on Rust tutorial at <https://github.com/rustviz/tutorial>
+(deployed at <https://rustviz.github.io/tutorial/>) is a full-scale
+example built this way.
+
+### 3. The command-line interface
+
+For one-shot rendering of a single `.rs` file:
+
+```sh
+cargo install rustviz2          # gets the lib + the `rustviz` binary
+rustviz init                    # one-time: install nightly + plugin
+
+rustviz svg foo.rs              # writes foo.code.svg + foo.timeline.svg
+rustviz html foo.rs             # writes one self-contained HTML page
+```
+
+`svg` is for embedding into your own HTML/Markdown workflow. `html`
+produces a single self-contained file with both SVGs inlined and the
+tooltip JS embedded — opens in any browser, no server, no external
+assets. See `rustviz init --help` for the bootstrap flags.
+
+### 4. The Rust library
+
+For programmatic SVG generation (e.g. wiring RustViz into your own
+authoring pipeline), the same `rustviz2` crate exposes a small Rust API:
+
+```rust
+use rustviz2::Rustviz;
+
+let rv = Rustviz::new(code)?;     // calls the plugin under the hood
+fs::write("code.svg", rv.code_panel_string())?;
+fs::write("timeline.svg", rv.timeline_panel_string())?;
+```
+
+A runnable example lives at
+[`rustviz2/examples/render_to_files.rs`](rustviz2/examples/render_to_files.rs).
+The crate's [API docs](rustviz2/src/lib.rs) cover the backend split
+(local subprocess vs. sandboxed Docker — `local` is the default for
+library use; the playground binary opts into `docker` for untrusted
+input).
 
 ---
 
@@ -48,30 +127,14 @@ at the University of Michigan.
                                    └────────────────────────┘
 ```
 
-The frontend is a static Vite bundle, hosted on GitHub Pages, so the page
-loads instantly even when no one has visited recently. The compile API on
-Fly is allowed to auto-stop and cold-start; that latency only shows up
-after the user clicks "Generate Visualization", where a couple-second
-delay is expected. CORS in `playground/src/main.rs` allows the Pages origin
-to call `/submit-code`.
-
-The same `playground` binary still serves the SPA + API from a single origin
-in the all-in-one Fly deploy (and in local development), so neither
-hosting mode is special-cased in the application code.
-
 Workspace members:
 
-| Crate                    | Role |
-|--------------------------|------|
-| **`rustviz2-plugin`**    | The rustc plugin. Built on Will Crichton's `rustc_plugin`/`rustc_utils` crates (same family as Flowistry/Aquascope). Provides `cargo rv-plugin`. |
-| **`rustviz2`**           | Thin user-facing library. `Rustviz::new(code)` runs the plugin against `code` (in a sandboxed Docker container by default) and returns the rendered code-panel and timeline-panel SVGs. |
-| **`mdbook-rustviz`**     | mdbook preprocessor that turns ` ```rv ``` ` fenced blocks into embedded SVGs. |
-| **`playground`**           | Actix-web playground: serves the React/CodeMirror SPA and exposes `POST /submit-code`. |
-
-For the playground's quick-start, deploy procedure, and Fly.io
-operational notes, see [`playground/README.md`](playground/README.md).
-The mdbook preprocessor's setup lives in
-[`mdbook-rustviz/README.md`](mdbook-rustviz/README.md).
+| Crate                   | Role |
+|-------------------------|------|
+| **`rustviz2-plugin`**   | The rustc plugin. Built on Will Crichton's `rustc_plugin`/`rustc_utils` crates (same family as Flowistry/Aquascope). Provides `cargo rv-plugin`. |
+| **`rustviz2`**          | User-facing library + the `rustviz` CLI. `Rustviz::new(code)` runs the plugin against `code` and returns the two rendered SVGs; the binary wraps that with file I/O and an HTML output mode. |
+| **`mdbook-rustviz`**    | mdbook preprocessor that turns ` ```rv ``` ` fenced blocks into embedded SVGs. |
+| **`playground`**        | Actix-web playground: serves the React/CodeMirror SPA and exposes `POST /submit-code`. |
 
 ---
 
@@ -83,9 +146,10 @@ not all of it. Currently unsupported (or known to misbehave):
 - For-loops
 - Conditional `let` bindings
 - Borrows that occur inside conditionals
-- Chained method calls (`x.get().get_mut()`)
-- Lifetime annotations
-- Borrows over struct members
+- Lifetime annotations beyond the simple cases the
+  [`Excerpt<'a>`](https://github.com/rustviz/tutorial/blob/master/src/structs.md)
+  tutorial example covers
+- Some borrows over struct members
 
 The plugin has a TODO list with more detail in
 [`rustviz2-plugin/README.md`](rustviz2-plugin/README.md).
@@ -95,19 +159,17 @@ The plugin has a TODO list with more detail in
 ## Security
 
 The playground compiles untrusted Rust source. Proc-macro expansion in user
-code is arbitrary code execution, so the plugin always runs inside a
-sandboxed container. The full threat model and the operator checklist are
-in [`SECURITY.md`](SECURITY.md). Report findings to `comar@umich.edu`.
+code is arbitrary code execution, so the playground runs the plugin inside
+a sandboxed container by default. The full threat model and operator
+checklist are in [`SECURITY.md`](SECURITY.md). Report findings to
+`comar@umich.edu`.
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. The project follows standard GitHub flow; keep
-each PR focused on a single concern, and run `./setup.sh` plus
-`cargo build --workspace --locked` before opening one.
-
----
+Issues and PRs welcome. Keep each PR focused on a single concern; for
+local-dev setup run `./setup.sh` then `cargo build --workspace --locked`.
 
 ## License
 

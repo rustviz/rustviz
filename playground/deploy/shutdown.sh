@@ -23,7 +23,9 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# fly.toml lives next to this script. cd here so fly subcommands
+# (machine destroy, list, …) resolve the app name from cwd.
+cd "$(dirname "$0")"
 
 YES=0
 for arg in "$@"; do
