@@ -47,7 +47,9 @@ cd rustviz
 
 `./setup.sh` is the canonical bootstrap for working *on* RustViz; it
 sets up everything you need to run any of the four entry points below
-plus the playground's React frontend.
+plus the playground's React frontend. To undo it, run `./uninstall.sh`
+(see `--help` for what it touches and what it leaves alone — by
+default it spares the rustup toolchain and the cargo `target/` tree).
 
 ---
 
@@ -144,6 +146,7 @@ top-level directory:
 | **`mdbook-rustviz/`** | An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor. Replaces ` ```rv ` fenced code blocks with embedded RustViz SVGs at build time. Includes a `test-book/` worked example. The full hands-on tutorial that uses it is in a [separate repo](https://github.com/rustviz/tutorial). |
 | **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/playground/> with the compile API at <https://rustviz-playground.fly.dev/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. |
 | `setup.sh`            | One-shot dev bootstrap: installs the toolchain, builds the plugin, builds the frontend, builds the runner image. Run once after cloning. |
+| `uninstall.sh`        | Reverse of `setup.sh`. Removes the cargo-installed binaries + the local docker runner image + frontend artifacts; spares the rustup toolchain and `target/` by default (override with `--toolchain` / `--target` / `--everything`). |
 
 ---
 
