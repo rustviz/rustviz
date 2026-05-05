@@ -16,15 +16,19 @@ rustup show active-toolchain >/dev/null
 # 2. Build & install the rustc plugin (provides `cargo rv-plugin`).
 cargo install --path rustviz2-plugin --locked
 
-# 3. Build the Vite frontend that the playground serves. The build copies
+# 3. Build & install the `rustviz` CLI (svg / html / init subcommands).
+#    Lives in the rustviz2 crate alongside the lib API.
+cargo install --path rustviz2 --locked
+
+# 4. Build the Vite frontend that the playground serves. The build copies
 #    frontend/public/ex-assets/ (helpers.js + visualization.css) into dist/
 #    so they ride along with the SPA whether served by playground or a CDN.
 ( cd playground/frontend && npm install && npm run build )
 
-# 4. Build the rest of the workspace.
+# 5. Build the rest of the workspace.
 cargo build --workspace --release
 
-# 5. Get the sandboxed runner image into the local docker daemon. Two paths:
+# 6. Get the sandboxed runner image into the local docker daemon. Two paths:
 #    - Pull from GHCR (faster, ~30 s, what production does).
 #    - Build from playground/runner/Dockerfile locally (slower, ~5 min, but works offline
 #      and lets you iterate on plugin changes without round-tripping through
