@@ -24,11 +24,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use rustviz2::{HELPERS_JS, Rustviz};
-
-/// Toolchain the rustc plugin links against. Must match
-/// `rust-toolchain.toml` at the workspace root.
-const NIGHTLY_TOOLCHAIN: &str = "nightly-2025-08-20";
+use rustviz2::{HELPERS_JS, Rustviz, toolchain_channel, toolchain_components};
 
 /// Default git source for the rustviz2-plugin install. Forward-
 /// looking to the eventual `rustviz/rustviz` consolidation; today
@@ -242,15 +238,22 @@ fn init(
         bail!("--skip-toolchain and --skip-plugin together leave nothing to do");
     }
 
+    // Both the channel string and the component list come from
+    // `rust-toolchain.toml` via `rustviz2::toolchain_*`. Single
+    // source of truth — bumping the toolchain only requires
+    // editing that one file.
+    let channel = toolchain_channel();
+
     if !skip_toolchain {
+        let components = toolchain_components().join(",");
         let toolchain_args = [
             "toolchain",
             "install",
-            NIGHTLY_TOOLCHAIN,
+            channel,
             "--profile",
             "minimal",
             "--component",
-            "rust-src,rustc-dev,llvm-tools-preview",
+            &components,
         ];
         run_cmd("rustup", &toolchain_args, dry_run)
             .context("rustup toolchain install failed — make sure rustup is on PATH")?;
@@ -260,7 +263,7 @@ fn init(
         // Install via cargo + the +nightly toolchain selector so the
         // plugin compiles against the same nightly the renderer
         // expects, regardless of the user's `rustup default`.
-        let toolchain_arg = format!("+{}", NIGHTLY_TOOLCHAIN);
+        let toolchain_arg = format!("+{}", channel);
         let mut args: Vec<&str> = vec![
             &toolchain_arg,
             "install",

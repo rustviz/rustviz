@@ -52,9 +52,63 @@ use std::{
 };
 use tempfile::tempdir;
 
-const TOOLCHAIN: &str = r#"[toolchain]
-channel = "nightly-2025-08-20"
-components = ["rust-src", "rustc-dev", "llvm-tools-preview"]"#;
+/// Verbatim contents of the workspace's `rust-toolchain.toml`,
+/// embedded at compile time. The single source of truth for which
+/// nightly + components RustViz needs — `setup.sh` (defers to
+/// rustup auto-install via this file), the local-runner backend
+/// below (writes it into the per-request temp crate), and
+/// `rustviz init` (parses it for the rustup install command) all
+/// derive from this one constant.
+pub const TOOLCHAIN: &str = include_str!("../../rust-toolchain.toml");
+
+/// Channel string from `rust-toolchain.toml` — e.g. `"nightly-2025-08-20"`.
+/// Used by `rustviz init` to pin the `+toolchain` selector when
+/// invoking `cargo install` against the plugin.
+pub fn toolchain_channel() -> &'static str {
+    parse_toolchain_field("channel")
+        .and_then(|v| trim_quotes(v))
+        .expect("rust-toolchain.toml is missing a `channel = \"…\"` line")
+}
+
+/// Components from `rust-toolchain.toml`, e.g.
+/// `["rust-src", "rustc-dev", "llvm-tools-preview"]`. Used by
+/// `rustviz init` for the `--component` flag of `rustup toolchain
+/// install`.
+pub fn toolchain_components() -> Vec<&'static str> {
+    let raw = parse_toolchain_field("components")
+        .expect("rust-toolchain.toml is missing a `components = […]` line");
+    let inside = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    inside
+        .split(',')
+        .map(str::trim)
+        .filter_map(trim_quotes)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Tiny, format-specific parser. We don't want a full TOML
+/// dependency just for two fields — `rust-toolchain.toml` is
+/// hand-edited and stable in shape, so a line scan is plenty.
+/// Returns the slice after the first `=` on a `key = …` line at
+/// any indentation, or `None` if no such line exists.
+fn parse_toolchain_field(key: &str) -> Option<&'static str> {
+    for line in TOOLCHAIN.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(key) {
+            // Allow `key=` and `key =` (any whitespace).
+            let after_key = rest.trim_start();
+            if let Some(eq_rest) = after_key.strip_prefix('=') {
+                return Some(eq_rest.trim());
+            }
+        }
+    }
+    None
+}
+
+fn trim_quotes(s: &str) -> Option<&str> {
+    let s = s.trim();
+    s.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+}
 
 /// Default image tag for the docker backend.
 const DEFAULT_RUNNER_IMAGE: &str = "rustviz/rustviz-runner:latest";
@@ -301,4 +355,40 @@ fn parse_output(stdout: &[u8]) -> Result<Rustviz, Box<dyn Error>> {
         timeline_panel: time_p.to_string(),
         height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin: the channel from `rust-toolchain.toml` parses as a
+    /// non-empty `nightly-…` string. Catches a future malformed
+    /// edit to that file before it hits the rustup invocation
+    /// in `rustviz init`.
+    #[test]
+    fn channel_is_a_nightly() {
+        let c = toolchain_channel();
+        assert!(
+            c.starts_with("nightly-"),
+            "expected nightly-* channel, got {:?}",
+            c
+        );
+        assert!(c.len() > "nightly-".len(), "channel suspiciously short: {:?}", c);
+    }
+
+    /// Pin: the rustc plugin needs all three of these components;
+    /// dropping any of them silently in `rust-toolchain.toml`
+    /// would manifest as a confusing build failure later.
+    #[test]
+    fn components_include_required_set() {
+        let c = toolchain_components();
+        for required in ["rust-src", "rustc-dev", "llvm-tools-preview"] {
+            assert!(
+                c.contains(&required),
+                "missing required toolchain component {:?}; got {:?}",
+                required,
+                c
+            );
+        }
+    }
 }
