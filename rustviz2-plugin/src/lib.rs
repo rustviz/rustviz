@@ -1,5 +1,4 @@
 // This file is based on the rust plugin example.
-// (Test edit to verify rustviz/tutorial cross-repo dispatch — PR #62.)
 #![feature(
   rustc_private,
   box_patterns,
