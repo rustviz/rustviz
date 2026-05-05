@@ -64,7 +64,7 @@ RUN rustup toolchain install ${RUST_NIGHTLY} \
 COPY --from=builder /usr/local/bin/cargo-rv-plugin /usr/local/cargo/bin/
 COPY --from=builder /usr/local/bin/rv-plugin-driver /usr/local/cargo/bin/
 
-COPY runner/rv-runner.sh /usr/local/bin/rv-runner
+COPY playground/runner/rv-runner.sh /usr/local/bin/rv-runner
 RUN chmod +x /usr/local/bin/rv-runner
 
 USER runner
