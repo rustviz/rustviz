@@ -20,6 +20,37 @@ at the University of Michigan.
 
 ---
 
+## Local setup
+
+The CLI, mdbook preprocessor, and library all share a runtime
+dependency on the rustc plugin built from this workspace, which links
+against `rustc_private` and so requires a specific nightly toolchain.
+The fastest way to get a working install is:
+
+```sh
+cargo install rustviz2     # gets the lib + the `rustviz` CLI binary
+rustviz init               # installs nightly-2025-08-20 + the plugin
+```
+
+`rustviz init` runs the underlying `rustup toolchain install` + `cargo
+install` against the canonical RustViz repo; pass `--dry-run` to see
+exactly what it would do, or `--plugin-git` / `--plugin-rev` to install
+from a fork. See `rustviz init --help` for the full flag list.
+
+**Building from this checkout instead** (e.g. you're contributing):
+
+```sh
+git clone https://github.com/rustviz/rustviz
+cd rustviz
+./setup.sh                 # toolchain + plugin install + frontend build + runner image
+```
+
+`./setup.sh` is the canonical bootstrap for working *on* RustViz; it
+sets up everything you need to run any of the four entry points below
+plus the playground's React frontend.
+
+---
+
 ## Four ways to use RustViz
 
 ### 1. The playground
@@ -56,10 +87,11 @@ fn main() {
 ````
 
 See [`mdbook-rustviz/README.md`](mdbook-rustviz/README.md) for setup
-instructions and the bundled `test-book/` for a small worked example.
-The hands-on Rust tutorial at <https://github.com/rustviz/tutorial>
-(deployed at <https://rustviz.github.io/tutorial/>) is a full-scale
-example built this way.
+instructions and `mdbook-rustviz/test-book/` for a small worked
+example. The hands-on Rust tutorial at
+<https://github.com/rustviz/tutorial> (deployed at
+<https://rustviz.github.io/tutorial/>) is a full-scale example built
+this way.
 
 ### 3. The command-line interface
 
@@ -100,41 +132,18 @@ input).
 
 ---
 
-## Architecture at a glance
+## Repository layout
 
-```
-              GET /  (CDN, instant)
-   browser ─────────────────────▶  GitHub Pages
-                                   rustviz.github.io/playground/
-                                   (Vite SPA, ex-assets)
+The workspace is organized around the four entry points above. Each
+top-level directory:
 
-              POST /submit-code (cold start ~10s
-                                  after Fly auto-stop,
-                                  cached afterward)
-   browser ─────────────────────▶  playground (Actix-web on Fly)
-                                          │
-                                          │ docker run --network=none --read-only …
-                                          ▼
-                                   ┌────────────────────────┐
-                                   │  rustviz-runner image  │  ephemeral container per request
-                                   │  (nightly + plugin)    │  tmpfs /work, capped CPU/RAM/PIDs
-                                   └──────────┬─────────────┘
-                                              │ cargo rv-plugin
-                                              ▼
-                                   ┌────────────────────────┐
-                                   │   rustviz2-plugin      │  rustc plugin: walks HIR/MIR,
-                                   │   (rustc_private)      │  emits two SVGs on stdout
-                                   └────────────────────────┘
-```
-
-Workspace members:
-
-| Crate                   | Role |
-|-------------------------|------|
-| **`rustviz2-plugin`**   | The rustc plugin. Built on Will Crichton's `rustc_plugin`/`rustc_utils` crates (same family as Flowistry/Aquascope). Provides `cargo rv-plugin`. |
-| **`rustviz2`**          | User-facing library + the `rustviz` CLI. `Rustviz::new(code)` runs the plugin against `code` and returns the two rendered SVGs; the binary wraps that with file I/O and an HTML output mode. |
-| **`mdbook-rustviz`**    | mdbook preprocessor that turns ` ```rv ``` ` fenced blocks into embedded SVGs. |
-| **`playground`**        | Actix-web playground: serves the React/CodeMirror SPA and exposes `POST /submit-code`. |
+| Path                  | Contents |
+|-----------------------|----------|
+| **`rustviz2-plugin/`**| The rustc plugin — the heart of the project. Walks HIR/MIR for a single-file crate and emits a code-panel + timeline-panel SVG on stdout. Built on Will Crichton's `rustc_plugin` / `rustc_utils` crates (same family as Flowistry / Aquascope). Produces the `cargo-rv-plugin` and `rv-plugin-driver` binaries. Pinned to nightly-2025-08-20 via `rust-toolchain.toml`. |
+| **`rustviz2/`**       | User-facing Rust library + the `rustviz` CLI. The library exposes `Rustviz::new(code)` which shells out to the plugin; the CLI (`rustviz svg`, `rustviz html`, `rustviz init`) wraps it with file I/O and self-contained-HTML output. The shared tooltip JS for hover behavior also lives here, exported as `rustviz2::HELPERS_JS`. |
+| **`mdbook-rustviz/`** | An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor. Replaces ` ```rv ` fenced code blocks with embedded RustViz SVGs at build time. Includes a `test-book/` worked example. The full hands-on tutorial that uses it is in a [separate repo](https://github.com/rustviz/tutorial). |
+| **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/playground/> with the compile API at <https://rustviz-playground.fly.dev/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. |
+| `setup.sh`            | One-shot dev bootstrap: installs the toolchain, builds the plugin, builds the frontend, builds the runner image. Run once after cloning. |
 
 ---
 
@@ -161,7 +170,7 @@ The plugin has a TODO list with more detail in
 The playground compiles untrusted Rust source. Proc-macro expansion in user
 code is arbitrary code execution, so the playground runs the plugin inside
 a sandboxed container by default. The full threat model and operator
-checklist are in [`SECURITY.md`](SECURITY.md). Report findings to
+checklist are in [`playground/SECURITY.md`](playground/SECURITY.md). Report findings to
 `comar@umich.edu`.
 
 ---

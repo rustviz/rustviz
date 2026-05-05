@@ -1,26 +1,21 @@
-.vscode/
+# OS / editor noise (recursive — `.DS_Store` is macOS, drops itself
+# in every directory the user opens in Finder)
 .DS_Store
+**/.DS_Store
+.vscode/
 
 # build outputs (workspace and per-package)
 target/
 */target/
 
-# transient artifacts the rustc plugin writes into test-crate during iteration
-test-crate/src/vis*
-test-crate/Cargo.lock
-test-crate/output.log
-test-crate/output.txt
-
-# per-run fixtures Cargo creates inside the mdbook + rv-serve test trees
-mdbook-rustviz/test-crate/
+# Per-run fixtures the mdbook preprocessor materialises into a book's
+# tree at build time. The inner test-book under mdbook-rustviz/ is
+# the canonical worked example; its src/examples and book/ outputs
+# are regenerated on every `mdbook build` so we don't track them.
 mdbook-rustviz/test-book/src/examples
 mdbook-rustviz/test-book/book
-playground/test-crate/
 
-# generated mdbook output
-test-book/book/
-
-# frontend build artifacts (Vite dist + node_modules — produced by setup.sh)
+# Frontend build artifacts (produced by setup.sh / npm run build)
 playground/frontend/dist/
 playground/frontend/node_modules/
 playground/frontend/*.tsbuildinfo

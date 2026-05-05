@@ -34,8 +34,8 @@
 //!   `rustviz/rustviz-runner` image with no network, a read-only
 //!   filesystem, tmpfs-backed `/work`, and capped memory / CPU / pids /
 //!   wall-time. The only backend appropriate for untrusted input; the
-//!   playground server explicitly opts into it. See `SECURITY.md` for
-//!   the full sandboxing contract.
+//!   playground server explicitly opts into it. See
+//!   `playground/SECURITY.md` for the full sandboxing contract.
 //!
 //! The default flipped from `docker` to `local` in PR C of the reorg —
 //! library use is the common case, and the previous default forced every
@@ -168,7 +168,7 @@ fn runner_backend() -> Result<String, Box<dyn Error>> {
 
 /// Production path: spawn a sandboxed container, pipe the user's source on
 /// stdin, capture stdout. Container flags must be kept in sync with the
-/// guarantees described in SECURITY.md.
+/// guarantees described in playground/SECURITY.md.
 fn run_docker(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let image = env::var("RV_RUNNER_IMAGE").unwrap_or_else(|_| DEFAULT_RUNNER_IMAGE.to_string());
 

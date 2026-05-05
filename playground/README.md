@@ -35,7 +35,7 @@ cd playground/frontend && npm run dev   # serves at http://127.0.0.1:3000/
 
 If you don't have Docker installed and just want to poke at the server,
 set `RV_RUNNER=local`. **Never** do this on a public deployment — see
-[`SECURITY.md`](../SECURITY.md) at the workspace root.
+[`SECURITY.md`](SECURITY.md).
 
 ## Deploy
 
@@ -68,7 +68,7 @@ fly auth login                                  # browser OAuth
 fly launch --config playground/deploy/fly.toml --copy-config --no-deploy
 
 # Trigger the runner-image workflow manually for the first publication.
-# It also auto-fires on every push to main that touches runner/** or
+# It also auto-fires on every push to main that touches playground/runner/** or
 # rustviz2-plugin/**, but the very first time it has to be kicked off
 # by hand because there's nothing in GHCR yet for the deploy to pull.
 gh workflow run runner-image.yml --ref main
@@ -100,7 +100,7 @@ the URL somewhere.
 ./playground/deploy/deploy.sh
 ```
 
-When you change `runner/**` or `rustviz2-plugin/**`,
+When you change `playground/runner/**` or `rustviz2-plugin/**`,
 `.github/workflows/runner-image.yml` automatically republishes the
 sandbox image to GHCR; the next `./playground/deploy/deploy.sh` picks it up on
 each Machine's first boot.

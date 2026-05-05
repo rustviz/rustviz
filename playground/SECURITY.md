@@ -69,7 +69,7 @@ Each request gets a fresh container. Properties:
 - **Container runs as UID 1000 (`runner`)**, never as root inside the
   container.
 
-The runner image (`runner/Dockerfile`) is the *only* image used for this
+The runner image (`playground/runner/Dockerfile`) is the *only* image used for this
 purpose; it ships only the toolchain + the plugin binaries + a tiny bash
 entrypoint. There is no shell access surface in the playground HTTP path.
 
@@ -119,7 +119,7 @@ explicitly via `fly.toml`.
 
 Before exposing `playground` to the public internet:
 
-1. Build and push the runner image: `docker build -t rustviz/rustviz-runner:latest -f runner/Dockerfile .`
+1. Build and push the runner image: `docker build -t rustviz/rustviz-runner:latest -f playground/runner/Dockerfile .`
 2. Run `playground` with `RV_RUNNER=docker` (the playground's built-in
    default if unset) and `RV_BIND=0.0.0.0:$PORT`.
 3. Tune `RV_RATE_SECONDS_PER_REQUEST` and `RV_RATE_BURST` for your expected
