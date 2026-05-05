@@ -78,7 +78,7 @@ async fn main() -> std::io::Result<()> {
         // hosting the static frontend on GitHub Pages and only proxying
         // /submit-code back to the Fly origin. That cross-origin path needs
         // explicit CORS. Vite dev server origins are listed too so
-        // `npm run dev` can talk to a locally-running rv-serve.
+        // `npm run dev` can talk to a locally-running playground.
         //
         // The allowlist is *the* control over who can drive the API from a
         // browser; widen it sparingly. Adding a new public origin here also

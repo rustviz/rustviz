@@ -5,7 +5,7 @@
 # The plugin must be built against the same nightly that rustc_private was
 # pinned to (nightly-2025-08-20), so we use a builder that installs that
 # specific toolchain, then carry only the binaries + a matching runtime
-# toolchain into the final image. The host (rv-serve) invokes:
+# toolchain into the final image. The host (playground) invokes:
 #
 #   docker run --rm -i --network=none --read-only \
 #     --memory=512m --cpus=1 --pids-limit=64 \
@@ -29,7 +29,7 @@ RUN rustup toolchain install ${RUST_NIGHTLY} \
 WORKDIR /src
 
 # Copy only what cargo install --path needs to build rustviz2-plugin.
-# (mdbook-rustviz / rv-serve / rustviz2 are not part of the runtime image.)
+# (mdbook-rustviz / playground / rustviz2 are not part of the runtime image.)
 COPY rust-toolchain.toml ./
 COPY Cargo.lock ./
 COPY rustviz2-plugin/ ./rustviz2-plugin/

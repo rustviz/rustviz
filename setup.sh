@@ -18,8 +18,8 @@ cargo install --path rustviz2-plugin --locked
 
 # 3. Build the Vite frontend that the playground serves. The build copies
 #    frontend/public/ex-assets/ (helpers.js + visualization.css) into dist/
-#    so they ride along with the SPA whether served by rv-serve or a CDN.
-( cd rv-serve/frontend && npm install && npm run build )
+#    so they ride along with the SPA whether served by playground or a CDN.
+( cd playground/frontend && npm install && npm run build )
 
 # 4. Build the rest of the workspace.
 cargo build --workspace --release
@@ -62,13 +62,13 @@ cat <<'EOF'
 
 Setup complete. To run the playground:
 
-  RV_RUNNER=local cd rv-serve && cargo run --release   # local dev
-  cd rv-serve && cargo run --release                   # docker (default)
+  RV_RUNNER=local cd playground && cargo run --release   # local dev
+  cd playground && cargo run --release                   # docker (default)
   open http://127.0.0.1:8080/
 
 To iterate on the frontend in dev mode (hot reload, proxies API to :8080):
 
-  cd rv-serve/frontend && npm run dev
+  cd playground/frontend && npm run dev
   open http://127.0.0.1:3000/
 
 To run the rustc plugin directly (host toolchain) against test-crate:

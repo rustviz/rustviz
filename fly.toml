@@ -7,7 +7,7 @@ app = 'rustviz-playground'
 primary_region = 'ord'
 
 [experimental]
-  # Required: the deploy image runs Docker-in-Docker so rv-serve can shell out
+  # Required: the deploy image runs Docker-in-Docker so playground can shell out
   # to a per-request sandboxed runner (see SECURITY.md). The inner dockerd
   # needs to manage cgroups / namespaces / overlayfs, which only works when
   # the Fly Machine itself is privileged.
@@ -47,7 +47,7 @@ primary_region = 'ord'
   # 5-15 min on a fresh Machine to extract the ~1 GiB runner image
   # through fuse-overlayfs. With auto_stop_machines = 'stop' set at
   # deploy time, every fresh Machine would be killed mid-bootstrap
-  # before rv-serve ever binds :8080 — fly deploy just deadlocks. So
+  # before playground ever binds :8080 — fly deploy just deadlocks. So
   # 'off' is the only value that makes a fresh fly deploy actually
   # complete.
   #
@@ -81,7 +81,7 @@ primary_region = 'ord'
     hard_limit = 5
 
   # HTTP check: only route requests to a Machine once GET / returns 200.
-  # rv-serve binds 8080 only at the very end of entrypoint.sh — after dockerd
+  # playground binds 8080 only at the very end of entrypoint.sh — after dockerd
   # has come up and the runner image is pulled — so a passing check means
   # the Machine is genuinely ready to serve, not just half-bootstrapped.
   #

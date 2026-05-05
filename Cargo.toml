@@ -4,8 +4,9 @@ resolver = "2"
 members = [
   "rustviz2-plugin",
   "mdbook-rustviz",
-  "rv-serve"
-, "rustviz2"]
+  "playground",
+  "rustviz2",
+]
 # need this for rustc plugin
 exclude = [
   "test-crate"

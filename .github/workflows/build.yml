@@ -47,7 +47,7 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: rv-serve/frontend/package-lock.json
+          cache-dependency-path: playground/frontend/package-lock.json
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -70,10 +70,10 @@ jobs:
         env:
           RV_RUNNER: docker
         run: |
-          # Use --locked to surface lockfile drift; spawn rv-serve in the
+          # Use --locked to surface lockfile drift; spawn playground in the
           # background and wait for /. Then POST a small program and confirm
           # we get back both SVGs.
-          (cd rv-serve && RV_RUNNER=docker cargo run --release --locked &) &&
+          (cd playground && RV_RUNNER=docker cargo run --release --locked &) &&
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:8080/ > /dev/null && break || sleep 1
           done

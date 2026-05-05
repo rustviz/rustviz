@@ -73,7 +73,7 @@ The runner image (`runner/Dockerfile`) is the *only* image used for this
 purpose; it ships only the toolchain + the plugin binaries + a tiny bash
 entrypoint. There is no shell access surface in the playground HTTP path.
 
-### 2. Input validation in `rv-serve`
+### 2. Input validation in `playground`
 
 - `actix_web::web::JsonConfig::default().limit(16 KiB)` rejects oversized
   bodies before the handler runs.
@@ -87,7 +87,7 @@ entrypoint. There is no shell access surface in the playground HTTP path.
 The static SPA is served from GitHub Pages at
 `https://rustviz.github.io/playground/`, so cross-origin requests to the
 Fly API are required and gated by an explicit `actix-cors` allowlist in
-`rv-serve/src/main.rs`. The allowlist is the *only* control over which
+`playground/src/main.rs`. The allowlist is the *only* control over which
 sites can drive the API from a browser:
 
 - `https://rustviz.github.io` — the Pages origin.
@@ -113,17 +113,17 @@ deployment**. The production `Dockerfile` and deploy config set
 
 ## Operator checklist
 
-Before exposing `rv-serve` to the public internet:
+Before exposing `playground` to the public internet:
 
 1. Build and push the runner image: `docker build -t rustviz/rustviz-runner:latest -f runner/Dockerfile .`
-2. Run `rv-serve` with `RV_RUNNER=docker` (the default) and
+2. Run `playground` with `RV_RUNNER=docker` (the default) and
    `RV_BIND=0.0.0.0:$PORT`.
 3. Tune `RV_RATE_SECONDS_PER_REQUEST` and `RV_RATE_BURST` for your expected
    traffic profile. Defaults assume single-user research workloads.
 4. Front the service with a reverse proxy that terminates TLS, sets
    `X-Forwarded-For`, and applies its own rate limit / WAF (Cloudflare,
    Caddy, nginx — whatever fits your platform).
-5. Run `rv-serve` itself as an unprivileged user with no sudo / docker group
+5. Run `playground` itself as an unprivileged user with no sudo / docker group
    beyond what's needed to spawn child containers. On Fly.io this means
    running the playground in a Machine with the docker socket exposed only
    to the rustviz process; on a VM, restrict the `docker` group membership.

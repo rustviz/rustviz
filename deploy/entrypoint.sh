@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy entrypoint: bring up dockerd, ensure the runner image is loaded,
-# then exec rv-serve. Runs as PID 1 inside the docker:dind base; tini
+# then exec playground. Runs as PID 1 inside the docker:dind base; tini
 # wraps us so signal handling is sane.
 
 set -euo pipefail
@@ -70,8 +70,8 @@ else
     LOG "runner image pulled and tagged as ${LOCAL_TAG}"
 fi
 
-# 4. Exec rv-serve. Bind addr + RV_RUNNER come from the env (set in
+# 4. Exec playground. Bind addr + RV_RUNNER come from the env (set in
 #    Dockerfile / fly.toml).
-LOG "starting rv-serve on ${RV_BIND}"
+LOG "starting playground on ${RV_BIND}"
 cd /app
-exec /usr/local/bin/rustviz_serve
+exec /usr/local/bin/rustviz-playground

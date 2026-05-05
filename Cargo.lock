@@ -1883,6 +1883,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rustviz-playground"
+version = "0.1.0"
+dependencies = [
+ "actix-cors",
+ "actix-files",
+ "actix-governor",
+ "actix-web",
+ "env_logger 0.9.3",
+ "log",
+ "rustviz2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rustviz2"
 version = "0.1.0"
 dependencies = [
@@ -1906,21 +1921,6 @@ dependencies = [
  "serde",
  "simplelog",
  "ts-rs 6.2.1",
-]
-
-[[package]]
-name = "rustviz_serve"
-version = "0.1.0"
-dependencies = [
- "actix-cors",
- "actix-files",
- "actix-governor",
- "actix-web",
- "env_logger 0.9.3",
- "log",
- "rustviz2",
- "serde",
- "serde_json",
 ]
 
 [[package]]

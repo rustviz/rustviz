@@ -22,10 +22,10 @@ To build from source:
   * To see the resulting svg files rendered in mdbook use the `test-ex.sh` script
   
 To use mdbook:
-We provide an [mdbook](https://github.com/rust-lang/mdBook) preprocessor that embeds diagrams into an mdBook. You will need to install 
-[mdbook-rustviz](https://https://github.com/R-uFu-s/mdbook-rustviz) and follow the instructions laid out in the [README](https://https://github.com/R-uFu-s/mdbook-rustviz/README.md).
+We provide an [mdbook](https://github.com/rust-lang/mdBook) preprocessor that embeds diagrams into an mdBook. See
+[`mdbook-rustviz/`](../mdbook-rustviz/) for instructions.
 
-You can also [click here](https://404) to use our RustViz playground.
+The hosted playground is at <https://rustviz.github.io/playground/>.
   
 ## Limitations
 RustViz is an educational tool meant to provide insight about Rust to beginners, it is also still actively in development, which means that it only supports a subset of all Rust features. For example, currently we do not support conditional borrowing logic, for-loops, conditional let-bindings and more. We are working to add more of these features, however RustViz is a learning tool for beginners and is not meant to encapsulate all Rust programs.

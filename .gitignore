@@ -15,12 +15,12 @@ test-crate/output.txt
 mdbook-rustviz/test-crate/
 mdbook-rustviz/test-book/src/examples
 mdbook-rustviz/test-book/book
-rv-serve/test-crate/
+playground/test-crate/
 
 # generated mdbook output
 test-book/book/
 
 # frontend build artifacts (Vite dist + node_modules — produced by setup.sh)
-rv-serve/frontend/dist/
-rv-serve/frontend/node_modules/
-rv-serve/frontend/*.tsbuildinfo
+playground/frontend/dist/
+playground/frontend/node_modules/
+playground/frontend/*.tsbuildinfo

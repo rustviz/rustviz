@@ -28,7 +28,7 @@ on:
     branches: [main]
     paths:
       # Only rebuild when the frontend or its config actually changes.
-      - 'rv-serve/frontend/**'
+      - 'playground/frontend/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -43,15 +43,15 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: rv-serve/frontend/package-lock.json
+          cache-dependency-path: playground/frontend/package-lock.json
 
       - name: Install frontend deps
         run: npm ci
-        working-directory: rv-serve/frontend
+        working-directory: playground/frontend
 
       - name: Build SPA in pages mode
         run: npm run build:pages
-        working-directory: rv-serve/frontend
+        working-directory: playground/frontend
 
       - name: Deploy to rustviz/playground
         uses: peaceiris/actions-gh-pages@v4
@@ -59,7 +59,7 @@ jobs:
           deploy_key: ${{ secrets.PAGES_DEPLOY_KEY }}
           external_repository: rustviz/playground
           publish_branch: main
-          publish_dir: rv-serve/frontend/dist
+          publish_dir: playground/frontend/dist
           # Helpful when diagnosing a botched deploy: each commit on the
           # destination branch references the source SHA it was built from.
           commit_message: 'deploy: ${{ github.sha }}'
