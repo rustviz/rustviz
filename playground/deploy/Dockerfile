@@ -79,7 +79,7 @@ COPY --from=frontend-builder /src/dist/ /app/frontend/dist/
 # now Machines are stateless wrt the runner image so `fly scale count N`
 # horizontal scaling Just Works without per-Machine bootstrapping.
 
-COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY playground/deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV RV_BIND=0.0.0.0:8080 \

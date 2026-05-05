@@ -240,7 +240,7 @@ jobs:
 
   # Deploy job, gated on build AND runner-image success and on a real
   # push to main (so PR runs build but never deploy). Calls
-  # deploy/deploy.sh, NOT `flyctl deploy` directly — the script does
+  # playground/deploy/deploy.sh, NOT `flyctl deploy` directly — the script does
   # the two-phase deploy the playground needs (phase 1: fly scale +
   # fly deploy with auto_stop_machines='off' so Machines survive the
   # cold-pull bootstrap; phase 2: per-Machine `fly machine update
@@ -282,7 +282,7 @@ jobs:
       - name: verify jq
         run: jq --version
       - name: deploy.sh
-        run: ./deploy/deploy.sh
+        run: ./playground/deploy/deploy.sh
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       # Open a tracking issue on failure so the failure surfaces in the
