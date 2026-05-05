@@ -7,8 +7,4 @@ members = [
   "playground",
   "rustviz2",
 ]
-# need this for rustc plugin
-exclude = [
-  "test-crate"
-]
 

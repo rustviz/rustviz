@@ -26,7 +26,7 @@ cargo build --workspace --release
 
 # 5. Get the sandboxed runner image into the local docker daemon. Two paths:
 #    - Pull from GHCR (faster, ~30 s, what production does).
-#    - Build from runner/Dockerfile locally (slower, ~5 min, but works offline
+#    - Build from playground/runner/Dockerfile locally (slower, ~5 min, but works offline
 #      and lets you iterate on plugin changes without round-tripping through
 #      a CI image push).
 #    Pull is the default; pass --build-runner to force a local build.
@@ -35,7 +35,7 @@ cargo build --workspace --release
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     if [ "${1:-}" = "--build-runner" ]; then
         echo "Building rustviz/rustviz-runner image locally..."
-        docker build -t rustviz/rustviz-runner:latest -f runner/Dockerfile .
+        docker build -t rustviz/rustviz-runner:latest -f playground/runner/Dockerfile .
     elif docker image inspect rustviz/rustviz-runner:latest >/dev/null 2>&1; then
         echo "Runner image already present locally; pass --build-runner to rebuild."
     else
@@ -46,7 +46,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         else
             echo "Pull failed (registry unreachable, image not yet published, or no internet)." >&2
             echo "Building locally as fallback (~5 min)..." >&2
-            docker build -t rustviz/rustviz-runner:latest -f runner/Dockerfile .
+            docker build -t rustviz/rustviz-runner:latest -f playground/runner/Dockerfile .
         fi
     fi
 else
@@ -54,7 +54,7 @@ else
 Skipping runner image setup: docker is not available.
 
 For local dev, set RV_RUNNER=local to run the plugin in-process
-(NEVER do this on a public deployment — see SECURITY.md).
+(NEVER do this on a public deployment — see playground/SECURITY.md).
 WARN
 fi
 
@@ -71,7 +71,8 @@ To iterate on the frontend in dev mode (hot reload, proxies API to :8080):
   cd playground/frontend && npm run dev
   open http://127.0.0.1:3000/
 
-To run the rustc plugin directly (host toolchain) against test-crate:
+To render a single Rust file through the plugin:
 
-  cd test-crate && cargo rv-plugin -w
+  rustviz svg path/to/foo.rs    # writes foo.code.svg + foo.timeline.svg
+  rustviz html path/to/foo.rs   # writes one self-contained HTML page
 EOF

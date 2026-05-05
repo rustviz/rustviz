@@ -5,7 +5,7 @@
 #   2. frontend-builder: vite build for the SPA.
 #   3. final: docker:dind base — playground runs alongside an in-VM dockerd
 #      and shells out to `docker run rustviz/rustviz-runner` per request
-#      (see SECURITY.md). The runner image itself is published separately
+#      (see ../SECURITY.md). The runner image itself is published separately
 #      to GHCR by .github/workflows/runner-image.yml, and entrypoint.sh
 #      pulls it on first boot. This keeps the deploy image small (~135 MiB)
 #      and Fly Machines stateless wrt the runner — `fly scale count N`

@@ -151,7 +151,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: runner/Dockerfile
+          file: playground/runner/Dockerfile
           platforms: ${{ matrix.platform }}
           # Push without a name; downstream merge job will tag the
           # multi-arch manifest. `outputs` here matches the buildx

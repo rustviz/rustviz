@@ -8,7 +8,7 @@ primary_region = 'ord'
 
 [experimental]
   # Required: the deploy image runs Docker-in-Docker so playground can shell out
-  # to a per-request sandboxed runner (see SECURITY.md). The inner dockerd
+  # to a per-request sandboxed runner (see ../SECURITY.md). The inner dockerd
   # needs to manage cgroups / namespaces / overlayfs, which only works when
   # the Fly Machine itself is privileged.
   privileged = true
