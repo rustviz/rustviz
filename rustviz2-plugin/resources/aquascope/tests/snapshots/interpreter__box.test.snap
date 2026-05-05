@@ -1,0 +1,231 @@
+---
+source: crates/aquascope/tests/interpreter.rs
+description: box.test
+---
+steps:
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 64
+            filename:
+              private: 0
+          location:
+            start: 0
+            end: 9
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 64
+            filename:
+              private: 0
+          location:
+            start: 14
+            end: 38
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Adt
+                value:
+                  name: Box
+                  variant: ~
+                  fields:
+                    - - "0"
+                      - type: Adt
+                        value:
+                          name: Unique
+                          variant: ~
+                          fields:
+                            - - pointer
+                              - type: Adt
+                                value:
+                                  name: NonNull
+                                  variant: ~
+                                  fields:
+                                    - - pointer
+                                      - type: Pointer
+                                        value:
+                                          path:
+                                            segment:
+                                              type: Heap
+                                              value:
+                                                index: 0
+                                            parts: []
+                                          range: ~
+                                  alloc_kind: ~
+                          alloc_kind: ~
+                  alloc_kind:
+                    type: Box
+              moved_paths: []
+    heap:
+      locations:
+        - type: Int
+          value: 0
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 64
+            filename:
+              private: 0
+          location:
+            start: 41
+            end: 49
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Adt
+                value:
+                  name: Box
+                  variant: ~
+                  fields:
+                    - - "0"
+                      - type: Adt
+                        value:
+                          name: Unique
+                          variant: ~
+                          fields:
+                            - - pointer
+                              - type: Adt
+                                value:
+                                  name: NonNull
+                                  variant: ~
+                                  fields:
+                                    - - pointer
+                                      - type: Pointer
+                                        value:
+                                          path:
+                                            segment:
+                                              type: Heap
+                                              value:
+                                                index: 0
+                                            parts: []
+                                          range: ~
+                                  alloc_kind: ~
+                          alloc_kind: ~
+                  alloc_kind:
+                    type: Box
+              moved_paths: []
+    heap:
+      locations:
+        - type: Int
+          value: 1
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 64
+            filename:
+              private: 0
+          location:
+            start: 52
+            end: 62
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Adt
+                value:
+                  name: Box
+                  variant: ~
+                  fields:
+                    - - "0"
+                      - type: Adt
+                        value:
+                          name: Unique
+                          variant: ~
+                          fields:
+                            - - pointer
+                              - type: Adt
+                                value:
+                                  name: NonNull
+                                  variant: ~
+                                  fields:
+                                    - - pointer
+                                      - type: Pointer
+                                        value:
+                                          path:
+                                            segment:
+                                              type: Heap
+                                              value:
+                                                index: 0
+                                            parts: []
+                                          range: ~
+                                  alloc_kind: ~
+                          alloc_kind: ~
+                  alloc_kind:
+                    type: Box
+              moved_paths:
+                - []
+            - name: y
+              value:
+                type: Adt
+                value:
+                  name: Box
+                  variant: ~
+                  fields:
+                    - - "0"
+                      - type: Adt
+                        value:
+                          name: Unique
+                          variant: ~
+                          fields:
+                            - - pointer
+                              - type: Adt
+                                value:
+                                  name: NonNull
+                                  variant: ~
+                                  fields:
+                                    - - pointer
+                                      - type: Pointer
+                                        value:
+                                          path:
+                                            segment:
+                                              type: Heap
+                                              value:
+                                                index: 0
+                                            parts: []
+                                          range: ~
+                                  alloc_kind: ~
+                          alloc_kind: ~
+                  alloc_kind:
+                    type: Box
+              moved_paths: []
+    heap:
+      locations:
+        - type: Int
+          value: 1
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 64
+            filename:
+              private: 0
+          location:
+            start: 63
+            end: 64
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+result:
+  type: Success
+

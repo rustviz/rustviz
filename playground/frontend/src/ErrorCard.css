@@ -1,0 +1,36 @@
+/* The error card mirrors the editor's left margin (50 px) and width
+   cap (1060 px) so the panels visually line up. The previous CSS had
+   `max-width: 400px; margin: 10px auto;` — too narrow to display
+   rustc's column-aligned diagnostics, and `auto` margins centered the
+   card mid-viewport rather than anchoring it at the editor's column. */
+#err_card {
+  background-color: black;
+  padding: 10px;
+  border-radius: 5px;
+  max-width: 1060px;
+  margin: 10px 50px;
+}
+
+#err_header {
+  color: red;
+  font-weight: bold;
+  margin: 0;
+}
+
+#error_message {
+  color: white;
+  margin: 0;
+  /* rustc errors are multi-line and column-aligned: the carets and
+     squiggly underlines under the offending tokens depend on a
+     monospace font + preserved whitespace to land in the right
+     column. Without `pre-wrap` the browser collapses runs of
+     whitespace and the source-pointer arrows drift away from the
+     code they're pointing at. */
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  /* Wrap long lines instead of forcing horizontal scroll within the
+     card; we already cap the card at 1060 px, so wrapping is the
+     right behavior for any line longer than that. */
+  word-break: break-word;
+}

@@ -1,0 +1,16 @@
+/* flex related styling */
+.flex-container {
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+}
+
+object.tl_panel {
+    flex-grow: 0;
+}
+
+object.code_panel {
+    flex-grow: 1;
+}

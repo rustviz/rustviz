@@ -1,0 +1,21 @@
+<svg height="{{height}}px" 
+        xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+
+    <desc>{{ visualization_name }}</desc>
+
+    <defs>
+        <style type="text/css">
+        <![CDATA[
+        {{ css }}
+        ]]>
+        </style>
+    </defs>
+
+    <g>
+        <text id="caption" x="30" y="30">Hover over timeline events (dots), states (vertical lines),</text>
+        <text id="caption" x="30" y="50">and actions (arrows) for extra information.</text>
+    </g>
+
+{{ code }}
+   
+</svg>

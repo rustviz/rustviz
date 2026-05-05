@@ -1,0 +1,129 @@
+---
+source: crates/aquascope/tests/interpreter.rs
+description: stackref.test
+---
+steps:
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 59
+            filename:
+              private: 0
+          location:
+            start: 0
+            end: 9
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 59
+            filename:
+              private: 0
+          location:
+            start: 14
+            end: 28
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Int
+                value: 1
+              moved_paths: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 59
+            filename:
+              private: 0
+          location:
+            start: 31
+            end: 46
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Int
+                value: 1
+              moved_paths: []
+            - name: y
+              value:
+                type: Pointer
+                value:
+                  path:
+                    segment:
+                      type: Stack
+                      value:
+                        frame: 0
+                        local: x
+                    parts: []
+                  range: ~
+              moved_paths: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 59
+            filename:
+              private: 0
+          location:
+            start: 49
+            end: 57
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Int
+                value: 2
+              moved_paths: []
+            - name: y
+              value:
+                type: Pointer
+                value:
+                  path:
+                    segment:
+                      type: Stack
+                      value:
+                        frame: 0
+                        local: x
+                    parts: []
+                  range: ~
+              moved_paths: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 59
+            filename:
+              private: 0
+          location:
+            start: 58
+            end: 59
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+result:
+  type: Success
+

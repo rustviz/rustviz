@@ -1,0 +1,4 @@
+fn main() {
+    let v = vec![1];
+    let _a = `[v RD]`;
+}

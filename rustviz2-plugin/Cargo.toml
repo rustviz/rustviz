@@ -1,0 +1,36 @@
+[package]
+name = "rustviz2-plugin"
+version = "0.1.0"
+edition = "2021"
+authors = ["Andrew Mahler <mahleran@umich.edu>", 
+          "Alaric Chen", 
+          "Akshey Deokule", 
+          "Yue Huang", 
+          "Yifan Liu"]
+repository = "https://github.com/rustviz/rustviz2"
+license = "MIT"
+description = "A tool that allows users to generate an interactive timeline depicting ownership and borrowing events for variables in a Rust code example"
+readme = "README.md"
+
+exclude = [
+    "resources/",
+    "tests/"
+]
+
+[dependencies]
+env_logger = "0.10"
+clap = {version = "4.4", features = ["derive"]}
+serde = {version = "1", features = ["derive"]}
+anyhow = "1.0.0"
+log = "0.4"
+itertools = "0.10.5"
+ts-rs = "6.2"
+regex = "1"
+fluid-let = "1.0"
+rustc_utils = {version = "0.14.3-nightly-2025-08-20", features = ["graphviz", "ts-rs", "serde", "test"]}
+rustc_plugin = {version = "0.14.3-nightly-2025-08-20"}
+simplelog = "0.11"
+handlebars = "3.0.1"
+
+
+

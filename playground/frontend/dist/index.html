@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RustViz playground</title>
+    <link rel="icon" href="data:;base64,=" />
+    <script src="ex-assets/helpers.js"></script>
+    <script type="module" crossorigin src="/assets/index-Dd19nqyK.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-GUUIxdM5.css">
+  </head>
+  <body>
+    <h1>RustViz Playground</h1>
+    <p>
+      Welcome! <a href="https://github.com/rustviz/rustviz2/">RustViz</a>
+      is a tool to visualize an approximation of the compile-time reasoning
+      of <a href="https://www.rust-lang.org/">Rust's</a> Borrow Checker.
+    </p>
+
+    <p>
+      You can try out RustViz by writing a Rust program in the editor below,
+      then clicking the "Generate Visualization" button to convert your
+      example code into an SVG diagram.
+    </p>
+
+    <div>
+      <p>
+        Please note: RustViz is a research tool, so it doesn't work for
+        some Rust programs. These are a few common Rust features that
+        remain unimplemented by our plugin and as a result may result in
+        undefined behavior when visualized:
+      </p>
+      <ul style="margin-left: 50px;">
+        <li>For loops</li>
+        <li>Conditional let bindings</li>
+        <li>Borrows that occur inside of conditionals</li>
+        <li>Chained method calls</li>
+        <li>Lifetime annotations</li>
+        <li>Borrows over struct members</li>
+      </ul>
+    </div>
+    <div>
+      <p>
+        If you come across an example that exposes some bug in our
+        visualization please submit an issue on the
+        <a href="https://github.com/rustviz/rustviz2/issues">repo</a> with
+        the example code and error message (if applicable).
+      </p>
+    </div>
+
+    <!-- React mounts the example-picker dropdown here via createPortal
+         (see src/App.tsx). It needs to live above the editor in DOM
+         order, but our React app's main root is below the editor for
+         legacy reasons, so the portal lets us keep one App component
+         and still place the picker above. -->
+    <div id="example-picker"></div>
+    <div id="editor"></div>
+    <div id="root"></div>
+  </body>
+</html>

@@ -1,0 +1,310 @@
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+  # Run for PRs against any base so the stacked chore/phase-* branches get CI
+  # on every push, not only when they're rebased onto main.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # for the issue-on-failure step in the deploy job
+  issues: write
+  # for the runner-image job to push to GHCR
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup show
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: playground/frontend/package-lock.json
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Run setup.sh (toolchain, plugin install, frontend build, runner image)
+        run: ./setup.sh
+
+      - name: cargo build --workspace
+        run: cargo build --workspace --locked
+
+      - name: cargo test --workspace
+        env:
+          # Corpus tests use the in-process plugin path (faster than spinning
+          # up a fresh runner container per case, and we're not testing
+          # sandboxing here). The plugin itself was installed by setup.sh.
+          RV_RUNNER: local
+        run: cargo test --workspace --locked
+
+      - name: Smoke test the playground end-to-end (sandboxed backend)
+        env:
+          RV_RUNNER: docker
+        run: |
+          # Use --locked to surface lockfile drift; spawn playground in the
+          # background and wait for /. Then POST a small program and confirm
+          # we get back both SVGs.
+          (cd playground && RV_RUNNER=docker cargo run --release --locked &) &&
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8080/ > /dev/null && break || sleep 1
+          done
+          curl -fsS -X POST http://127.0.0.1:8080/submit-code \
+            -H 'Content-Type: application/json' \
+            -d '{"code":"fn main(){let s=String::from(\"hi\");let t=s;println!(\"{}\",t);}"}' \
+            | grep -q '"code_panel"'
+
+      - name: Smoke test rate limit (expects 429 after burst exhausted)
+        run: |
+          ok=0
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+              http://127.0.0.1:8080/submit-code \
+              -H 'Content-Type: application/json' \
+              -d '{"code":"fn main(){}"}')
+            echo "request $i -> $code"
+            if [ "$code" = "429" ]; then ok=1; break; fi
+          done
+          [ "$ok" = "1" ] || { echo "rate limit never engaged"; exit 1; }
+
+  # Build the rustviz/rustviz-runner sandbox image (per-request docker
+  # container that compiles user-submitted Rust) and push it to GHCR.
+  # The deploy image's entrypoint pulls from this registry on first
+  # boot of each Fly Machine. Lives alongside `build` so deploy can
+  # gate on both — keeping `runner-image` in a separate workflow risks
+  # deploying tested plugin code against a stale `:latest` if the two
+  # workflows finish in a different order.
+  #
+  # Per-arch jobs run on native runners (no QEMU). Compiling
+  # rustviz2-plugin under user-mode QEMU was sporadically crashing
+  # rustc with `signal 5 (Trace/breakpoint trap)` ~17 minutes into
+  # the arm64 leg; native arm64 sidesteps that entirely and runs in
+  # parallel with amd64. Each job pushes a content-addressed,
+  # tagless manifest by digest; the merge job below stitches them
+  # into a multi-arch manifest under the user-facing tags.
+  #
+  # Only runs on real pushes to main (PRs don't push to GHCR).
+  runner-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runs-on: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runs-on: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 45
+    env:
+      REGISTRY: ghcr.io
+      # Lower-case so docker tag is happy on case-insensitive filesystems too.
+      IMAGE_NAME: rustviz/rustviz-runner
+    outputs:
+      digest-amd64: ${{ steps.export-digest.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.export-digest.outputs.digest-arm64 }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: playground/runner/Dockerfile
+          platforms: ${{ matrix.platform }}
+          # Push without a name; downstream merge job will tag the
+          # multi-arch manifest. `outputs` here matches the buildx
+          # docs' multi-platform pattern.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          # Per-arch registry cache so the two jobs don't trample
+          # each other's layers.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }},mode=max
+
+      - name: Export digest as workflow artifact
+        id: export-digest
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          # Strip the `sha256:` prefix for the filename — easier on
+          # downstream globbing — but also expose the full digest as
+          # a job output so the merge step can name images by it.
+          echo "${digest#sha256:}" > "/tmp/digests/${{ matrix.arch }}"
+          echo "digest-${{ matrix.arch }}=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v5
+        with:
+          name: runner-image-digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitch the two per-arch digests into a single multi-arch manifest
+  # under the user-facing tags (latest, sha-XXXX, branch ref). Runs
+  # only after both arch builds succeed.
+  runner-image-merge:
+    needs: runner-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: rustviz/rustviz-runner
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v5
+        with:
+          path: /tmp/digests
+          pattern: runner-image-digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=branch
+
+      - name: Create multi-arch manifest and push
+        working-directory: /tmp/digests
+        run: |
+          # imagetools create accepts one or more sources by digest
+          # and points each tag at a manifest list combining them.
+          digests=()
+          for f in *; do
+            digests+=("${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:$(cat "$f")")
+          done
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("--tag " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
+            "${digests[@]}"
+
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect \
+            "$(jq -cr '.tags[0]' <<< '${{ steps.meta.outputs.json }}')"
+
+  # Deploy job, gated on build AND runner-image success and on a real
+  # push to main (so PR runs build but never deploy). Calls
+  # playground/deploy/deploy.sh, NOT `flyctl deploy` directly — the script does
+  # the two-phase deploy the playground needs (phase 1: fly scale +
+  # fly deploy with auto_stop_machines='off' so Machines survive the
+  # cold-pull bootstrap; phase 2: per-Machine `fly machine update
+  # --autostop=stop` so the fleet idles cheaply in steady state). A
+  # plain `flyctl deploy` skips phase 2 and leaves every Machine
+  # pinned at auto_stop='off', i.e. always-running, ~$24/mo per
+  # Machine.
+  #
+  # Requires a FLY_API_TOKEN secret in Settings → Secrets → Actions.
+  deploy:
+    needs: [build, runner-image-merge]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # deploy.sh's phase 1 cold-pulls the runner image on every fresh
+    # Machine through fuse-overlayfs (5-15 min/Machine, parallelized
+    # via --strategy immediate). When a Machine gets stuck mid-pull
+    # (transient FUSE / GHCR flakiness), deploy.sh's retry path
+    # destroys + recreates and waits again — RV_DEPLOY_TIMEOUT_SECS
+    # × (RV_DEPLOY_RETRIES + 1) is the Phase 1 wait budget, default
+    # 30 min × 2 = 60 min. Plus Phase 2 (~few min) and fly deploy
+    # orchestration (~5 min). Worst-case observed: ~55 min. 90 leaves
+    # comfortable headroom; bump if you see CI hitting the cap.
+    timeout-minutes: 90
+    # On a burst of merges, kill the in-progress deploy and run the
+    # latest one. Aborting mid-deploy can briefly leave the fleet in
+    # a half-rolled state, but deploy.sh's Phase 1 is a
+    # destroy-and-recreate, so the run that immediately follows the
+    # cancel resets everything cleanly. Net effect on a 5-PR burst:
+    # only the last PR's image actually ends up live, vs. waiting
+    # ~30 min per intermediate deploy with cancel-in-progress=false.
+    concurrency:
+      group: fly-deploy
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # ubuntu-latest already has jq, but assert it explicitly so a
+      # future runner-image change doesn't silently break the script.
+      - name: verify jq
+        run: jq --version
+      - name: deploy.sh
+        run: ./playground/deploy/deploy.sh
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # Open a tracking issue on failure so the failure surfaces in the
+      # repo's Issues tab, not just in the email-notification firehose.
+      # Default GitHub email-on-workflow-failure still fires too.
+      - name: open issue on deploy failure
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const sha = context.sha.slice(0, 7);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Deploy failed at ${sha}`,
+              body: [
+                `The deploy job failed for commit ${sha}.`,
+                ``,
+                `Run: ${runUrl}`,
+                ``,
+                `This issue was opened automatically by \`.github/workflows/build.yml\` on workflow failure. Investigate the run, fix the underlying issue, and close this issue once the next successful deploy lands.`,
+              ].join('\n'),
+              labels: ['deploy-failure'],
+            });

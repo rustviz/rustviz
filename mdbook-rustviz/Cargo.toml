@@ -1,0 +1,46 @@
+[package]
+name = "mdbook-rustviz"
+version = "0.2.0"
+readme = "README.md"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rustviz/rustviz2"
+description = "An mdbook preprocessor that allows users to embed RustViz visualizations into mdbook projects"
+
+exclude = [
+    "test-book/",
+]
+
+[dependencies]
+toml = "0.5"
+
+# mdbook 0.5 split its API across crates; preprocessors now depend
+# on `mdbook-preprocessor` (the trait + Book/BookItem/Chapter types
+# + CmdPreprocessor) and `mdbook-markdown` (the new_cmark_parser
+# helper, which now takes a `MarkdownOptions` struct instead of a
+# bool flag). Rust API in 0.4 lived under `mdbook::*`; that crate
+# is now binary-only.
+mdbook-preprocessor = "0.5"
+mdbook-markdown = "0.5"
+anyhow = "1"
+
+log = "0.4"
+env_logger = "0.9"
+semver = "1.0"
+
+serde_json = "1.0"
+# Pin to whatever mdbook-markdown re-exports — pulldown-cmark is
+# explicitly part of mdbook's public API and any drift here means
+# we'd be parsing markdown with a different version than the rest
+# of the pipeline. 0.13 = mdbook 0.5's choice.
+pulldown-cmark = "0.13"
+pulldown-cmark-to-cmark = "22"
+rustviz2 = { path = "../rustviz2" }
+
+[dependencies.clap]
+version = "4.0"
+features = ["std", "derive", "cargo", "unicode", "error-context"]
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]

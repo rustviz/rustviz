@@ -1,0 +1,34 @@
+#[derive(Debug)]
+struct Both {
+    left: String,
+    right: String,
+}
+
+impl Both {
+    fn borrow_left(&mut self) -> &mut String {
+        &mut self.left
+    }
+}
+
+fn main() {
+    let s1 = String::from("left");
+    let s2 = String::from("right");
+    let mut both = Both { left: s1, right: s2 };
+
+    let left = both.borrow_left();
+
+    let _a = &`[left R-D]`;
+    let _a = &`[*left RW-]`;
+
+    let _a = &`[both ---]`;
+    let _a = &`[both.left ---]`;
+    let _a = &`[both.right ---]`;
+
+    left.push_str("used again");
+
+    println!("{left:?}");
+
+    let _a = &`[both RWD]`;
+    let _a = &`[both.left RWD]`;
+    let _a = &`[both.right RWD]`;
+}

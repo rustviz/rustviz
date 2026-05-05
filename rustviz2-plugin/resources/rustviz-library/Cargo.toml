@@ -1,0 +1,2 @@
+[workspace]
+members = ["rustviz_library", "rv_bin", "RustvizParse"]

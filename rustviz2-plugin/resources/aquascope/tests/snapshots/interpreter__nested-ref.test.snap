@@ -1,0 +1,127 @@
+---
+source: crates/aquascope/tests/interpreter.rs
+description: nested-ref.test
+---
+steps:
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 60
+            filename:
+              private: 0
+          location:
+            start: 0
+            end: 9
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 60
+            filename:
+              private: 0
+          location:
+            start: 14
+            end: 39
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Array
+                value:
+                  type: All
+                  value:
+                    - type: Tuple
+                      value:
+                        - type: Int
+                          value: 0
+                        - type: Int
+                          value: 1
+                    - type: Tuple
+                      value:
+                        - type: Int
+                          value: 2
+                        - type: Int
+                          value: 3
+              moved_paths: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 60
+            filename:
+              private: 0
+          location:
+            start: 42
+            end: 58
+            filename:
+              private: 0
+          locals:
+            - name: x
+              value:
+                type: Array
+                value:
+                  type: All
+                  value:
+                    - type: Tuple
+                      value:
+                        - type: Int
+                          value: 0
+                        - type: Int
+                          value: 1
+                    - type: Tuple
+                      value:
+                        - type: Int
+                          value: 2
+                        - type: Int
+                          value: 3
+              moved_paths: []
+            - name: y
+              value:
+                type: Pointer
+                value:
+                  path:
+                    segment:
+                      type: Stack
+                      value:
+                        frame: 0
+                        local: x
+                    parts:
+                      - type: Index
+                        value: 1
+                      - type: Field
+                        value: 1
+                  range: ~
+              moved_paths: []
+    heap:
+      locations: []
+  - stack:
+      frames:
+        - name: main
+          body_span:
+            start: 0
+            end: 60
+            filename:
+              private: 0
+          location:
+            start: 59
+            end: 60
+            filename:
+              private: 0
+          locals: []
+    heap:
+      locations: []
+result:
+  type: Success
+
