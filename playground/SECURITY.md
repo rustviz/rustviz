@@ -85,7 +85,7 @@ entrypoint. There is no shell access surface in the playground HTTP path.
 ### 3. CORS allowlist on the API
 
 The static SPA is served from GitHub Pages at
-`https://rustviz.github.io/playground/`, so cross-origin requests to the
+`https://rustviz.github.io/`, so cross-origin requests to the
 Fly API are required and gated by an explicit `actix-cors` allowlist in
 `playground/src/main.rs`. The allowlist is the *only* control over which
 sites can drive the API from a browser:
