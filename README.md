@@ -11,6 +11,11 @@ versions of RustViz, deployed in the classroom and described in [our VL/HCC 2022
 directly and walks HIR/MIR, so the diagram reflects the real borrow
 checker's view of the program rather than a hand-curated approximation.
 
+> Looking for the original (annotation-based) RustViz? It lives on
+> the [`rv1-final`](https://github.com/rustviz/rustviz/tree/rv1-final)
+> branch and tag in this repo, with a matching
+> [GitHub Release](https://github.com/rustviz/rustviz/releases/tag/rv1-final).
+
 RustViz is a project of the [Future of Programming Lab](https://fplab.mplse.org/)
 at the University of Michigan.
 

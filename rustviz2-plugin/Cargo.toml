@@ -7,7 +7,7 @@ authors = ["Andrew Mahler <mahleran@umich.edu>",
           "Akshey Deokule", 
           "Yue Huang", 
           "Yifan Liu"]
-repository = "https://github.com/rustviz/rustviz2"
+repository = "https://github.com/rustviz/rustviz"
 license = "MIT"
 description = "A tool that allows users to generate an interactive timeline depicting ownership and borrowing events for variables in a Rust code example"
 readme = "README.md"

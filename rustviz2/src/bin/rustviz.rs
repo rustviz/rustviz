@@ -26,11 +26,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use rustviz2::{HELPERS_JS, Rustviz, toolchain_channel, toolchain_components};
 
-/// Default git source for the rustviz2-plugin install. Forward-
-/// looking to the eventual `rustviz/rustviz` consolidation; today
-/// the code lives at `rustviz/rustviz2`. Override with
-/// `--plugin-git` if you're working off a fork or a different
-/// branch.
+/// Default git source for the rustviz2-plugin install — the
+/// canonical RustViz repo. Override with `--plugin-git` if you're
+/// working off a fork or a different branch.
 const DEFAULT_PLUGIN_GIT: &str = "https://github.com/rustviz/rustviz";
 
 #[derive(Parser)]

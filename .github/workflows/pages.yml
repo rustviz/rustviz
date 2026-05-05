@@ -16,9 +16,9 @@ name: pages
 #   4. Add the *public* key to rustviz/playground:
 #        Settings → Deploy keys → Add key, paste /tmp/playground_deploy_key.pub,
 #        check "Allow write access".
-#   5. Add the *private* key to rustviz/rustviz2:
+#   5. Add the *private* key to rustviz/rustviz:
 #        gh secret set PAGES_DEPLOY_KEY \
-#          --repo rustviz/rustviz2 < /tmp/playground_deploy_key
+#          --repo rustviz/rustviz < /tmp/playground_deploy_key
 #   6. Delete the local keypair: rm /tmp/playground_deploy_key*
 #
 # After that, every push to main here triggers a Pages deploy.

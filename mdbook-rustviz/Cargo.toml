@@ -4,7 +4,7 @@ version = "0.2.0"
 readme = "README.md"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/rustviz/rustviz2"
+repository = "https://github.com/rustviz/rustviz"
 description = "An mdbook preprocessor that allows users to embed RustViz visualizations into mdbook projects"
 
 exclude = [
