@@ -712,10 +712,11 @@ fn render_dot(
                         // render a plain OOS dot like a Copy type
                         // with the standard "f goes out of scope"
                         // message.
-                        if closure_has_move_captures(visualization_data, *hash) {
+                        let move_count = closure_move_capture_count(visualization_data, *hash);
+                        if move_count > 0 {
                             let cx = timeline_data.x_val;
                             let cy = get_y_axis_pos(*line_number);
-                            let title = hover_messages::event_dot_closure_go_out_of_scope(&name);
+                            let title = hover_messages::event_dot_closure_go_out_of_scope(&name, move_count);
                             let drop_data = DropDotData {
                                 hash: *hash as u64,
                                 dot_x: cx,

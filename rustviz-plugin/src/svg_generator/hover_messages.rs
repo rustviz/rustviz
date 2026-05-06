@@ -50,19 +50,21 @@ pub fn event_dot_owner_go_out_out_scope(my_name: &String) -> String {
 }
 
 // Closure binding goes out of scope. The closure value is dropped,
-// which in turn drops every captured upvar (for `move` captures) or
-// ends the borrow of every captured upvar (for ref captures). The
-// distinction isn't surfaced here because either way, from the
-// captured upvar's point of view, the closure releases it.
-//
-// Includes the "captured resources are dropped" suffix inline so the
-// timeline_panel's drop-dot path doesn't append the generic
-// "Its resource is dropped." tail to a closure's scope-end.
-pub fn event_dot_closure_go_out_of_scope(my_name: &String) -> String {
+// which in turn drops each move-captured upvar — `move_capture_count`
+// is how many of those there are. Reaches the timeline only when
+// the count is at least one (borrow-only and capture-less closures
+// take the plain owner-OOS path), so the singular/plural branch
+// only needs to handle ≥1.
+pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: usize) -> String {
     let my_name_fmt = fmt_style(my_name);
+    let (noun, verb) = if move_capture_count == 1 {
+        ("resource", "is")
+    } else {
+        ("resources", "are")
+    };
     format!(
-        "{0} goes out of scope. Its captured resources are dropped.",
-        my_name_fmt
+        "{0} goes out of scope. Its {1} captured {2} {3} dropped.",
+        my_name_fmt, move_capture_count, noun, verb
     )
 }
 

@@ -468,9 +468,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s",
             "Closure capture (move) from s to f",
             "Closure f captures: s (moved)",
-            "f goes out of scope. Its captured resources are dropped.",
-            // Move closure → f's timeline reports the exact count
-            // of move-captured resources owned via capture.
+            // Scope-end and timeline tooltips both report the
+            // exact count of move-captured resources, with
+            // singular grammar at N == 1.
+            "f goes out of scope. Its 1 captured resource is dropped.",
             "f owns a closure which owns 1 resource via capture",
         ],
         must_not_contain: &[
@@ -482,8 +483,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Generic owner state message would obscure the
             // closure-vs-resource distinction.
             "f is the owner of the resource",
-            // Wrong pluralization guard.
+            // Wrong pluralization guards.
             "owns 1 resources",
+            "1 captured resources are dropped",
+            // The previous count-less wording would slip through
+            // a substring match if we didn't pin the new one.
+            "Its captured resources are dropped",
         ],
     },
     TooltipExpect {
@@ -496,7 +501,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (move) from s to f",
             "Closure capture (move) from t to f",
             "Closure f captures: s (moved), t (moved)",
-            "f goes out of scope. Its captured resources are dropped.",
+            "f goes out of scope. Its 2 captured resources are dropped.",
             "f owns a closure which owns 2 resources via capture",
         ],
         must_not_contain: &[
@@ -507,6 +512,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure f captures (moves) t's resource",
             "f is the owner of the resource",
             "owns 2 resource via capture",
+            "2 captured resource is dropped",
+            "Its captured resources are dropped",
         ],
     },
     TooltipExpect {
@@ -536,6 +543,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from s to f",
             "Closure f captures an immutable reference to s",
             // No move captures → no "captured resources are dropped".
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f goes out of scope. Its 2 captured resources are dropped.",
             "f goes out of scope. Its captured resources are dropped.",
             // Borrow-only closure → no upgrade to "owns N resources via capture".
             "f owns a closure which owns",
@@ -563,6 +572,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (move) from s to f",
             "Mutable borrow from s to f",
             "Closure f captures a mutable reference to s",
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f goes out of scope. Its 2 captured resources are dropped.",
             "f goes out of scope. Its captured resources are dropped.",
             "f owns a closure which owns",
             "f is the owner of the resource",
