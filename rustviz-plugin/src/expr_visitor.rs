@@ -546,54 +546,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let owner_hash = self.rap_hashes as u64;
           let parent_is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
           self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.current_scope,!self.inside_branch);
-          // Resolve each field's substituted type so we can tell
-          // which fields are references (a `Excerpt<'a> { p: &'a
-          // str }` has p: &str at construction time, modelled as
-          // a StaticRef RAP that's a member of the parent struct)
-          // versus owned values (registered as Struct members
-          // exactly as before).
-          let generic_args = match ty.kind() {
-            TyKind::Adt(_, args) => *args,
-            _ => unreachable!("ty.is_adt() but kind is not Adt"),
-          };
-          for field in ty.ty_adt_def().unwrap().all_fields() {
-            let field_name = format!("{}.{}", name.clone(), field.name.as_str());
-            let field_ty = field.ty(self.tcx, generic_args);
-            if field_ty.is_ref() {
-              let ref_mutability = bool_of_mut(field_ty.ref_mutability().unwrap());
-              // The field's lender is whatever the user passed in
-              // for that field at the construction site; we wire
-              // that up later in match_rhs's Struct arm via the
-              // already-computed get_ref_data path. For now, seed
-              // borrow_map with Anonymous lender as a placeholder
-              // so the renderer can still draw the ref-line; the
-              // Struct arm will overwrite it.
-              if ref_mutability {
-                self.add_mut_ref_member(field_name.clone(), mutability,
-                    self.current_scope, !self.inside_branch, Some(owner_hash));
-              } else {
-                self.add_static_ref_member(field_name.clone(), mutability,
-                    self.current_scope, !self.inside_branch, Some(owner_hash));
-              }
-              // The borrow stored in this field is alive for as
-              // long as the parent struct is — so the loan
-              // extends to the end of the enclosing scope, same
-              // policy as fn-param refs which also borrow for
-              // the full body. Without this the ref-line
-              // trapezoid collapses (assigned_at == lifetime).
-              self.borrow_map.insert(field_name, RefData {
-                lender: ResourceTy::Anonymous,
-                assigned_at: expr_to_line(&expr, &self.tcx),
-                lifetime: self.current_scope,
-                ref_mutability,
-                aliasing: VecDeque::new(),
-              });
-            } else {
-              let field_is_copy = self.ty_is_copy(field_ty, expr.hir_id.owner);
-              self.add_struct(field_name, owner_hash, true, mutability, field_is_copy,
-                  self.current_scope, !self.inside_branch);
-            }
-          }
+          self.register_struct_members(
+            &name,
+            ty,
+            owner_hash,
+            mutability,
+            expr,
+          );
         },
         AdtKind::Union => {
           warn!("lhs union not implemented yet")
@@ -610,6 +569,84 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     else {
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_owner(name, mutability, is_copy, self.current_scope, !self.inside_branch);
+    }
+  }
+
+  /// Register `prefix.field` RAPs for every field of a struct type,
+  /// recursing into nested structs so accesses like `r.a.b` resolve.
+  ///
+  /// `top_owner_hash` is the timeline-grouping key for the outermost
+  /// struct — every nested member shares it so the renderer keeps
+  /// the whole tree under a single struct group, the same way flat
+  /// struct members already share their parent's group today.
+  ///
+  /// Reference fields (e.g. `Excerpt<'a> { p: &'a str }`) get the
+  /// same StaticRef/MutRef-member treatment as before, with a
+  /// placeholder Anonymous lender that the Struct arm of `match_rhs`
+  /// overwrites once it sees the construction-site initializer.
+  /// Owned struct fields recurse so `r.a.b.c` etc. land in `raps`
+  /// under their qualified names; Field-arm lookups in
+  /// `expr_visitor_utils` then find them and emit events instead of
+  /// silently giving up.
+  fn register_struct_members(
+    &mut self,
+    prefix: &str,
+    ty: Ty<'tcx>,
+    top_owner_hash: u64,
+    mutability: bool,
+    construction_expr: &'tcx Expr<'tcx>,
+  ) {
+    let generic_args = match ty.kind() {
+      TyKind::Adt(_, args) => *args,
+      _ => unreachable!("register_struct_members called with non-Adt ty"),
+    };
+    let owner_id = construction_expr.hir_id.owner;
+    let assigned_at = expr_to_line(&construction_expr, &self.tcx);
+    for field in ty.ty_adt_def().unwrap().all_fields() {
+      let field_name = format!("{}.{}", prefix, field.name.as_str());
+      let field_ty = field.ty(self.tcx, generic_args);
+      if field_ty.is_ref() {
+        let ref_mutability = bool_of_mut(field_ty.ref_mutability().unwrap());
+        if ref_mutability {
+          self.add_mut_ref_member(field_name.clone(), mutability,
+              self.current_scope, !self.inside_branch, Some(top_owner_hash));
+        } else {
+          self.add_static_ref_member(field_name.clone(), mutability,
+              self.current_scope, !self.inside_branch, Some(top_owner_hash));
+        }
+        // Same lender-placeholder rationale as the flat case before
+        // the refactor: borrow stored in this field outlives the
+        // statement, so stretch the loan to the enclosing scope so
+        // the ref-line trapezoid actually has a non-degenerate range.
+        self.borrow_map.insert(field_name, RefData {
+          lender: ResourceTy::Anonymous,
+          assigned_at,
+          lifetime: self.current_scope,
+          ref_mutability,
+          aliasing: VecDeque::new(),
+        });
+      } else {
+        let field_is_copy = self.ty_is_copy(field_ty, owner_id);
+        self.add_struct(field_name.clone(), top_owner_hash, true, mutability, field_is_copy,
+            self.current_scope, !self.inside_branch);
+        // Recurse for nested struct fields. Skip enums / unions
+        // (only struct ADTs are flattened today) and skip the
+        // special-owner builtins like `String` whose internals
+        // we deliberately don't expose.
+        if field_ty.is_adt() && !ty_is_special_owner(&self.tcx, &field_ty) {
+          if let Some(adt_def) = field_ty.ty_adt_def() {
+            if matches!(adt_def.adt_kind(), AdtKind::Struct) {
+              self.register_struct_members(
+                &field_name,
+                field_ty,
+                top_owner_hash,
+                mutability,
+                construction_expr,
+              );
+            }
+          }
+        }
+      }
     }
   }
 

@@ -37,6 +37,54 @@ const EXPECTED_OK: &[&str] = &[
     "ownershipFunctions",
     "testStaticB",
     "testMutB",
+    // Field-projection / nested-struct cases — see expected-arrows
+    // table below for the per-snippet shape we're locking in.
+    "nested_struct_borrow",
+    "nested_struct_move",
+    "nested_struct_passref",
+    "field_method_call",
+    "field_through_ref",
+];
+
+/// Specific arrow tooltips each snippet must produce. The check is
+/// containment (extra arrows are fine), so adding new tracked events
+/// to the plugin doesn't break these tests — only removing the
+/// listed ones does. Each tuple is (snippet stem, list of expected
+/// arrow tooltips, in-source order doesn't matter).
+///
+/// "Arrow tooltip" = the human-readable string the renderer puts on
+/// the `data-tooltip-text` attribute of an arrow `<g>`. We compare
+/// the un-HTML-escaped form so multi-segment names like `r.a.b` and
+/// punctuation render naturally.
+///
+/// These tests are the regression bar for issues #71 (`r.s.method()`),
+/// #72 (nested-struct reads / borrows / moves), and #73 (`(&r).s`).
+const EXPECTED_ARROWS: &[(&str, &[&str])] = &[
+    // #72
+    ("nested_struct_borrow", &[
+        "Move from String::from to r.a.b",
+        "Immutable borrow from r.a.b to p",
+        "Return immutably borrowed resource from p to r.a.b",
+    ]),
+    ("nested_struct_move", &[
+        "Move from String::from to r.a.b",
+        "Move from r.a.b to x",
+    ]),
+    ("nested_struct_passref", &[
+        "Move from String::from to r.a.b",
+        "read_a reads from r.a",
+    ]),
+    // #71
+    ("field_method_call", &[
+        "Move from String::from to r.s",
+        "push_str reads from/writes to r.s",
+    ]),
+    // #73
+    ("field_through_ref", &[
+        "Move from String::from to r.s",
+        "Immutable borrow from r.s to p",
+        "Return immutably borrowed resource from p to r.s",
+    ]),
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -95,6 +143,83 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         timeline.contains("tooltip-trigger"),
         "{}: timeline has no tooltip-trigger elements (annotations missing)",
         name
+    );
+}
+
+/// Extract every arrow tooltip from a rendered timeline panel.
+///
+/// The renderer wraps each arrow in `<g class="tooltip-trigger"
+/// data-tooltip-text="...">` inside `<g id="arrows">`. Tooltip text
+/// is HTML-escaped (`&lt;` / `&gt;` / `&quot;`) and contains nested
+/// `<span>` markup that we strip before comparing — what we want is
+/// the human-visible string ("Immutable borrow from r.a.b to p").
+fn arrow_tooltips(timeline_svg: &str) -> Vec<String> {
+    let arrows_start = match timeline_svg.find("<g id=\"arrows\">") {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let body = &timeline_svg[arrows_start..];
+    let mut out = Vec::new();
+    for chunk in body.split("data-tooltip-text=\"").skip(1) {
+        let raw = match chunk.find('"') {
+            Some(end) => &chunk[..end],
+            None => continue,
+        };
+        // Un-HTML-escape the small set the renderer emits.
+        let unescaped = raw
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&");
+        // Strip nested span markup; what's left is the visible text.
+        let mut clean = String::with_capacity(unescaped.len());
+        let mut in_tag = false;
+        for ch in unescaped.chars() {
+            if ch == '<' { in_tag = true; continue; }
+            if ch == '>' { in_tag = false; continue; }
+            if !in_tag { clean.push(ch); }
+        }
+        out.push(clean);
+    }
+    out
+}
+
+#[test]
+fn corpus_expected_arrows_present() {
+    let mut failures = Vec::new();
+    for (name, expected) in EXPECTED_ARROWS {
+        let res = std::panic::catch_unwind(|| {
+            let rv = run_with_local_backend(name);
+            let actual = arrow_tooltips(&rv.timeline_panel_string());
+            let mut missing: Vec<&str> = Vec::new();
+            for want in *expected {
+                if !actual.iter().any(|a| a == want) {
+                    missing.push(*want);
+                }
+            }
+            if !missing.is_empty() {
+                panic!(
+                    "missing arrows {:?}; actual arrows were:\n  {}",
+                    missing,
+                    actual.join("\n  ")
+                );
+            }
+        });
+        if let Err(payload) = res {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+            failures.push(format!("{}: {}", name, msg));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} arrow assertions failed:\n  {}",
+        failures.len(),
+        EXPECTED_ARROWS.len(),
+        failures.join("\n  ")
     );
 }
 
