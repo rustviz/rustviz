@@ -107,10 +107,17 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             match body_with_facts.borrow_set.location_map().get(&location) {
               Some(b_data) => {
                 // println!("borrow_data for location {:#?} : {:#?}", location, b_data);
-                let b_place = b_data.borrowed_place().local_or_deref_local();
-                let a_place = b_data.assigned_place().local_or_deref_local();
-                // println!("borrowed_place: {:#?}, as local: {:#?}", b_data.borrowed_place().to_string(self.tcx, &borrow_data.body), b_place);
-                // println!("assigned place {:#?}, as local {:#?}", b_data.assigned_place().to_string(self.tcx, &borrow_data.body), a_place);
+                // For a borrow of `r.a.b`, MIR's `borrowed_place`
+                // is `r` with projections [Field(a), Field(b)].
+                // `local_or_deref_local()` returns None for any
+                // projection that isn't a single deref, which is why
+                // ref-lifetime refinement used to skip every borrow
+                // of a struct field. Use the base `.local` directly
+                // so we always get the source name; `borrow_match`
+                // matches against either the exact lender name or a
+                // path prefix terminated by `.`.
+                let b_place = Some(b_data.borrowed_place().local);
+                let a_place = Some(b_data.assigned_place().local);
                 let b_name = self.src_name_of_local(b_place, &loc_to_source_name);
                 let a_name = self.src_name_of_local(a_place, &loc_to_source_name);
 
@@ -207,15 +214,30 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     // Helper function to help refine loan regions that we compute in HIR
     pub fn borrow_match(r: &RefData, b: &MIRBorrowData) -> Option<usize> {
-        if b.borrowed_place.is_some() {
-            // For now I think it's enough to just check the assignment line and borrowed place for equality
-            // Although this is by no means sound logic
-            if *b.borrowed_place.as_ref().unwrap() == r.lender.real_name() && b.region.0 == r.assigned_at {
-                return Some(b.region.1)
-            } 
-            else { 
-                return None 
-            }
+        let mir_place = b.borrowed_place.as_ref()?;
+        if b.region.0 != r.assigned_at {
+            return None;
+        }
+        let lender_name = r.lender.real_name();
+        // MIR's `borrowed_place().local_or_deref_local()` only gives
+        // back the base Local for a place — for `&r.a.b` it returns
+        // the name `r`, not `r.a.b`. Our lender name is the full
+        // dotted path (`r.a.b`). Accept a match when MIR's name is
+        // either exactly equal OR is a path prefix terminated by `.`
+        // (so `r` matches `r.a.b` but not `roar.a.b`). Without this
+        // any borrow rooted at a struct field skips MIR refinement
+        // and the lifetime stays pinned to the assignment line —
+        // which makes the dotted ref-line render with zero height
+        // when the only use of the borrower is inside a macro
+        // (where visit_expr can't reach the Path to extend it
+        // through update_rap).
+        if *mir_place == lender_name {
+            return Some(b.region.1);
+        }
+        if lender_name.starts_with(mir_place)
+            && lender_name.as_bytes().get(mir_place.len()) == Some(&b'.')
+        {
+            return Some(b.region.1);
         }
         None
     }
