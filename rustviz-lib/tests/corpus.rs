@@ -454,35 +454,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
 
     // ─── Closure captures (#79) ──────────────────────────────────────
+    //
+    // Move/borrow events into a closure binding render with
+    // capture-flavoured arrow labels (`Closure capture (move)` /
+    // `… (immutable borrow)` / `… (mutable borrow)`) instead of the
+    // generic `Move` / `Immutable borrow` / `Mutable borrow`. The
+    // closure binding's scope-end also gets a "captured resources
+    // are dropped" message in place of the generic "resource is
+    // dropped" suffix.
     TooltipExpect {
         name: "closure_move_single",
-        // `move ||` with a single captured upvar → Move arrow.
         must_contain: &[
             "Move from String::from to s",
+            "Closure capture (move) from s to f",
+            "f goes out of scope. Its captured resources are dropped.",
+        ],
+        must_not_contain: &[
+            // Generic Move-arrow label would obscure the capture.
             "Move from s to f",
         ],
-        must_not_contain: &[],
     },
     TooltipExpect {
         name: "closure_move_multi",
-        // Each captured upvar produces its own Move arrow.
+        // Each captured upvar produces its own capture arrow.
         must_contain: &[
+            "Closure capture (move) from s to f",
+            "Closure capture (move) from t to f",
+            "f goes out of scope. Its captured resources are dropped.",
+        ],
+        must_not_contain: &[
             "Move from s to f",
             "Move from t to f",
         ],
-        must_not_contain: &[],
     },
     TooltipExpect {
         name: "closure_borrow_imm",
         // Non-`move` closure that reads its upvar → static borrow.
         must_contain: &[
             "Move from String::from to s",
-            "Immutable borrow from s to f",
+            "Closure capture (immutable borrow) from s to f",
+            "f goes out of scope. Its captured resources are dropped.",
         ],
         must_not_contain: &[
             // Critically: the closure should *not* be modeled as a
             // move — `s` is still usable after `f` runs.
             "Move from s to f",
+            "Closure capture (move) from s to f",
+            "Immutable borrow from s to f",
         ],
     },
     TooltipExpect {
@@ -490,10 +508,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Non-`move` closure that mutates its upvar → mutable borrow.
         must_contain: &[
             "Move from String::from to s",
-            "Mutable borrow from s to f",
+            "Closure capture (mutable borrow) from s to f",
+            "f goes out of scope. Its captured resources are dropped.",
         ],
         must_not_contain: &[
             "Move from s to f",
+            "Closure capture (move) from s to f",
+            "Mutable borrow from s to f",
         ],
     },
 ];

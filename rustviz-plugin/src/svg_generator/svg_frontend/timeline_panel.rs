@@ -684,7 +684,32 @@ fn render_dot(
                 Event::OwnerGoOutOfScope => {
                     let ro = &visualization_data.timelines[hash].resource_access_point;
                     let is_copy = ro.is_copy();
-                    if !resource_hold {
+                    let is_closure = ro.is_closure();
+                    if is_closure {
+                        // The closure value is dropped, which in turn
+                        // drops every captured upvar (move) or ends
+                        // the borrow (ref). For borrow-capture
+                        // closures, `resource_hold` ends up false on
+                        // `f` (no Move/Acquire of an owned resource
+                        // on `f`'s timeline), so the generic flow
+                        // would say "No resource is dropped" — wrong
+                        // for a closure, whose drop *is* what
+                        // releases the captures. Override unconditionally.
+                        let cx = timeline_data.x_val;
+                        let cy = get_y_axis_pos(*line_number);
+                        let title = hover_messages::event_dot_closure_go_out_of_scope(&name);
+                        let drop_data = DropDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title,
+                            p1x: cx - 3, p1y: cy - 1,
+                            p2x: cx + 3, p2y: cy - 1,
+                            p3x: cx,     p3y: cy + 3,
+                        };
+                        append_drop_dot(&drop_data, output, timeline_data, registry);
+                        continue;
+                    } else if !resource_hold {
                         // Resource was already moved out — same copy
                         // for both Copy and non-Copy types: just note
                         // there's nothing to drop here.

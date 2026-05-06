@@ -196,7 +196,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_closure: false}), scope, is_global);
+  }
+
+  // Adds an owner RAP that binds a closure literal. Routed through
+  // a separate constructor (rather than an extra arg on add_owner) so
+  // we don't churn every call site — closures are the only producer.
+  pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_closure: true}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -576,6 +583,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     else if ty.is_fn() {
       error!("cannot have fn as lhs of expr");
+    }
+    else if ty.is_closure() {
+      // Tag the binding as a closure so the tooltip layer can swap
+      // capture-flavoured wording for moves/borrows into `name` and
+      // for `name`'s scope-end. The `match_rhs` ExprKind::Closure
+      // arm emits the actual capture events on top of this RAP.
+      self.add_closure_owner(name, mutability, self.current_scope, !self.inside_branch);
     }
     else {
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);

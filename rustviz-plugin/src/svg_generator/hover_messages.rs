@@ -49,6 +49,23 @@ pub fn event_dot_owner_go_out_out_scope(my_name: &String) -> String {
     )                             //was moved from the variable earlier.
 }
 
+// Closure binding goes out of scope. The closure value is dropped,
+// which in turn drops every captured upvar (for `move` captures) or
+// ends the borrow of every captured upvar (for ref captures). The
+// distinction isn't surfaced here because either way, from the
+// captured upvar's point of view, the closure releases it.
+//
+// Includes the "captured resources are dropped" suffix inline so the
+// timeline_panel's drop-dot path doesn't append the generic
+// "Its resource is dropped." tail to a closure's scope-end.
+pub fn event_dot_closure_go_out_of_scope(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} goes out of scope. Its captured resources are dropped.",
+        my_name_fmt
+    )
+}
+
 // An owned (non-ref) function parameter receives its resource from
 // whatever the caller passed. The L-shaped arrow on the param's
 // timeline visually anchors that "from outside this scope" origin;
@@ -269,6 +286,74 @@ pub fn event_dot_static_borrow(my_name: &String, _target_name: &String) -> Strin
     format!(
         "{0} immutably borrows a resource",
         my_name_fmt
+    )
+}
+
+// ─── Closure capture variants ────────────────────────────────────
+//
+// Used when the `to`/`is` of an event is a closure binding. Wording
+// emphasizes that the move/borrow is happening because the closure
+// captured the upvar, not because the user wrote an explicit `let
+// y = x` / `let r = &x`.
+
+// Source dot for a `move`-captured upvar. Mirrors event_dot_move_to.
+pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let target_fmt = fmt_style(target_name);
+    format!(
+        "{0}'s resource is captured (moved) by closure {1}",
+        my_name_fmt, target_fmt
+    )
+}
+
+// Source dot for an immutably captured upvar. Mirrors event_dot_static_lend.
+pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let target_fmt = fmt_style(target_name);
+    format!(
+        "{0}'s resource is captured (immutably borrowed) by closure {1}",
+        my_name_fmt, target_fmt
+    )
+}
+
+// Source dot for a mutably captured upvar. Mirrors event_dot_mut_lend.
+pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let target_fmt = fmt_style(target_name);
+    format!(
+        "{0}'s resource is captured (mutably borrowed) by closure {1}",
+        my_name_fmt, target_fmt
+    )
+}
+
+// Closure-side dot when a `move`-captured upvar lands on `f`'s
+// timeline. Mirrors event_dot_acquire.
+pub fn event_dot_closure_capture_acquire(my_name: &String, from_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let from_fmt = fmt_style(from_name);
+    format!(
+        "Closure {0} captures (moves) {1}'s resource",
+        my_name_fmt, from_fmt
+    )
+}
+
+// Closure-side dot for an immutable capture. Mirrors event_dot_static_borrow.
+pub fn event_dot_closure_capture_static_borrow(my_name: &String, from_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let from_fmt = fmt_style(from_name);
+    format!(
+        "Closure {0} captures an immutable reference to {1}",
+        my_name_fmt, from_fmt
+    )
+}
+
+// Closure-side dot for a mutable capture. Mirrors event_dot_mut_borrow.
+pub fn event_dot_closure_capture_mut_borrow(my_name: &String, from_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let from_fmt = fmt_style(from_name);
+    format!(
+        "Closure {0} captures a mutable reference to {1}",
+        my_name_fmt, from_fmt
     )
 }
 
