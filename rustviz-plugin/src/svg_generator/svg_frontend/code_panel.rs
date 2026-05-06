@@ -49,16 +49,23 @@ pub fn render_code_panel(
     let x = 20;
     let mut y = 90;
     let mut output = String::from("    <g id=\"code\">\n");
-    // `source_line` tracks the user's source-line number — what we
-    // print in the gutter for real source rows. `visual_row`
-    // tracks the renderer's row counter — drives both the y
-    // position and the `l_map` lookup, since `l_map`'s keys are
-    // post-shift visual rows (see svg_generation.rs's `final_line_num
-    // = line_num + extra_lines`). They diverge whenever an arrow
-    // stack inserts a blank row: visual_row keeps ticking, source_line
-    // pauses. Keeping them separate is what lets us number the
-    // displayed lines 1..n_source while still indexing per-row
-    // structures by the visual row.
+    // Three counters move at three different rates and aren't
+    // interchangeable:
+    //
+    //  - `iter_idx`    — 1-indexed position in `annotated_lines`. The
+    //                    fn-blank pre-pass already injected synthetic
+    //                    blanks into that vector, so `synthetic_blank_rows`
+    //                    keys live in this space (they're computed
+    //                    pre-arrow-stack-shift in svg_generation.rs).
+    //  - `source_line` — what we print in the gutter; only ticks for
+    //                    real user source rows.
+    //  - `visual_row`  — the renderer's row counter; ticks per row
+    //                    including arrow-stack inserts. Drives both
+    //                    the y position and the `l_map` lookup, since
+    //                    `l_map` keys are post-arrow-stack visual rows
+    //                    (see svg_generation.rs's
+    //                    `final_line_num = line_num + extra_lines`).
+    let mut iter_idx: usize = 1;
     let mut source_line: usize = 1;
     let mut visual_row: usize = 1;
     // Threaded through per-line `highlight()` calls so a `/* … */`
@@ -67,7 +74,7 @@ pub fn render_code_panel(
     let mut in_block_comment = false;
     for line in annotated_lines {
         let line_string = syntax::highlight(line, &mut in_block_comment);
-        let is_synthetic_blank = synthetic_blank_rows.contains(&visual_row);
+        let is_synthetic_blank = synthetic_blank_rows.contains(&iter_idx);
         let mut data = BTreeMap::new();
         data.insert("X_VAL".to_string(), x.to_string());
         data.insert("Y_VAL".to_string(), y.to_string());
@@ -116,6 +123,7 @@ pub fn render_code_panel(
             source_line += 1;
         }
         visual_row += 1;
+        iter_idx += 1;
     }
     output.push_str("    </g>\n");
     // Returned value used to be the next line number; preserve that
