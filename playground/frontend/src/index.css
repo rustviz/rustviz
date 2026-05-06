@@ -1,107 +1,327 @@
+/* ─── Base ──────────────────────────────────────────────────────── */
+
+:root {
+  --bg: #fafafa;
+  --bg-panel: #ffffff;
+  --bg-titlebar: #2b2b2b;
+  --fg: #1f1f1f;
+  --fg-muted: #6e6e6e;
+  --fg-titlebar: #f5f5f5;
+  --fg-titlebar-muted: #b8b8b8;
+  --border: #e1e1e1;
+  --border-strong: #cdcdcd;
+  --accent: #cc7116;
+  --accent-hover: #b86310;
+  --accent-disabled: #d8b793;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
+  --titlebar-height: 48px;
+  --radius: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
 body {
-  font: 16px "Helvetica Neue", "Open Sans", Arial, sans-serif;  
+  font: 14px/1.5 "Inter", "Helvetica Neue", "Open Sans", system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  overflow: hidden; /* layout owns the scroll */
 }
 
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
 
-h1 {
-  margin-top: 0;
-  font-weight: bold;
-  text-align: center;
+code {
+  font-family: "Source Code Pro", "SF Mono", Consolas, "Ubuntu Mono", Menlo, monospace;
+  font-size: 0.9em;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 1px 5px;
+  border-radius: 3px;
 }
 
-p {
-  max-width: 800px;
-  margin-left: 50px;
+/* ─── App shell ─────────────────────────────────────────────────── */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
 }
 
-
-/* Sized to fit ~120 monospace characters of code + the line-number
-   gutter + the 5px border on each side, using a fixed pixel width
-   instead of `width: 50%`. With the percentage-based width the box
-   resized whenever the viewport did, so the right edge floated
-   relative to the prose; users now get a predictable column the
-   same way real code editors do. The `max-width` is a guard for
-   narrow windows: it lets the box shrink below 1060 px when the
-   viewport gets too small to fit, instead of overflowing past the
-   right edge.
-   The 1060 px figure is approximate — derived from a 14 px monospace
-   font where '0' is ~8.4 px wide, so 120 chars ≈ 1008 px, plus ~40 px
-   for a 4-digit line-number gutter, plus 10 px of border. Tweak if a
-   future font change throws the alignment off. */
-#editor {
-    height: 300px;
-    width: 1060px;
-    max-width: calc(100% - 100px);
-    margin-left: 50px;
+.main-split {
+  flex: 1;
+  min-height: 0; /* let the panels actually shrink */
 }
 
-/* Stretch editor to fit inside its containing div */
-.cm-editor {
-    height: 100%;
-    width: 100%;
-    border-style: solid;
-    border-width: 5px;
-    border-radius: 5px;
-    /* Pin the font-size so the column width above (1060 px) remains a
-       reasonable approximation of "120 chars". Without this the box
-       would render at the user-agent default (often 16 px), which
-       would make 120 chars overflow the box. */
-    font-size: 14px;
+/* ─── Titlebar ──────────────────────────────────────────────────── */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--titlebar-height);
+  padding: 0 20px;
+  background: var(--bg-titlebar);
+  color: var(--fg-titlebar);
+  border-bottom: 1px solid #1a1a1a;
+  flex-shrink: 0;
+  gap: 16px;
 }
 
-/* Button styles */
-.large-button {
-  padding: 20px 40px; /* Increase padding to make the button larger */
-  margin: 50px; /* Add a 50px margin on all sides */
-  font-size: 16px; /* Increase the font size for better readability */
-  /* Hold the button width steady so it doesn't visibly shrink when its
-     label switches from "Generate Visualization" to "Generating…". */
-  min-width: 280px;
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
 }
+
+.titlebar-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.titlebar-title a {
+  color: var(--accent);
+}
+.titlebar-title a:hover { text-decoration: none; }
+
+.titlebar-callout {
+  font-size: 13px;
+  color: var(--fg-titlebar);
+  background: rgba(204, 113, 22, 0.18);
+  border: 1px solid rgba(204, 113, 22, 0.5);
+  padding: 4px 12px;
+  border-radius: 999px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.titlebar-callout:hover {
+  background: rgba(204, 113, 22, 0.32);
+  border-color: var(--accent);
+  text-decoration: none;
+}
+
+.titlebar-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg-titlebar-muted);
+  white-space: nowrap;
+}
+.titlebar-meta code {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg-titlebar);
+  font-size: 11px;
+}
+
+.titlebar-stars {
+  display: inline-flex;
+  align-items: center;
+  /* shields.io renders a slightly off-baseline image; nudge it
+     down a touch so it lines up with the version codes next to it. */
+  margin-bottom: -2px;
+}
+.titlebar-stars img { display: block; }
+
+/* ─── Panels (the resizable regions themselves) ─────────────────── */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  overflow: hidden; /* per-panel scroll lives on the inner container */
+  min-height: 0;
+  min-width: 0;
+}
+
+.description-panel,
+.viz-panel {
+  background: var(--bg-panel);
+}
+
+.description {
+  padding: 20px 24px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  max-width: 80ch;
+  line-height: 1.55;
+}
+
+.description h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin: 24px 0 8px;
+}
+
+.description p { margin: 8px 0; }
+.description ul { margin: 6px 0 14px; padding-left: 22px; }
+.description li { margin: 3px 0; }
+.description code { font-size: 12px; }
+
+/* ─── Editor panel (top-right) ──────────────────────────────────── */
+
+.editor-panel {
+  background: var(--bg-panel);
+}
+
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: #f6f6f6;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.example-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.example-picker label {
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+.example-picker select {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  cursor: pointer;
+  max-width: 280px;
+}
+.example-picker select:hover { border-color: var(--fg-muted); }
 
 .cm-button {
-  background-color: #cc7116; /* Example background color */
-  color: white; /* Example text color */
-  border: none; /* Remove default border */
-  border-radius: 5px; /* Example border radius */
-  cursor: pointer; /* Change cursor on hover */
-  /* Add other styles as needed */
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+  transition: background 120ms ease;
 }
-
+.cm-button:hover:not(:disabled) { background: var(--accent-hover); }
 .cm-button:disabled {
-  background-color: #ccc; /* Change background color when disabled */
-  cursor: not-allowed; /* Change cursor when disabled */
+  background: var(--accent-disabled);
+  cursor: not-allowed;
 }
 
-.loader {
-  border: 2px solid rgba(0, 0, 0, 0.1);
-  border-left-color: #000;
-  border-radius: 50%;
-  width: 16px;
-  height: 16px;
-  animation: spin 1s linear infinite;
+.generate-button {
+  margin-left: auto;
+  padding: 6px 16px;
+  font-size: 13px;
+  min-width: 180px;
 }
 
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+.editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
-/* Loading status block under the rust-version note while a /submit-code
-   request is in flight. The button's own animated label indicates
-   "doing work"; this block adds a textual cue + a note about the
-   cold-start latency the Fly compile server can introduce after
-   auto-stop. Stacks naturally under .rust-version (rust-version's
-   bottom margin provides the gap). */
+/* CodeMirror itself fills the editor host. Border lives on the host
+   container, not the editor, so there's no double border with the
+   panel chrome. */
+.cm-editor {
+  height: 100%;
+  width: 100%;
+  font-size: 13px;
+}
+.cm-editor .cm-scroller {
+  font-family: "Source Code Pro", "SF Mono", Consolas, "Ubuntu Mono", Menlo, monospace;
+}
+
+/* ─── Visualization panel (bottom) ──────────────────────────────── */
+
+.viz-panel { background: #f1f1f1; }
+
+.viz-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px;
+}
+
+/* Restore the side-by-side layout for the two SVG panels the plugin
+   returns (code panel + timeline panel). */
+.flex-container {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+}
+.code_panel { flex-shrink: 0; }
+.tl_panel { flex-shrink: 0; }
+
+/* ─── Resize handles ────────────────────────────────────────────── */
+
+/* Vertical handle = the bar BETWEEN top and bottom rows (drag up/down).
+   Horizontal handle = the bar BETWEEN left and right (drag left/right).
+   Names follow the axis the user is dragging along, which is the
+   convention `react-resizable-panels` uses internally. */
+.resize-handle {
+  position: relative;
+  background: var(--border);
+  transition: background 120ms ease;
+}
+.resize-handle:hover,
+.resize-handle[data-resize-handle-state="hover"],
+.resize-handle[data-resize-handle-state="drag"] {
+  background: var(--accent);
+}
+
+.resize-handle-horizontal {
+  height: 4px;
+  cursor: row-resize;
+}
+
+.resize-handle-vertical {
+  width: 4px;
+  cursor: col-resize;
+}
+
+/* ─── Loading + error chrome ────────────────────────────────────── */
+
 .loading-status {
-  margin-top: 0;
+  padding: 24px;
+  color: var(--fg-muted);
 }
 .loading-message {
-  font-size: 18px;
-  margin-bottom: 4px;
+  font-size: 16px;
+  color: var(--fg);
+  margin: 0 0 6px;
 }
-/* Animated ellipsis: render fixed "..." but reveal one dot at a time by
-   animating the visible width in 4 steps (0 → 3 dots, then loops). */
+.loading-note {
+  font-size: 13px;
+  margin: 0;
+  max-width: 60ch;
+}
+
+/* Animated ellipsis: render fixed "..." but reveal one dot at a time
+   by animating the visible width in 4 steps (0 → 3 dots, then loops). */
 .ellipsis::after {
   display: inline-block;
   vertical-align: bottom;
@@ -113,62 +333,3 @@ p {
 @keyframes ellipsis {
   to { width: 1.5em; }
 }
-.loading-note {
-  font-size: 14px;
-  color: #666;
-  margin-top: 0;
-}
-
-/* Toolchain note under the button. Small + subdued because it's
-   informational metadata, not user-facing UI; we want users to glance
-   at it and immediately know which rustc their snippet runs against
-   without it competing with the editor and visualization for
-   attention.
-   margin-top: -50px fully cancels the button's 50px bottom margin so
-   this paragraph sits directly under the button with no gap; the
-   loading-status block (when present) and the result panel both stack
-   below it using rust-version's own bottom margin as the gap, so
-   they can never overlap. */
-.rust-version {
-  font-size: 13px;
-  color: #888;
-  margin-top: -50px;
-  margin-bottom: 16px;
-}
-.rust-version code {
-  font-size: 13px;
-}
-
-/* Preloaded-example dropdown above the editor. Aligned with the
-   editor's left margin (50px) so it visually anchors to the same
-   column as the code box and the rest of the prose. */
-.example-picker {
-  margin: 0 0 8px 50px;
-  font-size: 14px;
-}
-.example-picker label {
-  margin-right: 8px;
-}
-.example-picker select {
-  font-size: 14px;
-  padding: 4px 8px;
-  max-width: 360px;
-}
-
-
-/* 
-.flex-container {
-  display: flex;
-  flex-direction: row;
-  justify-content: flex-start;
-  flex-wrap: nowrap;
-  flex-shrink: 0;
-}
-
-.tl_panel {
-  flex-grow: 0;
-}
-
-.code_panel {
-  flex-grow: 1;
-} */

@@ -44,12 +44,26 @@ RustViz is a teaching tool — it supports a meaningful subset of Rust,
 not all of it. Currently unsupported (or known to misbehave):
 
 - For-loops
-- Conditional `let` bindings
-- Borrows that occur inside conditionals
-- Some borrows over struct members
-- Lifetime annotations beyond what the
-  [`Excerpt<'a>`](https://github.com/rustviz/tutorial/blob/master/src/structs.md)
-  tutorial example covers
+- Bindings or borrows inside an `if` or `match` branch body (the
+  conditional itself can return a value into a `let`, but tracking
+  events inside the branch isn't supported)
+- Closures — captures (whether by reference or by `move`) aren't
+  drawn as arrows, so the visualization silently omits the capture
+  event
+- Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
+  objects (`Box<dyn T>`)
+- Indexing or slicing collections like `Vec` (string slices like
+  `&s[..]` on a `String` do work)
+- The `?` operator (and other desugaring-heavy forms like
+  `async`/`await`)
+- Some struct field access patterns: chaining a method onto a field
+  (`r.field.method()`), nested field access (`r.a.b`), and field
+  access through a reference (`(&r).field`). Plain `r.field` and
+  `&r.field` work.
+- Inherent methods (`impl S { fn ... }`) are fragile — the
+  Rectangle/area pattern (`fn area(&self) -> u32 { self.width *
+  self.height }`) works, but minor variants (e.g. a one-field
+  `fn get(&self) -> i32 { self.n }`) crash.
 
 ### To fix / implement
 

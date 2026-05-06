@@ -163,12 +163,26 @@ RustViz 2 is a research tool. It supports a meaningful subset of Rust but
 not all of it. Currently unsupported (or known to misbehave):
 
 - For-loops
-- Conditional `let` bindings
-- Borrows that occur inside conditionals
-- Lifetime annotations beyond the simple cases the
-  [`Excerpt<'a>`](https://github.com/rustviz/tutorial/blob/master/src/structs.md)
-  tutorial example covers
-- Some borrows over struct members
+- Bindings or borrows inside an `if` or `match` branch body (the
+  conditional itself can return a value into a `let`, but tracking
+  events inside the branch isn't supported)
+- Closures — captures (whether by reference or by `move`) aren't
+  drawn as arrows, so the visualization silently omits the capture
+  event
+- Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
+  objects (`Box<dyn T>`)
+- Indexing or slicing collections like `Vec` (string slices like
+  `&s[..]` on a `String` do work)
+- The `?` operator (and other desugaring-heavy forms like
+  `async`/`await`)
+- Some struct field access patterns: chaining a method onto a field
+  (`r.field.method()`), nested field access (`r.a.b`), and field
+  access through a reference (`(&r).field`). Plain `r.field` and
+  `&r.field` work.
+- Inherent methods (`impl S { fn ... }`) are fragile — the
+  Rectangle/area pattern (`fn area(&self) -> u32 { self.width *
+  self.height }`) works, but minor variants (e.g. a one-field
+  `fn get(&self) -> i32 { self.n }`) crash.
 
 The plugin has a TODO list with more detail in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).
@@ -231,6 +245,19 @@ them in dependency order (`rustviz-plugin` and `rustviz-lib` first,
 then `rustviz-cli` and `mdbook-rustviz`). A `CRATES_IO_TOKEN` repo
 secret with `publish-new` + `publish-update` scope on those four crate
 names is required.
+
+## Credits
+
+RustViz is a project of the
+[Future of Programming Lab](https://web.eecs.umich.edu/~comar/) at the
+University of Michigan. The plugin is built on
+[`rustc_plugin`](https://github.com/cognitive-engineering-lab/rustc_plugin) /
+[`rustc_utils`](https://github.com/cognitive-engineering-lab/rustc_plugin)
+by [Will Crichton](https://willcrichton.net/), and ports several
+MIR / borrow-fact helpers from
+[Aquascope](https://github.com/cognitive-engineering-lab/aquascope)
+(another visualization tool for Rust) by
+[Gavin Gray](https://gavinleroy.com/).
 
 ## License
 
