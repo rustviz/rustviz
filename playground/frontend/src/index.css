@@ -246,11 +246,23 @@ code {
 
 /* Compact toolbar buttons that sit between the example dropdown and
    the right-aligned Generate button. The `+` icon button is square;
-   the Rename button is wider but stays the same height. */
+   the Rename button is wider but stays the same height.
+   Gray-on-fg styling deliberately demotes them next to the orange
+   Generate button — these are example-list management, not the
+   primary action. */
 .toolbar-icon-button {
   padding: 4px 10px;
   font-size: 16px;
   line-height: 1;
+  background: var(--border);
+  color: var(--fg);
+}
+.toolbar-icon-button:hover:not(:disabled) {
+  background: var(--border-strong);
+}
+.toolbar-icon-button:disabled {
+  background: var(--border);
+  color: var(--fg-muted);
 }
 .editor-toolbar .cm-button:not(.generate-button):not(.toolbar-icon-button) {
   padding: 4px 10px;
