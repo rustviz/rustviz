@@ -548,7 +548,27 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           return;
         }
 
-        self.visit_expr(&guard_expr);
+        // if-let: `if let pat = expr { body }`. The guard is an
+        // ExprKind::Let; register its pattern bindings against the
+        // scrutinee so identifiers in the body resolve, and emit the
+        // scrutinee→binding event + a GoOutOfScope at the body's
+        // closing brace. Otherwise (plain `if cond { … }`) just visit
+        // the guard for any variable accesses inside it.
+        // If-let: collect the pattern bindings registered against the
+        // scrutinee. We add them to `if_decl` below so the Branch's
+        // decl_vars set covers them and `append_decl_branch_events`
+        // populates each binding's timeline with a branch-shaped
+        // history (the surrounding If arm already emits the
+        // GoOutOfScope events from `if_decl`, so the helper skips
+        // emitting them itself).
+        let iflet_bindings: HashSet<ResourceAccessPoint> =
+          if let ExprKind::Let(let_expr) = guard_expr.kind {
+            self.visit_expr(let_expr.init);
+            self.register_iflet_let_bindings(let_expr, None)
+          } else {
+            self.visit_expr(&guard_expr);
+            HashSet::new()
+          };
         self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
         self.visit_expr(&if_expr);
         let (else_live, else_decl) = match else_expr {
@@ -573,7 +593,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // live variables are defined as variables that are defined outside the conditional but
         // are used inside of it (the ones whose timelines will have a branch in the visualization)
         let if_live = get_live_of_expr(if_expr, &self.tcx, &self.raps);
-        let if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
+        // Bindings declared by an `if let` guard belong in the if
+        // branch's decl set (they live for the body block, same as a
+        // top-level `let` inside it).
+        let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
+        if_decl.extend(iflet_bindings);
         let mut liveness: HashSet<ResourceAccessPoint> = if_live.union(&else_live).cloned().collect();
 
         // If the guard sits on a line within the filter range below
@@ -639,19 +663,61 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       ExprKind::Loop(block, _, loop_ty, _span) => {
         match loop_ty {
           rustc_hir::LoopSource::While => {
-            match block.expr {
-              Some(e) => {
-                // while loop is just desugared to an if expression so just visit it
-                self.visit_expr(e);
-              } 
-              None => {
-
-
+            // rustc lowers `while cond { body }` to:
+            //   loop { if cond { body } else { break } }
+            // and `while let pat = expr { body }` similarly with cond
+            // = `Let(pat, expr)`. The wrapping span is marked
+            // DesugaringKind::WhileLoop, so visit_expr's If arm bails
+            // on `from_expansion` before reaching the body. Decode the
+            // shape here: visit cond, then walk the then-block with
+            // inside_branch = true, skipping the synthetic else-break.
+            let prev = self.inside_branch;
+            if let Some(e) = block.expr {
+              if let ExprKind::If(cond, then_body, _else) = e.kind {
+                // While-let: register the pattern bindings against the
+                // scrutinee so identifiers inside the body resolve.
+                // Pass body_end so the helper emits a GoOutOfScope at
+                // the body's closing brace — there's no surrounding
+                // Branch event to clean up after the binding (loop
+                // bodies are visited inline into the global timeline).
+                if let ExprKind::Let(let_expr) = cond.kind {
+                  self.visit_expr(let_expr.init);
+                  let body_end = self.tcx.sess.source_map()
+                    .lookup_char_pos(then_body.span.hi()).line;
+                  self.register_iflet_let_bindings(let_expr, Some(body_end));
+                } else {
+                  self.visit_expr(cond);
+                }
+                self.inside_branch = true;
+                self.visit_expr(then_body);
+                self.inside_branch = prev;
+                return;
               }
             }
+            // Defensive fallback if a future rustc tweaks the desugar.
+            self.inside_branch = true;
+            self.visit_block(block);
+            self.inside_branch = prev;
           }
-          _ => {
-            warn!("unhandled loop expr {:#?}", expr);
+          rustc_hir::LoopSource::Loop => {
+            // Bare `loop { body }`. No condition, no iterand — render
+            // as a single-iteration view: walk the body once with
+            // inside_branch = true so any RAPs declared inside have
+            // branch-scoped lifetimes. (The body always runs at least
+            // once, but we don't yet have a vocabulary for "always
+            // runs vs. may run", so use the same shape as while/for.)
+            let prev = self.inside_branch;
+            self.inside_branch = true;
+            self.visit_block(block);
+            self.inside_branch = prev;
+          }
+          rustc_hir::LoopSource::ForLoop => {
+            // For-loops are entered via the outer Match(ForLoopDesugar)
+            // arm, which drills into the inner Loop's Some-arm body
+            // directly. We don't expect to reach the inner Loop through
+            // the normal visit path; if we do, the Match arm has
+            // already handled the body, so walking it again would
+            // double-emit events. No-op.
           }
         }
       }

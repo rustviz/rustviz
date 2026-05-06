@@ -691,6 +691,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 self.get_dec_of_pat2(p, ty_results, parent, parent_ty, scope, res);
             }
         }
+        // `Some(x)` / `None` lower to `PatKind::Struct(QPath::LangItem(...))`
+        // with one PatField wrapping the user pattern (rustc's
+        // `pat_lang_item_variant`). Recurse into each field's inner
+        // pattern with the same parent — same flow as TupleStruct, just
+        // a different HIR shape.
+        PatKind::Struct(_, fields, _) => {
+            for field in fields.iter() {
+                self.get_dec_of_pat2(field.pat, ty_results, parent, parent_ty, scope, res);
+            }
+        }
         PatKind::Binding(mode, id, ident, _) => {
             // add raps that appear in binding
             let muta = bool_of_mut(mode.1); // You need to define this function
@@ -743,6 +753,70 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
         _ => {}
     }
+}
+
+/// Register the pattern bindings of an `if let` / `while let` form
+/// against the scrutinee and emit the scrutinee→binding events at the
+/// `let_expr` line.
+///
+/// `let_expr` is the `Let(pat, init, …)` HIR node that lives in the
+/// `If`'s guard slot. `emit_gos_at` is `Some(body_end_line)` for the
+/// while-let path (where the binding's lifetime is the body and
+/// nothing else cleans it up) and `None` for the if-let path (where
+/// the surrounding If arm appends GoOutOfScope events from its own
+/// `if_decl` set, so we'd double-emit otherwise).
+///
+/// Returns the set of bindings registered. The if-let caller unions
+/// these into its `if_decl` set so `append_decl_branch_events` can
+/// populate each binding's timeline with a Branch-shaped event;
+/// without that, the renderer's `fetch_timeline` panics looking for
+/// the Copy/Move event id in an empty history.
+///
+/// The caller is responsible for separately visiting the scrutinee
+/// (for any reads/borrows it performs).
+pub fn register_iflet_let_bindings(
+    &mut self,
+    let_expr: &'tcx rustc_hir::LetExpr<'tcx>,
+    emit_gos_at: Option<usize>,
+) -> HashSet<ResourceAccessPoint> {
+    let scrutinee = let_expr.init;
+    let typeck_res = self.tcx.typeck(scrutinee.hir_id.owner);
+    let scrutinee_ty = typeck_res.node_type(scrutinee.hir_id);
+    let parent = crate::expr_visitor_utils::get_rap(scrutinee, &self.tcx, &self.raps);
+
+    let let_line = crate::expr_visitor_utils::span_to_line(&let_expr.span, &self.tcx);
+    // Body-end is only needed if we're going to emit a GoOutOfScope.
+    // get_dec_of_pat2 also takes a `scope` param; pass let_line as a
+    // safe default for the if-let case (the renderer ignores it for
+    // the binding's own RAP since is_global=false).
+    let scope = emit_gos_at.unwrap_or(let_line);
+
+    let mut decls: Vec<(ResourceAccessPoint, Evt, Ty<'tcx>)> = Vec::new();
+    self.get_dec_of_pat2(let_expr.pat, typeck_res, &parent, &scrutinee_ty, scope, &mut decls);
+
+    let mut registered: HashSet<ResourceAccessPoint> = HashSet::new();
+    for (binding_rap, evt, parent_ty) in decls {
+        let is_partial = parent_ty != typeck_res.node_type(let_expr.pat.hir_id);
+        let event = self.ext_ev_of_evt(
+            evt,
+            ResourceTy::Value(binding_rap.clone()),
+            parent.clone(),
+            *self.unique_id,
+            is_partial,
+        );
+        self.add_external_event(let_line, event);
+        *self.unique_id += 1;
+
+        if let Some(body_end) = emit_gos_at {
+            self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
+                ro: binding_rap.clone(),
+                id: *self.unique_id,
+            });
+            *self.unique_id += 1;
+        }
+        registered.insert(binding_rap);
+    }
+    registered
 }
 
 // This function does the work of adding an event for let stmts

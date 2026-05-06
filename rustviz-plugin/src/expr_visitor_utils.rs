@@ -314,9 +314,16 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
       }
       HashSet::new()
     }
-    ExprKind::AddrOf(_, _, exp) | ExprKind::Unary(_, exp) 
+    ExprKind::AddrOf(_, _, exp) | ExprKind::Unary(_, exp)
     | ExprKind::DropTemps(exp) => {
       get_live_of_expr(exp, tcx, raps)
+    }
+    // `if let pat = expr` / `while let pat = expr`: the scrutinee
+    // (`init`) reads variables that are live in the surrounding
+    // branch. Pattern bindings declared by `pat` aren't live since
+    // they don't yet exist outside the branch.
+    ExprKind::Let(let_expr) => {
+      get_live_of_expr(let_expr.init, tcx, raps)
     }
     ExprKind::Binary(_, lhs_expr, rhs_expr) | ExprKind::Assign(lhs_expr, rhs_expr, _) | ExprKind::AssignOp(_, lhs_expr, rhs_expr) => {
       let lhs = get_live_of_expr(&lhs_expr, tcx, raps);
