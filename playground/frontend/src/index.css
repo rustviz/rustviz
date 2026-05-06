@@ -191,7 +191,10 @@ code {
 .editor-toolbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  /* Tight gap so the dropdown + icon buttons read as one cluster on
+     the left. The Generate button gets `margin-left: auto` (below) to
+     push itself to the right edge regardless of this gap. */
+  gap: 6px;
   padding: 10px 16px;
   background: #f6f6f6;
   border-bottom: 1px solid var(--border);
