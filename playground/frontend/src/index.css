@@ -242,6 +242,19 @@ code {
   min-width: 180px;
 }
 
+/* Compact toolbar buttons that sit between the example dropdown and
+   the right-aligned Generate button. The `+` icon button is square;
+   the Rename button is wider but stays the same height. */
+.toolbar-icon-button {
+  padding: 4px 10px;
+  font-size: 16px;
+  line-height: 1;
+}
+.editor-toolbar .cm-button:not(.generate-button):not(.toolbar-icon-button) {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
 .editor-host {
   flex: 1;
   min-height: 0;
