@@ -222,6 +222,13 @@ code {
 .example-picker select:hover { border-color: var(--fg-muted); }
 
 .cm-button {
+  /* Safari paints a light inner highlight inside native buttons —
+     hidden when text fills the button (Generate) but very visible
+     behind icon-only buttons (the icon's empty viewBox area shows
+     it through). Force the non-native style so the button is just a
+     uniform colored rectangle. */
+  -webkit-appearance: none;
+  appearance: none;
   background: var(--accent);
   color: white;
   border: none;
