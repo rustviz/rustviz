@@ -703,29 +703,32 @@ fn render_dot(
                     let is_copy = ro.is_copy();
                     let is_closure = ro.is_closure();
                     if is_closure {
-                        // The closure value is dropped, which in turn
-                        // drops every captured upvar (move) or ends
-                        // the borrow (ref). For borrow-capture
-                        // closures, `resource_hold` ends up false on
-                        // `f` (no Move/Acquire of an owned resource
-                        // on `f`'s timeline), so the generic flow
-                        // would say "No resource is dropped" — wrong
-                        // for a closure, whose drop *is* what
-                        // releases the captures. Override unconditionally.
-                        let cx = timeline_data.x_val;
-                        let cy = get_y_axis_pos(*line_number);
-                        let title = hover_messages::event_dot_closure_go_out_of_scope(&name);
-                        let drop_data = DropDotData {
-                            hash: *hash as u64,
-                            dot_x: cx,
-                            dot_y: cy,
-                            title,
-                            p1x: cx - 3, p1y: cy - 1,
-                            p2x: cx + 3, p2y: cy - 1,
-                            p3x: cx,     p3y: cy + 3,
-                        };
-                        append_drop_dot(&drop_data, output, timeline_data, registry);
-                        continue;
+                        // Closure value going out of scope: only
+                        // surface "Its captured resources are
+                        // dropped" when at least one upvar was
+                        // move-captured. Borrow-only and capture-
+                        // less closures have no owned resources to
+                        // drop, just the closure struct itself —
+                        // render a plain OOS dot like a Copy type
+                        // with the standard "f goes out of scope"
+                        // message.
+                        if closure_has_move_captures(visualization_data, *hash) {
+                            let cx = timeline_data.x_val;
+                            let cy = get_y_axis_pos(*line_number);
+                            let title = hover_messages::event_dot_closure_go_out_of_scope(&name);
+                            let drop_data = DropDotData {
+                                hash: *hash as u64,
+                                dot_x: cx,
+                                dot_y: cy,
+                                title,
+                                p1x: cx - 3, p1y: cy - 1,
+                                p2x: cx + 3, p2y: cy - 1,
+                                p3x: cx,     p3y: cy + 3,
+                            };
+                            append_drop_dot(&drop_data, output, timeline_data, registry);
+                            continue;
+                        }
+                        data.title = event.print_message_with_name(&mut name);
                     } else if !resource_hold {
                         // Resource was already moved out — same copy
                         // for both Copy and non-Copy types: just note
@@ -842,6 +845,21 @@ fn collect_closure_captures(
         }
     }
     out
+}
+
+// True iff the closure identified by `closure_hash` move-captured
+// at least one upvar (across the whole event stream — captures
+// always land at the closure literal's line, but we don't require
+// callers to know that line). Borrow-only closures have nothing
+// to "drop" at scope-end beyond the closure value itself, so the
+// "captured resources are dropped" message is suppressed.
+fn closure_has_move_captures(
+    visualization_data: &VisualizationData,
+    closure_hash: u64,
+) -> bool {
+    visualization_data.external_events.iter().any(|(_, ev)| {
+        matches!(ev, ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash))
+    })
 }
 
 fn matches_closure(rty: &ResourceTy, closure_hash: u64) -> bool {

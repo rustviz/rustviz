@@ -501,11 +501,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "closure_borrow_imm",
         // Non-`move` closure that reads its upvar → static borrow.
+        // No move captures, so f's scope-end gets the plain owner
+        // OOS message — there are no resources to drop.
         must_contain: &[
             "Move from String::from to s",
             "Closure capture (immutable borrow) from s to f",
             "Closure f captures: s (immutably borrowed)",
-            "f goes out of scope. Its captured resources are dropped.",
+            "f goes out of scope",
         ],
         must_not_contain: &[
             // Critically: the closure should *not* be modeled as a
@@ -514,22 +516,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (move) from s to f",
             "Immutable borrow from s to f",
             "Closure f captures an immutable reference to s",
+            // No move captures → no "captured resources are dropped".
+            "f goes out of scope. Its captured resources are dropped.",
         ],
     },
     TooltipExpect {
         name: "closure_borrow_mut",
         // Non-`move` closure that mutates its upvar → mutable borrow.
+        // Same as the immutable case for scope-end: no resources
+        // are dropped at the closure binding's OOS.
         must_contain: &[
             "Move from String::from to s",
             "Closure capture (mutable borrow) from s to f",
             "Closure f captures: s (mutably borrowed)",
-            "f goes out of scope. Its captured resources are dropped.",
+            "f goes out of scope",
         ],
         must_not_contain: &[
             "Move from s to f",
             "Closure capture (move) from s to f",
             "Mutable borrow from s to f",
             "Closure f captures a mutable reference to s",
+            "f goes out of scope. Its captured resources are dropped.",
         ],
     },
 ];
