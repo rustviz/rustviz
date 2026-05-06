@@ -249,6 +249,9 @@ pub fn render_svg(
     let size: usize = visualization_data.preprocess_external_events.len();
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut extra_lines: usize = 0;
+    // Source lines used to absorb stacked-arrow extras into pre-existing
+    // blank lines below — see the `Some(ev)` branch in the loop.
+    let source_lines_for_absorb: Vec<&str> = source_rs_str.lines().collect();
     // (source_line, extras_inserted_immediately_after_this_line). Records
     // each stacked-arrow site so we can apply the same shift to
     // fn_start_lines below — otherwise per-fn label y is computed in
@@ -299,12 +302,25 @@ pub fn render_svg(
                 Some(ev) => { // if there are multiple arrow events on this line
                     for e in ev.clone() { // append all the events in the line map on the same line
                         visualization_data.append_processed_external_event(e.clone(), final_line_num);
-                        skippable_ev.insert(e.get_id()); // they all become skippable 
+                        skippable_ev.insert(e.get_id()); // they all become skippable
                     }
-                    let ev_len = ev.len() - 1;
+                    // Stacked arrows draw at consecutive vertical positions
+                    // starting at this line's row; we'd normally insert
+                    // (n - 1) blank rows below to give them clearance.
+                    // But if the source already has consecutive blank
+                    // lines right after `line_num`, those blank rows do
+                    // the same job — reuse them instead of stacking our
+                    // own on top, which produces an awkward double gap.
+                    let needed = ev.len() - 1;
+                    let trailing_blanks = source_lines_for_absorb
+                        .iter()
+                        .skip(line_num) // 1-indexed → start at the line right after line_num
+                        .take_while(|l| l.trim().is_empty())
+                        .count();
+                    let to_insert = needed.saturating_sub(trailing_blanks);
                     event_line_map_replace.insert(final_line_num, ev); // insert new line number into new event line map
-                    line_insertion_map.insert(final_line_num, ev_len);
-                    ev_len
+                    line_insertion_map.insert(final_line_num, to_insert);
+                    to_insert
                 },
                 None => {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
