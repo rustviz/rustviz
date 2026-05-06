@@ -1575,7 +1575,7 @@ impl Visualizable for VisualizationData {
         },
         ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, ..} => {
           if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
-          else { vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }          
+          else { vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
         },
         ExternalEvent::MutableDie{from: from_ro, to: to_ro, id} => {
           if to_o && !from_ro.is_same_underlying(&to_ro){ 
@@ -1811,7 +1811,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
-                
+
             },
             ExternalEvent::StaticDie{from: from_ro, to: to_ro, id} => {
               // this catches when StaticDie(s to s*) to avoid duplicate events
@@ -1823,7 +1823,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
-                
+
             },
             ExternalEvent::MutableDie{from: from_ro, to: to_ro, id} => {
                 // this catches when MutableDie(s to s*) to avoid duplicate events

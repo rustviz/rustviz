@@ -326,6 +326,32 @@ pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &Str
     )
 }
 
+// Combined tooltip for the closure binding's Bind-Acquire dot
+// when one or more upvars are captured at the closure literal.
+// `captures` lists (upvar_name, capture_kind_label) pairs in the
+// order they were emitted by expr_visitor's Closure arm. Used in
+// place of the per-capture closure-side dots, which would
+// otherwise stack on the same (x,y) and mask each other.
+pub fn event_dot_closure_bind_with_captures(
+    my_name: &String,
+    captures: &[(String, &'static str)],
+) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    if captures.is_empty() {
+        // Closure with no captures (e.g. `let f = || println!("hi")`).
+        return format!("Closure {0} is bound", my_name_fmt);
+    }
+    let parts: Vec<String> = captures
+        .iter()
+        .map(|(name, kind)| format!("{} ({})", fmt_style(name), kind))
+        .collect();
+    format!(
+        "Closure {0} captures: {1}",
+        my_name_fmt,
+        parts.join(", ")
+    )
+}
+
 // Closure-side dot when a `move`-captured upvar lands on `f`'s
 // timeline. Mirrors event_dot_acquire.
 pub fn event_dot_closure_capture_acquire(my_name: &String, from_name: &String) -> String {

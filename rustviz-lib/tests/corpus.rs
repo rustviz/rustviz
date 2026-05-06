@@ -467,24 +467,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from String::from to s",
             "Closure capture (move) from s to f",
+            "Closure f captures: s (moved)",
             "f goes out of scope. Its captured resources are dropped.",
         ],
         must_not_contain: &[
             // Generic Move-arrow label would obscure the capture.
             "Move from s to f",
+            // Per-capture closure-side dots are suppressed in
+            // favour of the combined Bind dot.
+            "Closure f captures (moves) s's resource",
         ],
     },
     TooltipExpect {
         name: "closure_move_multi",
-        // Each captured upvar produces its own capture arrow.
+        // Each captured upvar produces its own capture arrow on
+        // the source side; on the closure side, a single Bind dot
+        // enumerates every capture so neither tooltip masks the
+        // other (#79 follow-up).
         must_contain: &[
             "Closure capture (move) from s to f",
             "Closure capture (move) from t to f",
+            "Closure f captures: s (moved), t (moved)",
             "f goes out of scope. Its captured resources are dropped.",
         ],
         must_not_contain: &[
             "Move from s to f",
             "Move from t to f",
+            // Per-capture closure-side dots suppressed.
+            "Closure f captures (moves) s's resource",
+            "Closure f captures (moves) t's resource",
         ],
     },
     TooltipExpect {
@@ -493,6 +504,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from String::from to s",
             "Closure capture (immutable borrow) from s to f",
+            "Closure f captures: s (immutably borrowed)",
             "f goes out of scope. Its captured resources are dropped.",
         ],
         must_not_contain: &[
@@ -501,6 +513,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from s to f",
             "Closure capture (move) from s to f",
             "Immutable borrow from s to f",
+            "Closure f captures an immutable reference to s",
         ],
     },
     TooltipExpect {
@@ -509,12 +522,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from String::from to s",
             "Closure capture (mutable borrow) from s to f",
+            "Closure f captures: s (mutably borrowed)",
             "f goes out of scope. Its captured resources are dropped.",
         ],
         must_not_contain: &[
             "Move from s to f",
             "Closure capture (move) from s to f",
             "Mutable borrow from s to f",
+            "Closure f captures a mutable reference to s",
         ],
     },
 ];

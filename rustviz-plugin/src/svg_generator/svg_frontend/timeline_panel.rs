@@ -621,12 +621,29 @@ fn render_dot(
     resource_hold: bool
 ) {
     for (line_number, event) in history.iter() {
+        // Closure-capture per-upvar dots on the closure's own
+        // timeline are suppressed here: the closure's Bind-Acquire
+        // dot at the same line carries a combined tooltip listing
+        // every capture (see the Anonymous-from arm below). The
+        // per-capture events stay in `history` because the arrow
+        // renderer traverses them to find the closure column for
+        // each capture arrow's endpoint.
+        let is_closure_capture_event = match event {
+            Event::Acquire { from: ResourceTy::Anonymous, .. } => false,
+            Event::Acquire { is, .. }
+            | Event::StaticBorrow { is, .. }
+            | Event::MutableBorrow { is, .. } => is.is_closure(),
+            _ => false,
+        };
+        if is_closure_capture_event {
+            continue;
+        }
         //matching the event
         match event {
             Event::RefDie { .. } => {
                 continue;
             }
-            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => { 
+            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => {
                 // first append split dot
                 let b_data = EventDotData {
                     hash: *hash as u64,
@@ -766,13 +783,73 @@ fn render_dot(
                     continue;
                 },
                 _ => {
-                    data.title = event.print_message_with_name(& mut name);
+                    // Closure Bind-Acquire: aggregate every capture
+                    // event landing at the same line into a single
+                    // tooltip listing all captured upvars, since the
+                    // per-capture target-side dots are suppressed
+                    // (they'd stack on this one and the topmost
+                    // tooltip would mask the rest).
+                    if let Event::Acquire { from: ResourceTy::Anonymous, is, .. } = event {
+                        if is.is_closure() {
+                            let captures = collect_closure_captures(visualization_data, *hash, *line_number);
+                            data.title = hover_messages::event_dot_closure_bind_with_captures(&name, &captures);
+                        } else {
+                            data.title = event.print_message_with_name(& mut name);
+                        }
+                    } else {
+                        data.title = event.print_message_with_name(& mut name);
+                    }
                 }
             }
         }
         // push to individual timelines
         append_dot(&data, output, timeline_data, registry);
     }
+}
+
+// Walk the original ExternalEvents to find every capture (Move /
+// StaticBorrow / MutableBorrow) at `line` whose target is the
+// closure identified by `closure_hash`. Returns (upvar_name,
+// kind_label) pairs in source order so the rendered list matches
+// what the user wrote in the closure literal.
+fn collect_closure_captures(
+    visualization_data: &VisualizationData,
+    closure_hash: u64,
+    line: usize,
+) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for (l, ev) in &visualization_data.external_events {
+        if *l != line {
+            continue;
+        }
+        match ev {
+            ExternalEvent::Move { from, to, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "moved"));
+                }
+            }
+            ExternalEvent::StaticBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "immutably borrowed"));
+                }
+            }
+            ExternalEvent::MutableBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "mutably borrowed"));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn matches_closure(rty: &ResourceTy, closure_hash: u64) -> bool {
+    rty.extract_rap().map_or(false, |r| *r.hash() == closure_hash)
+}
+
+fn upvar_name(rty: &ResourceTy) -> Option<String> {
+    rty.extract_rap().map(|r| r.name().to_owned())
 }
 
 // Same routing logic as `append_dot` (struct-grouped vs flat
