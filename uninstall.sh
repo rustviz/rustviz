@@ -57,10 +57,7 @@ run() {
 # silently so the script is idempotent — a second run is a no-op.
 # ----------------------------------------------------------------
 echo "==> cargo uninstall"
-# Include the legacy `rustviz2*` package names so an `uninstall.sh` run
-# from a freshly-pulled checkout cleans up binaries left behind by an
-# older `setup.sh` (pre-rename).
-for pkg in rustviz-cli rustviz-plugin rustviz2 rustviz2-plugin; do
+for pkg in rustviz-cli rustviz-plugin; do
     if cargo install --list 2>/dev/null | grep -qE "^${pkg} v"; then
         run cargo uninstall "$pkg"
     else
