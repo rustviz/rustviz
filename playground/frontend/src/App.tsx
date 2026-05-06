@@ -16,18 +16,13 @@ const API_BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
 declare function helpers(param: string): void;
 
-const defaultExample: string = `
-fn main() {
-    let mut x = 7;
-    let mut z = 6;
-    let mut a = &mut x;
-    let mut c = &mut z;
-    let mut b = &mut a;
-    b = &mut c;
-    println!("x {}", *a);
-    println!("z {}", **b);
-}
-`.trim();
+// Seed the editor with the first dropdown example (Motivation →
+// "Hands-on tutorial") so first-time visitors land on a snippet that
+// actually exercises ownership, borrowing, and the
+// `// rustviz: skip` / `// rustviz: hide` markers — instead of an
+// abstract `let mut x = 7; let mut a = &mut x; …` chain that doesn't
+// motivate anything. Single source of truth lives in examples.ts.
+const defaultExample: string = exampleGroups[0].examples[0].code;
 
 class Editor {
   private view: EditorView;

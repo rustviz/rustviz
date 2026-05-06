@@ -52,6 +52,7 @@ export const exampleGroups: ExampleGroup[] = [
         name: "Hands-on tutorial",
         code: `fn main() {
     let mut s = String::from("hello");
+    let mut q = String::from("skipped"); // rustviz: skip
 
     let r1 = &s;
     let r2 = &s;
@@ -61,9 +62,8 @@ export const exampleGroups: ExampleGroup[] = [
     clear_string(r3);
 }
 
-fn compare_strings(_a: &String, _b: &String) -> bool { // rustviz: hide
-    // body elided
-    true
+fn compare_strings(a: &String, b: &String) -> bool { // rustviz: hide
+    *a == *b
 }
 
 fn clear_string(_s: &mut String) { // rustviz: hide
