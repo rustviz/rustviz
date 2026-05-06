@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "mdbook-rustviz"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1425,7 +1425,7 @@ dependencies = [
  "mdbook-preprocessor",
  "pulldown-cmark",
  "pulldown-cmark-to-cmark",
- "rustviz2",
+ "rustviz-lib",
  "semver",
  "serde",
  "serde_json",
@@ -1883,6 +1883,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rustviz-cli"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rustviz-lib",
+]
+
+[[package]]
+name = "rustviz-lib"
+version = "2.0.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "rustviz-playground"
 version = "0.1.0"
 dependencies = [
@@ -1892,23 +1908,14 @@ dependencies = [
  "actix-web",
  "env_logger 0.9.3",
  "log",
- "rustviz2",
+ "rustviz-lib",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "rustviz2"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "tempfile",
-]
-
-[[package]]
-name = "rustviz2-plugin"
-version = "0.1.0"
+name = "rustviz-plugin"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -1,12 +1,13 @@
 [package]
-name = "rustviz2-plugin"
-version = "0.1.0"
+name = "rustviz-plugin"
+version = "2.0.0"
 edition = "2021"
-authors = ["Andrew Mahler <mahleran@umich.edu>", 
-          "Alaric Chen", 
-          "Akshey Deokule", 
-          "Yue Huang", 
-          "Yifan Liu"]
+authors = ["Cyrus Omar <comar@umich.edu>",
+           "Andrew Mahler <mahleran@umich.edu>",
+           "Alaric Chen",
+           "Akshey Deokule",
+           "Yue Huang",
+           "Yifan Liu"]
 repository = "https://github.com/rustviz/rustviz"
 license = "MIT"
 description = "A tool that allows users to generate an interactive timeline depicting ownership and borrowing events for variables in a Rust code example"

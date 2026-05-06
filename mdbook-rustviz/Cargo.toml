@@ -1,8 +1,9 @@
 [package]
 name = "mdbook-rustviz"
-version = "0.2.0"
+version = "2.0.0"
 readme = "README.md"
 edition = "2021"
+authors = ["Cyrus Omar <comar@umich.edu>", "Andrew Mahler <mahleran@umich.edu>"]
 license = "MIT"
 repository = "https://github.com/rustviz/rustviz"
 description = "An mdbook preprocessor that allows users to embed RustViz visualizations into mdbook projects"
@@ -35,7 +36,7 @@ serde_json = "1.0"
 # of the pipeline. 0.13 = mdbook 0.5's choice.
 pulldown-cmark = "0.13"
 pulldown-cmark-to-cmark = "22"
-rustviz2 = { path = "../rustviz2" }
+rustviz-lib = { path = "../rustviz-lib", version = "2.0.0" }
 
 [dependencies.clap]
 version = "4.0"

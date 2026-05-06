@@ -1,4 +1,4 @@
-//! Public interface to the rustviz2 plugin.
+//! Public interface to the RustViz rustc plugin.
 //!
 //! [`Rustviz::new`] runs the plugin against a single-file crate built
 //! from `code` and returns the rendered code-panel and timeline-panel SVGs.
@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use rustviz2::Rustviz;
+//! use rustviz_lib::Rustviz;
 //!
 //! let code = r#"
 //! fn main() {
@@ -52,14 +52,20 @@ use std::{
 };
 use tempfile::tempdir;
 
-/// Verbatim contents of the workspace's `rust-toolchain.toml`,
-/// embedded at compile time. The single source of truth for which
-/// nightly + components RustViz needs — `setup.sh` (defers to
-/// rustup auto-install via this file), the local-runner backend
-/// below (writes it into the per-request temp crate), and
-/// `rustviz init` (parses it for the rustup install command) all
-/// derive from this one constant.
-pub const TOOLCHAIN: &str = include_str!("../../rust-toolchain.toml");
+/// Verbatim contents of `rust-toolchain.toml`, embedded at compile
+/// time. The single source of truth for which nightly + components
+/// RustViz needs — `setup.sh` (defers to rustup auto-install via the
+/// workspace-root copy), the local-runner backend below (writes it
+/// into the per-request temp crate), and `rustviz init` (parses it
+/// for the rustup install command) all derive from this one constant.
+///
+/// The file ships in two locations: the workspace root (where rustup
+/// reads it for `cargo` invocations against the workspace) and inside
+/// this crate (so `cargo publish` can include it in the published
+/// tarball — `include_str!` paths can't reach above the crate root).
+/// `scripts/bump-version.sh` keeps the two in sync, and a unit test
+/// below asserts they match when both exist.
+pub const TOOLCHAIN: &str = include_str!("../rust-toolchain.toml");
 
 /// Channel string from `rust-toolchain.toml` — e.g. `"nightly-2025-08-20"`.
 /// Used by `rustviz init` to pin the `+toolchain` selector when
@@ -388,6 +394,29 @@ mod tests {
                 "missing required toolchain component {:?}; got {:?}",
                 required,
                 c
+            );
+        }
+    }
+
+    /// The crate ships its own copy of `rust-toolchain.toml` so the
+    /// `include_str!` above survives `cargo publish`, but rustup reads
+    /// the workspace-root copy when running cargo from the repo root.
+    /// Drift between the two would mean the published lib pins one
+    /// nightly while local builds resolve another — assert they match
+    /// whenever the workspace copy is reachable (i.e. checkout-mode
+    /// builds; published-crate builds skip the check silently).
+    #[test]
+    fn toolchain_files_match_in_workspace() {
+        let workspace_copy = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("rust-toolchain.toml");
+        if let Ok(workspace) = std::fs::read_to_string(&workspace_copy) {
+            assert_eq!(
+                workspace.trim(),
+                TOOLCHAIN.trim(),
+                "rustviz-lib/rust-toolchain.toml is out of sync with the workspace copy at {}; \
+                 run scripts/bump-version.sh or copy the file manually",
+                workspace_copy.display()
             );
         }
     }

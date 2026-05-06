@@ -104,7 +104,7 @@ jobs:
   # workflows finish in a different order.
   #
   # Per-arch jobs run on native runners (no QEMU). Compiling
-  # rustviz2-plugin under user-mode QEMU was sporadically crashing
+  # rustviz-plugin under user-mode QEMU was sporadically crashing
   # rustc with `signal 5 (Trace/breakpoint trap)` ~17 minutes into
   # the arm64 leg; native arm64 sidesteps that entirely and runs in
   # parallel with amd64. Each job pushes a content-addressed,
@@ -311,7 +311,7 @@ jobs:
 
   # Re-deploy the rustviz/tutorial book whenever a push to main here
   # touches anything the tutorial actually depends on (the rustc plugin,
-  # the mdbook preprocessor, the rustviz2 lib, or the toolchain pin).
+  # the mdbook preprocessor, the rustviz library, or the toolchain pin).
   # The tutorial's own deploy workflow `git clone`s rustviz/rustviz to
   # build the plugin from source, so any plugin-side change should
   # trigger a tutorial rebuild — otherwise the deployed tutorial would
@@ -349,7 +349,7 @@ jobs:
           fi
           echo "Changed files:"
           echo "$changed" | sed 's/^/  /'
-          if echo "$changed" | grep -qE '^(rustviz2-plugin/|mdbook-rustviz/|rustviz2/|rust-toolchain\.toml$)'; then
+          if echo "$changed" | grep -qE '^(rustviz-plugin/|mdbook-rustviz/|rustviz-lib/|rustviz-cli/|rust-toolchain\.toml$)'; then
             echo "affected=true" >> "$GITHUB_OUTPUT"
             echo "==> tutorial will be rebuilt"
           else

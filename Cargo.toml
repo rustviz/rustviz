@@ -2,9 +2,9 @@
 resolver = "2"
 
 members = [
-  "rustviz2-plugin",
+  "rustviz-plugin",
+  "rustviz-lib",
+  "rustviz-cli",
   "mdbook-rustviz",
   "playground",
-  "rustviz2",
 ]
-

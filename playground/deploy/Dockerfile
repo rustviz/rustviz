@@ -26,13 +26,14 @@ RUN apk add --no-cache musl-dev gcc make perl pkgconfig \
 
 WORKDIR /src
 # Build context is the repo root. Copy enough of the workspace that cargo
-# can resolve and build playground. (rustviz2-plugin is excluded from the
+# can resolve and build playground. (rustviz-plugin is excluded from the
 # playground binary's dep tree, so it's not compiled here even though its
 # manifest is part of the workspace resolution graph.)
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
-COPY rustviz2-plugin/Cargo.toml ./rustviz2-plugin/Cargo.toml
-COPY rustviz2-plugin/src/ ./rustviz2-plugin/src/
-COPY rustviz2/ ./rustviz2/
+COPY rustviz-plugin/Cargo.toml ./rustviz-plugin/Cargo.toml
+COPY rustviz-plugin/src/ ./rustviz-plugin/src/
+COPY rustviz-lib/ ./rustviz-lib/
+COPY rustviz-cli/ ./rustviz-cli/
 COPY mdbook-rustviz/ ./mdbook-rustviz/
 COPY playground/Cargo.toml ./playground/Cargo.toml
 COPY playground/src/ ./playground/src/

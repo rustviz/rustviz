@@ -31,7 +31,7 @@ described below, not at the type-system layer.
 
 ### 1. Sandboxed plugin execution
 
-`rustviz2/src/lib.rs::run_docker` is the only execution backend used in
+`rustviz-lib/src/lib.rs::run_docker` is the only execution backend used in
 production. It invokes:
 
 ```sh
@@ -108,7 +108,7 @@ arbitrary websites.
 
 `RV_RUNNER=local` runs the plugin in-process against a tempdir on the host.
 This is convenient for local iteration but **must never be used for a public
-deployment**. The `rustviz2` library defaults to `local` (the common case is
+deployment**. The `rustviz-lib` library defaults to `local` (the common case is
 trusted callers like the CLI or mdbook); the `playground` binary specifically
 overrides that default to `docker` at startup if the env var is unset, so
 you'd have to actively pass `RV_RUNNER=local` to the playground process to

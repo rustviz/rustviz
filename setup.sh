@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduces a working build of rustviz2 on macOS/Linux.
+# Reproduces a working build of RustViz on macOS/Linux.
 #
 # A committed Cargo.lock pins transitive deps that have since moved past
 # rustc 1.80 / edition 2024 — without those pins, fresh resolution from
@@ -14,11 +14,11 @@ cd "$(dirname "$0")"
 rustup show active-toolchain >/dev/null
 
 # 2. Build & install the rustc plugin (provides `cargo rv-plugin`).
-cargo install --path rustviz2-plugin --locked
+cargo install --path rustviz-plugin --locked
 
 # 3. Build & install the `rustviz` CLI (svg / html / init subcommands).
-#    Lives in the rustviz2 crate alongside the lib API.
-cargo install --path rustviz2 --locked
+#    Lives in rustviz-cli; the underlying library is in rustviz-lib.
+cargo install --path rustviz-cli --locked
 
 # 4. Build the Vite frontend that the playground serves. The build copies
 #    frontend/public/ex-assets/ (helpers.js + visualization.css) into dist/

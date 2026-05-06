@@ -16,19 +16,16 @@ against the matching nightly toolchain. The fastest path is the CLI's
 bootstrap:
 
 ```sh
-cargo install rustviz2
+cargo install rustviz-cli
 rustviz init
 ```
 
-That installs the lib + the `rustviz` binary, then runs the toolchain
-+ plugin install. After that, install the preprocessor itself:
+That installs the `rustviz` binary, then runs the toolchain + plugin
+install. Then install the preprocessor itself:
 
 ```sh
-cargo install --path . --locked    # from this directory, against a local checkout
+cargo install mdbook-rustviz
 ```
-
-(The crate isn't published — `cargo install mdbook-rustviz` from
-crates.io would land on a different, unmaintained crate.)
 
 ## Usage
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Container entrypoint. Reads Rust source from stdin, runs the rustviz2 plugin
+# Container entrypoint. Reads Rust source from stdin, runs the RustViz plugin
 # against a fresh single-file crate in the tmpfs-backed /work directory, and
 # prints the plugin's stdout (which the host parses as
 # "<code-svg>:::<timeline-svg>").
@@ -16,7 +16,7 @@ rm -rf test-crate
 cargo new --lib --quiet test-crate
 cd test-crate
 
-# Pin the toolchain that rustviz2-plugin was built against; without this the
+# Pin the toolchain that rustviz-plugin was built against; without this the
 # nested cargo invocation can pick up an unrelated default.
 cat > rust-toolchain.toml <<'TOML'
 [toolchain]

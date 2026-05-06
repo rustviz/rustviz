@@ -1,0 +1,23 @@
+[package]
+name = "rustviz-lib"
+version = "2.0.0"
+edition = "2021"
+authors = ["Cyrus Omar <comar@umich.edu>", "Andrew Mahler <mahleran@umich.edu>"]
+repository = "https://github.com/rustviz/rustviz"
+license = "MIT"
+description = "Library API for generating RustViz ownership/borrow visualizations by shelling out to the rustviz-plugin rustc plugin."
+readme = "README.md"
+
+# `lib.rs` does `include_str!("../rust-toolchain.toml")` so the toolchain
+# spec ships in the published tarball. The workspace-root copy stays the
+# source of truth (rustup reads it when running cargo from the repo root);
+# the in-crate copy is kept in sync by `scripts/bump-version.sh` and a
+# unit test below asserts they match when both exist.
+include = [
+    "src/**",
+    "rust-toolchain.toml",
+    "README.md",
+]
+
+[dependencies]
+tempfile = "3"

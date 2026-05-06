@@ -6,5 +6,5 @@ extern crate rustc_driver;
 extern crate rustc_interface;
 
 fn main() {
-  rustc_plugin::driver_main(rustviz2_plugin::RVPlugin);
+  rustc_plugin::driver_main(rustviz_plugin::RVPlugin);
 }

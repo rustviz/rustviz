@@ -1,17 +1,17 @@
-//! Render a snippet through the rustviz2 plugin and write the two
+//! Render a snippet through the RustViz plugin and write the two
 //! SVG panels to disk.
 //!
 //!     cargo run --example render_to_files -- /tmp/out
 //!
 //! Requires the nightly toolchain (auto-installed by
 //! `rust-toolchain.toml` at the workspace root) and `cargo rv-plugin`
-//! on `PATH` (see `rustviz2-plugin/`). For a one-shot CLI rather
-//! than a code example, use the `rustviz` binary in this crate
-//! (`cargo install --path . --bin rustviz`).
+//! on `PATH` (see `rustviz-plugin/`). For a one-shot CLI rather than
+//! a code example, use the `rustviz` binary from `rustviz-cli`
+//! (`cargo install rustviz-cli`).
 
 use std::{env, fs, path::PathBuf, process};
 
-use rustviz2::Rustviz;
+use rustviz_lib::Rustviz;
 
 const SNIPPET: &str = r#"
 fn main() {

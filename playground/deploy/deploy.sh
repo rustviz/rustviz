@@ -88,7 +88,7 @@ set -euo pipefail
 # (machine update, status, scale, …) find fly.toml in cwd
 # without needing --config. The exception is `fly deploy`, which
 # uses cwd as the Docker build context — the Dockerfile reaches
-# into the workspace crates via `COPY rustviz2-plugin/…` etc.,
+# into the workspace crates via `COPY rustviz-plugin/…` etc.,
 # so deploy needs to run from the repo root with fly.toml passed
 # explicitly. `fly_deploy` below wraps that.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

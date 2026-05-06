@@ -16,7 +16,7 @@ primary_region = 'ord'
 [build]
   # Dockerfile path is relative to this fly.toml; the actual build
   # context is whatever cwd `fly deploy` was invoked from (the
-  # repo root, per deploy.sh — its `COPY rustviz2-plugin/…` etc.
+  # repo root, per deploy.sh — its `COPY rustviz-plugin/…` etc.
   # need to reach the workspace crates).
   dockerfile = 'Dockerfile'
 

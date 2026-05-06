@@ -2,7 +2,7 @@ use actix_cors::Cors;
 use actix_files::Files;
 use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{error, http::header, middleware::Logger, web, App, HttpResponse, HttpServer};
-use rustviz2::Rustviz;
+use rustviz_lib::Rustviz;
 use serde::{Deserialize, Serialize};
 
 /// Hard cap on the JSON body Actix will accept on /submit-code.
@@ -55,7 +55,7 @@ async fn main() -> std::io::Result<()> {
 
     // The playground compiles arbitrary user-supplied Rust, so it
     // MUST run the plugin in the sandboxed Docker runner unless an
-    // operator explicitly opts out (local dev). The rustviz2 lib's
+    // operator explicitly opts out (local dev). The rustviz-lib
     // default flipped to `local` in PR C of the reorg — that's the
     // right choice for library callers + the CLI, but for this
     // binary specifically we want Docker-by-default to preserve
