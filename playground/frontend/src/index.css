@@ -264,6 +264,25 @@ code {
   background: var(--border);
   color: var(--fg-muted);
 }
+/* SVG icons inside toolbar buttons render as outlines using
+   currentColor. The wildcard fill: none on every descendant is
+   defensive: SVG's default fill is black, and an open path can still
+   render an implied filled region under the nonzero/even-odd rule.
+   Forcing no-fill here means we can drop in any Lucide-style line
+   icon without per-path fill="none" attributes. */
+.toolbar-icon-button svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+.toolbar-icon-button svg * {
+  fill: none;
+}
 .editor-toolbar .cm-button:not(.generate-button):not(.toolbar-icon-button) {
   padding: 4px 10px;
   font-size: 13px;

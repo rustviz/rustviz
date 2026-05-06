@@ -721,8 +721,14 @@ const App: React.FC = () => {
                   title="Save current example as a .rs file"
                   aria-label="Save current example as a .rs file"
                 >
-                  {/* U+2B07 DOWNWARDS BLACK ARROW — "download to disk". */}
-                  ⬇
+                  {/* Lucide "download" — tray with an arrow landing
+                      in it. Unambiguous "save to disk" semantics, vs
+                      a bare ⬇ which reads like "move down in list". */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
                 </button>
                 <button
                   className="cm-button toolbar-icon-button"
@@ -730,10 +736,14 @@ const App: React.FC = () => {
                   title="Load a .rs file as a new example"
                   aria-label="Load a .rs file as a new example"
                 >
-                  {/* U+2B06 UPWARDS BLACK ARROW — "upload from disk
-                      into the playground", same orientation as the
-                      browser's native upload-arrow conventions. */}
-                  ⬆
+                  {/* Lucide "upload" — same tray with the arrow
+                      leaving it. Pairs visually with the download
+                      icon above. */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
                 </button>
                 <input
                   ref={fileInputRef}
