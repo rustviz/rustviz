@@ -50,7 +50,7 @@ export const exampleGroups: ExampleGroup[] = [
     examples: [
       {
         name: "Hands-on tutorial",
-        code: `fn main(){
+        code: `fn main() {
     let mut s = String::from("hello");
 
     let r1 = &s;
@@ -110,9 +110,9 @@ fn clear_string(_s: &mut String) {
       {
         name: "Move on assignment",
         code: `fn main() {
-  let x = String::from("hello");
-  let mut y = String::from("test");
-  y = x;
+    let x = String::from("hello");
+    let mut y = String::from("test");
+    y = x;
 }`,
       },
       {
@@ -170,7 +170,7 @@ fn helper() {
     examples: [
       {
         name: "Function takes and returns ownership",
-        code: `fn take_and_return_ownership(some_string : String) -> String {
+        code: `fn take_and_return_ownership(some_string: String) -> String {
     println!("{}", some_string);
     some_string
 }
@@ -189,7 +189,7 @@ fn main() {
     println!("{}", x);
 }
 
-fn f(s : &String) {
+fn f(s: &String) {
     println!("{}", *s);
 }`,
       },
@@ -211,7 +211,7 @@ fn f(s : &String) {
     f(y, z);
 }
 
-fn f(s1 : &String, s2 : &String) {
+fn f(s1: &String, s2: &String) {
     println!("{} and {}", s1, s2);
 }`,
       },
@@ -237,7 +237,7 @@ fn f(s1 : &String, s2 : &String) {
     println!("{}", x);
 }
 
-fn world(s : &mut String) {
+fn world(s: &mut String) {
     s.push_str(", world");
 }`,
       },
@@ -287,7 +287,7 @@ impl Rectangle {
 fn print_area(rect: &Rectangle) {
     println!(
         "The area of the rectangle is {} square pixels.",
-       	rect.area() // dot even though it's actually a reference
+        rect.area() // dot even though it's actually a reference
     );
 }
 
@@ -308,7 +308,7 @@ fn main() {
 }
 
 fn main() {
-    let _y = String :: from("bar");
+    let _y = String::from("bar");
     let f = Foo { x: 5, y: _y };
     println!("{}", f.x);
     println!("{}", f.y);

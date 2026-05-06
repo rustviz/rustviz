@@ -1,6 +1,7 @@
 extern crate handlebars;
 
 use crate::svg_generator::data::{ExternalEvent, LINE_SPACE};
+use crate::svg_generator::svg_frontend::syntax;
 use handlebars::Handlebars;
 use std::{cmp::max, collections::{BTreeMap, HashMap}};
 
@@ -46,8 +47,12 @@ pub fn render_code_panel(
     let mut y = 90;
     let mut output = String::from("    <g id=\"code\">\n");
     let mut line_of_code = 1;
+    // Threaded through per-line `highlight()` calls so a `/* … */`
+    // that doesn't close on its opening line keeps subsequent lines
+    // styled as a comment until we see the matching `*/`.
+    let mut in_block_comment = false;
     for line in annotated_lines {
-        let line_string = line;
+        let line_string = syntax::highlight(line, &mut in_block_comment);
         let mut data = BTreeMap::new();
         data.insert("X_VAL".to_string(), x.to_string());
         data.insert("Y_VAL".to_string(), y.to_string());

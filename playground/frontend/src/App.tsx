@@ -17,13 +17,13 @@ const API_BASE: string = import.meta.env.VITE_API_BASE ?? '';
 declare function helpers(param: string): void;
 
 const defaultExample: string = `
-fn main () {
+fn main() {
     let mut x = 7;
     let mut z = 6;
-    let mut a = & mut x;
-    let mut c = & mut z;
-    let mut b = & mut a;
-    b = & mut c;
+    let mut a = &mut x;
+    let mut c = &mut z;
+    let mut b = &mut a;
+    b = &mut c;
     println!("x {}", *a);
     println!("z {}", **b);
 }
@@ -61,6 +61,10 @@ class Editor {
         insert: code,
       },
     });
+  }
+
+  public destroy(): void {
+    this.view.destroy();
   }
 }
 
@@ -119,10 +123,16 @@ const App = () => {
 
   useEffect(() => {
     const editorElement = document.getElementById('editor')!;
-    if (editorElement) {
-      const newEditor = new Editor(editorElement);
-      setEditor(newEditor);
-    }
+    if (!editorElement) return;
+    const newEditor = new Editor(editorElement);
+    setEditor(newEditor);
+    // Dispose the EditorView on unmount so React 18 StrictMode's
+    // dev-mode double-invocation of this effect doesn't leave a
+    // second CodeMirror instance attached to #editor.
+    return () => {
+      newEditor.destroy();
+      setEditor(null);
+    };
   }, []);
 
   // Tracks the AbortController of the in-flight /submit-code request,

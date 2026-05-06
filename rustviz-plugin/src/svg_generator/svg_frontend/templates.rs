@@ -110,7 +110,20 @@ pub static CSS_TEMPLATE: &'static str =
         font-family: \"Source Code Pro\", Consolas, \"Ubuntu Mono\", Menlo, \"DejaVu Sans Mono\", monospace, monospace !important;
         font-size: 0.875em;
     }
-    
+
+    text.code .kw {
+        font-weight: bold;
+    }
+
+    text.code .comment {
+        fill: #8a8a8a;
+        font-style: italic;
+    }
+
+    text.code .string {
+        fill: #3a6bb5;
+    }
+
     text.label {
         font-family: \"Source Code Pro\", Consolas, \"Ubuntu Mono\", Menlo, \"DejaVu Sans Mono\", monospace, monospace !important;
         font-size: 0.875em;

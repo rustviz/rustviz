@@ -4,3 +4,4 @@ pub mod code_panel;
 pub mod utils;
 pub mod line_styles;
 pub mod templates;
+pub mod syntax;
