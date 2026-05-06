@@ -239,6 +239,11 @@ pub fn get_decl_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
 
 pub fn get_decl_of_stmt(stmt: &Stmt, _tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
   let mut res = HashSet::new();
+  // Synthetic stmts from macro/desugar expansion (the `let args = …`
+  // emitted by `println!`, the inner Match arms of `?`, etc.) aren't
+  // registered as RAPs by visit_local, so a name lookup here would
+  // unwrap None. Mirror visit_local's skip on the read side.
+  if stmt.span.from_expansion() { return res; }
   match stmt.kind {
     StmtKind::Let(ref local) => {
       let name = match local.pat.kind {
@@ -255,6 +260,7 @@ pub fn get_decl_of_stmt(stmt: &Stmt, _tcx: &TyCtxt, raps: &HashMap<String, RapDa
 }
 
 pub fn get_live_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+  if stmt.span.from_expansion() { return HashSet::new(); }
   match stmt.kind {
     StmtKind::Let(ref local) => {
       match local.init {
