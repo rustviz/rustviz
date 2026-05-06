@@ -78,6 +78,12 @@ const EXPECTED_OK: &[&str] = &[
     "hide_marker_fn",
     // — Conditionals as expression RHS (the supported subset).
     "if_as_let_rhs",
+    // — Smart-pointer wrappers (#76): rendered as opaque single-owner
+    //   columns rather than recursing into Unique/NonNull/PhantomData
+    //   internals.
+    "box_string",
+    "rc_clone",
+    "box_dyn",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -268,8 +274,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let v = vec![..]` desugars through a macro into a Call whose
         // function never gets registered as a RAP. The fix in #75 emits a
         // plain Bind ("v acquires ownership") instead of crashing. `&v[..]`
-        // attributes the borrow to `v` (Vec is now collapsed via
-        // `ty_is_special_owner`), matching how `&s` works for `s: String`.
+        // attributes the borrow to `v` (Vec collapses via #76's non-local
+        // ADT rule), matching how `&s` works for `s: String`.
         must_contain: &[
             "v acquires ownership of a resource",
             "Immutable borrow from v to p",
@@ -277,7 +283,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             // Vec internals shouldn't leak into the timeline as separate
-            // columns (regression guard for the `ty_is_special_owner` arm).
+            // columns (regression guard for `ty_is_special_owner`).
             "v.buf, immutable",
             "v.len, immutable",
         ],
@@ -387,6 +393,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[],
+    },
+
+    // ─── Smart-pointer wrappers (#76) ───────────────────────────────
+    // Box / Rc / Box<dyn T> render as a single owning column, not as
+    // their internal struct internals. The `must_not_contain` list
+    // pins the regression: if any of these strings come back, #84's
+    // recursive struct-field walker is leaking wrapper internals
+    // into the timeline again.
+    TooltipExpect {
+        name: "box_string",
+        must_contain: &[
+            "Move from Box::new to b",
+        ],
+        must_not_contain: &[
+            "b.0, immutable",
+            "b.0.pointer, immutable",
+            "b.0.pointer.pointer, immutable",
+            "b.0._marker, immutable",
+            "b.1, immutable",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_clone",
+        // `Rc::clone(&r)` is just a regular function call: `&r` is
+        // a static borrow into Rc::clone, the return value moves
+        // into r2. Shared-ownership semantics aren't visualized
+        // (per the issue's "out of scope for the panic fix" note).
+        must_contain: &[
+            "Move from Rc::new to r",
+            "Move from Rc::clone to r2",
+            "Rc::clone reads from r",
+        ],
+        must_not_contain: &[
+            "r.ptr, immutable",
+            "r.ptr.pointer, immutable",
+            "r.phantom, immutable",
+            "r.alloc, immutable",
+            "r2.ptr, immutable",
+            "r2.alloc, immutable",
+        ],
+    },
+    TooltipExpect {
+        name: "box_dyn",
+        must_contain: &[
+            "Move from Box::new to b",
+        ],
+        must_not_contain: &[
+            "b.0, immutable",
+            "b.0.pointer, immutable",
+            "b.0._marker, immutable",
+            "b.1, immutable",
+        ],
     },
 ];
 
