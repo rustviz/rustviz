@@ -589,7 +589,7 @@ const App: React.FC = () => {
                   +
                 </button>
                 <button
-                  className="cm-button"
+                  className="cm-button toolbar-icon-button"
                   onClick={handleRename}
                   disabled={!canRename}
                   title={
@@ -597,8 +597,28 @@ const App: React.FC = () => {
                       ? 'Rename this example'
                       : 'Rename only works on examples you created'
                   }
+                  aria-label="Rename this example"
                 >
-                  Rename
+                  {/* Pencil icon (Lucide-style, inlined). `currentColor`
+                      inherits the button's white text color and the
+                      :disabled rule on .cm-button dims it the same way
+                      it dims text. */}
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                    style={{ display: 'block' }}
+                  >
+                    <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                    <path d="m15 5 4 4" />
+                  </svg>
                 </button>
                 <button
                   className="cm-button generate-button"
