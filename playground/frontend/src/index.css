@@ -176,6 +176,12 @@ code {
 .description li { margin: 3px 0; }
 .description code { font-size: 12px; }
 
+/* Indented, smaller-text academic citation under "Research paper". */
+.description p.citation {
+  font-size: 12px;
+  margin-left: 22px;
+}
+
 /* ─── Editor panel (top-right) ──────────────────────────────────── */
 
 .editor-panel {
