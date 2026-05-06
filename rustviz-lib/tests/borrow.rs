@@ -14,11 +14,11 @@
 //!     least one Hollow segment (state transitions visible).
 //!
 //! These tests use the same `RV_RUNNER=local` backend as `corpus.rs`
-//! and require `cargo install --path rustviz2-plugin --locked` first.
+//! and require `cargo install --path rustviz-plugin --locked` first.
 
 use std::env;
 
-use rustviz2::Rustviz;
+use rustviz_lib::Rustviz;
 
 fn run(src: &str) -> Rustviz {
     env::set_var("RV_RUNNER", "local");
@@ -100,7 +100,7 @@ fn has_hollow_segment_for(timeline: &str, hash: u64) -> bool {
         .any(|seg| seg.contains(&needle) && seg.contains("class=\"hollow"))
 }
 
-/// Hash of the n-th declared variable; rustviz2 assigns hashes sequentially
+/// Hash of the n-th declared variable; the plugin assigns hashes sequentially
 /// in declaration order. The function RAP for `String::from` lands at hash 1
 /// in every snippet that uses it, so the first user-declared variable is
 /// usually hash 2. Adjust per-test if needed.

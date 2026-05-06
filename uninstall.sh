@@ -57,7 +57,10 @@ run() {
 # silently so the script is idempotent — a second run is a no-op.
 # ----------------------------------------------------------------
 echo "==> cargo uninstall"
-for pkg in rustviz2 rustviz2-plugin; do
+# Include the legacy `rustviz2*` package names so an `uninstall.sh` run
+# from a freshly-pulled checkout cleans up binaries left behind by an
+# older `setup.sh` (pre-rename).
+for pkg in rustviz-cli rustviz-plugin rustviz2 rustviz2-plugin; do
     if cargo install --list 2>/dev/null | grep -qE "^${pkg} v"; then
         run cargo uninstall "$pkg"
     else
@@ -103,8 +106,8 @@ fi
 # 4. Optional: rustup toolchain. Off by default — the nightly
 # pinned by rust-toolchain.toml might be in use by other projects
 # on this machine. Channel string is read from the same file
-# rustviz2's lib.rs / rustviz init derive from, so this stays in
-# sync automatically.
+# rustviz-lib's lib.rs / `rustviz init` derive from, so this stays
+# in sync automatically.
 # ----------------------------------------------------------------
 if [ "$REMOVE_TOOLCHAIN" = 1 ]; then
     CHANNEL=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ {print $2; exit}' rust-toolchain.toml)

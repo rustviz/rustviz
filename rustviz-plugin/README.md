@@ -1,20 +1,18 @@
-# rustviz2-plugin
+# rustviz-plugin
 
-The compiler-integrated heart of RustViz. A `rustc_private` plugin that
-walks HIR/MIR for a single-file crate and emits a code panel + timeline
-panel as SVGs on stdout. Built on Will Crichton's
-[`rustc_plugin`](https://crates.io/crates/rustc_plugin) /
+The compiler-integrated heart of [RustViz](https://github.com/rustviz/rustviz).
+A `rustc_private` plugin that walks HIR/MIR for a single-file crate and
+emits a code panel + timeline panel as SVGs on stdout. Built on Will
+Crichton's [`rustc_plugin`](https://crates.io/crates/rustc_plugin) /
 [`rustc_utils`](https://crates.io/crates/rustc_utils) crates (same
 family as Flowistry / Aquascope).
 
 End users typically don't touch this crate directly — they use one of:
 
-- the **`rustviz` CLI** in [`../rustviz2/`](../rustviz2/) (`rustviz svg
-  foo.rs`, `rustviz html foo.rs`),
-- the **`mdbook-rustviz` preprocessor** in
-  [`../mdbook-rustviz/`](../mdbook-rustviz/) (` ```rv ` fenced blocks),
+- the **`rustviz` CLI** in [`rustviz-cli`](https://crates.io/crates/rustviz-cli) (`rustviz svg foo.rs`, `rustviz html foo.rs`),
+- the **`mdbook-rustviz` preprocessor** in [`mdbook-rustviz`](https://crates.io/crates/mdbook-rustviz) (` ```rv ` fenced blocks),
 - the **playground** in [`../playground/`](../playground/), or
-- the **`rustviz2` Rust library** in [`../rustviz2/`](../rustviz2/).
+- the **`rustviz-lib` Rust library** in [`rustviz-lib`](https://crates.io/crates/rustviz-lib).
 
 Each of those routes calls into the binaries this crate produces
 (`cargo-rv-plugin`, `rv-plugin-driver`).
@@ -27,7 +25,7 @@ The standard install path is via the `rustviz` CLI's bootstrap, which
 also installs the matching nightly toolchain:
 
 ```sh
-cargo install rustviz2
+cargo install rustviz-cli
 rustviz init
 ```
 

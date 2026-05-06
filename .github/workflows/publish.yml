@@ -1,0 +1,113 @@
+name: publish-to-crates-io
+
+# Push a `v2.Y.0` tag to publish all four crates to crates.io. The
+# four published manifests must all carry the same version as the tag
+# (enforced below); `scripts/bump-version.sh` is the canonical way to
+# bump them in lockstep before tagging. See the README's "Releasing"
+# section.
+on:
+  push:
+    tags:
+      - 'v*'
+  # Manual fallback if a release needs to be re-run after fixing a
+  # transient registry hiccup. Reads the tag the workflow_dispatch was
+  # invoked against, so use the GitHub UI's ref selector to pick it.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # Install the workspace's pinned nightly. cargo publish reads
+      # `rust-toolchain.toml` and rustup will auto-install on first
+      # cargo invocation anyway, but doing it explicitly here surfaces
+      # toolchain failures as a discrete CI step rather than burying
+      # them inside the first `cargo publish` line.
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup show
+          rustc --version
+          cargo --version
+
+      - name: Verify tag matches workspace versions
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          want="${tag#v}"
+          fail=0
+          for crate in rustviz-plugin rustviz-lib rustviz-cli mdbook-rustviz; do
+            got=$(grep -m1 '^version = ' "$crate/Cargo.toml" \
+                  | sed -E 's/^version = "(.+)"/\1/')
+            if [ "$got" != "$want" ]; then
+              echo "::error file=$crate/Cargo.toml::$crate version is $got, expected $want (from tag $tag)"
+              fail=1
+            else
+              echo "  $crate $got ✓"
+            fi
+          done
+          [ "$fail" = "0" ] || exit 1
+
+      # Publish in dependency order. rustviz-plugin and rustviz-lib have
+      # no inter-workspace deps; rustviz-cli and mdbook-rustviz both
+      # depend on rustviz-lib via a `path = "..", version = ".."` dual
+      # spec, so rustviz-lib must be on crates.io first.
+      #
+      # `--no-verify` skips the post-package build that cargo runs
+      # by default. The workspace already gets full CI on every push
+      # to main via build.yml; re-running the verify build here would
+      # duplicate ~10 min of rustc_private compilation for the plugin
+      # without catching anything build.yml didn't already.
+      #
+      # Each step polls the registry for index propagation before
+      # the next dependent crate's publish — recent cargo versions
+      # do this internally, but a `sleep 30` between dependent
+      # publishes is cheap insurance against the rare slow index
+      # update.
+      - name: cargo publish rustviz-plugin
+        run: cargo publish -p rustviz-plugin --no-verify --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: cargo publish rustviz-lib
+        run: cargo publish -p rustviz-lib --no-verify --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: wait for rustviz-lib to appear in the index
+        run: sleep 30
+
+      - name: cargo publish rustviz-cli
+        run: cargo publish -p rustviz-cli --no-verify --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: cargo publish mdbook-rustviz
+        run: cargo publish -p mdbook-rustviz --no-verify --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+      # Log who owns each published crate. The CRATES_IO_TOKEN's
+      # account is the sole initial owner of any newly-published
+      # crate; this step makes that explicit in the workflow log so
+      # ownership drift (or a token swap to a different account) is
+      # easy to spot at a glance after every release. Add additional
+      # owners with `cargo owner --add <user>` against a working
+      # checkout — not done automatically here because adding owners
+      # is a one-time setup, not a per-release operation.
+      - name: log crate owners
+        run: |
+          for crate in rustviz-plugin rustviz-lib rustviz-cli mdbook-rustviz; do
+            echo "==> $crate"
+            cargo owner --list "$crate" --token "$CARGO_REGISTRY_TOKEN" || true
+          done
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

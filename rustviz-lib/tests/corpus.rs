@@ -1,4 +1,4 @@
-//! Plugin regression tests against the corpus of `rustviz2-plugin/tests/*.rs`.
+//! Plugin regression tests against the corpus of `rustviz-plugin/tests/*.rs`.
 //!
 //! Each .rs file in the corpus is a Rust program the plugin should be able
 //! to visualize. We don't pin exact SVG output (it's noisy and changes with
@@ -16,17 +16,17 @@
 //! list; failures there are not regressions.
 //!
 //! These tests use the `RV_RUNNER=local` backend, which requires
-//! `cargo install --path rustviz2-plugin --locked` to have been run first.
+//! `cargo install --path rustviz-plugin --locked` to have been run first.
 //! `setup.sh` does this for you. CI runs `setup.sh` before `cargo test`.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use rustviz2::Rustviz;
+use rustviz_lib::Rustviz;
 
 /// Curated subset that should always succeed end-to-end. Each entry is the
-/// stem of a file in `../rustviz2-plugin/tests/`. Keep this list small and
+/// stem of a file in `../rustviz-plugin/tests/`. Keep this list small and
 /// representative; it's the regression floor.
 const EXPECTED_OK: &[&str] = &[
     "testMove",
@@ -42,7 +42,7 @@ const EXPECTED_OK: &[&str] = &[
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("rustviz2-plugin")
+        .join("rustviz-plugin")
         .join("tests")
 }
 
@@ -61,7 +61,7 @@ fn ensure_plugin_installed() {
         .unwrap_or(false);
     assert!(
         ok,
-        "`cargo rv-plugin` not on PATH. Run `cargo install --path rustviz2-plugin --locked` \
+        "`cargo rv-plugin` not on PATH. Run `cargo install --path rustviz-plugin --locked` \
          (or `./setup.sh`) before `cargo test`."
     );
 }

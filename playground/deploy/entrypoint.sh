@@ -10,7 +10,7 @@ LOG() { printf '[entrypoint] %s\n' "$*" >&2; }
 # Where to pull the runner image from. The default points at the
 # rustviz/rustviz-runner package on GHCR, populated by
 # .github/workflows/runner-image.yml on every push to main that touches
-# playground/runner/** or rustviz2-plugin/**. Override with RV_RUNNER_PULL_REF for
+# playground/runner/** or rustviz-plugin/**. Override with RV_RUNNER_PULL_REF for
 # staging/private deployments.
 PULL_REF="${RV_RUNNER_PULL_REF:-ghcr.io/rustviz/rustviz-runner:latest}"
 LOCAL_TAG="rustviz/rustviz-runner:latest"

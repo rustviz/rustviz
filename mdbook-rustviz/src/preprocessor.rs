@@ -24,14 +24,14 @@ use crate::cfg::Cfg;
 use core::str;
 use std::path::{Path, PathBuf};
 use std::fs;
-use rustviz2::Rustviz;
+use rustviz_lib::Rustviz;
 
 /// `<script>…</script>` block carrying the tooltip + cross-panel
 /// highlighting glue. The JS itself lives in
-/// `rustviz2/src/helpers.js` and is shared with the `rustviz` CLI's
+/// `rustviz-lib/src/helpers.js` and is shared with the `rustviz` CLI's
 /// `--html` mode — keep the SVG schema in sync with both consumers.
 fn helpers_script() -> String {
-    format!("<script>\n{}\n</script>", rustviz2::HELPERS_JS)
+    format!("<script>\n{}\n</script>", rustviz_lib::HELPERS_JS)
 }
 
 pub struct RustvizPlugin {

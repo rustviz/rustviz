@@ -21,7 +21,7 @@ at the University of Michigan.
 
 > **Try it live:** <https://rustviz.github.io/>
 
-![screenshot placeholder](rustviz2-plugin/src/svg_generator/rv2_example.png)
+![screenshot placeholder](rustviz-plugin/src/svg_generator/rv2_example.png)
 
 ---
 
@@ -33,8 +33,8 @@ against `rustc_private` and so requires a specific nightly toolchain.
 The fastest way to get a working install is:
 
 ```sh
-cargo install rustviz2     # gets the lib + the `rustviz` CLI binary
-rustviz init               # installs nightly-2025-08-20 + the plugin
+cargo install rustviz-cli   # the `rustviz` CLI binary
+rustviz init                # installs nightly-2025-08-20 + the plugin
 ```
 
 `rustviz init` runs the underlying `rustup toolchain install` + `cargo
@@ -105,7 +105,7 @@ this way.
 For one-shot rendering of a single `.rs` file:
 
 ```sh
-cargo install rustviz2          # gets the lib + the `rustviz` binary
+cargo install rustviz-cli       # the `rustviz` binary
 rustviz init                    # one-time: install nightly + plugin
 
 rustviz svg foo.rs              # writes foo.code.svg + foo.timeline.svg
@@ -120,10 +120,10 @@ assets. See `rustviz init --help` for the bootstrap flags.
 ### 4. The Rust library
 
 For programmatic SVG generation (e.g. wiring RustViz into your own
-authoring pipeline), the same `rustviz2` crate exposes a small Rust API:
+authoring pipeline), `rustviz-lib` exposes a small Rust API:
 
 ```rust
-use rustviz2::Rustviz;
+use rustviz_lib::Rustviz;
 
 let rv = Rustviz::new(code)?;     // calls the plugin under the hood
 fs::write("code.svg", rv.code_panel_string())?;
@@ -131,8 +131,8 @@ fs::write("timeline.svg", rv.timeline_panel_string())?;
 ```
 
 A runnable example lives at
-[`rustviz2/examples/render_to_files.rs`](rustviz2/examples/render_to_files.rs).
-The crate's [API docs](rustviz2/src/lib.rs) cover the backend split
+[`rustviz-lib/examples/render_to_files.rs`](rustviz-lib/examples/render_to_files.rs).
+The crate's [API docs](rustviz-lib/src/lib.rs) cover the backend split
 (local subprocess vs. sandboxed Docker — `local` is the default for
 library use; the playground binary opts into `docker` for untrusted
 input).
@@ -146,10 +146,12 @@ top-level directory:
 
 | Path                  | Contents |
 |-----------------------|----------|
-| **`rustviz2-plugin/`**| The rustc plugin — the heart of the project. Walks HIR/MIR for a single-file crate and emits a code-panel + timeline-panel SVG on stdout. Built on Will Crichton's `rustc_plugin` / `rustc_utils` crates (same family as Flowistry / Aquascope). Produces the `cargo-rv-plugin` and `rv-plugin-driver` binaries. Pinned to nightly-2025-08-20 via `rust-toolchain.toml`. |
-| **`rustviz2/`**       | User-facing Rust library + the `rustviz` CLI. The library exposes `Rustviz::new(code)` which shells out to the plugin; the CLI (`rustviz svg`, `rustviz html`, `rustviz init`) wraps it with file I/O and self-contained-HTML output. The shared tooltip JS for hover behavior also lives here, exported as `rustviz2::HELPERS_JS`. |
-| **`mdbook-rustviz/`** | An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor. Replaces ` ```rv ` fenced code blocks with embedded RustViz SVGs at build time. Includes a `test-book/` worked example. The full hands-on tutorial that uses it is in a [separate repo](https://github.com/rustviz/tutorial). |
-| **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/> with the compile API at <https://rustviz-playground.fly.dev/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. |
+| **`rustviz-plugin/`** | The rustc plugin — the heart of the project. Walks HIR/MIR for a single-file crate and emits a code-panel + timeline-panel SVG on stdout. Built on Will Crichton's `rustc_plugin` / `rustc_utils` crates (same family as Flowistry / Aquascope). Produces the `cargo-rv-plugin` and `rv-plugin-driver` binaries. Pinned to nightly-2025-08-20 via `rust-toolchain.toml`. Published to crates.io as **`rustviz-plugin`**. |
+| **`rustviz-lib/`**    | User-facing Rust library. Exposes `Rustviz::new(code)` which shells out to the plugin and returns the two SVGs. The shared tooltip JS for hover behavior also lives here, exported as `rustviz_lib::HELPERS_JS`. Published to crates.io as **`rustviz-lib`**. |
+| **`rustviz-cli/`**    | The `rustviz` command-line interface — `rustviz svg`, `rustviz html`, `rustviz init`. Wraps `rustviz-lib` with file I/O + self-contained-HTML output, plus a one-shot toolchain/plugin bootstrap (`init`). Published to crates.io as **`rustviz-cli`**. |
+| **`mdbook-rustviz/`** | An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor. Replaces ` ```rv ` fenced code blocks with embedded RustViz SVGs at build time. Includes a `test-book/` worked example. The full hands-on tutorial that uses it is in a [separate repo](https://github.com/rustviz/tutorial). Published to crates.io as **`mdbook-rustviz`**. |
+| **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/> with the compile API at <https://rustviz-playground.fly.dev/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. Not published to crates.io. |
+| `scripts/bump-version.sh` | Synchronizes the version field across all four published crates' Cargo.toml files (and refreshes Cargo.lock). Run before tagging a release; see "Releasing" below. |
 | `setup.sh`            | One-shot dev bootstrap: installs the toolchain, builds the plugin, builds the frontend, builds the runner image. Run once after cloning. |
 | `uninstall.sh`        | Reverse of `setup.sh`. Removes the cargo-installed binaries + the local docker runner image + frontend artifacts; spares the rustup toolchain and `target/` by default (override with `--toolchain` / `--target` / `--everything`). |
 
@@ -169,7 +171,7 @@ not all of it. Currently unsupported (or known to misbehave):
 - Some borrows over struct members
 
 The plugin has a TODO list with more detail in
-[`rustviz2-plugin/README.md`](rustviz2-plugin/README.md).
+[`rustviz-plugin/README.md`](rustviz-plugin/README.md).
 
 ---
 
@@ -187,6 +189,48 @@ checklist are in [`playground/SECURITY.md`](playground/SECURITY.md). Report find
 
 Issues and PRs welcome. Keep each PR focused on a single concern; for
 local-dev setup run `./setup.sh` then `cargo build --workspace --locked`.
+
+## Releasing
+
+Four crates are published to crates.io in lockstep, all sharing the
+same version:
+
+| Crate                                                            | What it is |
+|------------------------------------------------------------------|------------|
+| [`rustviz-plugin`](https://crates.io/crates/rustviz-plugin)      | The rustc plugin (binaries `cargo-rv-plugin` + `rv-plugin-driver`). |
+| [`rustviz-lib`](https://crates.io/crates/rustviz-lib)            | Rust library: `Rustviz::new(code)` returns the SVGs. |
+| [`rustviz-cli`](https://crates.io/crates/rustviz-cli)            | The `rustviz` CLI binary (`svg`, `html`, `init`). |
+| [`mdbook-rustviz`](https://crates.io/crates/mdbook-rustviz)      | The mdBook preprocessor. |
+
+Versions follow `v2.Y.0` (major fixed at 2 to match RustViz 2; patch
+fixed at 0 since the four crates always release together — bumping Y
+covers everything from a typo fix to a breaking API change). To cut a
+release:
+
+```sh
+# 1. Bump versions on a branch, open a PR, get it reviewed + merged.
+./scripts/bump-version.sh         # auto-increment Y
+# (or: ./scripts/bump-version.sh 5  to set v2.5.0 explicitly)
+git checkout -b release/v2.5.0
+git add -A && git commit -m 'Bump RustViz to v2.5.0'
+git push -u origin release/v2.5.0
+gh pr create --fill                # land it on main
+
+# 2. Once the bump PR is merged, tag the merge commit and push the tag.
+#    Merging the PR does NOT auto-tag — tagging is a separate, deliberate
+#    step so you have a clean "yes, ship this" checkpoint.
+git checkout main && git pull
+git tag v2.5.0
+git push origin v2.5.0
+```
+
+The pushed `v2.Y.0` tag triggers
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml), which
+verifies all four manifests pin the tag's version and then publishes
+them in dependency order (`rustviz-plugin` and `rustviz-lib` first,
+then `rustviz-cli` and `mdbook-rustviz`). A `CRATES_IO_TOKEN` repo
+secret with `publish-new` + `publish-update` scope on those four crate
+names is required.
 
 ## License
 

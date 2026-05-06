@@ -10,9 +10,9 @@
 //!   `foo.html` with both SVGs inlined and the tooltip JS embedded.
 //!   Open in any browser; no server required.
 //! - `rustviz init` installs the nightly toolchain + plugin needed
-//!   for the above. One-time setup after `cargo install rustviz2`.
+//!   for the above. One-time setup after `cargo install rustviz-cli`.
 //!
-//! `svg` and `html` call the same `rustviz2::Rustviz::new(code)`
+//! `svg` and `html` call the same `rustviz_lib::Rustviz::new(code)`
 //! API the playground and the mdbook preprocessor use, which
 //! shells out to the rustc plugin (`cargo rv-plugin`).
 
@@ -24,11 +24,11 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use rustviz2::{HELPERS_JS, Rustviz, toolchain_channel, toolchain_components};
+use rustviz_lib::{HELPERS_JS, Rustviz, toolchain_channel, toolchain_components};
 
-/// Default git source for the rustviz2-plugin install — the
-/// canonical RustViz repo. Override with `--plugin-git` if you're
-/// working off a fork or a different branch.
+/// Default git source for the rustviz-plugin install — the canonical
+/// RustViz repo. Override with `--plugin-git` if you're working off a
+/// fork or a different branch.
 const DEFAULT_PLUGIN_GIT: &str = "https://github.com/rustviz/rustviz";
 
 #[derive(Parser)]
@@ -70,9 +70,9 @@ enum Commands {
     },
     /// Install the nightly toolchain + rustc plugin needed by
     /// `rustviz svg` / `rustviz html`. Run once after
-    /// `cargo install rustviz2`.
+    /// `cargo install rustviz-cli`.
     Init {
-        /// Git URL to install the rustviz2-plugin from. Defaults to
+        /// Git URL to install the rustviz-plugin from. Defaults to
         /// the canonical RustViz repo.
         #[arg(long, default_value = DEFAULT_PLUGIN_GIT, value_name = "URL")]
         plugin_git: String,
@@ -237,7 +237,7 @@ fn init(
     }
 
     // Both the channel string and the component list come from
-    // `rust-toolchain.toml` via `rustviz2::toolchain_*`. Single
+    // `rust-toolchain.toml` via `rustviz_lib::toolchain_*`. Single
     // source of truth — bumping the toolchain only requires
     // editing that one file.
     let channel = toolchain_channel();
@@ -275,9 +275,9 @@ fn init(
         // The plugin crate name doesn't match the repo name, so name
         // it explicitly. `--locked` keeps us on the lockfile the
         // upstream repo committed.
-        args.extend_from_slice(&["--locked", "rustviz2-plugin"]);
+        args.extend_from_slice(&["--locked", "rustviz-plugin"]);
         run_cmd("cargo", &args, dry_run)
-            .context("cargo install rustviz2-plugin failed")?;
+            .context("cargo install rustviz-plugin failed")?;
     }
 
     if dry_run {

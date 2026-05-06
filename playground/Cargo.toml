@@ -14,4 +14,4 @@ env_logger = "0.9"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rustviz2 = { path = "../rustviz2" }
+rustviz-lib = { path = "../rustviz-lib" }
