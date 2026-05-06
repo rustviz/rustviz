@@ -159,7 +159,6 @@ code {
   overflow: auto;
   flex: 1;
   min-height: 0;
-  max-width: 80ch;
   line-height: 1.55;
 }
 
