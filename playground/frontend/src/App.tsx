@@ -599,27 +599,11 @@ const App: React.FC = () => {
                   }
                   aria-label="Rename this example"
                 >
-                  {/* Pencil icon (Lucide-style, inlined). `currentColor`
-                      stroke + explicit `fill="none"` on each path —
-                      the SVG-level `fill` doesn't reliably inherit to
-                      children in React's renderer, so without per-path
-                      fill the closed pencil-body path renders as a
-                      filled rectangle. */}
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                    style={{ display: 'block' }}
-                  >
-                    <path fill="none" d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                    <path fill="none" d="m15 5 4 4" />
-                  </svg>
+                  {/* Unicode "lower right pencil" (U+270E) renders in
+                      the inherited text color across platforms, the
+                      same way the `+` glyph above does — no SVG fill
+                      / stroke inheritance to debug. */}
+                  ✎
                 </button>
                 <button
                   className="cm-button generate-button"
