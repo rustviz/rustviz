@@ -63,6 +63,37 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
   }
 }
 
+/// Walk a chain of `Path` / `Field` / `AddrOf` / `Unary` / `DropTemps`
+/// expressions and produce the qualified RAP name, e.g. `r`, `r.s`,
+/// `r.a.b`, or `self.n`. Returns `None` for anything outside that
+/// chain — calls, blocks, literals, etc. — since those don't have a
+/// stable RAP name to look up.
+///
+/// Rationale: the visitor used to inline a one-arm match for
+/// `Field(Path(...), ident)` everywhere it needed a struct-field RAP
+/// name and `panic!("unexpected field expr")` on every other shape.
+/// That panicked on `r.a.b` (nested), `(&r).s` (field through a
+/// reference), `self.field` (in impl methods where `self.field`
+/// isn't a registered RAP), and the receiver of `r.s.method()`.
+/// Centralizing the walk lets us return `None` instead, which the
+/// callers map to "skip this event" / "Anonymous resource" rather
+/// than crashing the plugin.
+pub fn expr_to_rap_name(expr: &Expr, tcx: &TyCtxt) -> Option<String> {
+  match expr.kind {
+    ExprKind::Path(QPath::Resolved(_, p)) => {
+      Some(tcx.hir_name(p.segments[0].hir_id).as_str().to_owned())
+    }
+    ExprKind::Field(inner, ident) => {
+      let base = expr_to_rap_name(inner, tcx)?;
+      Some(format!("{}.{}", base, ident.as_str()))
+    }
+    ExprKind::AddrOf(_, _, inner)
+    | ExprKind::Unary(_, inner)
+    | ExprKind::DropTemps(inner) => expr_to_rap_name(inner, tcx),
+    _ => None,
+  }
+}
+
 pub fn bool_of_mut (m: Mutability) -> bool {
   match m {
     Mutability::Not => {
@@ -241,20 +272,29 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
         }
         _ => {
           let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-          HashSet::from([raps.get(&name).unwrap().rap.to_owned()])
+          // Same fallback as the Path arm in get_rap: an unknown
+          // name (macro-synthetic local, `self` in an impl method,
+          // etc.) becomes an empty live set rather than a crash.
+          match raps.get(&name) {
+            Some(rd) => HashSet::from([rd.rap.to_owned()]),
+            None => HashSet::new(),
+          }
         }
       }
     }
-    ExprKind::Field(expr, ident) => {
-      match expr {
-        Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
-          let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-          let field_name: String = ident.as_str().to_owned();
-          let total_name = format!("{}.{}", name, field_name);
-          HashSet::from([raps.get(&total_name).unwrap().rap.to_owned()])
+    ExprKind::Field(inner, ident) => {
+      // Live-set extraction: emit the qualified field RAP if we
+      // know it; otherwise return empty rather than panic. Callers
+      // accumulate live sets across an expression tree, so a
+      // missing one just means we under-report liveness for that
+      // sub-expression, which is preferable to crashing.
+      if let Some(base) = expr_to_rap_name(inner, tcx) {
+        let total_name = format!("{}.{}", base, ident.as_str());
+        if let Some(rd) = raps.get(&total_name) {
+          return HashSet::from([rd.rap.to_owned()]);
         }
-        _ => { panic!("unexpected field expr") }
-      } 
+      }
+      HashSet::new()
     }
     ExprKind::AddrOf(_, _, exp) | ExprKind::Unary(_, exp) 
     | ExprKind::DropTemps(exp) => {
@@ -543,22 +583,24 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
         None => { panic!("invalid expr for getting rap") }
       }
     }
-    ExprKind::Field(expr, ident) => {
-      match expr {
-        Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
-          let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-          let field_name: String = ident.as_str().to_owned();
-          let total_name = format!("{}.{}", name, field_name);
-          ResourceTy::Value(raps.get(&total_name).unwrap().rap.to_owned())
+    ExprKind::Field(inner, ident) => {
+      // Walk the receiver to a qualified name, then look it up. Any
+      // shape we can't name (call result, block, etc.) — or a name
+      // we don't have a RAP for — falls back to Anonymous so the
+      // surrounding event still records.
+      if let Some(base) = expr_to_rap_name(inner, tcx) {
+        let total_name = format!("{}.{}", base, ident.as_str());
+        if let Some(rd) = raps.get(&total_name) {
+          return ResourceTy::Value(rd.rap.to_owned());
         }
-        _ => { panic!("unexpected field expr") }
-      } 
+      }
+      ResourceTy::Anonymous
     }
     _ => ResourceTy::Anonymous
   }
 }
 
-// Almost the same as get_rap but we don't care about any anonymous owners 
+// Almost the same as get_rap but we don't care about any anonymous owners
 // which is why we return a RAP instead of a ResourceTy
 pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Option<ResourceAccessPoint> {
   match expr.kind {
@@ -574,16 +616,17 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
         None => { panic!("invalid expr for fetching rap") }
       }
     }
-    ExprKind::Field(expr, ident) => {
-      match expr {
-        Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
-          let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-          let field_name: String = ident.as_str().to_owned();
-          let total_name = format!("{}.{}", name, field_name);
-          Some(raps.get(&total_name).unwrap().rap.to_owned())
+    ExprKind::Field(inner, ident) => {
+      // Same logic as get_rap's Field arm, but return None instead
+      // of Anonymous since fetch_rap callers don't carry a separate
+      // "anonymous" sentinel.
+      if let Some(base) = expr_to_rap_name(inner, tcx) {
+        let total_name = format!("{}.{}", base, ident.as_str());
+        if let Some(rd) = raps.get(&total_name) {
+          return Some(rd.rap.to_owned());
         }
-        _ => { panic!("unexpected field expr") }
-      } 
+      }
+      None
     }
     _ => None
   }
@@ -640,21 +683,23 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
         }
       }
     }
-    ExprKind::Field(expr, ident) => {
-      match expr {
-        Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
-          let mut name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-          name = format!("{}.{}", name, ident.as_str());
-          if borrow_map.contains_key(&name) {
-            borrow_map.get(&name).unwrap().to_owned().lender
-          }
-          else{
-            ResourceTy::Value(raps.get(&name).unwrap().rap.to_owned())
-          }
+    ExprKind::Field(inner, ident) => {
+      // Walk to a qualified name; check borrow_map first (the field
+      // might itself be a registered borrower with a known lender),
+      // then fall back to raps. Unknown names return Anonymous so
+      // the surrounding `let p = &r.unknown.field;` still records a
+      // borrow site, just without a recorded lender.
+      if let Some(base) = expr_to_rap_name(inner, tcx) {
+        let name = format!("{}.{}", base, ident.as_str());
+        if let Some(rd) = borrow_map.get(&name) {
+          return rd.to_owned().lender;
         }
-        _ => { panic!("unexpected field expr") }
-      } 
+        if let Some(rd) = raps.get(&name) {
+          return ResourceTy::Value(rd.rap.to_owned());
+        }
+      }
+      ResourceTy::Anonymous
     }
-  _ => { panic!("unexpected rhs lender expr {:#?}", rhs) }
+  _ => ResourceTy::Anonymous,
   }
 }

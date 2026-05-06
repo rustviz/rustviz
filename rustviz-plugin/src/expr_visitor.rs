@@ -815,7 +815,16 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
       for field in expr_fields.iter() {
           let new_lhs_name = format!("{}.{}", lhs.name(), field.ident.as_str());
-          let field_rap = self.raps.get(&new_lhs_name).unwrap().rap.to_owned();
+          // Skip fields whose RAP we never registered. The most
+          // common case is a struct field whose type is itself a
+          // struct (`R { a: A { b: ... } }`): define_lhs registers
+          // `r.a` but doesn't recurse to add `r.a.b`, so the inner
+          // struct's expansion lands here without an entry. Better
+          // to lose the per-field event than crash the whole render.
+          let field_rap = match self.raps.get(&new_lhs_name) {
+            Some(rd) => rd.rap.to_owned(),
+            None => continue,
+          };
           let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
           let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, field.expr.hir_id.owner), field_ty);
           let e = if field_ty.is_ref() {
@@ -847,16 +856,19 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       }
     },
 
-    ExprKind::Field(expr, id) => {
-      match expr {
-        Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
-          let line_num = span_to_line(&p.span, &self.tcx);
-          let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-          let total_name = format!("{}.{}", name, id.as_str());
-          let rhs_rap = self.raps.get(&total_name).unwrap().rap.to_owned();
+    ExprKind::Field(inner, id) => {
+      // Walk the receiver to a qualified name; emit the event only
+      // if we actually have a RAP under that name. Anything else
+      // (nested field access we never registered, `self.field` in
+      // an impl method, fields through a deref/borrow) falls
+      // through silently rather than panicking.
+      if let Some(base) = expr_to_rap_name(inner, &self.tcx) {
+        let total_name = format!("{}.{}", base, id.as_str());
+        if let Some(rd) = self.raps.get(&total_name) {
+          let line_num = span_to_line(&inner.span, &self.tcx);
+          let rhs_rap = rd.rap.to_owned();
           self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
         }
-        _ => panic!("unexpected field expr")
       }
     }
     // explicitly using return keyword

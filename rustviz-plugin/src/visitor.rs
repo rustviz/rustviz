@@ -219,8 +219,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
           _ => {}
         }
-        let rcvr_name = hirid_to_var_name(rcvr.hir_id, &self.tcx).unwrap();
-        let rcvr_rap = self.raps.get(&rcvr_name).unwrap().rap.to_owned();
+        // The receiver of `r.s.method()` is a Field expression, not
+        // a bare path, so `hirid_to_var_name` can't name it.
+        // `expr_to_rap_name` walks Path / Field / AddrOf chains and
+        // returns the qualified name we registered the receiver
+        // under (e.g. `r.s`). If we can't resolve a RAP for the
+        // receiver — unregistered nested field, `self.field` in an
+        // impl method, etc. — bail out of the rest of the
+        // method-call processing rather than crash; the call site
+        // simply produces no event for this method.
+        let rcvr_name = match expr_to_rap_name(rcvr, &self.tcx) {
+          Some(n) => n,
+          None => return,
+        };
+        let rcvr_rap = match self.raps.get(&rcvr_name) {
+          Some(rd) => rd.rap.to_owned(),
+          None => return,
+        };
         self.update_rap(&rcvr_rap, line_num);
         let fn_rap = self.raps.get(&fn_name).unwrap().rap.to_owned();
         // typecheck
