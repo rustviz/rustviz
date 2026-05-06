@@ -647,12 +647,18 @@ pub fn state_full_privilege(my_name: &String) -> String {
 
 // Closure binding's FullPrivilege state. Two flavours so the
 // timeline tooltip distinguishes a `move ||` (closure owns the
-// captured resource — drop runs at scope-end) from a borrow-only
+// captured resources — drop runs at scope-end) from a borrow-only
 // closure (captures a reference; nothing of the resource is owned
-// by the closure value itself).
-pub fn state_closure_full_privilege_with_resource(my_name: &String) -> String {
+// by the closure value itself). The move-flavoured variant takes
+// the count of move-captured upvars so the tooltip is honest
+// about whether the closure owns one or many resources.
+pub fn state_closure_full_privilege_with_resource(my_name: &String, move_capture_count: usize) -> String {
     let my_name_fmt = fmt_style(my_name);
-    format!("{0} owns a closure which owns a resource", my_name_fmt)
+    let noun = if move_capture_count == 1 { "resource" } else { "resources" };
+    format!(
+        "{0} owns a closure which owns {1} {2} via capture",
+        my_name_fmt, move_capture_count, noun
+    )
 }
 
 pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {

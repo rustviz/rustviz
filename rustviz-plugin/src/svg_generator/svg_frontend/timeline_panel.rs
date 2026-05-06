@@ -847,19 +847,27 @@ fn collect_closure_captures(
     out
 }
 
-// True iff the closure identified by `closure_hash` move-captured
-// at least one upvar (across the whole event stream — captures
-// always land at the closure literal's line, but we don't require
-// callers to know that line). Borrow-only closures have nothing
-// to "drop" at scope-end beyond the closure value itself, so the
-// "captured resources are dropped" message is suppressed.
+// Count of upvars move-captured by the closure identified by
+// `closure_hash`. Zero ⇒ borrow-only or capture-less closure;
+// distinguishes the scope-end "captured resources are dropped"
+// message and the timeline state line ("owns N resources via
+// capture") from their borrow-only fallbacks.
+fn closure_move_capture_count(
+    visualization_data: &VisualizationData,
+    closure_hash: u64,
+) -> usize {
+    visualization_data
+        .external_events
+        .iter()
+        .filter(|(_, ev)| matches!(ev, ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash)))
+        .count()
+}
+
 fn closure_has_move_captures(
     visualization_data: &VisualizationData,
     closure_hash: u64,
 ) -> bool {
-    visualization_data.external_events.iter().any(|(_, ev)| {
-        matches!(ev, ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash))
-    })
+    closure_move_capture_count(visualization_data, closure_hash) > 0
 }
 
 // Title for a vertical timeline segment. Routes around the generic
@@ -877,8 +885,9 @@ fn timeline_segment_title(
     if rap.is_closure() {
         if let State::FullPrivilege { .. } = state {
             let name = rap.name().to_owned();
-            if closure_has_move_captures(visualization_data, *rap.hash()) {
-                return hover_messages::state_closure_full_privilege_with_resource(&name);
+            let count = closure_move_capture_count(visualization_data, *rap.hash());
+            if count > 0 {
+                return hover_messages::state_closure_full_privilege_with_resource(&name, count);
             }
             return hover_messages::state_closure_full_privilege_no_resource(&name);
         }
