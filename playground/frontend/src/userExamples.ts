@@ -170,6 +170,36 @@ export function forkedName(base: string, examples: UserExample[]): string {
 }
 
 /**
+ * Sanitize an example name for use as a download filename. Strips
+ * characters disallowed on common filesystems (Windows is the strictest:
+ * `<>:"/\|?*` plus control chars), collapses runs of underscores, and
+ * trims leading/trailing dots/underscores so the result is safe to hand
+ * to a browser's download attribute. Always ends in `.rs`.
+ */
+export function exampleFilename(name: string): string {
+  const cleaned = name
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[._]+|[._]+$/g, '');
+  return (cleaned || 'example') + '.rs';
+}
+
+/**
+ * Pick a name for an imported example based on the source file's
+ * basename (with `.rs` stripped). Mirrors `forkedName`'s collision
+ * handling — first try the bare stem, then `<stem> (2)`, etc.
+ */
+export function importedName(filenameStem: string, examples: UserExample[]): string {
+  const base = filenameStem.trim() || 'Imported example';
+  const taken = new Set(examples.map(e => e.name));
+  if (!taken.has(base)) return base;
+  for (let i = 2; ; i++) {
+    const candidate = `${base} (${i})`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/**
  * Encode a Selection into the dropdown's `<option value="...">`
  * string and back. Encoding is `kind:rest`:
  *   * `preloaded:<chapterIdx>:<exampleIdx>`

@@ -10,7 +10,9 @@ import { exampleGroups } from './examples';
 import {
   codeForSelection,
   DEFAULT_SELECTION,
+  exampleFilename,
   forkedName,
+  importedName,
   loadSelection,
   loadUserExamples,
   newId,
@@ -587,6 +589,60 @@ const App: React.FC = () => {
     handleClick();
   };
 
+  // Save the editor's current code to the user's disk as a `.rs`
+  // file. Filename derives from the selection's name (sanitized for
+  // filesystem use). Works for both preloaded and user examples —
+  // for preloaded we just emit the original snippet; for user we
+  // emit the latest auto-saved code.
+  const handleExport = () => {
+    if (!editor) return;
+    const code = editor.getCurrentCode();
+    const sourceName =
+      selection.kind === 'user'
+        ? userExamples.find(e => e.id === selection.id)?.name ?? 'example'
+        : exampleGroups[selection.chapter].examples[selection.index].name;
+    const blob = new Blob([code], { type: 'text/x-rust' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = exampleFilename(sourceName);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoke after the click handler has had a tick to start the
+    // download — Safari is finicky if we revoke synchronously.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  // Hidden <input type="file"> backing the import button. We click
+  // it programmatically from handleImport so the visible toolbar
+  // button can carry our own styling/icon.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  // Read the chosen file as text, register it as a new user example,
+  // and switch to it. Reusing the same file twice in a row works
+  // because we clear the input's value before bailing out.
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const code = await file.text();
+    const stem = file.name.replace(/\.rs$/i, '');
+    const created: UserExample = {
+      id: newId(),
+      name: importedName(stem, userExamples),
+      code,
+    };
+    setUserExamples([...userExamples, created]);
+    setSelection({ kind: 'user', id: created.id });
+    if (!editor) return;
+    editor.setCurrentCode(code);
+    handleClick();
+  };
+
   const canRename = selection.kind === 'user';
   const canDelete = selection.kind === 'user';
 
@@ -659,6 +715,33 @@ const App: React.FC = () => {
                       item" alongside the existing rename/add controls. */}
                   ✕
                 </button>
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleExport}
+                  title="Save current example as a .rs file"
+                  aria-label="Save current example as a .rs file"
+                >
+                  {/* U+2B07 DOWNWARDS BLACK ARROW — "download to disk". */}
+                  ⬇
+                </button>
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleImportClick}
+                  title="Load a .rs file as a new example"
+                  aria-label="Load a .rs file as a new example"
+                >
+                  {/* U+2B06 UPWARDS BLACK ARROW — "upload from disk
+                      into the playground", same orientation as the
+                      browser's native upload-arrow conventions. */}
+                  ⬆
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".rs,text/x-rust,text/plain"
+                  style={{ display: 'none' }}
+                  onChange={handleImportFile}
+                />
                 <button
                   className="cm-button generate-button"
                   onClick={handleClick}
