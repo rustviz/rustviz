@@ -156,6 +156,33 @@ struct OutputStringData {
     struct_members: String
 }
 
+/// Look up the (parent_panel, members_panel) entry for a struct
+/// owner key, lazy-inserting an empty pair if missing.
+///
+/// Why: `output[parent_hash]` is created on-demand by `append_line`
+/// when a Timeline's `states` produces at least one drawable
+/// segment. A parent struct whose history is "exists but never had
+/// a real ownership / borrow event" produces no such segment, so
+/// `append_line` skips it and the entry never appears. Subsequent
+/// passes (labels, dots, arrows, refs) still iterate the column
+/// layout and would unwrap None for that owner key — so route every
+/// per-owner write through here instead of `.get_mut(...).unwrap()`.
+fn ensure_owner_entry<'a>(
+    output: &'a mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    owner_key: i64,
+) -> &'a mut (TimelinePanelData, TimelinePanelData) {
+    output.entry(owner_key).or_insert_with(|| {
+        let blank = || TimelinePanelData {
+            labels: String::new(),
+            dots: String::new(),
+            timelines: String::new(),
+            ref_line: String::new(),
+            arrows: String::new(),
+        };
+        (blank(), blank())
+    })
+}
+
 pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (String, i32) {
     /* Template creation */
     let mut registry = Handlebars::new();
@@ -551,10 +578,11 @@ fn render_labels_string(
 
         // push to individual timelines
         if column_data.is_struct_group {
+            let owner_entry = ensure_owner_entry(output, column_data.owner as i64);
             if column_data.is_member {
-                output.get_mut(&(column_data.owner.to_owned() as i64)).unwrap().1.labels.push_str(&registry.render("label_template", &data).unwrap());
+                owner_entry.1.labels.push_str(&registry.render("label_template", &data).unwrap());
             } else {
-                output.get_mut(&(column_data.owner.to_owned() as i64)).unwrap().0.labels.push_str(&registry.render("label_template", &data).unwrap());
+                owner_entry.0.labels.push_str(&registry.render("label_template", &data).unwrap());
             }
         }
         else {
@@ -571,10 +599,11 @@ fn append_dot(
 ) {
     let column = timeline_data;
     if column.is_struct_group {
+        let owner_entry = ensure_owner_entry(output, column.owner as i64);
         if column.is_member {
-            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("dot_template", &dot_data).unwrap());
+            owner_entry.1.dots.push_str(&registry.render("dot_template", &dot_data).unwrap());
         } else {
-            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("dot_template", &dot_data).unwrap());
+            owner_entry.0.dots.push_str(&registry.render("dot_template", &dot_data).unwrap());
         }
     }
     else {
@@ -733,10 +762,11 @@ fn append_drop_dot(
     let column = timeline_data;
     let rendered = registry.render("drop_dot_template", drop_data).unwrap();
     if column.is_struct_group {
+        let owner_entry = ensure_owner_entry(output, column.owner as i64);
         if column.is_member {
-            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().1.dots.push_str(&rendered);
+            owner_entry.1.dots.push_str(&rendered);
         } else {
-            output.get_mut(&(column.owner.to_owned() as i64)).unwrap().0.dots.push_str(&rendered);
+            owner_entry.0.dots.push_str(&rendered);
         }
     } else {
         output.get_mut(&-1).unwrap().0.dots.push_str(&rendered);
@@ -962,10 +992,11 @@ fn render_arrow (
             );
 
             if timeline.is_struct_group {
+                let owner_entry = ensure_owner_entry(output, timeline.owner as i64);
                 if timeline.is_member {
-                    output.get_mut(&(timeline.owner.to_owned() as i64)).unwrap().1.arrows.push_str(&rendered);
+                    owner_entry.1.arrows.push_str(&rendered);
                 } else {
-                    output.get_mut(&(timeline.owner.to_owned() as i64)).unwrap().0.arrows.push_str(&rendered);
+                    owner_entry.0.arrows.push_str(&rendered);
                 }
             } else {
                 output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
@@ -1043,10 +1074,11 @@ fn render_arrow (
             );
 
             if timeline.is_struct_group {
+                let owner_entry = ensure_owner_entry(output, timeline.owner as i64);
                 if timeline.is_member {
-                    output.get_mut(&(timeline.owner.to_owned() as i64)).unwrap().1.arrows.push_str(&rendered);
+                    owner_entry.1.arrows.push_str(&rendered);
                 } else {
-                    output.get_mut(&(timeline.owner.to_owned() as i64)).unwrap().0.arrows.push_str(&rendered);
+                    owner_entry.0.arrows.push_str(&rendered);
                 }
             } else {
                 output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
@@ -1123,17 +1155,18 @@ fn render_arrow (
                     };
     
                     if to_timeline.is_struct_group {
+                        let owner_entry = ensure_owner_entry(output, to_timeline.owner as i64);
                         if to_timeline.is_member {
-                            output.get_mut(&(to_timeline.owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                            owner_entry.1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                         } else {
-                            output.get_mut(&(to_timeline.owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                            owner_entry.0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                         }
                     }
                     else {
                         output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                     }
                 }
-                (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByStaticReference { .. }) 
+                (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByStaticReference { .. })
                 | (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByMutableReference { .. }) => { 
                     // (Some(variable), Some(function), PassByRef)
                     let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
@@ -1156,10 +1189,11 @@ fn render_arrow (
                     };
 
                     if from_timeline.is_struct_group {
+                        let owner_entry = ensure_owner_entry(output, from_timeline.owner as i64);
                         if from_timeline.is_member {
-                            output.get_mut(&(from_timeline.owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                            owner_entry.1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                         } else {
-                            output.get_mut(&(from_timeline.owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
+                            owner_entry.0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
                         }
                     }
                     else {
@@ -1190,10 +1224,11 @@ fn render_arrow (
                     };
     
                     if from_timeline.is_struct_group {
+                        let owner_entry = ensure_owner_entry(output, from_timeline.owner as i64);
                         if from_timeline.is_member {
-                            output.get_mut(&(from_timeline.owner.to_owned() as i64)).unwrap().1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                            owner_entry.1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                         } else {
-                            output.get_mut(&(from_timeline.owner.to_owned() as i64)).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                            owner_entry.0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
                         }
                     }
                     else {
@@ -1324,10 +1359,13 @@ fn render_arrow (
 
                 // will need to change this later for structs in conditionals
                 if resource_owners_layout.contains_key(from.hash()) && resource_owners_layout[from.hash()].is_struct_group {
-                    if resource_owners_layout[from.hash()].is_member {
-                        output.get_mut(&(resource_owners_layout[from.hash()].owner.to_owned() as i64)).unwrap().1.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+                    let is_member = resource_owners_layout[from.hash()].is_member;
+                    let owner_key = resource_owners_layout[from.hash()].owner as i64;
+                    let owner_entry = ensure_owner_entry(output, owner_key);
+                    if is_member {
+                        owner_entry.1.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                     } else {
-                        output.get_mut(&(resource_owners_layout[from.hash()].owner.to_owned() as i64)).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+                        owner_entry.0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
                     }
                 }
                 else {
