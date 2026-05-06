@@ -8,6 +8,13 @@
 target/
 */target/
 
+# Per-clone direnv environment + the cargo home it points at.
+# `.envrc.example` is committed; the live `.envrc` and `.cargo-home/`
+# are local to each checkout. See README "Working from multiple
+# checkouts in parallel".
+.envrc
+.cargo-home/
+
 # Per-run fixtures the mdbook preprocessor materialises into a book's
 # tree at build time. The inner test-book under mdbook-rustviz/ is
 # the canonical worked example; its src/examples and book/ outputs

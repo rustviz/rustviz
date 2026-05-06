@@ -1,0 +1,45 @@
+# Per-clone isolation for working on RustViz from several checkouts at once.
+#
+# Without this, every clone shares ~/.cargo: setup.sh's `cargo install`
+# steps from each clone fight over ~/.cargo/bin/rustviz, and concurrent
+# playground processes collide on the docker image tag and bind port.
+#
+# direnv (https://direnv.net/) auto-loads this file when you cd into the
+# checkout and unloads it when you cd out, so any tool launched from a
+# shell inside the checkout — including `claude` — inherits the isolated
+# environment. One-time host setup:
+#
+#   brew install direnv
+#   echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc   # then restart your shell
+#
+# Then per checkout:
+#
+#   cp .envrc.example .envrc
+#   direnv allow
+#
+# The rustup toolchain (~/.rustup) is intentionally still shared — every
+# clone pins the same nightly via rust-toolchain.toml, so a per-clone
+# copy would just waste disk.
+
+# Per-clone cargo home. Houses the binaries setup.sh installs
+# (`rustviz`, `cargo-rv-plugin`, `rv-plugin-driver`) plus a private
+# registry cache, so installing from one clone doesn't shadow another.
+export CARGO_HOME="$PWD/.cargo-home"
+export PATH="$CARGO_HOME/bin:$PATH"
+
+# Uncomment the relevant lines below if you also need to run the
+# playground concurrently from multiple clones.
+
+# Skip docker (so two clones don't fight for the rustviz/rustviz-runner
+# image tag), run the plugin in-process instead. Fine for local dev;
+# never use on a public deploy — see playground/SECURITY.md.
+# export RV_RUNNER=local
+
+# Per-clone docker tag, so `docker build -t "$RV_RUNNER_IMAGE" ...` from
+# one clone doesn't clobber another's image. Pair with `setup.sh
+# --build-runner` after exporting.
+# export RV_RUNNER_IMAGE=rustviz/rustviz-runner:clone-a
+
+# Different bind address so two playgrounds can run simultaneously
+# (default is 127.0.0.1:8080).
+# export RV_BIND=127.0.0.1:8081

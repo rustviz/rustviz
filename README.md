@@ -56,6 +56,29 @@ plus the playground's React frontend. To undo it, run `./uninstall.sh`
 (see `--help` for what it touches and what it leaves alone — by
 default it spares the rustup toolchain and the cargo `target/` tree).
 
+### Working from multiple checkouts in parallel
+
+If you keep several clones around (e.g. one branch per agent or per
+issue), they share `~/.cargo` by default — so `setup.sh`'s `cargo
+install` from each one races for `~/.cargo/bin/rustviz`, and
+concurrent playground builds collide on the `rustviz/rustviz-runner`
+docker tag. To isolate them, this repo ships an
+[`.envrc.example`](.envrc.example) for [direnv](https://direnv.net/)
+that gives each checkout its own `CARGO_HOME` (and optional knobs
+for the docker tag and playground bind address):
+
+```sh
+brew install direnv
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc   # then restart your shell
+cp .envrc.example .envrc
+direnv allow
+```
+
+After that, any shell — and anything it launches, including `claude`
+— inherits a per-clone cargo home automatically when you `cd` into
+the checkout. The rustup toolchain stays shared across clones since
+they all pin the same nightly.
+
 ---
 
 ## Four ways to use RustViz
