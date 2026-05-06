@@ -147,11 +147,6 @@ const Description: React.FC = () => (
         <code>let</code>, but tracking events inside the branch isn't supported)
       </li>
       <li>
-        Closures — captures (whether by reference or by{' '}
-        <code>move</code>) aren't drawn as arrows, so the visualization
-        silently omits the capture event
-      </li>
-      <li>
         Smart-pointer wrappers (<code>Box</code>, <code>Rc</code>,{' '}
         <code>Arc</code>, <code>RefCell</code>) and trait objects (
         <code>Box&lt;dyn T&gt;</code>)

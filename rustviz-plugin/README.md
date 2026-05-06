@@ -47,9 +47,6 @@ not all of it. Currently unsupported (or known to misbehave):
 - Bindings or borrows inside an `if` or `match` branch body (the
   conditional itself can return a value into a `let`, but tracking
   events inside the branch isn't supported)
-- Closures — captures (whether by reference or by `move`) aren't
-  drawn as arrows, so the visualization silently omits the capture
-  event
 - Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
   objects (`Box<dyn T>`)
 - Indexing or slicing collections like `Vec` (string slices like
