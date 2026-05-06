@@ -784,9 +784,17 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // second arg, is a list of args to the function
     ExprKind::Call(fn_expr, _) => {
       let line_num = span_to_line(&fn_expr.span, &self.tcx);
-      let fn_name = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
-      let rhs_rap = self.raps.get(&fn_name).unwrap().rap.to_owned();
-      self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
+      // Fall back to Anonymous when the call doesn't have a name we
+      // can resolve. Two cases land here: (1) a macro-expanded call
+      // (e.g. `vec![1,2,3]` lowering to `<[_]>::into_vec(…)`) whose
+      // name was never registered via add_fn because visit_expr
+      // returned early on `from_expansion`; (2) a desugaring whose
+      // fn_expr is `QPath::LangItem` that hirid_to_var_name can't
+      // name. Same rationale as the Path / Field arms in get_rap.
+      let from = hirid_to_var_name(fn_expr.hir_id, &self.tcx)
+        .and_then(|n| self.raps.get(&n).map(|rd| rd.rap.to_owned()))
+        .map_or(ResourceTy::Anonymous, ResourceTy::Value);
+      self.add_ev(line_num, evt, lhs, from, false);
     },
     
     ExprKind::Lit(_) | ExprKind::Binary(..) | // Any type of literal on RHS implies a bind
@@ -877,9 +885,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         return;
       }
 
-      let fn_name = hirid_to_var_name(name_and_generic_args.hir_id, &self.tcx).unwrap();
-      let rhs_rap = self.raps.get(&fn_name).unwrap().rap.to_owned();
-      self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
+      // Same Anonymous fallback as the Call arm — chained / macro /
+      // desugared method calls may not have a registered name.
+      let from = hirid_to_var_name(name_and_generic_args.hir_id, &self.tcx)
+        .and_then(|n| self.raps.get(&n).map(|rd| rd.rap.to_owned()))
+        .map_or(ResourceTy::Anonymous, ResourceTy::Value);
+      self.add_ev(line_num, evt, lhs, from, false);
     }
     // Struct intializer list:
     // ex struct = {a: <expr>, b: <expr>, c: <expr>}
