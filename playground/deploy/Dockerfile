@@ -46,15 +46,19 @@ WORKDIR /src
 COPY playground/frontend/package.json playground/frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY playground/frontend/ ./
-# vite.config.ts reads rust-toolchain.toml at build time to inject the
-# pinned rustc channel into the SPA bundle (`Compiles with rustc …`
-# under the Generate button). It uses
-#   resolve(__dirname, '../../rust-toolchain.toml')
-# which lands at /rust-toolchain.toml inside this stage (vite.config.ts
-# is at /src, so two levels up is /). Locally the same relative path
-# walks up from playground/frontend/ to the workspace root, so the same
-# expression works in both contexts as long as we copy the file here.
+# vite.config.ts reads two files at build time to inject build-info
+# strings into the SPA bundle (the "Compiles with rustc … and
+# rustviz-plugin …" line under the Generate button):
+#   - rust-toolchain.toml       -> [toolchain].channel
+#   - rustviz-plugin/Cargo.toml -> [package].version
+# Both lookups use `resolve(__dirname, '../../<file>')` from
+# /src/vite.config.ts, so the files have to land at /<file> inside
+# this stage. Locally the same relative path walks up from
+# playground/frontend/ to the workspace root, so the same expressions
+# work in both contexts as long as we copy the files into matching
+# slots here.
 COPY rust-toolchain.toml /rust-toolchain.toml
+COPY rustviz-plugin/Cargo.toml /rustviz-plugin/Cargo.toml
 RUN npm run build
 
 # ---------- 3. final (docker:dind) ----------
