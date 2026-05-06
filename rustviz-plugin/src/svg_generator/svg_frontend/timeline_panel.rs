@@ -621,12 +621,29 @@ fn render_dot(
     resource_hold: bool
 ) {
     for (line_number, event) in history.iter() {
+        // Closure-capture per-upvar dots on the closure's own
+        // timeline are suppressed here: the closure's Bind-Acquire
+        // dot at the same line carries a combined tooltip listing
+        // every capture (see the Anonymous-from arm below). The
+        // per-capture events stay in `history` because the arrow
+        // renderer traverses them to find the closure column for
+        // each capture arrow's endpoint.
+        let is_closure_capture_event = match event {
+            Event::Acquire { from: ResourceTy::Anonymous, .. } => false,
+            Event::Acquire { is, .. }
+            | Event::StaticBorrow { is, .. }
+            | Event::MutableBorrow { is, .. } => is.is_closure(),
+            _ => false,
+        };
+        if is_closure_capture_event {
+            continue;
+        }
         //matching the event
         match event {
             Event::RefDie { .. } => {
                 continue;
             }
-            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => { 
+            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => {
                 // first append split dot
                 let b_data = EventDotData {
                     hash: *hash as u64,
@@ -684,7 +701,36 @@ fn render_dot(
                 Event::OwnerGoOutOfScope => {
                     let ro = &visualization_data.timelines[hash].resource_access_point;
                     let is_copy = ro.is_copy();
-                    if !resource_hold {
+                    let is_closure = ro.is_closure();
+                    if is_closure {
+                        // Closure value going out of scope: only
+                        // surface "Its captured resources are
+                        // dropped" when at least one upvar was
+                        // move-captured. Borrow-only and capture-
+                        // less closures have no owned resources to
+                        // drop, just the closure struct itself —
+                        // render a plain OOS dot like a Copy type
+                        // with the standard "f goes out of scope"
+                        // message.
+                        let move_count = closure_move_capture_count(visualization_data, *hash);
+                        if move_count > 0 {
+                            let cx = timeline_data.x_val;
+                            let cy = get_y_axis_pos(*line_number);
+                            let title = hover_messages::event_dot_closure_go_out_of_scope(&name, move_count);
+                            let drop_data = DropDotData {
+                                hash: *hash as u64,
+                                dot_x: cx,
+                                dot_y: cy,
+                                title,
+                                p1x: cx - 3, p1y: cy - 1,
+                                p2x: cx + 3, p2y: cy - 1,
+                                p3x: cx,     p3y: cy + 3,
+                            };
+                            append_drop_dot(&drop_data, output, timeline_data, registry);
+                            continue;
+                        }
+                        data.title = event.print_message_with_name(&mut name);
+                    } else if !resource_hold {
                         // Resource was already moved out — same copy
                         // for both Copy and non-Copy types: just note
                         // there's nothing to drop here.
@@ -741,13 +787,121 @@ fn render_dot(
                     continue;
                 },
                 _ => {
-                    data.title = event.print_message_with_name(& mut name);
+                    // Closure Bind-Acquire: aggregate every capture
+                    // event landing at the same line into a single
+                    // tooltip listing all captured upvars, since the
+                    // per-capture target-side dots are suppressed
+                    // (they'd stack on this one and the topmost
+                    // tooltip would mask the rest).
+                    if let Event::Acquire { from: ResourceTy::Anonymous, is, .. } = event {
+                        if is.is_closure() {
+                            let captures = collect_closure_captures(visualization_data, *hash, *line_number);
+                            data.title = hover_messages::event_dot_closure_bind_with_captures(&name, &captures);
+                        } else {
+                            data.title = event.print_message_with_name(& mut name);
+                        }
+                    } else {
+                        data.title = event.print_message_with_name(& mut name);
+                    }
                 }
             }
         }
         // push to individual timelines
         append_dot(&data, output, timeline_data, registry);
     }
+}
+
+// Walk the original ExternalEvents to find every capture (Move /
+// StaticBorrow / MutableBorrow) at `line` whose target is the
+// closure identified by `closure_hash`. Returns (upvar_name,
+// kind_label) pairs in source order so the rendered list matches
+// what the user wrote in the closure literal.
+fn collect_closure_captures(
+    visualization_data: &VisualizationData,
+    closure_hash: u64,
+    line: usize,
+) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for (l, ev) in &visualization_data.external_events {
+        if *l != line {
+            continue;
+        }
+        match ev {
+            ExternalEvent::Move { from, to, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "moved"));
+                }
+            }
+            ExternalEvent::StaticBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "immutably borrowed"));
+                }
+            }
+            ExternalEvent::MutableBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "mutably borrowed"));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+// Count of upvars move-captured by the closure identified by
+// `closure_hash`. Zero ⇒ borrow-only or capture-less closure;
+// distinguishes the scope-end "captured resources are dropped"
+// message and the timeline state line ("owns N resources via
+// capture") from their borrow-only fallbacks.
+fn closure_move_capture_count(
+    visualization_data: &VisualizationData,
+    closure_hash: u64,
+) -> usize {
+    visualization_data
+        .external_events
+        .iter()
+        .filter(|(_, ev)| matches!(ev, ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash)))
+        .count()
+}
+
+fn closure_has_move_captures(
+    visualization_data: &VisualizationData,
+    closure_hash: u64,
+) -> bool {
+    closure_move_capture_count(visualization_data, closure_hash) > 0
+}
+
+// Title for a vertical timeline segment. Routes around the generic
+// `state.print_message_with_name` for closure bindings so the
+// FullPrivilege segment reads as "f owns a closure (which owns a
+// resource)?" instead of the misleading generic "f is the owner
+// of the resource" — `f` doesn't own the upvar's resource directly,
+// it owns the closure value, and that closure may or may not in
+// turn own a captured resource.
+fn timeline_segment_title(
+    state: &State,
+    rap: &ResourceAccessPoint,
+    visualization_data: &VisualizationData,
+) -> String {
+    if rap.is_closure() {
+        if let State::FullPrivilege { .. } = state {
+            let name = rap.name().to_owned();
+            let count = closure_move_capture_count(visualization_data, *rap.hash());
+            if count > 0 {
+                return hover_messages::state_closure_full_privilege_with_resource(&name, count);
+            }
+            return hover_messages::state_closure_full_privilege_no_resource(&name);
+        }
+    }
+    state.print_message_with_name(rap.name())
+}
+
+fn matches_closure(rty: &ResourceTy, closure_hash: u64) -> bool {
+    rty.extract_rap().map_or(false, |r| *r.hash() == closure_hash)
+}
+
+fn upvar_name(rty: &ResourceTy) -> Option<String> {
+    rty.extract_rap().map(|r| r.name().to_owned())
 }
 
 // Same routing logic as `append_dot` (struct-grouped vs flat
@@ -1609,7 +1763,7 @@ fn render_timeline(
                         y1: get_y_axis_pos(*split_point),
                         x2: branch.t_data.x_val as f64,
                         y2: get_y_axis_pos(*split_point + 1),
-                        title: p_state.print_message_with_name(rap.name()),
+                        title: timeline_segment_title(&p_state, rap, visualization_data),
                         opacity: 1.0
                     };
 
@@ -1638,7 +1792,7 @@ fn render_timeline(
                         y1: get_y_axis_pos(*merge_point + 1),
                         x2: branch.t_data.x_val as f64,
                         y2: get_y_axis_pos(*merge_point),
-                        title: e_state.print_message_with_name(rap.name()),
+                        title: timeline_segment_title(&e_state, rap, visualization_data),
                         opacity: 1.0
                     };
 
@@ -1662,7 +1816,7 @@ fn render_timeline(
                 y1: get_y_axis_pos(*line_start),
                 x2: timeline_data.x_val as f64,
                 y2: get_y_axis_pos(*line_end),
-                title: state.print_message_with_name(rap.name()),
+                title: timeline_segment_title(state, rap, visualization_data),
                 opacity: 1.0
         };
         if *line_start != *line_end {

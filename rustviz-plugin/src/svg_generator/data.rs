@@ -92,6 +92,11 @@ pub struct Owner {
     /// going out of scope reclaims storage but doesn't run any
     /// drop glue; we surface that distinction visually.
     pub is_copy: bool,
+    /// True iff this owner binds a closure literal (`let f = || ...`
+    /// or `let f = move || ...`). Routes capture-related events
+    /// (Move/StaticBorrow/MutableBorrow into `f`) and `f`'s scope-end
+    /// to closure-flavoured tooltip text.
+    pub is_closure: bool,
 }
 
 // when something is a struct member
@@ -188,6 +193,13 @@ impl ResourceTy {
           }
     }
 
+    pub fn is_closure(&self) -> bool {
+        match self {
+            ResourceTy::Value(r) | ResourceTy::Deref(r) => r.is_closure(),
+            _ => false
+        }
+    }
+
     pub fn extract_rap(&self) -> Option<&ResourceAccessPoint> {
         match self {
             ResourceTy::Anonymous | ResourceTy::Caller => None,
@@ -271,6 +283,13 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::MutRef(_) => true,
             _ => false
         }
+    }
+
+    /// True iff this RAP is the binding of a closure literal — used
+    /// by the tooltip layer to swap in capture-flavoured wording for
+    /// events that flow into or out of a closure.
+    pub fn is_closure(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_closure: true, .. }))
     }
 
     /// True if this RAP is part of a struct grouping — either the
@@ -989,15 +1008,24 @@ impl Event {
             Event::Move{ to ,..} => {
                 match to {
                     ResourceTy::Caller => safe_message(hover_messages::event_dot_move_to_caller, &self.deref_name(my_name), to),
+                    _ if to.is_closure() => safe_message(hover_messages::event_dot_capture_move_to_closure, &self.deref_name(my_name), to),
                     _ => safe_message(hover_messages::event_dot_move_to, &self.deref_name(my_name), to),
                 }
-                
+
             }
             Event::StaticLend{ to ,..} => {
-                safe_message(hover_messages::event_dot_static_lend, &self.deref_name(my_name), to)
+                if to.is_closure() {
+                    safe_message(hover_messages::event_dot_capture_static_lend_to_closure, &self.deref_name(my_name), to)
+                } else {
+                    safe_message(hover_messages::event_dot_static_lend, &self.deref_name(my_name), to)
+                }
             }
             Event::MutableLend{ to ,..} => {
-                safe_message(hover_messages::event_dot_mut_lend, &self.deref_name(my_name), to)
+                if to.is_closure() {
+                    safe_message(hover_messages::event_dot_capture_mut_lend_to_closure, &self.deref_name(my_name), to)
+                } else {
+                    safe_message(hover_messages::event_dot_mut_lend, &self.deref_name(my_name), to)
+                }
             }
             Event::StaticDie{ to,.. } => {
                 safe_message(hover_messages::event_dot_static_return, &self.deref_name(my_name), to)
@@ -1006,17 +1034,35 @@ impl Event {
                 safe_message(hover_messages::event_dot_mut_return, &self.deref_name(my_name), to)
             }
             // arrow going in
-            Event::Acquire{ from ,..} => {
-                safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
+            Event::Acquire{ from, is, ..} => {
+                if is.is_closure() && from.extract_rap().is_some() {
+                    // `f` (closure) acquiring from a real source —
+                    // this is a `move`-capture, not a generic
+                    // ownership transfer. The Anonymous-from case
+                    // (the closure literal's own Bind) keeps the
+                    // generic message because there's no captured
+                    // upvar to name on the closure side yet.
+                    safe_message(hover_messages::event_dot_closure_capture_acquire, &self.deref_name(my_name), from)
+                } else {
+                    safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
+                }
             }
             Event::Copy{ from ,..} => {
                 safe_message(hover_messages::event_dot_copy_from, &self.deref_name(my_name), from)
             }
-            Event::MutableBorrow{ from ,..} => {
-                hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name())
+            Event::MutableBorrow{ from, is, ..} => {
+                if is.is_closure() {
+                    hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
+                } else {
+                    hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name())
+                }
             }
-            Event::StaticBorrow{ from ,..} => {
-                hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name())
+            Event::StaticBorrow{ from, is, ..} => {
+                if is.is_closure() {
+                    hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
+                } else {
+                    hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name())
+                }
             }
             Event::StaticReacquire{ from ,..} => {
                 safe_message(hover_messages::event_dot_static_reacquire, &self.deref_name(my_name), from)
@@ -1101,23 +1147,31 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
             String::from("Bind")
         },
         ExternalEvent::Copy{ is_partial,.. } => {
-            if *is_partial { String::from("Partial copy") } 
+            if *is_partial { String::from("Partial copy") }
             else { String::from("Copy") }
         },
-        ExternalEvent::Move{ is_partial, .. } => {
-            if *is_partial { String::from("Partial move")}
+        // Move/StaticBorrow/MutableBorrow into a closure binding are
+        // closure captures — the renderer's `from … to …` template
+        // (in render_arrow) reads e.g. "Closure capture (move)" as
+        // "Closure capture (move) from s to f", which scans more
+        // clearly than a bare "Move" arrow into a closure.
+        ExternalEvent::Move{ is_partial, to, .. } => {
+            if *is_partial { String::from("Partial move") }
+            else if to.is_closure() { String::from("Closure capture (move)") }
             else { String::from("Move") }
         },
-        ExternalEvent::StaticBorrow{ is_partial, .. } => {
+        ExternalEvent::StaticBorrow{ is_partial, to, .. } => {
             if *is_partial { String::from("Partial immutable borrow") }
+            else if to.is_closure() { String::from("Closure capture (immutable borrow)") }
             else { String::from("Immutable borrow") }
         },
         ExternalEvent::StaticDie{ .. } => {
             String::from("Return immutably borrowed resource")
         },
-        ExternalEvent::MutableBorrow{ is_partial, .. } => {
+        ExternalEvent::MutableBorrow{ is_partial, to, .. } => {
             if *is_partial { String::from("Partial Mutable borrow") }
-            else { String::from("Mutable borrow")}
+            else if to.is_closure() { String::from("Closure capture (mutable borrow)") }
+            else { String::from("Mutable borrow") }
         },
         ExternalEvent::MutableDie{ .. } => {
            String::from("Return mutably borrowed resource")
@@ -1260,6 +1314,22 @@ impl Visualizable for VisualizationData {
                 }
             },
             
+            // Closure binding takes a mutable capture: the closure
+            // is at FullPrivilege from its Bind-Acquire, takes a
+            // mutable borrow of an upvar, and stays at
+            // FullPrivilege — the borrow is internal to the
+            // closure's value, not a state change of `f` itself.
+            // Mirror for MutableDie at the closure's NLL last use:
+            // the borrow ends but the closure binding survives,
+            // unlike an ordinary MutRef binding (which the next
+            // arm covers).
+            (State::FullPrivilege{..}, Event::MutableBorrow { is, .. })
+            | (State::FullPrivilege{..}, Event::MutableDie { is, .. })
+                if is.is_closure() =>
+            {
+                State::FullPrivilege { s: LineState::Full }
+            }
+
             // happends when a mutable reference returns, invalid otherwise
             (State::FullPrivilege{..}, Event::MutableDie{ .. }) =>
                 State::OutOfScope,
@@ -1521,7 +1591,7 @@ impl Visualizable for VisualizationData {
         },
         ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, ..} => {
           if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
-          else { vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }          
+          else { vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
         },
         ExternalEvent::MutableDie{from: from_ro, to: to_ro, id} => {
           if to_o && !from_ro.is_same_underlying(&to_ro){ 
@@ -1757,7 +1827,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
-                
+
             },
             ExternalEvent::StaticDie{from: from_ro, to: to_ro, id} => {
               // this catches when StaticDie(s to s*) to avoid duplicate events
@@ -1769,7 +1839,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
-                
+
             },
             ExternalEvent::MutableDie{from: from_ro, to: to_ro, id} => {
                 // this catches when MutableDie(s to s*) to avoid duplicate events

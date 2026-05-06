@@ -84,6 +84,12 @@ const EXPECTED_OK: &[&str] = &[
     "box_string",
     "rc_clone",
     "box_dyn",
+    // — Closure captures (#79): capture arrows render for both
+    //   `move` and borrow closures.
+    "closure_move_single",
+    "closure_move_multi",
+    "closure_borrow_imm",
+    "closure_borrow_mut",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -444,6 +450,133 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b.0.pointer, immutable",
             "b.0._marker, immutable",
             "b.1, immutable",
+        ],
+    },
+
+    // ─── Closure captures (#79) ──────────────────────────────────────
+    //
+    // Move/borrow events into a closure binding render with
+    // capture-flavoured arrow labels (`Closure capture (move)` /
+    // `… (immutable borrow)` / `… (mutable borrow)`) instead of the
+    // generic `Move` / `Immutable borrow` / `Mutable borrow`. The
+    // closure binding's scope-end also gets a "captured resources
+    // are dropped" message in place of the generic "resource is
+    // dropped" suffix.
+    TooltipExpect {
+        name: "closure_move_single",
+        must_contain: &[
+            "Move from String::from to s",
+            "Closure capture (move) from s to f",
+            "Closure f captures: s (moved)",
+            // Scope-end and timeline tooltips both report the
+            // exact count of move-captured resources, with
+            // singular grammar at N == 1.
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f owns a closure which owns 1 resource via capture",
+        ],
+        must_not_contain: &[
+            // Generic Move-arrow label would obscure the capture.
+            "Move from s to f",
+            // Per-capture closure-side dots are suppressed in
+            // favour of the combined Bind dot.
+            "Closure f captures (moves) s's resource",
+            // Generic owner state message would obscure the
+            // closure-vs-resource distinction.
+            "f is the owner of the resource",
+            // Wrong pluralization guards.
+            "owns 1 resources",
+            "1 captured resources are dropped",
+            // The previous count-less wording would slip through
+            // a substring match if we didn't pin the new one.
+            "Its captured resources are dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_move_multi",
+        // Each captured upvar produces its own capture arrow on
+        // the source side; on the closure side, a single Bind dot
+        // enumerates every capture so neither tooltip masks the
+        // other (#79 follow-up).
+        must_contain: &[
+            "Closure capture (move) from s to f",
+            "Closure capture (move) from t to f",
+            "Closure f captures: s (moved), t (moved)",
+            "f goes out of scope. Its 2 captured resources are dropped.",
+            "f owns a closure which owns 2 resources via capture",
+        ],
+        must_not_contain: &[
+            "Move from s to f",
+            "Move from t to f",
+            // Per-capture closure-side dots suppressed.
+            "Closure f captures (moves) s's resource",
+            "Closure f captures (moves) t's resource",
+            "f is the owner of the resource",
+            "owns 2 resource via capture",
+            "2 captured resource is dropped",
+            "Its captured resources are dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_borrow_imm",
+        // Non-`move` closure that reads its upvar → static borrow.
+        // No move captures, so f's scope-end gets the plain owner
+        // OOS message — there are no resources to drop. The borrow
+        // returns at f's NLL last use (the call on the line after
+        // the closure literal), not at the closure's lexical scope.
+        must_contain: &[
+            "Move from String::from to s",
+            "Closure capture (immutable borrow) from s to f",
+            "Closure f captures: s (immutably borrowed)",
+            "Return immutably borrowed resource from f to s",
+            "f's immutable borrow ends",
+            "s's resource is no longer immutably borrowed",
+            "f goes out of scope",
+            // Borrow-only closure → f owns the closure value but
+            // not any captured resource.
+            "f owns a closure",
+        ],
+        must_not_contain: &[
+            // Critically: the closure should *not* be modeled as a
+            // move — `s` is still usable after `f` runs.
+            "Move from s to f",
+            "Closure capture (move) from s to f",
+            "Immutable borrow from s to f",
+            "Closure f captures an immutable reference to s",
+            // No move captures → no "captured resources are dropped".
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f goes out of scope. Its 2 captured resources are dropped.",
+            "f goes out of scope. Its captured resources are dropped.",
+            // Borrow-only closure → no upgrade to "owns N resources via capture".
+            "f owns a closure which owns",
+            "f is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_borrow_mut",
+        // Non-`move` closure that mutates its upvar → mutable borrow.
+        // Same as the immutable case for scope-end: no resources
+        // are dropped at the closure binding's OOS, and the
+        // borrow returns at the closure's NLL last use.
+        must_contain: &[
+            "Move from String::from to s",
+            "Closure capture (mutable borrow) from s to f",
+            "Closure f captures: s (mutably borrowed)",
+            "Return mutably borrowed resource from f to s",
+            "f's mutable borrow ends",
+            "s's resource is no longer mutably borrowed",
+            "f goes out of scope",
+            "f owns a closure",
+        ],
+        must_not_contain: &[
+            "Move from s to f",
+            "Closure capture (move) from s to f",
+            "Mutable borrow from s to f",
+            "Closure f captures a mutable reference to s",
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f goes out of scope. Its 2 captured resources are dropped.",
+            "f goes out of scope. Its captured resources are dropped.",
+            "f owns a closure which owns",
+            "f is the owner of the resource",
         ],
     },
 ];

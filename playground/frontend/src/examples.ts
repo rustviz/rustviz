@@ -336,4 +336,44 @@ fn main() {
       },
     ],
   },
+  {
+    chapter: 'Closures',
+    examples: [
+      {
+        name: "Move closure (single capture)",
+        code: `fn main() {
+    let s = String::from("hi");
+    let f = move || println!("{}", s);
+    f();
+}`,
+      },
+      {
+        name: "Move closure (multiple captures)",
+        code: `fn main() {
+    let s = String::from("hi");
+    let t = String::from("bye");
+    let f = move || println!("{} {}", s, t);
+    f();
+}`,
+      },
+      {
+        name: "Borrow closure (immutable)",
+        code: `fn main() {
+    let s = String::from("hi");
+    let f = || println!("{}", s);
+    f();
+    println!("after: {}", s);
+}`,
+      },
+      {
+        name: "Borrow closure (mutable)",
+        code: `fn main() {
+    let mut s = String::from("hi");
+    let mut f = || s.push_str("!");
+    f();
+    println!("{}", s);
+}`,
+      },
+    ],
+  },
 ];

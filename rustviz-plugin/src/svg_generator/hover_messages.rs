@@ -49,6 +49,25 @@ pub fn event_dot_owner_go_out_out_scope(my_name: &String) -> String {
     )                             //was moved from the variable earlier.
 }
 
+// Closure binding goes out of scope. The closure value is dropped,
+// which in turn drops each move-captured upvar — `move_capture_count`
+// is how many of those there are. Reaches the timeline only when
+// the count is at least one (borrow-only and capture-less closures
+// take the plain owner-OOS path), so the singular/plural branch
+// only needs to handle ≥1.
+pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: usize) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let (noun, verb) = if move_capture_count == 1 {
+        ("resource", "is")
+    } else {
+        ("resources", "are")
+    };
+    format!(
+        "{0} goes out of scope. Its {1} captured {2} {3} dropped.",
+        my_name_fmt, move_capture_count, noun, verb
+    )
+}
+
 // An owned (non-ref) function parameter receives its resource from
 // whatever the caller passed. The L-shaped arrow on the param's
 // timeline visually anchors that "from outside this scope" origin;
@@ -269,6 +288,100 @@ pub fn event_dot_static_borrow(my_name: &String, _target_name: &String) -> Strin
     format!(
         "{0} immutably borrows a resource",
         my_name_fmt
+    )
+}
+
+// ─── Closure capture variants ────────────────────────────────────
+//
+// Used when the `to`/`is` of an event is a closure binding. Wording
+// emphasizes that the move/borrow is happening because the closure
+// captured the upvar, not because the user wrote an explicit `let
+// y = x` / `let r = &x`.
+
+// Source dot for a `move`-captured upvar. Mirrors event_dot_move_to.
+pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let target_fmt = fmt_style(target_name);
+    format!(
+        "{0}'s resource is captured (moved) by closure {1}",
+        my_name_fmt, target_fmt
+    )
+}
+
+// Source dot for an immutably captured upvar. Mirrors event_dot_static_lend.
+pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let target_fmt = fmt_style(target_name);
+    format!(
+        "{0}'s resource is captured (immutably borrowed) by closure {1}",
+        my_name_fmt, target_fmt
+    )
+}
+
+// Source dot for a mutably captured upvar. Mirrors event_dot_mut_lend.
+pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let target_fmt = fmt_style(target_name);
+    format!(
+        "{0}'s resource is captured (mutably borrowed) by closure {1}",
+        my_name_fmt, target_fmt
+    )
+}
+
+// Combined tooltip for the closure binding's Bind-Acquire dot
+// when one or more upvars are captured at the closure literal.
+// `captures` lists (upvar_name, capture_kind_label) pairs in the
+// order they were emitted by expr_visitor's Closure arm. Used in
+// place of the per-capture closure-side dots, which would
+// otherwise stack on the same (x,y) and mask each other.
+pub fn event_dot_closure_bind_with_captures(
+    my_name: &String,
+    captures: &[(String, &'static str)],
+) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    if captures.is_empty() {
+        // Closure with no captures (e.g. `let f = || println!("hi")`).
+        return format!("Closure {0} is bound", my_name_fmt);
+    }
+    let parts: Vec<String> = captures
+        .iter()
+        .map(|(name, kind)| format!("{} ({})", fmt_style(name), kind))
+        .collect();
+    format!(
+        "Closure {0} captures: {1}",
+        my_name_fmt,
+        parts.join(", ")
+    )
+}
+
+// Closure-side dot when a `move`-captured upvar lands on `f`'s
+// timeline. Mirrors event_dot_acquire.
+pub fn event_dot_closure_capture_acquire(my_name: &String, from_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let from_fmt = fmt_style(from_name);
+    format!(
+        "Closure {0} captures (moves) {1}'s resource",
+        my_name_fmt, from_fmt
+    )
+}
+
+// Closure-side dot for an immutable capture. Mirrors event_dot_static_borrow.
+pub fn event_dot_closure_capture_static_borrow(my_name: &String, from_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let from_fmt = fmt_style(from_name);
+    format!(
+        "Closure {0} captures an immutable reference to {1}",
+        my_name_fmt, from_fmt
+    )
+}
+
+// Closure-side dot for a mutable capture. Mirrors event_dot_mut_borrow.
+pub fn event_dot_closure_capture_mut_borrow(my_name: &String, from_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let from_fmt = fmt_style(from_name);
+    format!(
+        "Closure {0} captures a mutable reference to {1}",
+        my_name_fmt, from_fmt
     )
 }
 
@@ -527,11 +640,32 @@ pub fn state_resource_revoked(my_name: &String, _to_name: &String) -> String {
 pub fn state_full_privilege(my_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
-    
+
     format!(
         "{0} is the owner of the resource", //not necessarily write if let was used rather than let mut
         my_name_fmt
     )
+}
+
+// Closure binding's FullPrivilege state. Two flavours so the
+// timeline tooltip distinguishes a `move ||` (closure owns the
+// captured resources — drop runs at scope-end) from a borrow-only
+// closure (captures a reference; nothing of the resource is owned
+// by the closure value itself). The move-flavoured variant takes
+// the count of move-captured upvars so the tooltip is honest
+// about whether the closure owns one or many resources.
+pub fn state_closure_full_privilege_with_resource(my_name: &String, move_capture_count: usize) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let noun = if move_capture_count == 1 { "resource" } else { "resources" };
+    format!(
+        "{0} owns a closure which owns {1} {2} via capture",
+        my_name_fmt, move_capture_count, noun
+    )
+}
+
+pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!("{0} owns a closure", my_name_fmt)
 }
 
 // More than one ResourceOwner has access to the underlying resource

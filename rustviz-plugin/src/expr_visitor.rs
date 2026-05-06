@@ -196,7 +196,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_closure: false}), scope, is_global);
+  }
+
+  // Adds an owner RAP that binds a closure literal. Routed through
+  // a separate constructor (rather than an extra arg on add_owner) so
+  // we don't churn every call site — closures are the only producer.
+  pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_closure: true}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -577,6 +584,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     else if ty.is_fn() {
       error!("cannot have fn as lhs of expr");
     }
+    else if ty.is_closure() {
+      // Tag the binding as a closure so the tooltip layer can swap
+      // capture-flavoured wording for moves/borrows into `name` and
+      // for `name`'s scope-end. The `match_rhs` ExprKind::Closure
+      // arm emits the actual capture events on top of this RAP.
+      self.add_closure_owner(name, mutability, self.current_scope, !self.inside_branch);
+    }
     else {
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_owner(name, mutability, is_copy, self.current_scope, !self.inside_branch);
@@ -953,6 +967,108 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     }
     ExprKind::DropTemps(exp) => {
       self.match_rhs(lhs, &exp, evt);
+    }
+    // `let f = move || ...` / `let f = || ...`. The closure itself
+    // is conceptually a small struct that holds the upvars it
+    // captures from the enclosing scope. Bind `f` to that struct
+    // (Anonymous source — we don't render the closure body), then
+    // emit one capture event per upvar pulled from rustc's
+    // `closure_min_captures_flattened`. Capture kind decides the
+    // event shape:
+    //   ByValue (always for `move`, sometimes for inferred captures)
+    //     → Move(upvar → f). f now owns the captured resource.
+    //   ByRef(Immutable | UniqueImmBorrow) → SBorrow(upvar → f).
+    //   ByRef(Mutable)                     → MBorrow(upvar → f).
+    //   ByUse (`use` capture clause, recent feature) → Move,
+    //     same as ByValue for our purposes.
+    //
+    // We only handle whole-variable captures here (place.projections
+    // empty); a partial-field capture like `move || x.field`
+    // carries projections we don't have a column for, so we
+    // attribute the event to the root variable's RAP. That matches
+    // what the rest of the plugin does for field accesses today.
+    ExprKind::Closure(closure) => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      // Bind for the closure value itself — gives `f` an "acquires
+      // ownership of a resource" dot like other Bind sites.
+      self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+
+      // MIR loan facts for the enclosing fn body. Each ref capture
+      // becomes one polonius loan whose `borrowed_place` is the
+      // upvar and whose `region.1` is the NLL kill line — the line
+      // where the borrow ends, which under NLL is the closure
+      // binding's last use, not its lexical scope end. We use this
+      // below to emit a StaticDie / MutableDie at the kill line so
+      // the captured borrow visually returns to its lender on the
+      // line the user expects.
+      let mir_b_data = self.gather_borrow_data(self.bwf);
+
+      let typeck = self.tcx.typeck(closure.def_id);
+      for capture in typeck.closure_min_captures_flattened(closure.def_id) {
+        let upvar_hir_id = match capture.place.base {
+          rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
+          _ => continue,
+        };
+        // Use the registered RAP name for the upvar (covers
+        // `r.a.b`-style nested field captures via expr_to_rap_name's
+        // counterpart on the source side; for now we just take the
+        // root variable's name).
+        let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+        let upvar_rap = match self.raps.get(&upvar_name) {
+          Some(rd) => rd.rap.to_owned(),
+          None => continue,
+        };
+        let from = ResourceTy::Value(upvar_rap);
+        let to = lhs.clone();
+        let evt_kind = match capture.info.capture_kind {
+          rustc_middle::ty::UpvarCapture::ByValue
+          | rustc_middle::ty::UpvarCapture::ByUse => Evt::Move,
+          rustc_middle::ty::UpvarCapture::ByRef(kind) => match kind {
+            rustc_middle::ty::BorrowKind::Mutable => Evt::MBorrow,
+            // Immutable + UniqueImmBorrow both render as a static
+            // (immutable) borrow from the user's perspective —
+            // UniqueImmBorrow is an internal closure-borrow flavor
+            // they can't write, and the visualization shouldn't
+            // distinguish it.
+            _ => Evt::SBorrow,
+          },
+        };
+        self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false);
+
+        // For ref captures, find the matching MIR loan and emit
+        // a Die event at its kill line so the borrow returns on
+        // the closure's last use, not at the closure's lexical
+        // scope end. Move captures don't go through the loan
+        // machinery — they transfer ownership outright, and the
+        // closure's drop is what releases them.
+        let die_evt = match evt_kind {
+          Evt::SBorrow => Some(Evt::SDie),
+          Evt::MBorrow => Some(Evt::MDie),
+          _ => None,
+        };
+        if let Some(die_evt) = die_evt {
+          let kill_line = mir_b_data.iter().find_map(|b| {
+            // Match on (assignment line, upvar name): the loan
+            // for this capture is issued at the closure literal's
+            // line and borrows the upvar by name. region.1 is the
+            // NLL-refined kill line.
+            if b.region.0 == line_num
+              && b.borrowed_place.as_deref() == Some(upvar_name.as_str())
+            {
+              Some(b.region.1)
+            } else {
+              None
+            }
+          });
+          if let Some(die_line) = kill_line {
+            // add_ev maps (lhs, rhs) → StaticDie/MutableDie
+            // {from: rhs, to: lhs}. We want from=closure (f),
+            // to=upvar (s) so the renderer's return arrow goes
+            // f → s, mirroring the borrow direction.
+            self.add_ev(die_line, die_evt, from, lhs.clone(), false);
+          }
+        }
+      }
     }
     _ => {
       warn!("unmatched rhs {:#?}", rhs);
