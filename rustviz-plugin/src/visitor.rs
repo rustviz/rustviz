@@ -137,7 +137,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     // only through this outer macro Call, so skipping it also drops the
     // inner reads — which matches the requested behavior of treating
     // macro invocations as opaque.
-    if expr.span.from_expansion() {
+    //
+    // Exception: for-loop desugarings. rustc's lower_expr_for marks the
+    // outer Match's span with DesugaringKind::ForLoop, so it's
+    // technically from_expansion — but the Match's body still contains
+    // the user's actual loop body, which we want to render. The for-
+    // loop is also wrapped in a DropTemps (lower_expr_for emits
+    // `expr_drop_temps_mut(for_span, match_expr)` so that head temps
+    // are dropped before the surrounding scope), so peel that through
+    // too. Both shapes fall through to their normal match arms below;
+    // the inner re-entry on the Match handles the desugar.
+    if expr.span.from_expansion()
+       && !matches!(expr.kind,
+           ExprKind::Match(_, _, rustc_hir::MatchSource::ForLoopDesugar)
+           | ExprKind::DropTemps(_))
+    {
       return;
     }
     match expr.kind {
@@ -655,7 +669,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // from_expansion check on ExprKind::If above: macro-added
         // control flow shouldn't be rendered as branches the user
         // didn't write.
-        if expr.span.from_expansion() {
+        //
+        // Exception: ForLoopDesugar matches. They're from_expansion
+        // (rustc marks lower_expr_for's outer span with
+        // DesugaringKind::ForLoop) but the user's body still lives
+        // inside, and the source-discriminator below has explicit
+        // handling for it.
+        if expr.span.from_expansion()
+           && !matches!(source, rustc_hir::MatchSource::ForLoopDesugar)
+        {
           self.visit_expr(guard_expr);
           return;
         }
@@ -820,7 +842,128 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             *self.unique_id += 1;
           }
           rustc_hir::MatchSource::ForLoopDesugar => {
-            info!("loop desugar expr {:#?}", expr);
+            // For-loops desugar (rustc_ast_lowering's lower_expr_for) to:
+            //
+            //   match IntoIterator::into_iter(<head>) {
+            //     mut iter => loop {
+            //       match Iterator::next(&mut iter) {
+            //         None       => break,
+            //         Some(<pat>) => <body>,
+            //       }
+            //     }
+            //   }
+            //
+            // We render this as the issue's "single-iteration view":
+            // emit one borrow/move event for <head> at the for line,
+            // register the pattern binding(s) as branch-scoped RAPs,
+            // and visit <body> with inside_branch = true so its events
+            // flow into the timeline as if the loop ran once. We don't
+            // emit a Branch event yet — the conditional-shading
+            // visualization is design work tracked alongside #78.
+            //
+            // Shape pattern-matching is defensive: if the inner HIR
+            // doesn't look like the lowering above (e.g. a future
+            // rustc tweak, or a `for await`), we silently fall back to
+            // the previous behaviour (no body events) rather than
+            // panic.
+            if let Some(head_arg) = match guard_expr.kind {
+              ExprKind::Call(_, args) if args.len() == 1 => Some(&args[0]),
+              _ => None,
+            } {
+              if let Some((user_pat, body_expr)) = arms.first()
+                .and_then(|outer_arm| match outer_arm.body.kind {
+                  ExprKind::Loop(loop_block, _, rustc_hir::LoopSource::ForLoop, _) => {
+                    loop_block.stmts.first().and_then(|s| match s.kind {
+                      StmtKind::Expr(e) | StmtKind::Semi(e) => match e.kind {
+                        ExprKind::Match(_, inner_arms, rustc_hir::MatchSource::ForLoopDesugar) => {
+                          // The Some-arm of the inner match wraps the
+                          // user pattern in a `PatKind::Struct` with a
+                          // single PatField (rustc's pat_some →
+                          // pat_lang_item_variant — the wrapper is
+                          // `Some(pat)` where pat lives in fields[0]).
+                          inner_arms.iter().find_map(|a| match a.pat.kind {
+                            PatKind::Struct(_, fields, _) if fields.len() == 1 => {
+                              Some((fields[0].pat, a.body))
+                            }
+                            _ => None,
+                          })
+                        }
+                        _ => None,
+                      },
+                      _ => None,
+                    })
+                  }
+                  _ => None,
+                })
+              {
+                // Iterand event: shape of head_arg dictates the arrow.
+                //   &v       ⇒ SBorrow from v
+                //   &mut v   ⇒ MBorrow from v
+                //   v (owned, non-Copy) ⇒ Move from v
+                //   anything else (Range, call result, …) ⇒ skip
+                let for_line = self.tcx.sess.source_map()
+                  .lookup_char_pos(expr.span.lo()).line;
+                let iterand_evt = match head_arg.kind {
+                  ExprKind::AddrOf(_, Mutability::Not, _) => Some(Evt::SBorrow),
+                  ExprKind::AddrOf(_, Mutability::Mut, _) => Some(Evt::MBorrow),
+                  ExprKind::Path(_) => {
+                    let head_ty = self.tcx.typeck(head_arg.hir_id.owner)
+                      .node_type(head_arg.hir_id);
+                    let is_copy = self.tcx.type_is_copy_modulo_regions(
+                      rustc_middle::ty::TypingEnv::post_analysis(self.tcx, head_arg.hir_id.owner),
+                      head_ty);
+                    if head_ty.is_ref() { None }   // already a ref binding; skip
+                    else if is_copy { None }       // Range / Copy iterand
+                    else { Some(Evt::Move) }
+                  }
+                  _ => None,
+                };
+                let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
+
+                // Register the user pattern binding (single-name case)
+                // as a branch-scoped RAP so events inside the body
+                // referencing it resolve. Multi-binding / nested
+                // patterns aren't handled yet — fall through and
+                // they'll just not register, which is the same as
+                // pre-fix behaviour for those shapes.
+                let prev_inside_branch = self.inside_branch;
+                self.inside_branch = true;
+                if let PatKind::Binding(_, _, pat_ident, None) = user_pat.kind {
+                  let pat_name = pat_ident.to_string();
+                  let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
+                    .pat_ty(user_pat);
+                  if pat_ty.is_ref() {
+                    self.add_ref(
+                      pat_name.clone(),
+                      bool_of_mut(pat_ty.ref_mutability().unwrap()),
+                      false,
+                      for_line,
+                      head_rty.clone(),
+                      std::collections::VecDeque::new(),
+                      self.current_scope,
+                      false,
+                    );
+                  } else {
+                    let is_copy = self.tcx.type_is_copy_modulo_regions(
+                      rustc_middle::ty::TypingEnv::post_analysis(self.tcx, user_pat.hir_id.owner),
+                      pat_ty);
+                    self.add_owner(pat_name.clone(), false, is_copy, self.current_scope, false);
+                  }
+                  self.annotate_src(pat_name.clone(), pat_ident.span, false,
+                    *self.raps.get(&pat_name).unwrap().rap.hash());
+
+                  // Emit the iterand event into the user's pattern binding.
+                  if let Some(e) = iterand_evt {
+                    let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
+                    self.add_ev(for_line, e, to_rty, head_rty, false);
+                  }
+                }
+
+                // Visit body — events flow into the global timeline.
+                self.visit_expr(body_expr);
+                self.inside_branch = prev_inside_branch;
+              }
+            }
           }
           _ => {}
         }
