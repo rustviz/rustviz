@@ -119,18 +119,25 @@ pub fn is_addr(expr: &Expr) -> bool { // todo, probably a better way to do this 
   }
 }
 
-// The purpose of this function is to override the typechecking done on variables
-// when we want to consider them owners rather than structs. This is because for 99.9% of cases
-// users don't care about acessing String::len/buf members. 
-// We should work towards elimanting all struct members that are not used in the program
-// and that way we can just get rid of this hacky function.
-pub fn ty_is_special_owner<'tcx> (tcx: &TyCtxt<'tcx>, t: &Ty<'tcx>) -> bool {
-  match &*t.sort_string(*tcx) {
-    "`std::string::String`" => { true }
-    _ => {
-      false
-    }
+// Render an ADT as a single owning column (like a primitive) rather
+// than recursing into its struct fields when the type is defined
+// outside the user's crate. RustViz is a teaching tool against a
+// single-file crate — anything from `std`/`core`/`alloc` or a third-
+// party dep (`String`, `Box`, `Rc`, `Arc`, `RefCell`, `Vec`,
+// `HashMap`, ...) is by definition opaque from the user's
+// perspective, so surfacing `r.ptr.pointer.pointer` or `r.alloc`
+// columns just exposes implementation detail. Local structs the user
+// defined (`Rectangle`, `Excerpt`, etc.) keep their per-field
+// timeline columns, matching what #84 added.
+//
+// Escape hatch for "I want to expose a non-local struct's fields
+// anyway" (e.g. a teaching example that wants to point at `Vec`'s
+// `len` / `cap`) is tracked in #90.
+pub fn ty_is_special_owner<'tcx>(t: &Ty<'tcx>) -> bool {
+  if let Some(adt_def) = t.ty_adt_def() {
+    return !adt_def.did().is_local();
   }
+  false
 }
 
 // Get a string representation of a Path - usually used as a name for a RAP
