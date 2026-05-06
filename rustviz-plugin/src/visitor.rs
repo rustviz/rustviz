@@ -839,6 +839,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     if local.span.from_expansion() {
       return;
     }
+    let local_line = self.tcx.sess.source_map().lookup_char_pos(local.span.lo()).line;
+    let is_skipped = self.skip_lines.contains(&local_line);
     match local.pat.kind {
       PatKind::Binding(binding_annotation, ann_hirid, ident, _op_pat) => {
         let lhs_var:String = ident.to_string();
@@ -854,24 +856,37 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         } else {
           match is_copyable {
-            true => Evt::Copy, 
+            true => Evt::Copy,
             false => Evt::Move
           }
         };
         match local.init { // init refers to RHS of let
           Some(expr) => {
-            self.visit_expr(expr);
-            // Figure out what LHS is and add it to list of RAPs
-            self.define_lhs(lhs_var.clone(), bool_of_mut(binding_annotation.1), expr, lhs_ty);
-            self.match_rhs(ResourceTy::Value(self.raps.get(&lhs_var).unwrap().rap.to_owned()), expr, e);
+            if is_skipped {
+              // Marker on this `let` — register the LHS RAP so any
+              // later mention of the variable still resolves (and
+              // get the source-line annotation) but mark it in
+              // skip_raps so add_external_event drops every event
+              // that touches it. We deliberately don't visit the
+              // RHS so events emitted on its behalf (e.g. a
+              // String::from move into the var) also disappear —
+              // those touch the skipped LHS too.
+              self.define_lhs(lhs_var.clone(), bool_of_mut(binding_annotation.1), expr, lhs_ty);
+              self.skip_raps.insert(lhs_var);
+            } else {
+              self.visit_expr(expr);
+              // Figure out what LHS is and add it to list of RAPs
+              self.define_lhs(lhs_var.clone(), bool_of_mut(binding_annotation.1), expr, lhs_ty);
+              self.match_rhs(ResourceTy::Value(self.raps.get(&lhs_var).unwrap().rap.to_owned()), expr, e);
+            }
           }
            _ => {} // in the case of a declaration ex: let a; nothing happens, currently unhandled logic
         }
       }
       _ => { warn!("unrecognized local pattern") }
     }
-    
-    
+
+
     if let Some(els) = local.els {
       self.visit_block(els);
     }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, HashSet};
 use simplelog::*;
 use std::fs::OpenOptions;
 use log::error;
@@ -75,6 +75,11 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
     }
   }
   let a_map: BTreeMap<usize, String> = line_map.clone();
+  // Lines carrying a `// rustviz: skip` marker. Borrowed by every
+  // per-fn ExprVisitor so visit_local can short-circuit on marked
+  // `let`s, and consulted directly here to bypass body traversal of
+  // marked fns.
+  let skip_lines: HashSet<usize> = testing_helper.skip_lines.clone();
   let mut a_line_map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
   let mut owner_to_hash: HashMap<String, usize> = HashMap::new();
   let mut pre_events: Vec<(usize, ExternalEvent)> = Vec::new();
@@ -118,6 +123,15 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             let output = matches!(fn_sig.decl.output, FnRetTy::Return(_));
             let fn_start_line = tcx.sess.source_map().lookup_char_pos(fn_sig.span.lo()).line;
 
+            // Marker on the fn signature line — leave the body
+            // un-traced. Call sites in non-skipped fns will still
+            // emit events whose endpoint is the Function RAP for
+            // this fn (created by `add_fn` when the call is
+            // visited), so moves into / out of it still appear.
+            if skip_lines.contains(&fn_start_line) {
+              continue;
+            }
+
             let mut visitor = ExprVisitor {
               tcx,
               mir_body: body,
@@ -137,6 +151,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               unique_id: &mut ids,
               inside_branch: false,
               fn_ret: output,
+              skip_lines: &skip_lines,
+              skip_raps: HashSet::new(),
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
@@ -169,6 +185,15 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         };
         let fn_start_line = tcx.sess.source_map().lookup_char_pos(fn_sig.span.lo()).line;
 
+        // Marker on the fn signature line — leave the body
+        // un-traced. Call sites in non-skipped fns will still emit
+        // events whose endpoint is the Function RAP for this fn
+        // (created by `add_fn` when the call is visited), so moves
+        // into / out of it still appear.
+        if skip_lines.contains(&fn_start_line) {
+          continue;
+        }
+
         let mut visitor = ExprVisitor {
           tcx,
           mir_body: body,
@@ -187,7 +212,9 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           id_map: & mut owner_to_hash,
           unique_id: & mut ids,
           inside_branch: false,
-          fn_ret: output
+          fn_ret: output,
+          skip_lines: &skip_lines,
+          skip_raps: HashSet::new(),
         };
         visitor.visit_body(hir_body);
         visitor.print_lifetimes();

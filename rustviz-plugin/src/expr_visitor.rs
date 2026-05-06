@@ -119,7 +119,22 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
 
 
   pub inside_branch: bool,
-  pub fn_ret: bool
+  pub fn_ret: bool,
+
+  // Source lines (1-indexed) carrying a `// rustviz: skip` marker.
+  // Used by visit_local to suppress events for marked `let`s and by
+  // plugin.rs to bypass body traversal of marked fns. Owned by the
+  // plugin's RV1Helper; visitors get a borrow for the duration of
+  // each fn-body walk.
+  pub skip_lines: &'a std::collections::HashSet<usize>,
+
+  // Names of RAPs registered for `let` bindings that landed on a
+  // skip line. We still register the RAP so any non-skipped use of
+  // the variable elsewhere can resolve, but every event whose source
+  // or destination references one of these names is dropped before
+  // it reaches the renderer — which is what gives the variable no
+  // timeline column.
+  pub skip_raps: std::collections::HashSet<String>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -280,7 +295,59 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// True iff `event` references a RAP whose name is in `skip_raps`.
+  /// Covers every variant of ExternalEvent — `ResourceAccessPoint_extract`
+  /// returns Anonymous for `GoOutOfScope` / `OwnerDropAtReassign` /
+  /// `InitRefParam` / `RefDie`, so we match them explicitly here
+  /// instead of relying on it.
+  fn event_touches_skipped(&self, event: &ExternalEvent) -> bool {
+    let touches_ty = |r: &ResourceTy| -> bool {
+      match r {
+        ResourceTy::Value(rap) | ResourceTy::Deref(rap) => {
+          self.skip_raps.contains(rap.name())
+        }
+        _ => false,
+      }
+    };
+    match event {
+      ExternalEvent::Bind { from, to, .. }
+      | ExternalEvent::Copy { from, to, .. }
+      | ExternalEvent::Move { from, to, .. }
+      | ExternalEvent::StaticBorrow { from, to, .. }
+      | ExternalEvent::StaticDie { from, to, .. }
+      | ExternalEvent::MutableBorrow { from, to, .. }
+      | ExternalEvent::MutableDie { from, to, .. }
+      | ExternalEvent::RefDie { from, to, .. }
+      | ExternalEvent::PassByStaticReference { from, to, .. }
+      | ExternalEvent::PassByMutableReference { from, to, .. } => {
+        touches_ty(from) || touches_ty(to)
+      }
+      ExternalEvent::GoOutOfScope { ro, .. }
+      | ExternalEvent::OwnerDropAtReassign { ro, .. } => {
+        self.skip_raps.contains(ro.name())
+      }
+      ExternalEvent::InitRefParam { param, .. } => {
+        self.skip_raps.contains(param.name())
+      }
+      // Branch events bundle child events; we don't recurse into
+      // them here. A skipped variable that only appears inside a
+      // branch could still leak through — fix when the need arises.
+      ExternalEvent::Branch { .. } => false,
+    }
+  }
+
   pub fn add_external_event(&mut self, line_num: usize, event: ExternalEvent) {
+    // Drop events whose source or destination is a `// rustviz: skip`-
+    // marked variable. The marked RAP still exists (so non-skipped
+    // code that references it doesn't crash on lookup), but every
+    // arrow that touches it disappears — no init Bind, no later
+    // Move/Copy/Borrow, no end-of-scope return — and because the
+    // renderer only materialises a timeline when a hash sees its
+    // first event, a RAP with zero events never gets a column.
+    if self.event_touches_skipped(&event) {
+      return;
+    }
+
     self.preprocessed_events.push((line_num, event.clone()));
     let resourceaccesspoint = ResourceAccessPoint_extract(&event);
     match (resourceaccesspoint.0, resourceaccesspoint.1, &event) {
