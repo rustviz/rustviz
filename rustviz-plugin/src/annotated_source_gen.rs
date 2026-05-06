@@ -5,7 +5,7 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{hirid_to_var_name, span_to_line}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{expr_to_rap_name, hirid_to_var_name, span_to_line}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
 use rustc_span::Span;
 
@@ -151,9 +151,18 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         }
         _ => {}
       }
-      let rcvr_name = hirid_to_var_name(rcvr.hir_id, &self.tcx).unwrap();
-      self.annotate_src(rcvr_name.clone(), rcvr.span, false, *self.raps.get(&rcvr_name).unwrap().rap.hash());
-
+      // Same handling as the visitor's MethodCall arm: receivers
+      // like `r.s` are Field expressions, not bare paths, so use
+      // `expr_to_rap_name` to derive the qualified name. If we
+      // can't resolve a RAP, skip annotation for this receiver
+      // rather than panic — the annotation is purely for source-
+      // panel coloring; missing it just leaves the receiver
+      // un-styled.
+      if let Some(rcvr_name) = expr_to_rap_name(rcvr, &self.tcx) {
+        if let Some(rd) = self.raps.get(&rcvr_name) {
+          self.annotate_src(rcvr_name.clone(), rcvr.span, false, *rd.rap.hash());
+        }
+      }
     }
     ExprKind::Assign(exp1, exp2, _) | ExprKind::AssignOp(_, exp1, exp2) => {
       self.annotate_expr(exp1);
