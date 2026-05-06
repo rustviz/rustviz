@@ -472,6 +472,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let arg_ty = tycheck_results.node_type(arg.hir_id);
     let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner), arg_ty);
     let from_ro = get_rap(arg, &self.tcx, &self.raps);
+    // Extend the lifetime of any reference RAP this arg touches so a
+    // ref passed as a fn argument shows its dotted lifetime line out
+    // to the call site. Critical for macro args like
+    // `println!("{}", p)`: visit_expr bails on macro-expanded
+    // children before reaching the inner Path that would normally
+    // call update_rap, so without this nudge the ref's lifetime
+    // stays pinned to its declaration line and the renderer draws a
+    // degenerate (zero-height) ref-line.
+    if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) = &from_ro {
+      self.update_rap(rap, line_num);
+    }
     let to_ro = ResourceTy::Value(self.raps.get(&fn_name).unwrap().rap.to_owned());
     // type-check the arg and add event accordingly
     if arg_ty.is_ref() {
