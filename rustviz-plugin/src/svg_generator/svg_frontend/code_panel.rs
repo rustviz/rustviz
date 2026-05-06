@@ -3,14 +3,20 @@ extern crate handlebars;
 use crate::svg_generator::data::{ExternalEvent, LINE_SPACE};
 use crate::svg_generator::svg_frontend::syntax;
 use handlebars::Handlebars;
-use std::{cmp::max, collections::{BTreeMap, HashMap}};
+use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet}};
 
 pub fn render_code_panel(
     annotated_lines: std::str::Lines,
     lines: std::str::Lines,
     max_x_space: &mut i64,
     _event_line_map: &BTreeMap<usize, Vec<ExternalEvent>>,
-    l_map: &HashMap<usize, usize>, 
+    l_map: &HashMap<usize, usize>,
+    // Visual-row positions (1-indexed in the post-fn-blank-pass
+    // sequence) where svg_generation injected a synthetic blank line
+    // before a non-first fn so the fn-label header has somewhere to
+    // sit. Rendered with a blank gutter and no source-line increment
+    // — same treatment arrow-stack inserts get below.
+    synthetic_blank_rows: &HashSet<usize>,
 ) -> (String, i32) {
     /* Template creation */
     let mut handlebars = Handlebars::new();
@@ -30,15 +36,14 @@ pub fn render_code_panel(
         total_lines += 1;
     }
 
-    // Right-align the gutter to the widest source line number. We
-    // intentionally don't include the arrow-stack inserts in this
-    // calculation: those rows are blank in the gutter (they exist
-    // purely to give the trapezoid arrows vertical clearance), so
-    // the largest displayed number is just the source-line count.
-    // Right alignment matters because left alignment shifts the
-    // content column whenever a digit boundary crosses (`9  ` vs
-    // `10  `).
-    let num_width = total_lines.max(1).to_string().len();
+    // Right-align the gutter to the widest source line number we'll
+    // actually print. Arrow-clearance and fn-blank inserts both
+    // render with a blank gutter, so the largest displayed number
+    // is the source-line count minus all the synthetic blanks. Right
+    // alignment matters because left alignment shifts the content
+    // column whenever a digit boundary crosses (`9  ` vs `10  `).
+    let displayed_lines = total_lines.saturating_sub(synthetic_blank_rows.len());
+    let num_width = displayed_lines.max(1).to_string().len();
 
     /* Render the code segment of the svg to a String */
     let x = 20;
@@ -62,13 +67,24 @@ pub fn render_code_panel(
     let mut in_block_comment = false;
     for line in annotated_lines {
         let line_string = syntax::highlight(line, &mut in_block_comment);
+        let is_synthetic_blank = synthetic_blank_rows.contains(&visual_row);
         let mut data = BTreeMap::new();
         data.insert("X_VAL".to_string(), x.to_string());
         data.insert("Y_VAL".to_string(), y.to_string());
-        let fmt_line = format!(
-            "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
-            source_line, line_string, width = num_width,
-        );
+        // Synthetic fn-blank inserts get the same blank-gutter
+        // treatment as arrow-clearance rows; only real source rows
+        // tick `source_line`.
+        let fmt_line = if is_synthetic_blank {
+            format!(
+                "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
+                "", line_string, width = num_width,
+            )
+        } else {
+            format!(
+                "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
+                source_line, line_string, width = num_width,
+            )
+        };
         data.insert("LINE".to_string(), fmt_line);
         output.push_str(&handlebars.render("code_line_template", &data).unwrap());
         y = y + LINE_SPACE;
@@ -96,7 +112,9 @@ pub fn render_code_panel(
             visual_row += 1;
             extra_line_num -= 1;
         }
-        source_line += 1;
+        if !is_synthetic_blank {
+            source_line += 1;
+        }
         visual_row += 1;
     }
     output.push_str("    </g>\n");
