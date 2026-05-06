@@ -371,6 +371,17 @@ const App: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 
+  // Re-attach hover/tooltip listeners whenever the SVG content
+  // changes. Without this, switching examples while the cursor sits
+  // over the viz panel leaves the new SVG nodes without listeners
+  // (the wrapper div's onMouseEnter doesn't refire), and tooltips
+  // silently stop working until the user moves the cursor out and
+  // back in. helpers() is idempotent — it tags triggers with a
+  // .listener class to skip already-bound nodes.
+  useEffect(() => {
+    helpers('ex2');
+  }, [code_svg, timeline_svg]);
+
   const handleExampleSelect = (code: string) => {
     if (!editor) return;
     editor.setCurrentCode(code);
@@ -439,7 +450,6 @@ const App: React.FC = () => {
                   className="ex2 tl_panel"
                   style={{ width: 'auto' }}
                   dangerouslySetInnerHTML={{ __html: timeline_svg ?? '' }}
-                  onMouseEnter={() => helpers('ex2')}
                 />
               </div>
             </div>
