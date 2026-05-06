@@ -253,12 +253,6 @@ const Description: React.FC = () => (
     <h3>Known limitations</h3>
     <p>RustViz is a research tool. It supports a meaningful subset of Rust but not all of it — these features are unsupported or known to misbehave:</p>
     <ul>
-      <li>For-loops</li>
-      <li>
-        Bindings or borrows inside an <code>if</code> or <code>match</code>{' '}
-        branch body (the conditional itself can return a value into a{' '}
-        <code>let</code>, but tracking events inside the branch isn't supported)
-      </li>
       <li>
         Smart-pointer wrappers (<code>Box</code>, <code>Rc</code>,{' '}
         <code>Arc</code>, <code>RefCell</code>) and trait objects (

@@ -185,10 +185,6 @@ top-level directory:
 RustViz 2 is a research tool. It supports a meaningful subset of Rust but
 not all of it. Currently unsupported (or known to misbehave):
 
-- For-loops
-- Bindings or borrows inside an `if` or `match` branch body (the
-  conditional itself can return a value into a `let`, but tracking
-  events inside the branch isn't supported)
 - Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
   objects (`Box<dyn T>`)
 - Indexing or slicing collections like `Vec` (string slices like
