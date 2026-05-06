@@ -560,7 +560,35 @@ const App: React.FC = () => {
     );
   };
 
+  // Delete the currently-selected user example. Confirms first
+  // because the action is destructive and there's no undo (the
+  // example's code is overwritten in localStorage). After deletion,
+  // fall back to the example that was at the same index (or just
+  // before, if we deleted the last one); if no user examples are
+  // left, fall back to the default preloaded example.
+  const handleDelete = () => {
+    if (selection.kind !== 'user') return;
+    const idx = userExamples.findIndex(e => e.id === selection.id);
+    if (idx < 0) return;
+    const current = userExamples[idx];
+    if (!window.confirm(`Delete "${current.name}"? This can't be undone.`)) return;
+    const next = userExamples.filter(e => e.id !== current.id);
+    let fallback: Selection;
+    if (next.length > 0) {
+      const fallbackIdx = Math.min(idx, next.length - 1);
+      fallback = { kind: 'user', id: next[fallbackIdx].id };
+    } else {
+      fallback = DEFAULT_SELECTION;
+    }
+    setUserExamples(next);
+    setSelection(fallback);
+    if (!editor) return;
+    editor.setCurrentCode(codeForSelection(fallback, next));
+    handleClick();
+  };
+
   const canRename = selection.kind === 'user';
+  const canDelete = selection.kind === 'user';
 
   return (
     <div className="app-shell">
@@ -604,6 +632,22 @@ const App: React.FC = () => {
                       same way the `+` glyph above does — no SVG fill
                       / stroke inheritance to debug. */}
                   ✎
+                </button>
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleDelete}
+                  disabled={!canDelete}
+                  title={
+                    canDelete
+                      ? 'Delete this example'
+                      : 'Delete only works on examples you created'
+                  }
+                  aria-label="Delete this example"
+                >
+                  {/* U+2715 MULTIPLICATION X — monochrome, consistent
+                      with the + and ✎ glyphs. Reads as "remove this
+                      item" alongside the existing rename/add controls. */}
+                  ✕
                 </button>
                 <button
                   className="cm-button generate-button"
