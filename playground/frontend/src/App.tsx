@@ -179,6 +179,22 @@ const Description: React.FC = () => (
       </a>{' '}
       with the snippet and error message.
     </p>
+    <h3>Other ways to use RustViz</h3>
+    <p>
+      Besides this playground, RustViz ships as an mdBook preprocessor
+      (for embedding visualizations in a book, like our{' '}
+      <a href="https://rustviz.github.io/tutorial/" target="_blank" rel="noreferrer">
+        visual Rust tutorial
+      </a>
+      ), a <code>rustviz</code>{' '}
+      command-line tool (one-shot rendering of a <code>.rs</code> file
+      to SVG or self-contained HTML), and a Rust library for
+      programmatic use. Setup and usage for all of them are in the{' '}
+      <a href="https://github.com/rustviz/rustviz" target="_blank" rel="noreferrer">
+        GitHub repo
+      </a>
+      .
+    </p>
     <h3>Credits</h3>
     <p>
       RustViz is a project of the{' '}
@@ -201,7 +217,8 @@ const Description: React.FC = () => (
       <a href="https://gavinleroy.com/" target="_blank" rel="noreferrer">
         Gavin Gray
       </a>
-      .
+      . RustViz is an independent academic project and has no formal
+      affiliation with the Rust project or the Rust Foundation.
     </p>
     <h3>Research paper</h3>
     <p>
