@@ -92,8 +92,14 @@ const ExamplePicker = ({ onSelect }: ExamplePickerProps) => {
   return (
     <div className="example-picker">
       <label htmlFor="example-select">Examples:</label>
-      <select id="example-select" defaultValue="" onChange={handleChange}>
-        <option value="">— pick a preloaded example —</option>
+      {/* Default to "0:0" — Motivation → "Hands-on tutorial" — to
+          match the editor's seed snippet (defaultExample). React's
+          `defaultValue` only sets initial state; it doesn't fire
+          onChange, so we don't double-load the same code. The
+          placeholder option is gone because the dropdown is never
+          empty — the editor always has a selected snippet from the
+          start. */}
+      <select id="example-select" defaultValue="0:0" onChange={handleChange}>
         {exampleGroups.map((group, gIdx) => (
           <optgroup key={group.chapter} label={group.chapter}>
             {group.examples.map((ex, eIdx) => (
