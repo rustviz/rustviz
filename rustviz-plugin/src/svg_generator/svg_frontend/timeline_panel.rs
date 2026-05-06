@@ -862,6 +862,30 @@ fn closure_has_move_captures(
     })
 }
 
+// Title for a vertical timeline segment. Routes around the generic
+// `state.print_message_with_name` for closure bindings so the
+// FullPrivilege segment reads as "f owns a closure (which owns a
+// resource)?" instead of the misleading generic "f is the owner
+// of the resource" — `f` doesn't own the upvar's resource directly,
+// it owns the closure value, and that closure may or may not in
+// turn own a captured resource.
+fn timeline_segment_title(
+    state: &State,
+    rap: &ResourceAccessPoint,
+    visualization_data: &VisualizationData,
+) -> String {
+    if rap.is_closure() {
+        if let State::FullPrivilege { .. } = state {
+            let name = rap.name().to_owned();
+            if closure_has_move_captures(visualization_data, *rap.hash()) {
+                return hover_messages::state_closure_full_privilege_with_resource(&name);
+            }
+            return hover_messages::state_closure_full_privilege_no_resource(&name);
+        }
+    }
+    state.print_message_with_name(rap.name())
+}
+
 fn matches_closure(rty: &ResourceTy, closure_hash: u64) -> bool {
     rty.extract_rap().map_or(false, |r| *r.hash() == closure_hash)
 }
@@ -1729,7 +1753,7 @@ fn render_timeline(
                         y1: get_y_axis_pos(*split_point),
                         x2: branch.t_data.x_val as f64,
                         y2: get_y_axis_pos(*split_point + 1),
-                        title: p_state.print_message_with_name(rap.name()),
+                        title: timeline_segment_title(&p_state, rap, visualization_data),
                         opacity: 1.0
                     };
 
@@ -1758,7 +1782,7 @@ fn render_timeline(
                         y1: get_y_axis_pos(*merge_point + 1),
                         x2: branch.t_data.x_val as f64,
                         y2: get_y_axis_pos(*merge_point),
-                        title: e_state.print_message_with_name(rap.name()),
+                        title: timeline_segment_title(&e_state, rap, visualization_data),
                         opacity: 1.0
                     };
 
@@ -1782,7 +1806,7 @@ fn render_timeline(
                 y1: get_y_axis_pos(*line_start),
                 x2: timeline_data.x_val as f64,
                 y2: get_y_axis_pos(*line_end),
-                title: state.print_message_with_name(rap.name()),
+                title: timeline_segment_title(state, rap, visualization_data),
                 opacity: 1.0
         };
         if *line_start != *line_end {

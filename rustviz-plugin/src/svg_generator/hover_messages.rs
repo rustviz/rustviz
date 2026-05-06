@@ -638,11 +638,26 @@ pub fn state_resource_revoked(my_name: &String, _to_name: &String) -> String {
 pub fn state_full_privilege(my_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
-    
+
     format!(
         "{0} is the owner of the resource", //not necessarily write if let was used rather than let mut
         my_name_fmt
     )
+}
+
+// Closure binding's FullPrivilege state. Two flavours so the
+// timeline tooltip distinguishes a `move ||` (closure owns the
+// captured resource — drop runs at scope-end) from a borrow-only
+// closure (captures a reference; nothing of the resource is owned
+// by the closure value itself).
+pub fn state_closure_full_privilege_with_resource(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!("{0} owns a closure which owns a resource", my_name_fmt)
+}
+
+pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!("{0} owns a closure", my_name_fmt)
 }
 
 // More than one ResourceOwner has access to the underlying resource
