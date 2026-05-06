@@ -3,14 +3,20 @@ extern crate handlebars;
 use crate::svg_generator::data::{ExternalEvent, LINE_SPACE};
 use crate::svg_generator::svg_frontend::syntax;
 use handlebars::Handlebars;
-use std::{cmp::max, collections::{BTreeMap, HashMap}};
+use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet}};
 
 pub fn render_code_panel(
     annotated_lines: std::str::Lines,
     lines: std::str::Lines,
     max_x_space: &mut i64,
     _event_line_map: &BTreeMap<usize, Vec<ExternalEvent>>,
-    l_map: &HashMap<usize, usize>, 
+    l_map: &HashMap<usize, usize>,
+    // Visual-row positions (1-indexed in the post-fn-blank-pass
+    // sequence) where svg_generation injected a synthetic blank line
+    // before a non-first fn so the fn-label header has somewhere to
+    // sit. Rendered with a blank gutter and no source-line increment
+    // — same treatment arrow-stack inserts get below.
+    synthetic_blank_rows: &HashSet<usize>,
 ) -> (String, i32) {
     /* Template creation */
     let mut handlebars = Handlebars::new();
@@ -30,63 +36,98 @@ pub fn render_code_panel(
         total_lines += 1;
     }
 
-    // Account for the extra arrow rows the timeline panel reserves
-    // for arrow events that share a line — without this, a snippet
-    // with 9 source lines but an arrow stack pushing the rendered
-    // count to 10+ would lose its line-number alignment when the
-    // last few rendered numbers cross to two digits.
-    let total_with_arrow_rows: usize = total_lines + l_map.values().sum::<usize>();
-    // Right-align line numbers to the widest one. With left-aligned
-    // numbers (`9  ` vs `10  `) the trailing spaces shift content
-    // by a column whenever a digit boundary is crossed; right-align
-    // them and the content column stays put across the whole file.
-    let num_width = total_with_arrow_rows.max(1).to_string().len();
+    // Right-align the gutter to the widest source line number we'll
+    // actually print. Arrow-clearance and fn-blank inserts both
+    // render with a blank gutter, so the largest displayed number
+    // is the source-line count minus all the synthetic blanks. Right
+    // alignment matters because left alignment shifts the content
+    // column whenever a digit boundary crosses (`9  ` vs `10  `).
+    let displayed_lines = total_lines.saturating_sub(synthetic_blank_rows.len());
+    let num_width = displayed_lines.max(1).to_string().len();
 
     /* Render the code segment of the svg to a String */
     let x = 20;
     let mut y = 90;
     let mut output = String::from("    <g id=\"code\">\n");
-    let mut line_of_code = 1;
+    // Three counters move at three different rates and aren't
+    // interchangeable:
+    //
+    //  - `iter_idx`    — 1-indexed position in `annotated_lines`. The
+    //                    fn-blank pre-pass already injected synthetic
+    //                    blanks into that vector, so `synthetic_blank_rows`
+    //                    keys live in this space (they're computed
+    //                    pre-arrow-stack-shift in svg_generation.rs).
+    //  - `source_line` — what we print in the gutter; only ticks for
+    //                    real user source rows.
+    //  - `visual_row`  — the renderer's row counter; ticks per row
+    //                    including arrow-stack inserts. Drives both
+    //                    the y position and the `l_map` lookup, since
+    //                    `l_map` keys are post-arrow-stack visual rows
+    //                    (see svg_generation.rs's
+    //                    `final_line_num = line_num + extra_lines`).
+    let mut iter_idx: usize = 1;
+    let mut source_line: usize = 1;
+    let mut visual_row: usize = 1;
     // Threaded through per-line `highlight()` calls so a `/* … */`
     // that doesn't close on its opening line keeps subsequent lines
     // styled as a comment until we see the matching `*/`.
     let mut in_block_comment = false;
     for line in annotated_lines {
         let line_string = syntax::highlight(line, &mut in_block_comment);
+        let is_synthetic_blank = synthetic_blank_rows.contains(&iter_idx);
         let mut data = BTreeMap::new();
         data.insert("X_VAL".to_string(), x.to_string());
         data.insert("Y_VAL".to_string(), y.to_string());
-        /* automatically add line numbers to code */
-        let fmt_line = format!(
-            "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
-            line_of_code, line_string, width = num_width,
-        );
+        // Synthetic fn-blank inserts get the same blank-gutter
+        // treatment as arrow-clearance rows; only real source rows
+        // tick `source_line`.
+        let fmt_line = if is_synthetic_blank {
+            format!(
+                "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
+                "", line_string, width = num_width,
+            )
+        } else {
+            format!(
+                "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
+                source_line, line_string, width = num_width,
+            )
+        };
         data.insert("LINE".to_string(), fmt_line);
         output.push_str(&handlebars.render("code_line_template", &data).unwrap());
-        // change line spacing
         y = y + LINE_SPACE;
-        let mut extra_line_num = match l_map.get(&line_of_code) {
+        let mut extra_line_num = match l_map.get(&visual_row) {
             Some(l) => *l,
             None => 0
         };
-        /* add empty lines for arrows */
+        /* add empty arrow-clearance rows. They occupy a visual row
+           (so the trapezoid arrow has somewhere to draw) but stay
+           blank in the gutter — line numbers in the visualization
+           stay one-to-one with the editor's line numbers. */
         while extra_line_num > 0 {
             let mut data = BTreeMap::new();
             data.insert("X_VAL".to_string(), x.to_string());
             data.insert("Y_VAL".to_string(), y.to_string());
-            /* automatically add line numbers to code */
-            line_of_code = line_of_code + 1;
+            // Pad with the same width as a real number so the
+            // content column doesn't jiggle row-to-row.
             let empty_line = format!(
-                "<tspan fill=\"#AAA\">{:>width$}</tspan>",
-                line_of_code, width = num_width,
+                "<tspan fill=\"#AAA\">{:>width$}  </tspan>",
+                "", width = num_width,
             );
             data.insert("LINE".to_string(), empty_line);
             output.push_str(&handlebars.render("code_line_template", &data).unwrap());
             y = y + LINE_SPACE;
+            visual_row += 1;
             extra_line_num -= 1;
         }
-        line_of_code = line_of_code + 1;
+        if !is_synthetic_blank {
+            source_line += 1;
+        }
+        visual_row += 1;
+        iter_idx += 1;
     }
     output.push_str("    </g>\n");
-    (output, line_of_code as i32)
+    // Returned value used to be the next line number; preserve that
+    // shape (callers want a row count for height etc.) by returning
+    // the visual row count.
+    (output, visual_row as i32)
 }

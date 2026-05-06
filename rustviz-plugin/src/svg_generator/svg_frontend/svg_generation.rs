@@ -265,6 +265,17 @@ pub fn render_svg(
 
     let new_a_str: String;
     let new_s_str: String;
+    // Visual-row positions (1-indexed) of the synthetic blank lines
+    // we just inserted. The Kth blank lands at `needs_blank_at[K]
+    // + K` because K earlier inserts have already shifted everything
+    // after them by one. The code-panel renderer consults this to
+    // leave those rows un-numbered in the gutter — line numbers in
+    // the visualization stay 1:1 with the user's editor.
+    let synthetic_blank_rows: HashSet<usize> = needs_blank_at
+        .iter()
+        .enumerate()
+        .map(|(i, src)| src + i)
+        .collect();
     if needs_blank_at.is_empty() {
         new_a_str = annotated_src_str.to_string();
         new_s_str = source_rs_str.to_string();
@@ -494,7 +505,7 @@ pub fn render_svg(
     // data for code panel
     let mut max_x_space: i64 = 0;
     let (output, line_of_code) =
-            code_panel::render_code_panel(a_lines, s_lines, &mut max_x_space, &visualization_data.event_line_map, &line_insertion_map);
+            code_panel::render_code_panel(a_lines, s_lines, &mut max_x_space, &visualization_data.event_line_map, &line_insertion_map, &synthetic_blank_rows);
     let code_panel_string = output;
     let num_lines = line_of_code;
 
