@@ -733,6 +733,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
 // This function does the work of adding an event for let stmts
 pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
+  // Macro-expanded RHS — `let v = vec![1, 2, 3]`, `let s = format!(...)`,
+  // etc. — desugars into a `Call` whose function path was never registered
+  // as a RAP (visit_expr's from_expansion guard skipped it). Treating
+  // such an RHS like a literal — Bind from Anonymous — gives the user a
+  // clean "v acquires ownership of a resource" event without trying to
+  // name the synthetic call inside the macro.
+  if rhs.span.from_expansion() {
+    let line_num = span_to_line(&rhs.span, &self.tcx);
+    self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+    return;
+  }
   match rhs.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
       let line_num = span_to_line(&p.span, &self.tcx);

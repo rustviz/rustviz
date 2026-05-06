@@ -90,6 +90,11 @@ pub fn expr_to_rap_name(expr: &Expr, tcx: &TyCtxt) -> Option<String> {
     ExprKind::AddrOf(_, _, inner)
     | ExprKind::Unary(_, inner)
     | ExprKind::DropTemps(inner) => expr_to_rap_name(inner, tcx),
+    // `v[..]` / `s[i]`: attribute the slice/element to the receiver's
+    // RAP, the same way we treat `&v` directly. RustViz doesn't render
+    // a separate column per index/slice, so collapsing onto the
+    // receiver matches how fields share their parent's column.
+    ExprKind::Index(recv, _, _) => expr_to_rap_name(recv, tcx),
     _ => None,
   }
 }
@@ -576,6 +581,8 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
       }
     }
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => get_rap(expr, tcx, raps),
+    // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
+    ExprKind::Index(recv, _, _) => get_rap(recv, tcx, raps),
     ExprKind::Call(fn_expr, _) => {
       let fn_name = hirid_to_var_name(fn_expr.hir_id, tcx).unwrap();
       ResourceTy::Value(raps.get(&fn_name).unwrap().rap.to_owned())
@@ -617,6 +624,8 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
       Some(raps.get(&name).unwrap().rap.to_owned())
     }
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => fetch_rap(expr, tcx, raps),
+    // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
+    ExprKind::Index(recv, _, _) => fetch_rap(recv, tcx, raps),
     ExprKind::Block(b, _) => {
       match b.expr {
         Some(expr) => { fetch_rap(expr, tcx, raps) }
@@ -668,6 +677,11 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
     }
     ExprKind::AddrOf(_, _, expr) => {
       find_lender(expr, tcx, raps, borrow_map)
+    }
+    // `&v[..]` / `&s[i..j]`: the lender is the receiver, the same way
+    // `&r.field` resolves through the Field arm.
+    ExprKind::Index(recv, _, _) => {
+      find_lender(recv, tcx, raps, borrow_map)
     }
     ExprKind::Block(b, _) => {
       match b.expr {
