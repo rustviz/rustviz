@@ -597,7 +597,17 @@ const App: React.FC = () => {
         {/* Top row: prose on the left, code editor on the right. */}
         <Panel defaultSize={40} minSize={15}>
           <PanelGroup direction="horizontal" autoSaveId="rustviz-top-horizontal">
-            <Panel defaultSize={35} minSize={15} className="panel description-panel">
+            {/* Collapsible so users running pure code demos can drag
+                the handle to the left edge and snap the prose pane
+                away. minSize is the snap threshold — below 15% the
+                panel collapses to 0; the resize handle stays visible
+                at the edge so the user can drag it back to expand. */}
+            <Panel
+              defaultSize={35}
+              minSize={15}
+              collapsible
+              className="panel description-panel"
+            >
               <Description />
             </Panel>
             <PanelResizeHandle className="resize-handle resize-handle-vertical" />
