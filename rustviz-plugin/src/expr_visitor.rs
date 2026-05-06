@@ -540,7 +540,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Add a RAP to our collection of raps for a let stmt
   pub fn define_lhs(&mut self, name: String, mutability: bool, expr: &'tcx Expr, ty: Ty <'tcx>) {
-    let is_special = ty_is_special_owner(&self.tcx, &ty);
+    let is_special = ty_is_special_owner(&ty);
     if ty.is_ref() {
       let (lender, aliasing) = self.get_ref_data(&expr);
       self.add_ref(name.clone(), 
@@ -644,7 +644,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // (only struct ADTs are flattened today) and skip the
         // special-owner builtins like `String` whose internals
         // we deliberately don't expose.
-        if field_ty.is_adt() && !ty_is_special_owner(&self.tcx, &field_ty) {
+        if field_ty.is_adt() && !ty_is_special_owner(&field_ty) {
           if let Some(adt_def) = field_ty.ty_adt_def() {
             if matches!(adt_def.adt_kind(), AdtKind::Struct) {
               self.register_struct_members(

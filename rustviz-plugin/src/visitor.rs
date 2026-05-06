@@ -70,7 +70,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     // add RAP corresponding to parameter type
     let line_num=span_to_line(&param.span, &self.tcx);
     let ty = self.tcx.typeck(param.hir_id.owner).pat_ty(param.pat);
-    let is_special = ty_is_special_owner(&self.tcx, &ty);
+    let is_special = ty_is_special_owner(&ty);
     match param.pat.kind {
       PatKind::Binding(binding_annotation, _ann_hirid, ident, _op_pat) =>{
         let name: String = ident.to_string();
