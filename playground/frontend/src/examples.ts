@@ -61,12 +61,12 @@ export const exampleGroups: ExampleGroup[] = [
     clear_string(r3);
 }
 
-fn compare_strings(_a: &String, _b: &String) -> bool {
+fn compare_strings(_a: &String, _b: &String) -> bool { // rustviz: hide
     // body elided
     true
 }
 
-fn clear_string(_s: &mut String) {
+fn clear_string(_s: &mut String) { // rustviz: hide
     // body elided
 }`,
       },

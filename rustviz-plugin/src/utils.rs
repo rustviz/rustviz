@@ -10,19 +10,30 @@ use std::fs::File;
 
 use crate::expr_visitor::RapData;
 
-/// Recognise the user-facing `// rustviz: skip` marker. We match the
-/// trimmed body of a `//` line comment against `rustviz: skip` (with
-/// the colon's surrounding whitespace optional) so trailing prose
+/// Two flavours of marker we recognise on a `//` line comment.
+/// `Skip` keeps the source visible but stops tracing the marked item;
+/// `Hide` (fn-only in semantics) additionally removes the entire item
+/// from the rendered code panel.
+#[derive(Clone, Copy, Debug)]
+pub enum SkipKind {
+    Skip,
+    Hide,
+}
+
+/// Recognise `// rustviz: skip` and `// rustviz: hide`. Match the
+/// trimmed body of a `//` line comment against one of those keywords
+/// (the colon's surrounding whitespace is optional) so trailing prose
 /// (`// rustviz: skip — see issue #42`) still counts.
-fn line_has_skip_marker(line: &str) -> Option<usize> {
+fn line_skip_marker(line: &str) -> Option<(usize, SkipKind)> {
     let comment_start = line.find("//")?;
     let body = line[comment_start + 2..].trim_start();
     let mut rest = body.strip_prefix("rustviz")?.trim_start();
     rest = rest.strip_prefix(':')?.trim_start();
-    if rest.starts_with("skip") {
-        let after = &rest[4..];
-        if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
-            return Some(comment_start);
+    for &(kw, kind) in &[("skip", SkipKind::Skip), ("hide", SkipKind::Hide)] {
+        if let Some(after) = rest.strip_prefix(kw) {
+            if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                return Some((comment_start, kind));
+            }
         }
     }
     None
@@ -124,11 +135,15 @@ pub fn annotate_enum_variant(
 pub struct RV1Helper {
   source_str: String,
   source_path: PathBuf,
-  /// Lines (1-indexed) whose source carries a `// rustviz: skip`
-  /// marker. The marker has been stripped from `source_str` and the
-  /// returned line map already, but the plugin still needs the line
-  /// numbers to suppress events / fn-body traversal at those sites.
+  /// Lines (1-indexed) whose source carries a `// rustviz: skip` or
+  /// `// rustviz: hide` marker. Both kinds suppress the marked
+  /// item's body trace; `hide` additionally tells the renderer to
+  /// remove the whole item from the displayed code panel. The
+  /// markers themselves have been stripped from `source_str` and
+  /// the returned line map already.
   pub skip_lines: HashSet<usize>,
+  /// Subset of `skip_lines` carrying the `hide` keyword (fn-only).
+  pub hide_lines: HashSet<usize>,
 }
 
 impl RV1Helper {
@@ -137,6 +152,7 @@ impl RV1Helper {
       source_str: String::new(),
       source_path: PathBuf::new(),
       skip_lines: HashSet::new(),
+      hide_lines: HashSet::new(),
     }
   }
   pub fn initialize_line_map(&mut self) -> Result<BTreeMap<usize, String>> {
@@ -156,9 +172,14 @@ impl RV1Helper {
         // still index correctly.
         let mut res_str = String::with_capacity(contents.len());
         let mut skip_lines: HashSet<usize> = HashSet::new();
+        let mut hide_lines: HashSet<usize> = HashSet::new();
         for (i, line) in contents.lines().enumerate() {
-          if let Some(idx) = line_has_skip_marker(line) {
-            skip_lines.insert(i + 1);
+          if let Some((idx, kind)) = line_skip_marker(line) {
+            let line_num = i + 1;
+            skip_lines.insert(line_num);
+            if matches!(kind, SkipKind::Hide) {
+              hide_lines.insert(line_num);
+            }
             res_str.push_str(line[..idx].trim_end());
           } else {
             res_str.push_str(line);
@@ -168,6 +189,7 @@ impl RV1Helper {
 
         self.source_str = res_str.clone();
         self.skip_lines = skip_lines;
+        self.hide_lines = hide_lines;
 
         let lines: Vec<&str> = res_str.lines().collect();
         for (line_num, line_content) in lines.iter().enumerate() {
@@ -190,6 +212,7 @@ impl RV1Helper {
     a_map: & mut BTreeMap<usize, Vec<String>>,
     num_raps: usize,
     fn_start_lines: HashMap<u64, usize>,
+    hidden_source_lines: HashSet<usize>,
     write_to_cwd: bool) -> Result<()> {
     let mut keys_to_remove: Vec<usize> = Vec::new();
     for (k, v) in line_map.iter() {
@@ -207,7 +230,7 @@ impl RV1Helper {
 
 
     // send stuff to RV1
-    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines)?;
+    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, hidden_source_lines)?;
 
     if write_to_cwd { // write the SVG files
       self.source_path.pop(); // just write to inside cwd

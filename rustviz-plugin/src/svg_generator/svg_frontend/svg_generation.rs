@@ -160,9 +160,81 @@ pub fn render_svg(
     annotated_src_str: &str,
     source_rs_str: &str,
     visualization_data: &mut VisualizationData,
+    hide_lines: &HashSet<usize>,
 ) -> (String, String){
     info!("preprocessed events : {:#?}", visualization_data.preprocess_external_events);
     info!("ev_line_map: {:#?}", visualization_data.event_line_map);
+
+    // First, drop any source lines that the plugin marked with the
+    // `// rustviz: hide` form (the whole fn body, plus its leading
+    // blank line) and shift every line-keyed structure down to
+    // close the gap. Done before the fn-blank-line padding pass
+    // below so that pass operates on the post-hide layout — `prev`
+    // checks for fn neighbours, etc., reflect what the user will
+    // actually see.
+    let (post_hide_a, post_hide_s) = if hide_lines.is_empty() {
+        (annotated_src_str.to_string(), source_rs_str.to_string())
+    } else {
+        let mut sorted: Vec<usize> = hide_lines.iter().copied().collect();
+        sorted.sort();
+        let removed_set: HashSet<usize> = hide_lines.iter().copied().collect();
+        // Number of hidden lines strictly less than `l`.
+        let removed_before = move |l: usize| -> usize {
+            sorted.iter().take_while(|&&r| r < l).count()
+        };
+        let shift = |l: usize| -> usize { l - removed_before(l) };
+
+        let pruned_a: String = annotated_src_str
+            .lines()
+            .enumerate()
+            .filter(|(i, _)| !removed_set.contains(&(i + 1)))
+            .map(|(_, l)| l)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let pruned_s: String = source_rs_str
+            .lines()
+            .enumerate()
+            .filter(|(i, _)| !removed_set.contains(&(i + 1)))
+            .map(|(_, l)| l)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Drop fn_start_lines pointing into a hidden range (the fn
+        // is gone), shift the rest.
+        visualization_data
+            .fn_start_lines
+            .retain(|_, l| !removed_set.contains(l));
+        for v in visualization_data.fn_start_lines.values_mut() {
+            *v = shift(*v);
+        }
+
+        // Drop events on hidden lines (events inside hidden fn
+        // bodies); shift line numbers on the rest. Branch events
+        // recurse via `shift_event_lines` and use the same closure.
+        visualization_data
+            .preprocess_external_events
+            .retain(|(l, _)| !removed_set.contains(l));
+        for (l, ev) in visualization_data.preprocess_external_events.iter_mut() {
+            *l = shift(*l);
+            shift_event_lines(ev, &shift);
+        }
+
+        let shifted_elm: BTreeMap<usize, Vec<ExternalEvent>> = visualization_data
+            .event_line_map
+            .iter()
+            .filter(|(k, _)| !removed_set.contains(k))
+            .map(|(k, v)| {
+                let mut v = v.clone();
+                for sub in v.iter_mut() { shift_event_lines(sub, &shift); }
+                (shift(*k), v)
+            })
+            .collect();
+        visualization_data.event_line_map = shifted_elm;
+
+        (pruned_a, pruned_s)
+    };
+    let annotated_src_str: &str = post_hide_a.as_str();
+    let source_rs_str: &str = post_hide_s.as_str();
 
     // Force a blank source line before each non-first fn that doesn't
     // already have one. Without this, per-fn labels (which are placed
