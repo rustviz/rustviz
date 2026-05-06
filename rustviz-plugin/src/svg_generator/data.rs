@@ -1314,6 +1314,22 @@ impl Visualizable for VisualizationData {
                 }
             },
             
+            // Closure binding takes a mutable capture: the closure
+            // is at FullPrivilege from its Bind-Acquire, takes a
+            // mutable borrow of an upvar, and stays at
+            // FullPrivilege — the borrow is internal to the
+            // closure's value, not a state change of `f` itself.
+            // Mirror for MutableDie at the closure's NLL last use:
+            // the borrow ends but the closure binding survives,
+            // unlike an ordinary MutRef binding (which the next
+            // arm covers).
+            (State::FullPrivilege{..}, Event::MutableBorrow { is, .. })
+            | (State::FullPrivilege{..}, Event::MutableDie { is, .. })
+                if is.is_closure() =>
+            {
+                State::FullPrivilege { s: LineState::Full }
+            }
+
             // happends when a mutable reference returns, invalid otherwise
             (State::FullPrivilege{..}, Event::MutableDie{ .. }) =>
                 State::OutOfScope,
