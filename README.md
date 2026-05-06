@@ -208,11 +208,18 @@ covers everything from a typo fix to a breaking API change). To cut a
 release:
 
 ```sh
+# 1. Bump versions on a branch, open a PR, get it reviewed + merged.
 ./scripts/bump-version.sh         # auto-increment Y
 # (or: ./scripts/bump-version.sh 5  to set v2.5.0 explicitly)
-
+git checkout -b release/v2.5.0
 git add -A && git commit -m 'Bump RustViz to v2.5.0'
-# get that merged to main, then:
+git push -u origin release/v2.5.0
+gh pr create --fill                # land it on main
+
+# 2. Once the bump PR is merged, tag the merge commit and push the tag.
+#    Merging the PR does NOT auto-tag — tagging is a separate, deliberate
+#    step so you have a clean "yes, ship this" checkpoint.
+git checkout main && git pull
 git tag v2.5.0
 git push origin v2.5.0
 ```
