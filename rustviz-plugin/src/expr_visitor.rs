@@ -993,6 +993,16 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // ownership of a resource" dot like other Bind sites.
       self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
 
+      // MIR loan facts for the enclosing fn body. Each ref capture
+      // becomes one polonius loan whose `borrowed_place` is the
+      // upvar and whose `region.1` is the NLL kill line — the line
+      // where the borrow ends, which under NLL is the closure
+      // binding's last use, not its lexical scope end. We use this
+      // below to emit a StaticDie / MutableDie at the kill line so
+      // the captured borrow visually returns to its lender on the
+      // line the user expects.
+      let mir_b_data = self.gather_borrow_data(self.bwf);
+
       let typeck = self.tcx.typeck(closure.def_id);
       for capture in typeck.closure_min_captures_flattened(closure.def_id) {
         let upvar_hir_id = match capture.place.base {
@@ -1023,7 +1033,41 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             _ => Evt::SBorrow,
           },
         };
-        self.add_ev(line_num, evt_kind, to, from, false);
+        self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false);
+
+        // For ref captures, find the matching MIR loan and emit
+        // a Die event at its kill line so the borrow returns on
+        // the closure's last use, not at the closure's lexical
+        // scope end. Move captures don't go through the loan
+        // machinery — they transfer ownership outright, and the
+        // closure's drop is what releases them.
+        let die_evt = match evt_kind {
+          Evt::SBorrow => Some(Evt::SDie),
+          Evt::MBorrow => Some(Evt::MDie),
+          _ => None,
+        };
+        if let Some(die_evt) = die_evt {
+          let kill_line = mir_b_data.iter().find_map(|b| {
+            // Match on (assignment line, upvar name): the loan
+            // for this capture is issued at the closure literal's
+            // line and borrows the upvar by name. region.1 is the
+            // NLL-refined kill line.
+            if b.region.0 == line_num
+              && b.borrowed_place.as_deref() == Some(upvar_name.as_str())
+            {
+              Some(b.region.1)
+            } else {
+              None
+            }
+          });
+          if let Some(die_line) = kill_line {
+            // add_ev maps (lhs, rhs) → StaticDie/MutableDie
+            // {from: rhs, to: lhs}. We want from=closure (f),
+            // to=upvar (s) so the renderer's return arrow goes
+            // f → s, mirroring the borrow direction.
+            self.add_ev(die_line, die_evt, from, lhs.clone(), false);
+          }
+        }
       }
     }
     _ => {
