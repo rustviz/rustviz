@@ -208,6 +208,35 @@ const Description: React.FC = () => (
       </a>
       .
     </p>
+    <h3>Research paper</h3>
+    <p>
+      An earlier version of RustViz used hand-written visualization
+      directives in source comments and was deployed in classroom
+      teaching at the University of Michigan. That version is described
+      in our VL/HCC 2022 paper:
+    </p>
+    <p className="citation">
+      Marcelo Almeida, Grant Cole, Ke Du, Gongming Luo, Shulin Pan,
+      Yu Pan, Kai Qiu, Vishnu Reddy, Haochen Zhang, Yingying Zhu, and
+      Cyrus Omar.{' '}
+      <a
+        href="https://web.eecs.umich.edu/~comar/rustviz-vlhcc22.pdf"
+        target="_blank"
+        rel="noreferrer"
+      >
+        RustViz: Interactively Visualizing Ownership and Borrowing
+      </a>
+      . In <em>2022 IEEE Symposium on Visual Languages and
+      Human-Centric Computing (VL/HCC)</em>, pages 1–10, 2022.{' '}
+      <a
+        href="https://github.com/rustviz/rustviz/blob/main/rustviz.bib"
+        target="_blank"
+        rel="noreferrer"
+      >
+        BibTeX
+      </a>
+      .
+    </p>
   </div>
 );
 
