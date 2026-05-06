@@ -710,10 +710,16 @@ const App: React.FC = () => {
                   }
                   aria-label="Delete this example"
                 >
-                  {/* U+2715 MULTIPLICATION X — monochrome, consistent
-                      with the + and ✎ glyphs. Reads as "remove this
-                      item" alongside the existing rename/add controls. */}
-                  ✕
+                  {/* Lucide "trash-2" — trash can with lid + body
+                      vertical strokes. Reads as "delete permanently"
+                      more clearly than a bare ✕. */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <polyline fill="none" points="3 6 5 6 21 6" />
+                    <path fill="none" d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                    <path fill="none" d="M10 11v6" />
+                    <path fill="none" d="M14 11v6" />
+                    <path fill="none" d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                  </svg>
                 </button>
                 <button
                   className="cm-button toolbar-icon-button"
@@ -723,11 +729,15 @@ const App: React.FC = () => {
                 >
                   {/* Lucide "download" — tray with an arrow landing
                       in it. Unambiguous "save to disk" semantics, vs
-                      a bare ⬇ which reads like "move down in list". */}
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
+                      a bare ⬇ which reads like "move down in list".
+                      `fill="none"` is set on every node (and again
+                      via CSS) because some renderers fill an open
+                      path's implied closed region under the default
+                      fill rule. */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path fill="none" d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline fill="none" points="7 10 12 15 17 10" />
+                    <line fill="none" x1="12" y1="15" x2="12" y2="3" />
                   </svg>
                 </button>
                 <button
@@ -739,10 +749,10 @@ const App: React.FC = () => {
                   {/* Lucide "upload" — same tray with the arrow
                       leaving it. Pairs visually with the download
                       icon above. */}
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path fill="none" d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline fill="none" points="17 8 12 3 7 8" />
+                    <line fill="none" x1="12" y1="3" x2="12" y2="15" />
                   </svg>
                 </button>
                 <input
