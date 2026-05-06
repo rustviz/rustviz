@@ -159,7 +159,6 @@ code {
   overflow: auto;
   flex: 1;
   min-height: 0;
-  max-width: 80ch;
   line-height: 1.55;
 }
 
@@ -191,7 +190,10 @@ code {
 .editor-toolbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  /* Tight gap so the dropdown + icon buttons read as one cluster on
+     the left. The Generate button gets `margin-left: auto` (below) to
+     push itself to the right edge regardless of this gap. */
+  gap: 6px;
   padding: 10px 16px;
   background: #f6f6f6;
   border-bottom: 1px solid var(--border);
@@ -240,6 +242,31 @@ code {
   padding: 6px 16px;
   font-size: 13px;
   min-width: 180px;
+}
+
+/* Compact toolbar buttons that sit between the example dropdown and
+   the right-aligned Generate button. The `+` icon button is square;
+   the Rename button is wider but stays the same height.
+   Gray-on-fg styling deliberately demotes them next to the orange
+   Generate button — these are example-list management, not the
+   primary action. */
+.toolbar-icon-button {
+  padding: 4px 10px;
+  font-size: 16px;
+  line-height: 1;
+  background: var(--border);
+  color: var(--fg);
+}
+.toolbar-icon-button:hover:not(:disabled) {
+  background: var(--border-strong);
+}
+.toolbar-icon-button:disabled {
+  background: var(--border);
+  color: var(--fg-muted);
+}
+.editor-toolbar .cm-button:not(.generate-button):not(.toolbar-icon-button) {
+  padding: 4px 10px;
+  font-size: 13px;
 }
 
 .editor-host {

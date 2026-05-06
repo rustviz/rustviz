@@ -7,6 +7,22 @@ import axios from 'axios';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import ErrorCard from './ErrorCard';
 import { exampleGroups } from './examples';
+import {
+  codeForSelection,
+  DEFAULT_SELECTION,
+  forkedName,
+  loadSelection,
+  loadUserExamples,
+  newId,
+  nextNewExampleName,
+  NEW_EXAMPLE_TEMPLATE,
+  optionValueToSelection,
+  saveSelection,
+  saveUserExamples,
+  selectionToOptionValue,
+  type Selection,
+  type UserExample,
+} from './userExamples';
 
 // API origin. Empty (relative URL) for the default same-origin Fly deploy;
 // set to https://rustviz-playground.fly.dev for the GitHub Pages build via
@@ -16,26 +32,37 @@ const API_BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
 declare function helpers(param: string): void;
 
-// Seed the editor with the first dropdown example (Motivation →
-// "Hands-on tutorial") so first-time visitors land on a snippet that
-// actually exercises ownership, borrowing, and the
-// `// rustviz: skip` / `// rustviz: hide` markers — instead of an
-// abstract `let mut x = 7; let mut a = &mut x; …` chain that doesn't
-// motivate anything. Single source of truth lives in examples.ts.
-const defaultExample: string = exampleGroups[0].examples[0].code;
-
 // Thin wrapper around CodeMirror's EditorView so the React layer can
 // hold a single `Editor` instance across renders without re-creating
 // the underlying view (which would lose cursor position, undo
 // history, etc.). Owns its own DOM insertion via the constructor's
 // `parent` arg.
+//
+// `onUserChange` fires after every user-driven document change (typing,
+// paste, delete) but is suppressed during programmatic `setCurrentCode`
+// — the dropdown loading a different example shouldn't look like the
+// user editing the current one (which would trigger an implicit fork).
 class Editor {
   private view: EditorView;
+  // True for the duration of one programmatic `setCurrentCode` call.
+  // CodeMirror dispatches transactions synchronously, so we set, dispatch,
+  // and clear within the same call frame — the change listener fires
+  // in between and sees the flag set.
+  private programmatic = false;
 
-  public constructor(editorContainer: HTMLElement, code: string = defaultExample) {
+  public constructor(
+    editorContainer: HTMLElement,
+    code: string,
+    onUserChange: (code: string) => void,
+  ) {
+    const updateListener = EditorView.updateListener.of(update => {
+      if (!update.docChanged) return;
+      if (this.programmatic) return;
+      onUserChange(update.state.doc.toString());
+    });
     const initial_state = EditorState.create({
       doc: code,
-      extensions: extensions,
+      extensions: [...extensions, updateListener],
     });
     this.view = new EditorView({ state: initial_state, parent: editorContainer });
   }
@@ -44,12 +71,20 @@ class Editor {
     return this.view.state.doc.toString();
   }
 
-  // Replace the entire editor contents in one transaction. Used by the
-  // example-picker dropdown when the user selects a preloaded snippet.
+  // Replace the entire editor contents in one transaction. The
+  // `programmatic` flag prevents the change listener from interpreting
+  // this as user input (which would otherwise look like the user editing
+  // a preloaded example, triggering an unwanted implicit fork).
   public setCurrentCode(code: string): void {
-    this.view.dispatch({
-      changes: { from: 0, to: this.view.state.doc.length, insert: code },
-    });
+    if (code === this.view.state.doc.toString()) return;
+    this.programmatic = true;
+    try {
+      this.view.dispatch({
+        changes: { from: 0, to: this.view.state.doc.length, insert: code },
+      });
+    } finally {
+      this.programmatic = false;
+    }
   }
 
   public destroy(): void {
@@ -260,7 +295,9 @@ const Description: React.FC = () => (
 );
 
 type ExamplePickerProps = {
-  onSelect: (code: string) => void;
+  selection: Selection;
+  userExamples: UserExample[];
+  onSelect: (sel: Selection) => void;
 };
 
 // The picker stays interactive even while a /submit-code request is
@@ -268,28 +305,42 @@ type ExamplePickerProps = {
 // request (see inflightRef in App) and starts a new one — the user
 // can change their mind and the wrong response can never overwrite
 // the right one.
-const ExamplePicker: React.FC<ExamplePickerProps> = ({ onSelect }) => {
+//
+// Two source groups: the persisted `userExamples` at the top (only
+// rendered when non-empty) and the curated `exampleGroups` below.
+// Option values are encoded via `selectionToOptionValue` so the
+// onChange handler can round-trip a Selection without juggling
+// string parsing inline.
+const ExamplePicker: React.FC<ExamplePickerProps> = ({ selection, userExamples, onSelect }) => {
   const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const value = e.target.value;
-    if (!value) return;
-    // value encodes "<chapterIndex>:<exampleIndex>" so we don't have
-    // to escape the example name into the option's value attribute.
-    const [chapterIdx, exampleIdx] = value.split(':').map(Number);
-    onSelect(exampleGroups[chapterIdx].examples[exampleIdx].code);
+    const sel = optionValueToSelection(e.target.value);
+    if (sel) onSelect(sel);
   };
 
   return (
     <div className="example-picker">
       <label htmlFor="example-select">Example:</label>
-      {/* Default to "0:0" — Motivation → "Hands-on tutorial" — to
-          match the editor's seed snippet (defaultExample). React's
-          `defaultValue` only sets initial state; it doesn't fire
-          onChange, so we don't double-load the same code. */}
-      <select id="example-select" defaultValue="0:0" onChange={handleChange}>
+      <select
+        id="example-select"
+        value={selectionToOptionValue(selection)}
+        onChange={handleChange}
+      >
+        {userExamples.length > 0 && (
+          <optgroup label="Your examples">
+            {userExamples.map(ex => (
+              <option key={ex.id} value={selectionToOptionValue({ kind: 'user', id: ex.id })}>
+                {ex.name}
+              </option>
+            ))}
+          </optgroup>
+        )}
         {exampleGroups.map((group, gIdx) => (
           <optgroup key={group.chapter} label={group.chapter}>
             {group.examples.map((ex, eIdx) => (
-              <option key={ex.name} value={`${gIdx}:${eIdx}`}>
+              <option
+                key={ex.name}
+                value={selectionToOptionValue({ kind: 'preloaded', chapter: gIdx, index: eIdx })}
+              >
                 {ex.name}
               </option>
             ))}
@@ -308,6 +359,62 @@ const App: React.FC = () => {
   const [code_svg, setCodeSvg] = useState<string | null>(null);
   const [timeline_svg, setTimelineSvg] = useState<string | null>(null);
 
+  // Persisted user examples + the current selection. Both hydrated
+  // from localStorage on first render (useState initializer runs once)
+  // and saved back on every change via the effects below.
+  const [userExamples, setUserExamples] = useState<UserExample[]>(() => loadUserExamples());
+  const [selection, setSelection] = useState<Selection>(() =>
+    loadSelection(loadUserExamples()),
+  );
+
+  // Refs mirror the latest state so the editor's change listener — a
+  // stable closure captured at editor-mount time — can read current
+  // values when deciding whether to fork or update in-place. Without
+  // these refs the listener would see the initial state forever.
+  const selectionRef = useRef(selection);
+  const userExamplesRef = useRef(userExamples);
+  useEffect(() => {
+    selectionRef.current = selection;
+  }, [selection]);
+  useEffect(() => {
+    userExamplesRef.current = userExamples;
+  }, [userExamples]);
+
+  // Persist on every change. localStorage writes are cheap; no need
+  // to debounce.
+  useEffect(() => {
+    saveUserExamples(userExamples);
+  }, [userExamples]);
+  useEffect(() => {
+    saveSelection(selection);
+  }, [selection]);
+
+  // Editor change listener. Two cases:
+  //   * `selection.kind === 'user'`  →  update the existing user
+  //     example's stored code in place (auto-save).
+  //   * `selection.kind === 'preloaded'`  →  implicit fork. Create a
+  //     new user example named "<original> (copy)", populated with
+  //     the just-edited code, and switch the selection to it. The
+  //     user's edit cursor stays where it is — we don't touch the
+  //     editor view itself.
+  const handleEditorChange = (code: string) => {
+    const sel = selectionRef.current;
+    const examples = userExamplesRef.current;
+    if (sel.kind === 'user') {
+      const next = examples.map(e => (e.id === sel.id ? { ...e, code } : e));
+      setUserExamples(next);
+      return;
+    }
+    const preloadedName = exampleGroups[sel.chapter].examples[sel.index].name;
+    const forked: UserExample = {
+      id: newId(),
+      name: forkedName(preloadedName, examples),
+      code,
+    };
+    setUserExamples([...examples, forked]);
+    setSelection({ kind: 'user', id: forked.id });
+  };
+
   // The CodeMirror editor needs a real DOM node to attach to. Create
   // it once when the host div mounts; tear it down on unmount so
   // React 18 StrictMode's dev-mode double-invocation of this effect
@@ -315,12 +422,19 @@ const App: React.FC = () => {
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!editorHostRef.current) return;
-    const newEditor = new Editor(editorHostRef.current);
+    // Read directly from the initial state values (computed in the
+    // useState initializer above). The ESLint deps rule wants
+    // selection/userExamples here, but adding them would re-mount the
+    // editor on every example switch and lose history. The change
+    // listener below uses refs to read the live values instead.
+    const initialCode = codeForSelection(selection, userExamples);
+    const newEditor = new Editor(editorHostRef.current, initialCode, handleEditorChange);
     setEditor(newEditor);
     return () => {
       newEditor.destroy();
       setEditor(null);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Tracks the AbortController of the in-flight /submit-code request,
@@ -401,14 +515,80 @@ const App: React.FC = () => {
     helpers('ex2');
   }, [code_svg, timeline_svg]);
 
-  const handleExampleSelect = (code: string) => {
+  // Switch to a different example (preloaded or user-created).
+  // Setting selection + pushing the new code into the editor are both
+  // programmatic — neither should trigger the implicit-fork path.
+  const handleExampleSelect = (sel: Selection) => {
+    setSelection(sel);
     if (!editor) return;
-    editor.setCurrentCode(code);
+    editor.setCurrentCode(codeForSelection(sel, userExamples));
     // Auto-fire the visualization. CodeMirror's dispatch is
     // synchronous so getCurrentCode() inside handleClick() will see
     // the just-set code on the next line.
     handleClick();
   };
+
+  // `+` button: create a fresh user example with the next "New
+  // example N" name and seed it with an empty fn main() template.
+  const handleNewExample = () => {
+    const created: UserExample = {
+      id: newId(),
+      name: nextNewExampleName(userExamples),
+      code: NEW_EXAMPLE_TEMPLATE,
+    };
+    setUserExamples([...userExamples, created]);
+    setSelection({ kind: 'user', id: created.id });
+    if (!editor) return;
+    editor.setCurrentCode(NEW_EXAMPLE_TEMPLATE);
+    handleClick();
+  };
+
+  // Rename the currently-selected user example. No-op (and disabled
+  // in the toolbar) for preloaded examples — those are read-only.
+  // Empty / whitespace-only names are rejected; duplicates aren't
+  // forbidden because the underlying id stays unique.
+  const handleRename = () => {
+    if (selection.kind !== 'user') return;
+    const current = userExamples.find(e => e.id === selection.id);
+    if (!current) return;
+    const input = window.prompt('Rename example:', current.name);
+    if (input === null) return;
+    const trimmed = input.trim();
+    if (!trimmed || trimmed === current.name) return;
+    setUserExamples(
+      userExamples.map(e => (e.id === current.id ? { ...e, name: trimmed } : e)),
+    );
+  };
+
+  // Delete the currently-selected user example. Confirms first
+  // because the action is destructive and there's no undo (the
+  // example's code is overwritten in localStorage). After deletion,
+  // fall back to the example that was at the same index (or just
+  // before, if we deleted the last one); if no user examples are
+  // left, fall back to the default preloaded example.
+  const handleDelete = () => {
+    if (selection.kind !== 'user') return;
+    const idx = userExamples.findIndex(e => e.id === selection.id);
+    if (idx < 0) return;
+    const current = userExamples[idx];
+    if (!window.confirm(`Delete "${current.name}"? This can't be undone.`)) return;
+    const next = userExamples.filter(e => e.id !== current.id);
+    let fallback: Selection;
+    if (next.length > 0) {
+      const fallbackIdx = Math.min(idx, next.length - 1);
+      fallback = { kind: 'user', id: next[fallbackIdx].id };
+    } else {
+      fallback = DEFAULT_SELECTION;
+    }
+    setUserExamples(next);
+    setSelection(fallback);
+    if (!editor) return;
+    editor.setCurrentCode(codeForSelection(fallback, next));
+    handleClick();
+  };
+
+  const canRename = selection.kind === 'user';
+  const canDelete = selection.kind === 'user';
 
   return (
     <div className="app-shell">
@@ -417,13 +597,68 @@ const App: React.FC = () => {
         {/* Top row: prose on the left, code editor on the right. */}
         <Panel defaultSize={40} minSize={15}>
           <PanelGroup direction="horizontal" autoSaveId="rustviz-top-horizontal">
-            <Panel defaultSize={35} minSize={15} className="panel description-panel">
+            {/* Collapsible so users running pure code demos can drag
+                the handle to the left edge and snap the prose pane
+                away. minSize is the snap threshold — below 15% the
+                panel collapses to 0; the resize handle stays visible
+                at the edge so the user can drag it back to expand. */}
+            <Panel
+              defaultSize={35}
+              minSize={15}
+              collapsible
+              className="panel description-panel"
+            >
               <Description />
             </Panel>
             <PanelResizeHandle className="resize-handle resize-handle-vertical" />
             <Panel defaultSize={65} minSize={25} className="panel editor-panel">
               <div className="editor-toolbar">
-                <ExamplePicker onSelect={handleExampleSelect} />
+                <ExamplePicker
+                  selection={selection}
+                  userExamples={userExamples}
+                  onSelect={handleExampleSelect}
+                />
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleNewExample}
+                  title="Create a new example (saved in this browser)"
+                  aria-label="Create a new example"
+                >
+                  +
+                </button>
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleRename}
+                  disabled={!canRename}
+                  title={
+                    canRename
+                      ? 'Rename this example'
+                      : 'Rename only works on examples you created'
+                  }
+                  aria-label="Rename this example"
+                >
+                  {/* Unicode "lower right pencil" (U+270E) renders in
+                      the inherited text color across platforms, the
+                      same way the `+` glyph above does — no SVG fill
+                      / stroke inheritance to debug. */}
+                  ✎
+                </button>
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleDelete}
+                  disabled={!canDelete}
+                  title={
+                    canDelete
+                      ? 'Delete this example'
+                      : 'Delete only works on examples you created'
+                  }
+                  aria-label="Delete this example"
+                >
+                  {/* U+2715 MULTIPLICATION X — monochrome, consistent
+                      with the + and ✎ glyphs. Reads as "remove this
+                      item" alongside the existing rename/add controls. */}
+                  ✕
+                </button>
                 <button
                   className="cm-button generate-button"
                   onClick={handleClick}
