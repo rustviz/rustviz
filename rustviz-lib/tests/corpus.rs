@@ -63,6 +63,8 @@ const EXPECTED_OK: &[&str] = &[
     // — Stdlib method calls.
     "string_push_str",
     "string_len",
+    // — Stdlib indexing / slicing (#75).
+    "vec_slice",
     // — User-defined inherent methods.
     "inherent_method_rectangle",
     // — Lifetime annotations.
@@ -260,6 +262,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push_str reads from/writes to s",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "vec_slice",
+        // `let v = vec![..]` desugars through a macro into a Call whose
+        // function never gets registered as a RAP. The fix in #75 emits a
+        // plain Bind ("v acquires ownership") instead of crashing. `&v[..]`
+        // attributes the borrow to `v` (Vec is now collapsed via
+        // `ty_is_special_owner`), matching how `&s` works for `s: String`.
+        must_contain: &[
+            "v acquires ownership of a resource",
+            "Immutable borrow from v to p",
+            "Return immutably borrowed resource from p to v",
+        ],
+        must_not_contain: &[
+            // Vec internals shouldn't leak into the timeline as separate
+            // columns (regression guard for the `ty_is_special_owner` arm).
+            "v.buf, immutable",
+            "v.len, immutable",
+        ],
     },
     TooltipExpect {
         name: "string_len",

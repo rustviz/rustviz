@@ -90,6 +90,11 @@ pub fn expr_to_rap_name(expr: &Expr, tcx: &TyCtxt) -> Option<String> {
     ExprKind::AddrOf(_, _, inner)
     | ExprKind::Unary(_, inner)
     | ExprKind::DropTemps(inner) => expr_to_rap_name(inner, tcx),
+    // `v[..]` / `s[i]`: attribute the slice/element to the receiver's
+    // RAP, the same way we treat `&v` directly. RustViz doesn't render
+    // a separate column per index/slice, so collapsing onto the
+    // receiver matches how fields share their parent's column.
+    ExprKind::Index(recv, _, _) => expr_to_rap_name(recv, tcx),
     _ => None,
   }
 }
@@ -121,16 +126,20 @@ pub fn is_addr(expr: &Expr) -> bool { // todo, probably a better way to do this 
 
 // The purpose of this function is to override the typechecking done on variables
 // when we want to consider them owners rather than structs. This is because for 99.9% of cases
-// users don't care about acessing String::len/buf members. 
+// users don't care about acessing String::len/buf members.
 // We should work towards elimanting all struct members that are not used in the program
 // and that way we can just get rid of this hacky function.
+//
+// Match on the ADT's def path (without generic args) so e.g. `Vec<i32>`,
+// `Vec<String>`, and `Vec<T>` all collapse to a single owner column. Using
+// `sort_string` here would embed the generic instance, requiring a separate
+// arm per element type.
 pub fn ty_is_special_owner<'tcx> (tcx: &TyCtxt<'tcx>, t: &Ty<'tcx>) -> bool {
-  match &*t.sort_string(*tcx) {
-    "`std::string::String`" => { true }
-    _ => {
-      false
-    }
-  }
+  let rustc_middle::ty::TyKind::Adt(adt_def, _) = t.kind() else { return false; };
+  matches!(
+    tcx.def_path_str(adt_def.did()).as_str(),
+    "std::string::String" | "std::vec::Vec"
+  )
 }
 
 // Get a string representation of a Path - usually used as a name for a RAP
@@ -569,6 +578,8 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
       }
     }
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => get_rap(expr, tcx, raps),
+    // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
+    ExprKind::Index(recv, _, _) => get_rap(recv, tcx, raps),
     ExprKind::Call(fn_expr, _) => {
       let fn_name = hirid_to_var_name(fn_expr.hir_id, tcx).unwrap();
       ResourceTy::Value(raps.get(&fn_name).unwrap().rap.to_owned())
@@ -610,6 +621,8 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
       Some(raps.get(&name).unwrap().rap.to_owned())
     }
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => fetch_rap(expr, tcx, raps),
+    // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
+    ExprKind::Index(recv, _, _) => fetch_rap(recv, tcx, raps),
     ExprKind::Block(b, _) => {
       match b.expr {
         Some(expr) => { fetch_rap(expr, tcx, raps) }
@@ -661,6 +674,11 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
     }
     ExprKind::AddrOf(_, _, expr) => {
       find_lender(expr, tcx, raps, borrow_map)
+    }
+    // `&v[..]` / `&s[i..j]`: the lender is the receiver, the same way
+    // `&r.field` resolves through the Field arm.
+    ExprKind::Index(recv, _, _) => {
+      find_lender(recv, tcx, raps, borrow_map)
     }
     ExprKind::Block(b, _) => {
       match b.expr {
