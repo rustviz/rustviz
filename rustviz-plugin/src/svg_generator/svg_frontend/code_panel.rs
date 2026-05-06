@@ -30,23 +30,32 @@ pub fn render_code_panel(
         total_lines += 1;
     }
 
-    // Account for the extra arrow rows the timeline panel reserves
-    // for arrow events that share a line — without this, a snippet
-    // with 9 source lines but an arrow stack pushing the rendered
-    // count to 10+ would lose its line-number alignment when the
-    // last few rendered numbers cross to two digits.
-    let total_with_arrow_rows: usize = total_lines + l_map.values().sum::<usize>();
-    // Right-align line numbers to the widest one. With left-aligned
-    // numbers (`9  ` vs `10  `) the trailing spaces shift content
-    // by a column whenever a digit boundary is crossed; right-align
-    // them and the content column stays put across the whole file.
-    let num_width = total_with_arrow_rows.max(1).to_string().len();
+    // Right-align the gutter to the widest source line number. We
+    // intentionally don't include the arrow-stack inserts in this
+    // calculation: those rows are blank in the gutter (they exist
+    // purely to give the trapezoid arrows vertical clearance), so
+    // the largest displayed number is just the source-line count.
+    // Right alignment matters because left alignment shifts the
+    // content column whenever a digit boundary crosses (`9  ` vs
+    // `10  `).
+    let num_width = total_lines.max(1).to_string().len();
 
     /* Render the code segment of the svg to a String */
     let x = 20;
     let mut y = 90;
     let mut output = String::from("    <g id=\"code\">\n");
-    let mut line_of_code = 1;
+    // `source_line` tracks the user's source-line number — what we
+    // print in the gutter for real source rows. `visual_row`
+    // tracks the renderer's row counter — drives both the y
+    // position and the `l_map` lookup, since `l_map`'s keys are
+    // post-shift visual rows (see svg_generation.rs's `final_line_num
+    // = line_num + extra_lines`). They diverge whenever an arrow
+    // stack inserts a blank row: visual_row keeps ticking, source_line
+    // pauses. Keeping them separate is what lets us number the
+    // displayed lines 1..n_source while still indexing per-row
+    // structures by the visual row.
+    let mut source_line: usize = 1;
+    let mut visual_row: usize = 1;
     // Threaded through per-line `highlight()` calls so a `/* … */`
     // that doesn't close on its opening line keeps subsequent lines
     // styled as a comment until we see the matching `*/`.
@@ -56,37 +65,43 @@ pub fn render_code_panel(
         let mut data = BTreeMap::new();
         data.insert("X_VAL".to_string(), x.to_string());
         data.insert("Y_VAL".to_string(), y.to_string());
-        /* automatically add line numbers to code */
         let fmt_line = format!(
             "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
-            line_of_code, line_string, width = num_width,
+            source_line, line_string, width = num_width,
         );
         data.insert("LINE".to_string(), fmt_line);
         output.push_str(&handlebars.render("code_line_template", &data).unwrap());
-        // change line spacing
         y = y + LINE_SPACE;
-        let mut extra_line_num = match l_map.get(&line_of_code) {
+        let mut extra_line_num = match l_map.get(&visual_row) {
             Some(l) => *l,
             None => 0
         };
-        /* add empty lines for arrows */
+        /* add empty arrow-clearance rows. They occupy a visual row
+           (so the trapezoid arrow has somewhere to draw) but stay
+           blank in the gutter — line numbers in the visualization
+           stay one-to-one with the editor's line numbers. */
         while extra_line_num > 0 {
             let mut data = BTreeMap::new();
             data.insert("X_VAL".to_string(), x.to_string());
             data.insert("Y_VAL".to_string(), y.to_string());
-            /* automatically add line numbers to code */
-            line_of_code = line_of_code + 1;
+            // Pad with the same width as a real number so the
+            // content column doesn't jiggle row-to-row.
             let empty_line = format!(
-                "<tspan fill=\"#AAA\">{:>width$}</tspan>",
-                line_of_code, width = num_width,
+                "<tspan fill=\"#AAA\">{:>width$}  </tspan>",
+                "", width = num_width,
             );
             data.insert("LINE".to_string(), empty_line);
             output.push_str(&handlebars.render("code_line_template", &data).unwrap());
             y = y + LINE_SPACE;
+            visual_row += 1;
             extra_line_num -= 1;
         }
-        line_of_code = line_of_code + 1;
+        source_line += 1;
+        visual_row += 1;
     }
     output.push_str("    </g>\n");
-    (output, line_of_code as i32)
+    // Returned value used to be the next line number; preserve that
+    // shape (callers want a row count for height etc.) by returning
+    // the visual row count.
+    (output, visual_row as i32)
 }
