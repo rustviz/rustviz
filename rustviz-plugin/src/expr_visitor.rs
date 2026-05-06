@@ -954,6 +954,64 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     ExprKind::DropTemps(exp) => {
       self.match_rhs(lhs, &exp, evt);
     }
+    // `let f = move || ...` / `let f = || ...`. The closure itself
+    // is conceptually a small struct that holds the upvars it
+    // captures from the enclosing scope. Bind `f` to that struct
+    // (Anonymous source — we don't render the closure body), then
+    // emit one capture event per upvar pulled from rustc's
+    // `closure_min_captures_flattened`. Capture kind decides the
+    // event shape:
+    //   ByValue (always for `move`, sometimes for inferred captures)
+    //     → Move(upvar → f). f now owns the captured resource.
+    //   ByRef(Immutable | UniqueImmBorrow) → SBorrow(upvar → f).
+    //   ByRef(Mutable)                     → MBorrow(upvar → f).
+    //   ByUse (`use` capture clause, recent feature) → Move,
+    //     same as ByValue for our purposes.
+    //
+    // We only handle whole-variable captures here (place.projections
+    // empty); a partial-field capture like `move || x.field`
+    // carries projections we don't have a column for, so we
+    // attribute the event to the root variable's RAP. That matches
+    // what the rest of the plugin does for field accesses today.
+    ExprKind::Closure(closure) => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      // Bind for the closure value itself — gives `f` an "acquires
+      // ownership of a resource" dot like other Bind sites.
+      self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+
+      let typeck = self.tcx.typeck(closure.def_id);
+      for capture in typeck.closure_min_captures_flattened(closure.def_id) {
+        let upvar_hir_id = match capture.place.base {
+          rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
+          _ => continue,
+        };
+        // Use the registered RAP name for the upvar (covers
+        // `r.a.b`-style nested field captures via expr_to_rap_name's
+        // counterpart on the source side; for now we just take the
+        // root variable's name).
+        let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+        let upvar_rap = match self.raps.get(&upvar_name) {
+          Some(rd) => rd.rap.to_owned(),
+          None => continue,
+        };
+        let from = ResourceTy::Value(upvar_rap);
+        let to = lhs.clone();
+        let evt_kind = match capture.info.capture_kind {
+          rustc_middle::ty::UpvarCapture::ByValue
+          | rustc_middle::ty::UpvarCapture::ByUse => Evt::Move,
+          rustc_middle::ty::UpvarCapture::ByRef(kind) => match kind {
+            rustc_middle::ty::BorrowKind::Mutable => Evt::MBorrow,
+            // Immutable + UniqueImmBorrow both render as a static
+            // (immutable) borrow from the user's perspective —
+            // UniqueImmBorrow is an internal closure-borrow flavor
+            // they can't write, and the visualization shouldn't
+            // distinguish it.
+            _ => Evt::SBorrow,
+          },
+        };
+        self.add_ev(line_num, evt_kind, to, from, false);
+      }
+    }
     _ => {
       warn!("unmatched rhs {:#?}", rhs);
     }

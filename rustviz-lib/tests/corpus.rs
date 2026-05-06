@@ -84,6 +84,12 @@ const EXPECTED_OK: &[&str] = &[
     "box_string",
     "rc_clone",
     "box_dyn",
+    // — Closure captures (#79): capture arrows render for both
+    //   `move` and borrow closures.
+    "closure_move_single",
+    "closure_move_multi",
+    "closure_borrow_imm",
+    "closure_borrow_mut",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -444,6 +450,50 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b.0.pointer, immutable",
             "b.0._marker, immutable",
             "b.1, immutable",
+        ],
+    },
+
+    // ─── Closure captures (#79) ──────────────────────────────────────
+    TooltipExpect {
+        name: "closure_move_single",
+        // `move ||` with a single captured upvar → Move arrow.
+        must_contain: &[
+            "Move from String::from to s",
+            "Move from s to f",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "closure_move_multi",
+        // Each captured upvar produces its own Move arrow.
+        must_contain: &[
+            "Move from s to f",
+            "Move from t to f",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "closure_borrow_imm",
+        // Non-`move` closure that reads its upvar → static borrow.
+        must_contain: &[
+            "Move from String::from to s",
+            "Immutable borrow from s to f",
+        ],
+        must_not_contain: &[
+            // Critically: the closure should *not* be modeled as a
+            // move — `s` is still usable after `f` runs.
+            "Move from s to f",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_borrow_mut",
+        // Non-`move` closure that mutates its upvar → mutable borrow.
+        must_contain: &[
+            "Move from String::from to s",
+            "Mutable borrow from s to f",
+        ],
+        must_not_contain: &[
+            "Move from s to f",
         ],
     },
 ];
