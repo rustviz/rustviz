@@ -219,7 +219,8 @@ const App = () => {
         {isLoading ? <>Generating<span className="ellipsis"></span></> : 'Generate Visualization'}
       </button>
       <p className="rust-version">
-        Compiles with <code>rustc {__RUST_VERSION__}</code>
+        Compiles with <code>rustc {__RUST_VERSION__}</code> and{' '}
+        <code>rustviz-plugin {__PLUGIN_VERSION__}</code>
       </p>
       {isLoading && (
         <div className="loading-status">

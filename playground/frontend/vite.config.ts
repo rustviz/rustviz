@@ -3,17 +3,29 @@ import react from '@vitejs/plugin-react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-// Read the workspace's pinned Rust toolchain at build time so the
-// playground can show users which rustc version their snippet is being
-// compiled against. The same channel is what every Fly Machine ends up
-// running via rust-toolchain.toml. We hand it to the SPA via Vite's
-// `define` (text replacement at build time) rather than at runtime so
-// there's no extra request and the GitHub Pages build doesn't need a
-// matching API endpoint.
+// Read the workspace's pinned Rust toolchain + the rustviz-plugin
+// version at build time so the playground can show users exactly
+// which rustc + plugin combination their snippet is being compiled
+// against. We hand them to the SPA via Vite's `define` (text
+// replacement at build time) rather than at runtime so there's no
+// extra request and the GitHub Pages build doesn't need a matching
+// API endpoint. Both files live at the workspace root from this
+// config's perspective (`playground/frontend/../../`); the deploy
+// Dockerfile mirrors that layout so the same relative paths resolve
+// in both contexts.
 const rustToolchainPath = resolve(__dirname, '../../rust-toolchain.toml');
 const rustToolchainContent = readFileSync(rustToolchainPath, 'utf-8');
 const channelMatch = rustToolchainContent.match(/channel\s*=\s*"([^"]+)"/);
 const rustVersion = channelMatch ? channelMatch[1] : 'unknown';
+
+const pluginManifestPath = resolve(__dirname, '../../rustviz-plugin/Cargo.toml');
+const pluginManifestContent = readFileSync(pluginManifestPath, 'utf-8');
+// First `^version = "X"` line under [package] is the package version.
+// Anchor on start-of-line (with `m` flag) so we don't accidentally
+// pick up a dep-spec like `rustc_utils = { version = "..." }` further
+// down in the manifest.
+const pluginVersionMatch = pluginManifestContent.match(/^version\s*=\s*"([^"]+)"/m);
+const pluginVersion = pluginVersionMatch ? pluginVersionMatch[1] : 'unknown';
 
 // Two build modes:
 //   * default (`npm run build`): emits a same-origin SPA intended to
@@ -34,6 +46,7 @@ export default defineConfig(({ mode }) => ({
   plugins: [react()],
   define: {
     __RUST_VERSION__: JSON.stringify(rustVersion),
+    __PLUGIN_VERSION__: JSON.stringify(pluginVersion),
   },
   server: {
     port: 3000,
