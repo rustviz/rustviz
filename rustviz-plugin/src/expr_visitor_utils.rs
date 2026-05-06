@@ -369,8 +369,18 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
       res
     }
     ExprKind::MethodCall(_, rcvr, args, _) => {
-      let rcvr_name = hirid_to_var_name(rcvr.hir_id, tcx).unwrap(); // TODO: will break for chained methodcalls
-      let mut res = HashSet::from([raps.get(&rcvr_name).unwrap().rap.to_owned()]);
+      // Receiver might be anything — a literal (`"5".parse()`), a
+      // chained call (`a.foo().bar()`), a desugared expression, etc.
+      // Resolve via expr_to_rap_name (handles Path / Field / AddrOf
+      // chains) and fall back to "no contribution from the receiver"
+      // when we can't name it. We still descend into args so any user
+      // variables passed to the method count toward liveness.
+      let mut res = HashSet::new();
+      if let Some(name) = expr_to_rap_name(rcvr, tcx) {
+        if let Some(rd) = raps.get(&name) {
+          res.insert(rd.rap.to_owned());
+        }
+      }
       for a_expr in args.iter() {
         res = res.union(&get_live_of_expr(&a_expr, tcx, raps)).cloned().collect();
       }
@@ -589,18 +599,29 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => get_rap(expr, tcx, raps),
     // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
     ExprKind::Index(recv, _, _) => get_rap(recv, tcx, raps),
+    // For Call / MethodCall, we want the fn's RAP — but desugarings
+    // produce Calls whose fn_expr is a `QPath::LangItem` (e.g. the
+    // `Try::branch(…)` scrutinee of `?`) that hirid_to_var_name can't
+    // name, and macro expansions produce calls whose fn_name was
+    // never registered via add_fn (visit_expr returns early on
+    // from_expansion). Both situations should fall back to Anonymous
+    // rather than crash, mirroring the Path / Field arms above.
     ExprKind::Call(fn_expr, _) => {
-      let fn_name = hirid_to_var_name(fn_expr.hir_id, tcx).unwrap();
-      ResourceTy::Value(raps.get(&fn_name).unwrap().rap.to_owned())
+      hirid_to_var_name(fn_expr.hir_id, tcx)
+        .and_then(|n| raps.get(&n).map(|rd| rd.rap.to_owned()))
+        .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::MethodCall(name_and_generic_args, ..) => {
-      let fn_name = hirid_to_var_name(name_and_generic_args.hir_id, &tcx).unwrap();
-      ResourceTy::Value(raps.get(&fn_name).unwrap().rap.to_owned())
+      hirid_to_var_name(name_and_generic_args.hir_id, &tcx)
+        .and_then(|n| raps.get(&n).map(|rd| rd.rap.to_owned()))
+        .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::Block(b, _) => {
       match b.expr {
         Some(expr) => { get_rap(expr, tcx, raps) }
-        None => { panic!("invalid expr for getting rap") }
+        // Empty block — no value, no RAP. Used to panic; Anonymous
+        // is the right neutral fallback here too.
+        None => ResourceTy::Anonymous,
       }
     }
     ExprKind::Field(inner, ident) => {
@@ -626,8 +647,12 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
   match expr.kind {
     ExprKind::Call(..) | ExprKind::Binary(..) | ExprKind::Lit(_) | ExprKind::MethodCall(..) => None,
     ExprKind::Path(QPath::Resolved(_,p)) => {
+      // Path expression that resolves to a name we never registered —
+      // most commonly a synthetic local from a macro expansion, or a
+      // LangItem qualifier reached via desugaring. Return None rather
+      // than crash; callers map None to "skip this event".
       let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-      Some(raps.get(&name).unwrap().rap.to_owned())
+      raps.get(&name).map(|rd| rd.rap.to_owned())
     }
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => fetch_rap(expr, tcx, raps),
     // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
@@ -635,7 +660,8 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
     ExprKind::Block(b, _) => {
       match b.expr {
         Some(expr) => { fetch_rap(expr, tcx, raps) }
-        None => { panic!("invalid expr for fetching rap") }
+        // Empty block — no value to fetch.
+        None => None,
       }
     }
     ExprKind::Field(inner, ident) => {
