@@ -726,8 +726,12 @@ const App: React.FC = () => {
     <div className="app-shell">
       <TitleBar />
       <PanelGroup direction="vertical" className="main-split" autoSaveId="rustviz-vertical">
-        {/* Top row: prose on the left, code editor on the right. */}
-        <Panel defaultSize={40} minSize={15}>
+        {/* Top row: prose on the left, code editor on the right.
+            Collapsible so dragging the horizontal handle to the very
+            top snaps the entire row away — useful when presenting
+            just the visualization. The handle stays grabbable at the
+            top edge of the viz panel for restoring the row. */}
+        <Panel defaultSize={40} minSize={15} collapsible>
           <PanelGroup direction="horizontal" autoSaveId="rustviz-top-horizontal">
             {/* Collapsible so users running pure code demos can drag
                 the handle to the left edge and snap the prose pane
