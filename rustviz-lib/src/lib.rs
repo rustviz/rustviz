@@ -293,8 +293,12 @@ fn run_docker(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 fn run_local(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let tempdir = tempdir()?;
     let root = tempdir.path();
+    // Crate name surfaces in rustc/cargo error messages
+    // ("could not compile `user-code`"), so use a name that reads as
+    // "this is the user's code" rather than a leaked internal
+    // placeholder.
     let status = Command::new("cargo")
-        .args(["new", "--lib", "test-crate"])
+        .args(["new", "--lib", "user-code"])
         .current_dir(root)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -305,7 +309,7 @@ fn run_local(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         )));
     }
 
-    let cwd = root.join("test-crate");
+    let cwd = root.join("user-code");
     fs::write(cwd.join("rust-toolchain.toml"), TOOLCHAIN)?;
     fs::write(cwd.join("src").join("lib.rs"), code_str)?;
 

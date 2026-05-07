@@ -11,10 +11,13 @@
 set -euo pipefail
 
 cd /work
-rm -rf test-crate
+rm -rf user-code
 
-cargo new --lib --quiet test-crate
-cd test-crate
+# Crate name surfaces in rustc/cargo error messages ("could not compile
+# `user-code`"), so use a name that reads as "this is the user's code"
+# rather than a leaked internal placeholder.
+cargo new --lib --quiet user-code
+cd user-code
 
 # Pin the toolchain that rustviz-plugin was built against; without this the
 # nested cargo invocation can pick up an unrelated default.
