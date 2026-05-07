@@ -166,8 +166,14 @@ const TitleBar: React.FC = () => {
             ⋯
           </summary>
           <div className="titlebar-overflow-popover" role="menu">
+            {/* Each popover item carries an `…-overflow-target` class
+                tied to a specific breakpoint. CSS shows the popover
+                item ONLY at widths where its inline counterpart in
+                the title bar is hidden — so at 700px (versions
+                hidden, callout still inline) the popover shows just
+                the versions, and at 480px both. No duplicate UI. */}
             <a
-              className="titlebar-overflow-item"
+              className="titlebar-overflow-item titlebar-overflow-callout"
               href="https://rustviz.github.io/tutorial/"
               target="_blank"
               rel="noreferrer"
@@ -175,10 +181,16 @@ const TitleBar: React.FC = () => {
             >
               Read our visual tutorial →
             </a>
-            <div className="titlebar-overflow-item titlebar-overflow-static" role="none">
+            <div
+              className="titlebar-overflow-item titlebar-overflow-static titlebar-overflow-version"
+              role="none"
+            >
               rustc {__RUST_VERSION__}
             </div>
-            <div className="titlebar-overflow-item titlebar-overflow-static" role="none">
+            <div
+              className="titlebar-overflow-item titlebar-overflow-static titlebar-overflow-version"
+              role="none"
+            >
               rustviz-plugin {__PLUGIN_VERSION__}
             </div>
           </div>

@@ -460,16 +460,31 @@ a.titlebar-overflow-item:hover {
   cursor: default;
 }
 
+/* Popover items default to hidden — only the ones whose inline
+   counterpart has been hidden (by a media query below) get shown.
+   Stops the popover from duplicating items that are still visible
+   in the title bar. */
+.titlebar-overflow-callout,
+.titlebar-overflow-version { display: none; }
+
 /* ─── Responsive (small screens / mobile) ───────────────────────── */
 
-/* Title bar starts overlapping around ~900px once the callout, the
-   two version codes, and the stars badge have all claimed their
-   natural widths. Move them into the overflow menu well before that
-   so the user never sees text overlap. */
+/* Phase 1 — version codes go first. Their two `<code>` chips eat
+   ~330px between them, the largest single contribution to title-bar
+   width after the callout. Below ~900px they start crowding the
+   stars badge; tip them into the overflow before that happens. */
 @media (max-width: 920px) {
-  .titlebar-callout { display: none; }
   .titlebar-version { display: none; }
   .titlebar-overflow { display: inline-block; }
+  .titlebar-overflow-version { display: block; }
+}
+
+/* Phase 2 — callout follows. Once the version codes are out of the
+   way the callout has more room, but it's still ~280px and starts
+   crowding the title around ~620px. */
+@media (max-width: 620px) {
+  .titlebar-callout { display: none; }
+  .titlebar-overflow-callout { display: block; }
 }
 
 /* Narrow: phones in portrait. Tighten toolbar/titlebar/description
