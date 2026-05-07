@@ -286,6 +286,7 @@ code {
   stroke-linecap: round;
   stroke-linejoin: round;
   fill: none;
+  background: transparent;
 }
 .toolbar-icon-button svg * {
   fill: none;
