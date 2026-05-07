@@ -172,15 +172,15 @@ export function forkedName(base: string, examples: UserExample[]): string {
 /**
  * Sanitize an example name for use as a download filename. Strips
  * characters disallowed on common filesystems (Windows is the strictest:
- * `<>:"/\|?*` plus control chars), collapses runs of underscores, and
- * trims leading/trailing dots/underscores so the result is safe to hand
- * to a browser's download attribute. Always ends in `.rs`.
+ * `<>:"/\|?*` plus control chars) but otherwise preserves the name as
+ * the user wrote it — spaces, parens, dashes, dots all stay. Always
+ * ends in `.rs`.
  */
 export function exampleFilename(name: string): string {
   const cleaned = name
-    .replace(/[^a-zA-Z0-9._-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^[._]+|[._]+$/g, '');
+    .replace(/[<>:"/\\|?*\x00-\x1f]+/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.]+|[\s.]+$/g, '');
   return (cleaned || 'example') + '.rs';
 }
 
