@@ -754,7 +754,16 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
   // clean "v acquires ownership of a resource" event without trying to
   // name the synthetic call inside the macro.
   if rhs.span.from_expansion() {
-    let line_num = span_to_line(&rhs.span, &self.tcx);
+    // Walk the macro expansion chain back to the user's source span.
+    // Without this, `rhs.span` for `let v = vec![…]` points into the
+    // macro's own source file (e.g. `liballoc/macros.rs`), so the
+    // Bind event is attributed to a line that doesn't exist in the
+    // user's snippet — `compute_states` then sees the Acquire event
+    // ordered *after* the binding's GoOutOfScope at end-of-fn, and
+    // the rendered timeline column has no visible state segment or
+    // drop. `source_callsite` resolves to the user's `let` line.
+    let user_span = rhs.span.source_callsite();
+    let line_num = span_to_line(&user_span, &self.tcx);
     self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
     return;
   }
