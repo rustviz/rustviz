@@ -34,6 +34,17 @@ const API_BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
 declare function helpers(param: string): void;
 
+// Viewport width threshold (px) below which the layout is considered
+// "narrow" — phones in portrait, narrow split windows, etc. Drives
+// the initial description-panel size so a first-time mobile visitor
+// doesn't see prose eat the editor's screen real estate. After the
+// initial render the panel is fully resizable like always.
+const NARROW_VIEWPORT_PX = 768;
+const initialNarrow =
+  typeof window !== 'undefined' &&
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia(`(max-width: ${NARROW_VIEWPORT_PX}px)`).matches;
+
 // Thin wrapper around CodeMirror's EditorView so the React layer can
 // hold a single `Editor` instance across renders without re-creating
 // the underlying view (which would lose cursor position, undo
@@ -98,47 +109,112 @@ class Editor {
 // stamp on the right (kept here instead of below the editor so it
 // reads as masthead metadata rather than competing with the editor /
 // visualization for attention).
-const TitleBar: React.FC = () => (
-  <header className="titlebar">
-    <div className="titlebar-left">
-      <h1 className="titlebar-title">
-        <a href="https://github.com/rustviz/rustviz/" target="_blank" rel="noreferrer">
-          RustViz
-        </a>{' '}
-        Playground
-      </h1>
-      <a
-        className="titlebar-callout"
-        href="https://rustviz.github.io/tutorial/"
-        target="_blank"
-        rel="noreferrer"
-        title="Open the RustViz tutorial in a new tab"
-      >
-        New to Rust? Read our visual tutorial →
-      </a>
-    </div>
-    <div className="titlebar-meta">
-      <code>rustc {__RUST_VERSION__}</code>
-      <code>rustviz-plugin {__PLUGIN_VERSION__}</code>
-      {/* shields.io social-style badge updates dynamically; no JS
-          fetch needed and the SVG inlines the current star count.
-          Rightmost so it's the last thing the eye lands on. */}
-      <a
-        className="titlebar-stars"
-        href="https://github.com/rustviz/rustviz"
-        target="_blank"
-        rel="noreferrer"
-        title="Star us on GitHub"
-      >
-        <img
-          src="https://img.shields.io/github/stars/rustviz/rustviz?style=social&label=Star"
-          alt="GitHub stars"
-          height={20}
-        />
-      </a>
-    </div>
-  </header>
-);
+//
+// At narrow widths the tutorial callout and the version codes don't
+// fit alongside the title and stars badge — instead of letting them
+// overlap (or hiding them outright) they move into a `⋯` overflow
+// popover. The popover items are duplicated in the JSX so CSS can
+// flip which set is visible without React re-rendering.
+const TitleBar: React.FC = () => {
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+
+  // <details> doesn't close on outside click on its own — wire it up
+  // so a tap elsewhere dismisses the popover, matching the platform
+  // expectation for a transient menu.
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (detailsRef.current?.open && !detailsRef.current.contains(e.target as Node)) {
+        detailsRef.current.open = false;
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <header className="titlebar">
+      <div className="titlebar-left">
+        <h1 className="titlebar-title">
+          <a href="https://github.com/rustviz/rustviz/" target="_blank" rel="noreferrer">
+            RustViz
+          </a>{' '}
+          Playground
+        </h1>
+        <a
+          className="titlebar-callout"
+          href="https://rustviz.github.io/tutorial/"
+          target="_blank"
+          rel="noreferrer"
+          title="Open the RustViz tutorial in a new tab"
+        >
+          New to Rust? Read our visual tutorial →
+        </a>
+      </div>
+      <div className="titlebar-meta">
+        <code className="titlebar-version">rustc {__RUST_VERSION__}</code>
+        <code className="titlebar-version">rustviz-plugin {__PLUGIN_VERSION__}</code>
+        {/* Overflow menu — hidden by CSS at wide widths, shown when
+            the inline callout / version codes are hidden. The popover
+            re-renders the same content so nothing actually disappears,
+            it just moves. */}
+        <details ref={detailsRef} className="titlebar-overflow">
+          <summary
+            className="titlebar-overflow-trigger"
+            aria-label="More"
+            title="More"
+          >
+            ⋯
+          </summary>
+          <div className="titlebar-overflow-popover" role="menu">
+            {/* Each popover item carries an `…-overflow-target` class
+                tied to a specific breakpoint. CSS shows the popover
+                item ONLY at widths where its inline counterpart in
+                the title bar is hidden — so at 700px (versions
+                hidden, callout still inline) the popover shows just
+                the versions, and at 480px both. No duplicate UI. */}
+            <a
+              className="titlebar-overflow-item titlebar-overflow-callout"
+              href="https://rustviz.github.io/tutorial/"
+              target="_blank"
+              rel="noreferrer"
+              role="menuitem"
+            >
+              Read our visual tutorial →
+            </a>
+            <div
+              className="titlebar-overflow-item titlebar-overflow-static titlebar-overflow-version"
+              role="none"
+            >
+              rustc {__RUST_VERSION__}
+            </div>
+            <div
+              className="titlebar-overflow-item titlebar-overflow-static titlebar-overflow-version"
+              role="none"
+            >
+              rustviz-plugin {__PLUGIN_VERSION__}
+            </div>
+          </div>
+        </details>
+        {/* shields.io social-style badge updates dynamically; no JS
+            fetch needed and the SVG inlines the current star count.
+            Rightmost so it's the last thing the eye lands on. */}
+        <a
+          className="titlebar-stars"
+          href="https://github.com/rustviz/rustviz"
+          target="_blank"
+          rel="noreferrer"
+          title="Star us on GitHub"
+        >
+          <img
+            src="https://img.shields.io/github/stars/rustviz/rustviz?style=social&label=Star"
+            alt="GitHub stars"
+            height={20}
+          />
+        </a>
+      </div>
+    </header>
+  );
+};
 
 // Static prose pane. Same content the index.html used to carry, just
 // moved into the React tree so the resizable layout owns every
@@ -216,6 +292,21 @@ const Description: React.FC = () => (
       </a>{' '}
       with the snippet and error message.
     </p>
+    <h3>Presentation mode</h3>
+    <p>
+      The three panels are independently resizable, so you can stage a clean
+      presentation view by:
+    </p>
+    <ul>
+      <li>
+        Dragging the vertical handle to the left edge to hide this info panel.
+      </li>
+      <li>
+        Dragging the horizontal handle up to hide the editor entirely, or
+        most of the way up to leave just the example-picker toolbar visible
+        for switching snippets live.
+      </li>
+    </ul>
     <h3>Other ways to use RustViz</h3>
     <p>Besides this playground, RustViz ships as:</p>
     <ul>
@@ -650,16 +741,28 @@ const App: React.FC = () => {
     <div className="app-shell">
       <TitleBar />
       <PanelGroup direction="vertical" className="main-split" autoSaveId="rustviz-vertical">
-        {/* Top row: prose on the left, code editor on the right. */}
-        <Panel defaultSize={40} minSize={15}>
+        {/* Top row: prose on the left, code editor on the right.
+            minSize=0 with no `collapsible` means the handle drags
+            smoothly all the way down — no snap point. Useful for
+            "presentation mode" where you drag until just the
+            example-picker toolbar is visible (the editor scrolls
+            out of view but the dropdown stays clickable), or all
+            the way to 0 to show only the visualization. The handle
+            stays grabbable at the top edge of the viz panel for
+            dragging back open. */}
+        <Panel defaultSize={40} minSize={0}>
           <PanelGroup direction="horizontal" autoSaveId="rustviz-top-horizontal">
             {/* Collapsible so users running pure code demos can drag
                 the handle to the left edge and snap the prose pane
                 away. minSize is the snap threshold — below 15% the
                 panel collapses to 0; the resize handle stays visible
-                at the edge so the user can drag it back to expand. */}
+                at the edge so the user can drag it back to expand.
+                On a narrow viewport (phones, narrow split windows)
+                we start collapsed so the editor + viz get the full
+                width on first load — the user can still drag to
+                expand. */}
             <Panel
-              defaultSize={35}
+              defaultSize={initialNarrow ? 0 : 35}
               minSize={15}
               collapsible
               className="panel description-panel"
