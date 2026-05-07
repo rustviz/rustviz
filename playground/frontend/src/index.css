@@ -401,24 +401,82 @@ code {
   to { width: 1.5em; }
 }
 
-/* ─── Responsive (small screens / mobile) ───────────────────────── */
+/* ─── Title-bar overflow menu (the "⋯" popover) ─────────────────── */
 
-/* Mid-narrow: tablet and small laptops. The "Read our visual
-   tutorial" callout is pure marketing fluff — the prose pane has
-   the same link, so it can disappear here without losing
-   functionality. */
-@media (max-width: 720px) {
-  .titlebar-callout { display: none; }
+/* Wide widths: overflow trigger is hidden because everything fits
+   on the title-bar row. CSS below flips this on at narrow widths. */
+.titlebar-overflow {
+  display: none;
+  position: relative;
+}
+.titlebar-overflow > summary {
+  /* Strip the default disclosure triangle (Chrome paints a ▶/▼ next
+     to <summary>); the "⋯" content stands on its own. */
+  list-style: none;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--fg-titlebar);
+  user-select: none;
+}
+.titlebar-overflow > summary::-webkit-details-marker { display: none; }
+.titlebar-overflow > summary:hover { background: rgba(255, 255, 255, 0.08); }
+.titlebar-overflow[open] > summary { background: rgba(255, 255, 255, 0.12); }
+
+.titlebar-overflow-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  background: var(--bg-titlebar);
+  border: 1px solid #1a1a1a;
+  border-radius: 6px;
+  padding: 6px;
+  min-width: 240px;
+  z-index: 10;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.titlebar-overflow-item {
+  display: block;
+  padding: 6px 10px;
+  color: var(--fg-titlebar);
+  font-size: 13px;
+  text-decoration: none;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+a.titlebar-overflow-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  text-decoration: none;
+}
+.titlebar-overflow-static {
+  color: var(--fg-titlebar-muted);
+  font-family: "Source Code Pro", "SF Mono", Consolas, "Ubuntu Mono", Menlo, monospace;
+  font-size: 12px;
+  cursor: default;
 }
 
-/* Narrow: phones in portrait. Hide the rustc / plugin version
-   stamps (still visible in the GitHub repo for anyone who needs
-   them) and shrink toolbar/titlebar padding. The "Example:" label
-   is dropped because the dropdown's selected value already names
-   what's loaded. */
+/* ─── Responsive (small screens / mobile) ───────────────────────── */
+
+/* Title bar starts overlapping around ~900px once the callout, the
+   two version codes, and the stars badge have all claimed their
+   natural widths. Move them into the overflow menu well before that
+   so the user never sees text overlap. */
+@media (max-width: 920px) {
+  .titlebar-callout { display: none; }
+  .titlebar-version { display: none; }
+  .titlebar-overflow { display: inline-block; }
+}
+
+/* Narrow: phones in portrait. Tighten toolbar/titlebar/description
+   padding and drop the redundant "Example:" label (the dropdown's
+   selected value already names what's loaded). */
 @media (max-width: 540px) {
   .titlebar { padding: 0 12px; gap: 10px; }
-  .titlebar-meta code { display: none; }
 
   .editor-toolbar { padding: 8px 10px; gap: 4px; }
   .example-picker label { display: none; }

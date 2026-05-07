@@ -109,47 +109,100 @@ class Editor {
 // stamp on the right (kept here instead of below the editor so it
 // reads as masthead metadata rather than competing with the editor /
 // visualization for attention).
-const TitleBar: React.FC = () => (
-  <header className="titlebar">
-    <div className="titlebar-left">
-      <h1 className="titlebar-title">
-        <a href="https://github.com/rustviz/rustviz/" target="_blank" rel="noreferrer">
-          RustViz
-        </a>{' '}
-        Playground
-      </h1>
-      <a
-        className="titlebar-callout"
-        href="https://rustviz.github.io/tutorial/"
-        target="_blank"
-        rel="noreferrer"
-        title="Open the RustViz tutorial in a new tab"
-      >
-        New to Rust? Read our visual tutorial →
-      </a>
-    </div>
-    <div className="titlebar-meta">
-      <code>rustc {__RUST_VERSION__}</code>
-      <code>rustviz-plugin {__PLUGIN_VERSION__}</code>
-      {/* shields.io social-style badge updates dynamically; no JS
-          fetch needed and the SVG inlines the current star count.
-          Rightmost so it's the last thing the eye lands on. */}
-      <a
-        className="titlebar-stars"
-        href="https://github.com/rustviz/rustviz"
-        target="_blank"
-        rel="noreferrer"
-        title="Star us on GitHub"
-      >
-        <img
-          src="https://img.shields.io/github/stars/rustviz/rustviz?style=social&label=Star"
-          alt="GitHub stars"
-          height={20}
-        />
-      </a>
-    </div>
-  </header>
-);
+//
+// At narrow widths the tutorial callout and the version codes don't
+// fit alongside the title and stars badge — instead of letting them
+// overlap (or hiding them outright) they move into a `⋯` overflow
+// popover. The popover items are duplicated in the JSX so CSS can
+// flip which set is visible without React re-rendering.
+const TitleBar: React.FC = () => {
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+
+  // <details> doesn't close on outside click on its own — wire it up
+  // so a tap elsewhere dismisses the popover, matching the platform
+  // expectation for a transient menu.
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (detailsRef.current?.open && !detailsRef.current.contains(e.target as Node)) {
+        detailsRef.current.open = false;
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <header className="titlebar">
+      <div className="titlebar-left">
+        <h1 className="titlebar-title">
+          <a href="https://github.com/rustviz/rustviz/" target="_blank" rel="noreferrer">
+            RustViz
+          </a>{' '}
+          Playground
+        </h1>
+        <a
+          className="titlebar-callout"
+          href="https://rustviz.github.io/tutorial/"
+          target="_blank"
+          rel="noreferrer"
+          title="Open the RustViz tutorial in a new tab"
+        >
+          New to Rust? Read our visual tutorial →
+        </a>
+      </div>
+      <div className="titlebar-meta">
+        <code className="titlebar-version">rustc {__RUST_VERSION__}</code>
+        <code className="titlebar-version">rustviz-plugin {__PLUGIN_VERSION__}</code>
+        {/* Overflow menu — hidden by CSS at wide widths, shown when
+            the inline callout / version codes are hidden. The popover
+            re-renders the same content so nothing actually disappears,
+            it just moves. */}
+        <details ref={detailsRef} className="titlebar-overflow">
+          <summary
+            className="titlebar-overflow-trigger"
+            aria-label="More"
+            title="More"
+          >
+            ⋯
+          </summary>
+          <div className="titlebar-overflow-popover" role="menu">
+            <a
+              className="titlebar-overflow-item"
+              href="https://rustviz.github.io/tutorial/"
+              target="_blank"
+              rel="noreferrer"
+              role="menuitem"
+            >
+              Read our visual tutorial →
+            </a>
+            <div className="titlebar-overflow-item titlebar-overflow-static" role="none">
+              rustc {__RUST_VERSION__}
+            </div>
+            <div className="titlebar-overflow-item titlebar-overflow-static" role="none">
+              rustviz-plugin {__PLUGIN_VERSION__}
+            </div>
+          </div>
+        </details>
+        {/* shields.io social-style badge updates dynamically; no JS
+            fetch needed and the SVG inlines the current star count.
+            Rightmost so it's the last thing the eye lands on. */}
+        <a
+          className="titlebar-stars"
+          href="https://github.com/rustviz/rustviz"
+          target="_blank"
+          rel="noreferrer"
+          title="Star us on GitHub"
+        >
+          <img
+            src="https://img.shields.io/github/stars/rustviz/rustviz?style=social&label=Star"
+            alt="GitHub stars"
+            height={20}
+          />
+        </a>
+      </div>
+    </header>
+  );
+};
 
 // Static prose pane. Same content the index.html used to carry, just
 // moved into the React tree so the resizable layout owns every
