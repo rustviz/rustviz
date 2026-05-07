@@ -10,7 +10,9 @@ import { exampleGroups } from './examples';
 import {
   codeForSelection,
   DEFAULT_SELECTION,
+  exampleFilename,
   forkedName,
+  importedName,
   loadSelection,
   loadUserExamples,
   newId,
@@ -587,6 +589,60 @@ const App: React.FC = () => {
     handleClick();
   };
 
+  // Save the editor's current code to the user's disk as a `.rs`
+  // file. Filename derives from the selection's name (sanitized for
+  // filesystem use). Works for both preloaded and user examples —
+  // for preloaded we just emit the original snippet; for user we
+  // emit the latest auto-saved code.
+  const handleExport = () => {
+    if (!editor) return;
+    const code = editor.getCurrentCode();
+    const sourceName =
+      selection.kind === 'user'
+        ? userExamples.find(e => e.id === selection.id)?.name ?? 'example'
+        : exampleGroups[selection.chapter].examples[selection.index].name;
+    const blob = new Blob([code], { type: 'text/x-rust' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = exampleFilename(sourceName);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoke after the click handler has had a tick to start the
+    // download — Safari is finicky if we revoke synchronously.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  // Hidden <input type="file"> backing the import button. We click
+  // it programmatically from handleImport so the visible toolbar
+  // button can carry our own styling/icon.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  // Read the chosen file as text, register it as a new user example,
+  // and switch to it. Reusing the same file twice in a row works
+  // because we clear the input's value before bailing out.
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const code = await file.text();
+    const stem = file.name.replace(/\.rs$/i, '');
+    const created: UserExample = {
+      id: newId(),
+      name: importedName(stem, userExamples),
+      code,
+    };
+    setUserExamples([...userExamples, created]);
+    setSelection({ kind: 'user', id: created.id });
+    if (!editor) return;
+    editor.setCurrentCode(code);
+    handleClick();
+  };
+
   const canRename = selection.kind === 'user';
   const canDelete = selection.kind === 'user';
 
@@ -654,11 +710,58 @@ const App: React.FC = () => {
                   }
                   aria-label="Delete this example"
                 >
-                  {/* U+2715 MULTIPLICATION X — monochrome, consistent
-                      with the + and ✎ glyphs. Reads as "remove this
-                      item" alongside the existing rename/add controls. */}
-                  ✕
+                  {/* Lucide "trash-2" — trash can with lid + body
+                      vertical strokes. Reads as "delete permanently"
+                      more clearly than a bare ✕. */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <polyline fill="none" points="3 6 5 6 21 6" />
+                    <path fill="none" d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                    <path fill="none" d="M10 11v6" />
+                    <path fill="none" d="M14 11v6" />
+                    <path fill="none" d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                  </svg>
                 </button>
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleExport}
+                  title="Save current example as a .rs file"
+                  aria-label="Save current example as a .rs file"
+                >
+                  {/* Lucide "download" — tray with an arrow landing
+                      in it. Unambiguous "save to disk" semantics, vs
+                      a bare ⬇ which reads like "move down in list".
+                      `fill="none"` is set on every node (and again
+                      via CSS) because some renderers fill an open
+                      path's implied closed region under the default
+                      fill rule. */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path fill="none" d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline fill="none" points="7 10 12 15 17 10" />
+                    <line fill="none" x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                </button>
+                <button
+                  className="cm-button toolbar-icon-button"
+                  onClick={handleImportClick}
+                  title="Load a .rs file as a new example"
+                  aria-label="Load a .rs file as a new example"
+                >
+                  {/* Lucide "upload" — same tray with the arrow
+                      leaving it. Pairs visually with the download
+                      icon above. */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path fill="none" d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline fill="none" points="17 8 12 3 7 8" />
+                    <line fill="none" x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".rs,text/x-rust,text/plain"
+                  style={{ display: 'none' }}
+                  onChange={handleImportFile}
+                />
                 <button
                   className="cm-button generate-button"
                   onClick={handleClick}
