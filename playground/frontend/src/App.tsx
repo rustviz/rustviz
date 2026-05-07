@@ -237,26 +237,6 @@ const Description: React.FC = () => (
       the <strong>Generate Visualization</strong> button. The diagram appears in the
       bottom panel.
     </p>
-    <h3>Presentation mode</h3>
-    <p>
-      The three panels are independently resizable, so you can stage a clean
-      presentation view by:
-    </p>
-    <ul>
-      <li>
-        Dragging the vertical handle to the left edge to hide{' '}
-        <em>this</em> info panel.
-      </li>
-      <li>
-        Dragging the horizontal handle up to hide the editor entirely, or
-        most of the way up to leave just the example-picker toolbar visible
-        for switching snippets live.
-      </li>
-      <li>
-        The visualization claims whatever space is left.
-      </li>
-    </ul>
-    <p>Drag the handles back from the edges to restore the panels.</p>
     <h3>Annotation markers</h3>
     <p>You can keep individual items out of the visualization with comment markers:</p>
     <ul>
@@ -312,6 +292,26 @@ const Description: React.FC = () => (
       </a>{' '}
       with the snippet and error message.
     </p>
+    <h3>Presentation mode</h3>
+    <p>
+      The three panels are independently resizable, so you can stage a clean
+      presentation view by:
+    </p>
+    <ul>
+      <li>
+        Dragging the vertical handle to the left edge to hide{' '}
+        <em>this</em> info panel.
+      </li>
+      <li>
+        Dragging the horizontal handle up to hide the editor entirely, or
+        most of the way up to leave just the example-picker toolbar visible
+        for switching snippets live.
+      </li>
+      <li>
+        The visualization claims whatever space is left.
+      </li>
+    </ul>
+    <p>Drag the handles back from the edges to restore the panels.</p>
     <h3>Other ways to use RustViz</h3>
     <p>Besides this playground, RustViz ships as:</p>
     <ul>
