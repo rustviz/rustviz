@@ -727,11 +727,15 @@ const App: React.FC = () => {
       <TitleBar />
       <PanelGroup direction="vertical" className="main-split" autoSaveId="rustviz-vertical">
         {/* Top row: prose on the left, code editor on the right.
-            Collapsible so dragging the horizontal handle to the very
-            top snaps the entire row away — useful when presenting
-            just the visualization. The handle stays grabbable at the
-            top edge of the viz panel for restoring the row. */}
-        <Panel defaultSize={40} minSize={15} collapsible>
+            minSize=0 with no `collapsible` means the handle drags
+            smoothly all the way down — no snap point. Useful for
+            "presentation mode" where you drag until just the
+            example-picker toolbar is visible (the editor scrolls
+            out of view but the dropdown stays clickable), or all
+            the way to 0 to show only the visualization. The handle
+            stays grabbable at the top edge of the viz panel for
+            dragging back open. */}
+        <Panel defaultSize={40} minSize={0}>
           <PanelGroup direction="horizontal" autoSaveId="rustviz-top-horizontal">
             {/* Collapsible so users running pure code demos can drag
                 the handle to the left edge and snap the prose pane
