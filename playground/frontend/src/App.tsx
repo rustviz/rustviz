@@ -34,6 +34,17 @@ const API_BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
 declare function helpers(param: string): void;
 
+// Viewport width threshold (px) below which the layout is considered
+// "narrow" — phones in portrait, narrow split windows, etc. Drives
+// the initial description-panel size so a first-time mobile visitor
+// doesn't see prose eat the editor's screen real estate. After the
+// initial render the panel is fully resizable like always.
+const NARROW_VIEWPORT_PX = 768;
+const initialNarrow =
+  typeof window !== 'undefined' &&
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia(`(max-width: ${NARROW_VIEWPORT_PX}px)`).matches;
+
 // Thin wrapper around CodeMirror's EditorView so the React layer can
 // hold a single `Editor` instance across renders without re-creating
 // the underlying view (which would lose cursor position, undo
@@ -657,9 +668,13 @@ const App: React.FC = () => {
                 the handle to the left edge and snap the prose pane
                 away. minSize is the snap threshold — below 15% the
                 panel collapses to 0; the resize handle stays visible
-                at the edge so the user can drag it back to expand. */}
+                at the edge so the user can drag it back to expand.
+                On a narrow viewport (phones, narrow split windows)
+                we start collapsed so the editor + viz get the full
+                width on first load — the user can still drag to
+                expand. */}
             <Panel
-              defaultSize={35}
+              defaultSize={initialNarrow ? 0 : 35}
               minSize={15}
               collapsible
               className="panel description-panel"

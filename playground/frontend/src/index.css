@@ -194,6 +194,11 @@ code {
      the left. The Generate button gets `margin-left: auto` (below) to
      push itself to the right edge regardless of this gap. */
   gap: 6px;
+  /* Wrap when the row is too narrow for everything on one line —
+     mobile / small windows would otherwise push the Generate button
+     off the right edge with no way to reach it. */
+  flex-wrap: wrap;
+  row-gap: 6px;
   padding: 10px 16px;
   background: #f6f6f6;
   border-bottom: 1px solid var(--border);
@@ -248,7 +253,9 @@ code {
   margin-left: auto;
   padding: 6px 16px;
   font-size: 13px;
-  min-width: 180px;
+  /* No min-width: on a narrow viewport the Generate button needs to
+     shrink (or wrap to its own row, courtesy of flex-wrap on the
+     parent). 180px would force the toolbar to overflow. */
 }
 
 /* Compact toolbar buttons that sit between the example dropdown and
@@ -392,4 +399,41 @@ code {
 }
 @keyframes ellipsis {
   to { width: 1.5em; }
+}
+
+/* ─── Responsive (small screens / mobile) ───────────────────────── */
+
+/* Mid-narrow: tablet and small laptops. The "Read our visual
+   tutorial" callout is pure marketing fluff — the prose pane has
+   the same link, so it can disappear here without losing
+   functionality. */
+@media (max-width: 720px) {
+  .titlebar-callout { display: none; }
+}
+
+/* Narrow: phones in portrait. Hide the rustc / plugin version
+   stamps (still visible in the GitHub repo for anyone who needs
+   them) and shrink toolbar/titlebar padding. The "Example:" label
+   is dropped because the dropdown's selected value already names
+   what's loaded. */
+@media (max-width: 540px) {
+  .titlebar { padding: 0 12px; gap: 10px; }
+  .titlebar-meta code { display: none; }
+
+  .editor-toolbar { padding: 8px 10px; gap: 4px; }
+  .example-picker label { display: none; }
+  .example-picker select { max-width: 200px; }
+
+  .description { padding: 16px; }
+  .viz-content { padding: 12px; }
+}
+
+/* Touch devices (typically phones / tablets) — bump the resize
+   handles up to 12px so they're actually grabbable with a fingertip.
+   `pointer: coarse` is the standard signal for "no hover, primary
+   input is touch", so it doesn't bloat the handles for
+   touchscreen-equipped laptops with a precise mouse / trackpad. */
+@media (pointer: coarse) {
+  .resize-handle-horizontal { height: 12px; }
+  .resize-handle-vertical { width: 12px; }
 }
