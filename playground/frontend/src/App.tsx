@@ -299,19 +299,14 @@ const Description: React.FC = () => (
     </p>
     <ul>
       <li>
-        Dragging the vertical handle to the left edge to hide{' '}
-        <em>this</em> info panel.
+        Dragging the vertical handle to the left edge to hide this info panel.
       </li>
       <li>
         Dragging the horizontal handle up to hide the editor entirely, or
         most of the way up to leave just the example-picker toolbar visible
         for switching snippets live.
       </li>
-      <li>
-        The visualization claims whatever space is left.
-      </li>
     </ul>
-    <p>Drag the handles back from the edges to restore the panels.</p>
     <h3>Other ways to use RustViz</h3>
     <p>Besides this playground, RustViz ships as:</p>
     <ul>
