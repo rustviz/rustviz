@@ -50,13 +50,35 @@ pub fn annotate_src(&mut self, name: String, s: Span, is_func: bool, hash: u64) 
 }
 
 pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
-  // Mirror the visitor's macro-expansion skip: macro-generated nodes
-  // refer to synthetic items (e.g. `core::panicking::panic`) that the
-  // visitor never registers in `self.raps`, so attempting to annotate
-  // them here unwraps None on the RAP lookup. The user's source code
-  // doesn't include these names anyway, so there's nothing to
-  // highlight in the rendered code panel.
+  // Most macro/desugar-generated subtrees should be skipped — they
+  // refer to synthetic items the visitor never registered. But a few
+  // specific desugar shapes wrap *user-written* code in synthetic
+  // spans, and we want to keep annotating into them:
+  //
+  //   while cond { body }                 →  loop { if cond { body } else { break } }
+  //   while let pat = expr { body }       →  loop { if let pat = expr { body } else { break } }
+  //   for pat in iter { body }            →  match into_iter(iter) { mut iter =>
+  //                                            loop { match next(&mut iter) {
+  //                                              None => break, Some(pat) => body } } }
+  //
+  // The wrapping `If` / `Match` / `Loop` carry the DesugaringKind
+  // span (so `from_expansion()` returns true), but the user's `pat`,
+  // scrutinee, and `body` are themselves user-written. Without this
+  // descent, `s` in `while let Some(s) = stack.pop() { … }` and
+  // `stack`/`pop` on the same line never get annotated.
   if expr.span.from_expansion() {
+    if let ExprKind::If(guard, then_body, _else) = expr.kind {
+      // The else arm of a while/if-let desugar is the synthetic
+      // `break` — skip it. The guard is either a `Let(pat, init)`
+      // (let-form) or a plain condition (regular `while`).
+      if let ExprKind::Let(let_expr) = guard.kind {
+        self.annotate_pat(let_expr.pat);
+        self.annotate_expr(let_expr.init);
+      } else {
+        self.annotate_expr(guard);
+      }
+      self.annotate_expr(then_body);
+    }
     return;
   }
   match expr.kind {
@@ -203,6 +225,14 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         Some(e) => self.annotate_expr(&e),
         None => {}
       }
+    }
+    // `if let pat = expr { … }` user-written. The Let node sits in
+    // the If's guard slot; its `pat` carries pattern bindings the
+    // user wrote (e.g. the `s` in `if let Some(s) = opt`) and `init`
+    // is the scrutinee.
+    ExprKind::Let(let_expr) => {
+      self.annotate_pat(let_expr.pat);
+      self.annotate_expr(let_expr.init);
     }
     ExprKind::Loop(block, _, _loop_ty, _span) => {
       for stmt in block.stmts.iter() {

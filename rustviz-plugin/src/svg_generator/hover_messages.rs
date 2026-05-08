@@ -244,9 +244,24 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
 pub fn event_dot_acquire(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
-    
+
     format!(
         "{0} acquires ownership of a resource",
+        my_name_fmt
+    )
+}
+
+// Same Acquire event shape, but the destination column holds a Copy
+// type (i32, bool, etc. — no heap, no ownership semantics) and the
+// source is Anonymous (a literal, an arithmetic expression, or a
+// macro-internal expansion). Avoids the misleading "ownership"
+// language for primitives. Used for both fresh `let n = 5;` bindings
+// and reassignments like `n += 1;`.
+pub fn event_dot_acquire_copyable(my_name: &String, _target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+
+    format!(
+        "{0} is bound to a value",
         my_name_fmt
     )
 }
@@ -643,6 +658,19 @@ pub fn state_full_privilege(my_name: &String) -> String {
 
     format!(
         "{0} is the owner of the resource", //not necessarily write if let was used rather than let mut
+        my_name_fmt
+    )
+}
+
+// FullPrivilege but the owner is a Copy type (i32 etc.), so the
+// "owner of the resource" framing doesn't fit — primitives are
+// values, not heap-backed resources. Used for the timeline-stripe
+// tooltip and the vertical lifeline.
+pub fn state_full_privilege_copyable(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+
+    format!(
+        "{0} holds a value",
         my_name_fmt
     )
 }
