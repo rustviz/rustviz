@@ -376,4 +376,107 @@ fn main() {
       },
     ],
   },
+  {
+    chapter: 'Loops',
+    examples: [
+      {
+        name: "for over a borrowed Vec",
+        code: `fn show(s: &String) {
+    println!("{}", s);
+}
+
+fn main() {
+    let words = vec![String::from("hi"), String::from("ok")];
+    for w in &words {
+        show(w);
+    }
+}`,
+      },
+      {
+        name: "for that moves each element",
+        code: `fn consume(_s: String) {}
+
+fn main() {
+    let words = vec![String::from("hi"), String::from("ok")];
+    for w in words {
+        consume(w);
+    }
+}`,
+      },
+      {
+        name: "for over a Range",
+        code: `fn read(_n: i32) {}
+
+fn main() {
+    for i in 0..3 {
+        read(i);
+    }
+}`,
+      },
+      {
+        name: "while loop",
+        code: `fn read(_n: i32) {}
+
+fn main() {
+    let mut n = 0;
+    while n < 3 {
+        read(n);
+        n += 1;
+    }
+}`,
+      },
+      {
+        name: "while let popping a stack",
+        code: `fn consume(_s: String) {}
+
+fn main() {
+    let mut stack = vec![String::from("a"), String::from("b")];
+    while let Some(s) = stack.pop() {
+        consume(s);
+    }
+}`,
+      },
+      {
+        name: "loop { ... break }",
+        code: `fn read(_n: i32) {}
+
+fn main() {
+    let mut n = 0;
+    loop {
+        read(n);
+        n += 1;
+        if n >= 3 {
+            break;
+        }
+    }
+}`,
+      },
+      {
+        name: "loop { break value }",
+        code: `fn show(_n: i32) {}
+
+fn main() {
+    let mut n = 0;
+    let result = loop {
+        n += 1;
+        if n >= 5 {
+            break n * 2;
+        }
+    };
+    show(result);
+}`,
+      },
+      {
+        name: "if let on Option",
+        code: `fn read(_n: i32) {}
+
+fn main() {
+    let opt: Option<i32> = Some(3);
+    if let Some(x) = opt {
+        read(x);
+    }
+}`,
+      },
+    ],
+  },
 ];

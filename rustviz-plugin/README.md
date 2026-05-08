@@ -43,10 +43,6 @@ cargo install --path . --locked
 RustViz is a teaching tool — it supports a meaningful subset of Rust,
 not all of it. Currently unsupported (or known to misbehave):
 
-- For-loops
-- Bindings or borrows inside an `if` or `match` branch body (the
-  conditional itself can return a value into a `let`, but tracking
-  events inside the branch isn't supported)
 - Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
   objects (`Box<dyn T>`)
 - Indexing or slicing collections like `Vec` (string slices like
@@ -71,7 +67,7 @@ not all of it. Currently unsupported (or known to misbehave):
 - [ ] Implement hoverable anonymous owner interactions in code panel
 - [ ] Weird phantom annotated src bug that seems to appear when there are `\t` characters
 - [ ] Add highlighting for passbyref events
-- [ ] Implement For-loops (really just desugared match expr)
+- [x] Implement for-loops, while, while-let, loop, if-let — all loop / pattern-binding constructs
 - [x] last (black) data-hash doesn't render properly
 - [x] Fix resource dropping (breaks with conditionals)
 - [x] Reference aliasing
