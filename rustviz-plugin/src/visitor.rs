@@ -1090,12 +1090,31 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 };
                 let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
 
-                // Register the user pattern binding (single-name case)
-                // as a branch-scoped RAP so events inside the body
-                // referencing it resolve. Multi-binding / nested
-                // patterns aren't handled yet — fall through and
-                // they'll just not register, which is the same as
-                // pre-fix behaviour for those shapes.
+                // Register the user pattern binding(s) as branch-scoped
+                // RAPs so events inside the body referencing them
+                // resolve. Two cases:
+                //
+                //   `for x in &v`           — single binding, attribute
+                //                             an iterand-shaped event
+                //                             (SBorrow / MBorrow / Move)
+                //                             from the head expression.
+                //
+                //   `for (i, a) in iter`    — tuple / struct / etc. The
+                //                             iterand semantics don't
+                //                             pair element-wise against
+                //                             a tuple pattern (the
+                //                             iterator yields tuples but
+                //                             the iter expression isn't
+                //                             one), so fall back to
+                //                             `bind_walk`: register every
+                //                             binding the pattern names
+                //                             against `head_arg`. Each
+                //                             gets a best-effort event
+                //                             (a Move/Copy via
+                //                             match_rhs) — approximate,
+                //                             but the body refs to
+                //                             `i`/`a` resolve and the
+                //                             columns aren't empty.
                 let prev_inside_branch = self.inside_branch;
                 self.inside_branch = true;
                 if let PatKind::Binding(_, _, pat_ident, None) = user_pat.kind {
@@ -1127,6 +1146,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
                     self.add_ev(for_line, e, to_rty, head_rty, false);
                   }
+                } else {
+                  // Composite patterns: bind every name in the pattern
+                  // as a branch-scoped RAP so body references resolve.
+                  // Emit a Bind from Anonymous for each — we don't
+                  // have a clean iterand shape (the iterator yields
+                  // tuples but the iter expression isn't a tuple).
+                  // Calling `match_rhs(head_arg)` would synthesize a
+                  // Copy from the iter's tail Function (e.g.
+                  // `enumerate`); those Function→Value events are
+                  // filtered out of `event_line_map` and end up
+                  // never reaching the destination's timeline, so the
+                  // column wouldn't render at all. The Bind shortcut
+                  // sidesteps that and matches the macro-RHS path.
+                  let _ = iterand_evt;
+                  let _ = head_rty;
+                  self.register_pattern_bindings_anon(user_pat, for_line);
                 }
 
                 // Visit body — events flow into the global timeline.
@@ -1370,6 +1405,71 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// unless the binding's source line is on the skip list, in which
   /// case we still register the RAP (so later references resolve)
   /// but record it in `skip_raps` so events touching it get dropped.
+  /// Walk a pattern (`(a, b)`, `Some(x)`, etc.) and register each
+  /// binding as a branch-scoped RAP with a synthetic Bind from
+  /// Anonymous on `line`. Used for for-loop tuple patterns where the
+  /// "real" source (the iter expression's tail call) doesn't render
+  /// cleanly — see the for-loop arm of `visit_expr` for context.
+  pub fn register_pattern_bindings_anon(&mut self, pat: &'tcx Pat<'tcx>, line: usize) {
+    match pat.kind {
+      PatKind::Binding(_, hirid, ident, sub_pat) => {
+        let name = ident.to_string();
+        let pat_ty = self.tcx.typeck(hirid.owner).pat_ty(pat);
+        if pat_ty.is_ref() {
+          self.add_ref(
+            name.clone(),
+            bool_of_mut(pat_ty.ref_mutability().unwrap()),
+            false,
+            line,
+            ResourceTy::Anonymous,
+            std::collections::VecDeque::new(),
+            self.current_scope,
+            false,
+          );
+        } else {
+          let is_copy = self.tcx.type_is_copy_modulo_regions(
+            rustc_middle::ty::TypingEnv::post_analysis(self.tcx, hirid.owner),
+            pat_ty,
+          );
+          self.add_owner(name.clone(), false, is_copy, self.current_scope, false);
+        }
+        self.annotate_src(name.clone(), ident.span, false,
+          *self.raps.get(&name).unwrap().rap.hash());
+        // Acquire event so the column has at least one entry on its
+        // timeline (otherwise the renderer gives it no column).
+        let to_rty = ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
+        self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+        if let Some(sp) = sub_pat {
+          self.register_pattern_bindings_anon(sp, line);
+        }
+      }
+      PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) => {
+        for p in ps { self.register_pattern_bindings_anon(p, line); }
+      }
+      PatKind::Struct(_, fs, _) => {
+        for f in fs { self.register_pattern_bindings_anon(f.pat, line); }
+      }
+      PatKind::Or(ps) => {
+        // alternatives bind the same names — first is enough.
+        if let Some(p) = ps.first() { self.register_pattern_bindings_anon(p, line); }
+      }
+      PatKind::Ref(inner, _)
+      | PatKind::Box(inner)
+      | PatKind::Deref(inner)
+      | PatKind::Guard(inner, _) => {
+        self.register_pattern_bindings_anon(inner, line);
+      }
+      PatKind::Slice(before, mid, after) => {
+        for p in before { self.register_pattern_bindings_anon(p, line); }
+        if let Some(p) = mid { self.register_pattern_bindings_anon(p, line); }
+        for p in after { self.register_pattern_bindings_anon(p, line); }
+      }
+      // No bindings inside.
+      PatKind::Wild | PatKind::Never | PatKind::Missing | PatKind::Err(_)
+      | PatKind::Expr(_) | PatKind::Range(..) => {}
+    }
+  }
+
   fn bind_one(
     &mut self,
     name: String,
