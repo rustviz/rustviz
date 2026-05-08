@@ -2,7 +2,7 @@
 use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet, VecDeque}, ops::Bound};
 use log::warn;
 use rustc_hir::Mutability;
-use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceTy};
+use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
 use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_span::Span;
 use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, StmtKind, Stmt, Block, UnOp};
@@ -493,6 +493,44 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
       HashSet::new()
     }
   }
+}
+
+/// Walk a per-branch event list and accumulate the resource-owning
+/// variables it touches. Used to build a Branch event's `live_vars`
+/// from the events that actually landed inside the branches —
+/// rather than from `get_live_of_expr`, which over-includes variables
+/// only read by the conditional's guard expression and produces a
+/// branched (and visually noisy) timeline for them. Function RAPs
+/// are filtered out: they're call sites, not per-branch lifecycles.
+/// Nested Branch events propagate their inner live_vars upward —
+/// anything live in an inner branch is also live in the outer.
+pub fn collect_event_live_vars(
+    events: &[(usize, ExternalEvent)],
+    out: &mut HashSet<ResourceAccessPoint>,
+) {
+    for (_, ev) in events {
+        match ev {
+            ExternalEvent::Branch { live_vars, .. } => {
+                out.extend(live_vars.iter().cloned());
+            }
+            // Synthesized cleanup events (added after filtering) and
+            // param-init events don't introduce live vars on their
+            // own; the param case is handled at fn-entry, not in a
+            // conditional's liveness set.
+            ExternalEvent::GoOutOfScope { .. }
+            | ExternalEvent::InitRefParam { .. } => {}
+            _ => {
+                let (from, to) = ResourceAccessPoint_extract(ev);
+                for rty in [from, to] {
+                    if let ResourceTy::Value(rap) = rty {
+                        if !rap.is_fn() {
+                            out.insert(rap.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Used for filtering events from the main event container

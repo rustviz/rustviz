@@ -1863,7 +1863,19 @@ fn render_timeline(
     for (_, ev) in history {
         match ev {
             Event::Branch { branch_history, split_point, merge_point, ..} => {
-                let begin_state = states.iter().find(|&item| item.1 == *split_point).unwrap().clone();
+                // Find the state segment that *covers* the split point.
+                // Looking for `.1 == split_point` was a foothold from
+                // the days before let-as-rhs could put a Branch in
+                // live_vars: when the LHS variable doesn't exist
+                // before the conditional, the pre-branch state and
+                // the during-branch placeholder are both OutOfScope
+                // and clean_states merges them, so the boundary at
+                // split_point disappears. Range-containment finds the
+                // right segment in either case.
+                let begin_state = states.iter()
+                    .find(|item| item.0 <= *split_point && *split_point <= item.1)
+                    .unwrap_or_else(|| panic!("no state segment covers split_point {}", split_point))
+                    .clone();
                 let p_state = convert_back(&begin_state.2);
                 for (i, branch) in branch_history.iter().enumerate() {
                     let mut split_line_data = VerticalLineData {

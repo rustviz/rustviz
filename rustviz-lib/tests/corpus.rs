@@ -705,12 +705,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "if_no_else",
-        // Plain `if cond { body }` (no else). No "Else" branch label
-        // gets synthesized; only "If" appears.
-        must_contain: &["If"],
+        // Plain `if cond { body }` with `s` moved inside the body.
+        // The Branch is single-branch — only "If" appears, no
+        // synthesized "Else" — and the merge dot tooltip says `s`
+        // may have been moved (the implicit-untouched else means
+        // BoundHere can't fire).
+        must_contain: &[
+            "If",
+            "s may have been moved (consumed in at least one branch above)",
+        ],
         must_not_contain: &[
             "Else",
             "merge",
+            "is bound here from one of the branches above",
         ],
     },
 ];
