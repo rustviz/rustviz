@@ -893,6 +893,15 @@ fn timeline_segment_title(
             return hover_messages::state_closure_full_privilege_no_resource(&name);
         }
     }
+    // Copy-typed owners (i32 etc.) — "the owner of the resource"
+    // language doesn't fit primitives; route to the value-flavoured
+    // wording so the lifeline tooltip stays consistent with the
+    // event-dot tooltip on the same column.
+    if rap.is_copy_owner() {
+        if let State::FullPrivilege { .. } = state {
+            return hover_messages::state_full_privilege_copyable(rap.name());
+        }
+    }
     state.print_message_with_name(rap.name())
 }
 

@@ -292,6 +292,14 @@ impl ResourceAccessPoint {
         matches!(self, ResourceAccessPoint::Owner(Owner { is_closure: true, .. }))
     }
 
+    /// True iff this RAP is an owner of a Copy type (i32 etc.). The
+    /// "ownership" framing in tooltip text doesn't fit primitives —
+    /// they're values, not heap resources — so this lets the tooltip
+    /// dispatcher pick non-ownership wording where appropriate.
+    pub fn is_copy_owner(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_copy: true, .. }))
+    }
+
     /// True if this RAP is part of a struct grouping — either the
     /// struct itself or any of its fields (Struct fields and
     /// ref-typed fields modelled as MutRef/StaticRef with
@@ -1043,6 +1051,14 @@ impl Event {
                     // generic message because there's no captured
                     // upvar to name on the closure side yet.
                     safe_message(hover_messages::event_dot_closure_capture_acquire, &self.deref_name(my_name), from)
+                } else if matches!(from, ResourceTy::Anonymous)
+                    && matches!(is.extract_rap(), Some(rap) if rap.is_copy_owner()) {
+                    // i32 / bool / other primitive being assigned a
+                    // literal or arithmetic value (`let n = 5;` or
+                    // `n += 1;`). "Acquires ownership" is the wrong
+                    // mental model for Copy types — there's no heap
+                    // resource to own.
+                    safe_message(hover_messages::event_dot_acquire_copyable, &self.deref_name(my_name), from)
                 } else {
                     safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
                 }
