@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{convert_back, string_of_branch, string_of_external_event, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StructsInfo, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{convert_back, string_of_branch, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StructsInfo, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -374,51 +374,44 @@ fn update_timeline_data(events: & mut Vec<(usize, Event)>, parent_data: &Timelin
                     // copy the parent data
                     branch.t_data = parent_data.clone();
                 }
-                // update the xvalue based on width
+                // Update the x-value of each branch based on its width.
+                // The N-branch fanned-out layout used to be Match-only;
+                // the dedicated 2-branch If/Loop arm hardcoded
+                // `branch_history[1]`, which panicked when an `if`
+                // without an `else` produced a single-branch event.
+                // Math reduces to the same x-values as the old If
+                // layout for N=2, so use the generic path for every
+                // BranchType.
                 let mut parent_branch_data: Vec<TimelineColumnData> = Vec::new();
-                match ty {
-                    BranchType::Match(..) => {
-                        let halfway = branch_history.len() / 2;
-                        let mut running_x = parent_data.x_val;
-                        for i in (0..halfway).rev() {
-                            let b_data = branch_history.get_mut(i).unwrap();
-                            let b_width = b_data.width;
-                            let padding = if i == halfway - 1 {1} else {0};
-                            let left_side_coefficient = -1 * (b_width + padding) as i64;
-                            let x = left_side_coefficient * BRANCH_WEIGHT;
-                            running_x += x;
-                            b_data.t_data.x_val = running_x;
-                            running_x -= 2 * BRANCH_WEIGHT;
-                        }
-                        for i in 0..halfway {
-                          let b_data = branch_history.get(i).unwrap();
-                          parent_branch_data.push(b_data.t_data.clone());
-                        }
+                let _ = ty; // BranchType doesn't affect x-positioning
+                let halfway = branch_history.len() / 2;
+                let mut running_x = parent_data.x_val;
+                for i in (0..halfway).rev() {
+                    let b_data = branch_history.get_mut(i).unwrap();
+                    let b_width = b_data.width;
+                    let padding = if i == halfway - 1 { 1 } else { 0 };
+                    let left_side_coefficient = -1 * (b_width + padding) as i64;
+                    let x = left_side_coefficient * BRANCH_WEIGHT;
+                    running_x += x;
+                    b_data.t_data.x_val = running_x;
+                    running_x -= 2 * BRANCH_WEIGHT;
+                }
+                for i in 0..halfway {
+                    let b_data = branch_history.get(i).unwrap();
+                    parent_branch_data.push(b_data.t_data.clone());
+                }
 
-                        running_x = parent_data.x_val;
-                        for i in halfway..branch_history.len() {
-                            let b_data = branch_history.get_mut(i).unwrap();
-                            let b_width = b_data.width;
-                            let padding = if i == halfway {1} else {0};
-                            let right_side_coefficient = (b_width + padding) as i64;
-                            let x = right_side_coefficient * BRANCH_WEIGHT;
-                            running_x += x;
-                            b_data.t_data.x_val = running_x;
-                            running_x += 2 * BRANCH_WEIGHT;
-                            parent_branch_data.push(b_data.t_data.clone());
-                        }
-                    }
-                    _ => {
-                        let if_bw = branch_history.get(0).unwrap().width;
-                        let else_bw = branch_history.get(1).unwrap().width;
-                        let if_offset_coefficient: i64 = -1 * ((if_bw + 1) as i64); // + 1 for padding between branches
-                        let else_offset_coefficient: i64 = (else_bw + 1) as i64;
-
-                        branch_history.get_mut(0).unwrap().t_data.x_val = parent_data.x_val + (if_offset_coefficient * BRANCH_WEIGHT);
-                        branch_history.get_mut(1).unwrap().t_data.x_val = parent_data.x_val + (else_offset_coefficient * BRANCH_WEIGHT);
-                        parent_branch_data.push(branch_history.get(0).unwrap().t_data.clone());
-                        parent_branch_data.push(branch_history.get(1).unwrap().t_data.clone());
-                    }
+                running_x = parent_data.x_val;
+                for i in halfway..branch_history.len() {
+                    let b_data = branch_history.get_mut(i).unwrap();
+                    let b_width = b_data.width;
+                    let padding = if i == halfway { 1 } else { 0 };
+                    let right_side_coefficient = (b_width + padding) as i64;
+                    let x = right_side_coefficient * BRANCH_WEIGHT;
+                    running_x += x;
+                    b_data.t_data.x_val = running_x;
+                    running_x += 2 * BRANCH_WEIGHT;
+                    parent_branch_data.push(b_data.t_data.clone());
                 }
 
                 // recurse
@@ -676,12 +669,16 @@ fn render_dot(
                     append_dot(&merge_data, output, &branch.t_data, registry);
                 }
 
-                // render merge dot
+                // render merge dot. Tooltip is the joined ownership
+                // state for this variable across the branches above —
+                // see `branch_join_message`. Title is empty for the
+                // Unchanged case so the dot stays as a structural
+                // marker without a stray hover.
                 let m_data = EventDotData {
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,
                     dot_y: get_y_axis_pos(*merge_point + 1),
-                    title: "merge".to_owned()
+                    title: branch_join_message(branch_history, ty, &is.real_name()),
                 };
                 append_dot(&m_data, output, timeline_data, registry);
                 continue;
@@ -808,6 +805,110 @@ fn render_dot(
         }
         // push to individual timelines
         append_dot(&data, output, timeline_data, registry);
+    }
+}
+
+// ── Conditional join-state computation ─────────────────────────────
+//
+// Computes the joined ownership state of one variable across the
+// branches of an `if` / `match` / `if let`, used to label the per-
+// variable merge dot at the bottom of the conditional.
+//
+// We classify each branch's *end state* for the variable as
+// (ends_moved, has_acquire) by walking the per-variable Event list
+// the conversion in data.rs already filtered for us. Move events on
+// that list mean the variable was moved out; Acquire events mean it
+// received a new resource (re-bind or first bind). Borrows / dies /
+// duplicates don't change ownership.
+//
+// Nested conditionals are handled recursively: if any nested path
+// moves the variable, we propagate that up as a possible move on the
+// containing path. If every nested path acquires the variable, we
+// propagate that up as an acquire.
+//
+// Joining across the outer branches:
+//   - Any branch ends moved             → MovedAfter
+//   - Every branch acquires AND every    → BoundHere
+//     conceptual path is represented
+//     (no missing else)
+//   - Otherwise                          → Unchanged (no tooltip)
+//
+// "Every conceptual path is represented" — for `if cond { body }`
+// without an else, the implicit-untouched else means the var can't
+// be considered freshly-bound regardless of what the if branch does.
+// Match arms are exhaustive in Rust, so all paths are present.
+
+enum BranchJoin {
+    Unchanged,
+    MovedAfter,
+    BoundHere,
+}
+
+fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
+    let mut moved = false;
+    let mut acquired = false;
+    for (_, e) in events {
+        match e {
+            Event::Move { .. } => { moved = true; acquired = false; }
+            Event::Acquire { .. } => { moved = false; acquired = true; }
+            Event::Branch { branch_history, ty, .. } => {
+                let mut nested_any_moved = false;
+                let mut nested_all_acquired = !branch_history.is_empty();
+                for nb in branch_history {
+                    let (m, a) = analyze_branch_for_join(&nb.e_data);
+                    if m { nested_any_moved = true; }
+                    if !a { nested_all_acquired = false; }
+                }
+                if nested_any_moved {
+                    moved = true; acquired = false;
+                } else if nested_all_acquired && all_paths_present(ty, branch_history.len()) {
+                    moved = false; acquired = true;
+                }
+            }
+            // Borrows, returns, copies-from-here, duplicates: don't
+            // change whether the variable still owns its resource.
+            _ => {}
+        }
+    }
+    (moved, acquired)
+}
+
+fn all_paths_present(ty: &BranchType, n_branches: usize) -> bool {
+    match ty {
+        // Plain `if cond { … }` without an else has only one branch
+        // recorded; the implicit-untouched else means not every
+        // conceptual path acquires, so BoundHere can't fire.
+        BranchType::If(labels, _) => labels.len() >= 2 && n_branches >= 2,
+        // Rust match is exhaustive — every path is one of the arms.
+        BranchType::Match(labels, _) => labels.len() == n_branches,
+        // Loop bodies are conditionally entered (zero or more times),
+        // so a "BoundHere" claim isn't appropriate for their merge.
+        BranchType::Loop(_, _) => false,
+    }
+}
+
+fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType) -> BranchJoin {
+    let mut any_moved = false;
+    let mut all_acquired = !branch_history.is_empty();
+    for b in branch_history {
+        let (m, a) = analyze_branch_for_join(&b.e_data);
+        if m { any_moved = true; }
+        if !a { all_acquired = false; }
+    }
+    if any_moved {
+        BranchJoin::MovedAfter
+    } else if all_acquired && all_paths_present(ty, branch_history.len()) {
+        BranchJoin::BoundHere
+    } else {
+        BranchJoin::Unchanged
+    }
+}
+
+fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, var_name: &String) -> String {
+    match compute_branch_join(branch_history, ty) {
+        BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
+        BranchJoin::BoundHere => hover_messages::event_dot_branch_merge_bound(var_name),
+        BranchJoin::Unchanged => String::new(),
     }
 }
 

@@ -749,16 +749,37 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         
         let if_map = create_line_map(&if_ev);
-        let else_map = create_line_map(&else_ev);
         if if_end != merge { if_end += 1; } // this is for front-end formatting
-        let b_ty = BranchType::If(vec!["If".to_owned(), "Else".to_owned()], vec![(split + 1, if_end), (if_end, merge)]);
-        self.add_external_event(line_num, 
-          ExternalEvent::Branch { 
-            live_vars: liveness, 
-            branches: vec![ExtBranchData{ e_data: if_ev, line_map: if_map, decl_vars: if_decl }, 
-                          ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl }], 
-            branch_type: b_ty, 
-            split_point: split, 
+
+        // Emit the Branch event with one ExtBranchData per real branch.
+        // Plain `if cond { body }` (no else) is single-branch — emitting
+        // a synthesized "Else" label leaks an "Else" tooltip onto the
+        // visualization for code the user didn't write.
+        let (b_labels, b_slices, b_branches) = match else_expr {
+          Some(_) => {
+            let else_map = create_line_map(&else_ev);
+            (
+              vec!["If".to_owned(), "Else".to_owned()],
+              vec![(split + 1, if_end), (if_end, merge)],
+              vec![
+                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl   },
+                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl },
+              ],
+            )
+          }
+          None => (
+            vec!["If".to_owned()],
+            vec![(split + 1, if_end)],
+            vec![ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl }],
+          ),
+        };
+        let b_ty = BranchType::If(b_labels, b_slices);
+        self.add_external_event(line_num,
+          ExternalEvent::Branch {
+            live_vars: liveness,
+            branches: b_branches,
+            branch_type: b_ty,
+            split_point: split,
             merge_point: merge,
             id: *self.unique_id });
             *self.unique_id += 1;

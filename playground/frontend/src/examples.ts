@@ -377,6 +377,138 @@ fn main() {
     ],
   },
   {
+    chapter: 'Conditionals',
+    examples: [
+      {
+        name: "if as let RHS",
+        code: `fn main() {
+    let n = 3;
+    let s = if n > 0 { String::from("a") } else { String::from("b") };
+    println!("{}", s);
+}`,
+      },
+      {
+        name: "if without else",
+        code: `fn main() {
+    let s = String::from("hi");
+    if s.len() > 0 {
+        println!("non-empty: {}", s);
+    }
+    println!("{}", s);
+}`,
+      },
+      {
+        name: "if/else with disjoint variables",
+        code: `fn main() {
+    let cond = true;
+    let a = String::from("a");
+    let b = String::from("b");
+    if cond {
+        println!("{}", a);
+    } else {
+        println!("{}", b);
+    }
+}`,
+      },
+      {
+        name: "if/else: same var moved on one side",
+        code: `fn consume(_s: String) {}
+
+fn main() {
+    let s = String::from("hi");
+    let cond = true;
+    if cond {
+        consume(s);
+    } else {
+        println!("kept: {}", s);
+    }
+}`,
+      },
+      {
+        name: "match as let RHS",
+        code: `fn main() {
+    let n = 3;
+    let s = match n {
+        0 => String::from("zero"),
+        _ => String::from("other"),
+    };
+    println!("{}", s);
+}`,
+      },
+      {
+        name: "if let Some",
+        code: `fn main() {
+    let opt: Option<String> = Some(String::from("x"));
+    if let Some(x) = opt {
+        println!("got {}", x);
+    }
+}`,
+      },
+      {
+        name: "match with a borrow in one arm",
+        code: `fn main() {
+    let s = String::from("hello");
+    let n = 1;
+    match n {
+        0 => println!("zero"),
+        _ => println!("borrowed: {}", s),
+    }
+    println!("after: {}", s);
+}`,
+      },
+      {
+        name: "if/else: move on one side, borrow on other",
+        code: `fn consume(_s: String) {}
+
+fn main() {
+    let s = String::from("hi");
+    let cond = true;
+    if cond {
+        consume(s);
+    } else {
+        println!("borrow: {}", s);
+    }
+}`,
+      },
+      {
+        name: "rebind on both sides (\"bound here\" join)",
+        code: `fn consume(_s: String) {}
+
+fn main() {
+    let mut s = String::from("orig");
+    let cond = true;
+    if cond {
+        consume(s);
+        s = String::from("new");
+    } else {
+        consume(s);
+        s = String::from("alt");
+    }
+    println!("{}", s);
+}`,
+      },
+      {
+        name: "nested if (move propagates outward)",
+        code: `fn consume(_s: String) {}
+
+fn main() {
+    let s = String::from("hi");
+    let c1 = true;
+    let c2 = false;
+    if c1 {
+        if c2 {
+            consume(s);
+        } else {
+            println!("kept inner: {}", s);
+        }
+    } else {
+        consume(s);
+    }
+}`,
+      },
+    ],
+  },
+  {
     chapter: 'Loops',
     examples: [
       {

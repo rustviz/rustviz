@@ -1049,14 +1049,26 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         None => {}
       }
     },
-    // TODO: implement conditional let bindings:
-    // let x = if {} else {};
-    // let x = match z {};
+    // `let x = if cond { e1 } else { e2 };` — recurse into each
+    // branch's trailing expression so the move/copy/bind arrow lands
+    // on the LHS once per branch. The branches themselves rendered
+    // their inner side-effects when visit_expr walked them earlier;
+    // this arm is purely about pairing the branch result with `lhs`.
     ExprKind::If(_, if_block, else_block) => {
       self.match_rhs(lhs.clone(), &if_block, evt.clone());
       match else_block {
         Some(e) => self.match_rhs(lhs, &e, evt),
         None => {}
+      }
+    }
+    // `let x = match scrutinee { … };` — same shape as If above.
+    // Each arm's body becomes the value bound to `lhs` on the path
+    // through that arm. Pre-fix this fell through silently and a
+    // match-as-rhs binding got zero move/copy arrows, even though
+    // the equivalent if/else form rendered fine (issue #87).
+    ExprKind::Match(_, arms, _) => {
+      for arm in arms.iter() {
+        self.match_rhs(lhs.clone(), arm.body, evt.clone());
       }
     }
     ExprKind::DropTemps(exp) => {
