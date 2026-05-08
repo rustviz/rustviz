@@ -97,8 +97,10 @@ const EXPECTED_OK: &[&str] = &[
     "method_call_in_println",
     "freefn_call_in_println",
     // — Tuple destructuring (#86): each tuple-literal element pairs
-    //   with its sub-pattern as if it were its own `let`.
+    //   with its sub-pattern as if it were its own `let`. The slice
+    //   variant takes the same path against an array literal RHS.
     "tuple_destructure",
+    "slice_destructure",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -568,6 +570,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let (a, b) = (String::from("x"), String::from("y"));` —
         // pairs sub-pat to sub-expr so each element renders as its
         // own move into its own column, with its own scope-end drop.
+        must_contain: &[
+            "Move from String::from to a",
+            "Move from String::from to b",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "slice_destructure",
+        // `let [a, b] = [String::from("x"), String::from("y")];` —
+        // same element-wise pairing as tuple_destructure, but
+        // against an array literal RHS.
         must_contain: &[
             "Move from String::from to a",
             "Move from String::from to b",

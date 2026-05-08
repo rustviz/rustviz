@@ -1190,13 +1190,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// Structural pat-against-init decomposition. When the pattern's
-  /// shape matches the init expression's shape (tuple-on-tuple,
-  /// tuple-struct-on-call, struct-on-struct, ref-on-addrof), recurse
-  /// element-wise so each binding gets paired with the corresponding
-  /// sub-expression as its source. Otherwise fall back to
-  /// [`bind_walk`], which registers every binding in the pattern
-  /// against the whole init — semantically approximate, but never
-  /// silently empty.
+  /// shape matches the init expression's shape — tuple-on-tuple,
+  /// tuple-struct-on-call, struct-on-struct, ref-on-addrof, or
+  /// slice-on-array — recurse element-wise so each binding gets
+  /// paired with the corresponding sub-expression as its source.
+  /// Otherwise fall back to [`bind_walk`], which registers every
+  /// binding in the pattern against the whole init — semantically
+  /// approximate, but never silently empty.
   fn bind_pat(
     &mut self,
     pat: &'tcx Pat<'tcx>,
@@ -1242,6 +1242,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `let &x = &y;` — recurse through the borrow on both sides.
       (PatKind::Ref(inner_pat, _), ExprKind::AddrOf(_, _, inner_init)) => {
         self.bind_pat(inner_pat, inner_init, is_skipped);
+      }
+      // `let [a, b] = [e1, e2];` — fixed-length slice destructure
+      // against an array literal of matching length. Pair element-wise.
+      // The mid-`Some` case (`let [a, .., b] = …`) only pairs cleanly
+      // when `mid` is Wild — when it's a binding we'd need a
+      // slice-typed source for it, which we don't have without MIR.
+      // Mid-binding falls through to bind_walk.
+      (PatKind::Slice(before, mid, after), ExprKind::Array(elems))
+        if mid.is_none_or(|m| matches!(m.kind, PatKind::Wild))
+          && before.len() + after.len() <= elems.len()
+          && (mid.is_some() || before.len() + after.len() == elems.len()) =>
+      {
+        for (sp, se) in before.iter().zip(elems.iter()) {
+          self.bind_pat(sp, se, is_skipped);
+        }
+        let after_start = elems.len() - after.len();
+        for (sp, se) in after.iter().zip(elems[after_start..].iter()) {
+          self.bind_pat(sp, se, is_skipped);
+        }
+        // mid-Wild: middle elements are explicitly discarded; their
+        // side effects were captured by the entry visit_expr.
       }
       // Canonical leaf: a single named binding consuming the init.
       (PatKind::Binding(annotation, hirid, ident, sub_pat), _) => {
