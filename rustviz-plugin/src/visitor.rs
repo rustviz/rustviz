@@ -6,7 +6,7 @@
 //! See tcx: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html
 
 use log::{info, warn};
-use rustc_hir::{StmtKind, Stmt, Expr, ExprKind, UnOp, Param, QPath, PatKind, Mutability, LetStmt, def::*};
+use rustc_hir::{StmtKind, Stmt, Expr, ExprKind, UnOp, Param, QPath, Pat, PatKind, BindingMode, HirId, Mutability, LetStmt, def::*};
 use rustc_hir::intravisit::{self, Visitor};
 use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
@@ -1148,54 +1148,237 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     }
     let local_line = self.tcx.sess.source_map().lookup_char_pos(local.span.lo()).line;
     let is_skipped = self.skip_lines.contains(&local_line);
-    match local.pat.kind {
-      PatKind::Binding(binding_annotation, ann_hirid, ident, _op_pat) => {
-        let lhs_var:String = ident.to_string();
-        let tycheck_results = self.tcx.typeck(ann_hirid.owner);
-        let lhs_ty = tycheck_results.node_type(ann_hirid);
-        let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, local.hir_id.owner), lhs_ty);
-        // By finding out the type of LHS we know (kinda) what event will happen,
-        // then we can just figure out what RHS is (match_rhs)
-        let e = if lhs_ty.is_ref() {
-          match lhs_ty.ref_mutability().unwrap() {
-            Mutability::Not => Evt::Copy,
-            Mutability::Mut => Evt::Move,
-          }
-        } else {
-          match is_copyable {
-            true => Evt::Copy,
-            false => Evt::Move
-          }
-        };
-        match local.init { // init refers to RHS of let
-          Some(expr) => {
-            if is_skipped {
-              // Marker on this `let` — register the LHS RAP so any
-              // later mention of the variable still resolves (and
-              // get the source-line annotation) but mark it in
-              // skip_raps so add_external_event drops every event
-              // that touches it. We deliberately don't visit the
-              // RHS so events emitted on its behalf (e.g. a
-              // String::from move into the var) also disappear —
-              // those touch the skipped LHS too.
-              self.define_lhs(lhs_var.clone(), bool_of_mut(binding_annotation.1), expr, lhs_ty);
-              self.skip_raps.insert(lhs_var);
-            } else {
-              self.visit_expr(expr);
-              // Figure out what LHS is and add it to list of RAPs
-              self.define_lhs(lhs_var.clone(), bool_of_mut(binding_annotation.1), expr, lhs_ty);
-              self.match_rhs(ResourceTy::Value(self.raps.get(&lhs_var).unwrap().rap.to_owned()), expr, e);
-            }
-          }
-           _ => {} // in the case of a declaration ex: let a; nothing happens, currently unhandled logic
-        }
-      }
-      _ => { warn!("unrecognized local pattern") }
+    if let Some(init) = local.init {
+      self.process_let_binding(local.pat, init, is_skipped);
     }
-
+    // `let x;` (no init) — nothing to bind from. The variable still
+    // gets its column on its first assignment downstream, same as
+    // pre-fix behaviour.
 
     if let Some(els) = local.els {
       self.visit_block(els);
     }
   }
-} 
+}
+
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Entry point for handling `let pat = init [else { … }];`.
+  ///
+  /// Walks the init expression once for side-effect events (calls,
+  /// borrows, struct constructions, etc.), then dispatches to
+  /// [`bind_pat`] which decomposes composite patterns against the
+  /// init's shape. Issue #86 rolled this out as a replacement for the
+  /// old `match local.pat.kind` in `visit_local`, which only handled
+  /// `PatKind::Binding` and silently dropped everything else (so
+  /// `let (a, b) = (…, …);` produced an empty timeline).
+  ///
+  /// `is_skipped` is true when the `let`'s source line carries a
+  /// `// rv-skip` marker. Same semantics as before: define the LHS
+  /// RAPs so later references still resolve, but suppress the RHS
+  /// visit and the move/copy event so nothing touching this binding
+  /// renders.
+  pub fn process_let_binding(
+    &mut self,
+    pat: &'tcx Pat<'tcx>,
+    init: &'tcx Expr<'tcx>,
+    is_skipped: bool,
+  ) {
+    if !is_skipped {
+      self.visit_expr(init);
+    }
+    self.bind_pat(pat, init, is_skipped);
+  }
+
+  /// Structural pat-against-init decomposition. When the pattern's
+  /// shape matches the init expression's shape — tuple-on-tuple,
+  /// tuple-struct-on-call, struct-on-struct, ref-on-addrof, or
+  /// slice-on-array — recurse element-wise so each binding gets
+  /// paired with the corresponding sub-expression as its source.
+  /// Otherwise fall back to [`bind_walk`], which registers every
+  /// binding in the pattern against the whole init — semantically
+  /// approximate, but never silently empty.
+  fn bind_pat(
+    &mut self,
+    pat: &'tcx Pat<'tcx>,
+    init: &'tcx Expr<'tcx>,
+    is_skipped: bool,
+  ) {
+    match (pat.kind, init.kind) {
+      // `let (a, b) = (e1, e2);` — Issue #86. We require an exact
+      // arity match with no `..` so the field-to-pattern correspondence
+      // is unambiguous; mismatched-arity / `..`-bearing tuples fall
+      // through to bind_walk.
+      (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(sub_exprs))
+        if ddpos.as_opt_usize().is_none()
+          && sub_pats.len() == sub_exprs.len() =>
+      {
+        for (sp, se) in sub_pats.iter().zip(sub_exprs.iter()) {
+          self.bind_pat(sp, se, is_skipped);
+        }
+      }
+      // `let Foo(a, b) = Foo(e1, e2);` — single-variant tuple struct
+      // (the only case `let` admits irrefutably). Same arity guard
+      // as above.
+      (PatKind::TupleStruct(_, sub_pats, ddpos), ExprKind::Call(_, sub_exprs))
+        if ddpos.as_opt_usize().is_none()
+          && sub_pats.len() == sub_exprs.len() =>
+      {
+        for (sp, se) in sub_pats.iter().zip(sub_exprs.iter()) {
+          self.bind_pat(sp, se, is_skipped);
+        }
+      }
+      // `let Foo { a, b } = Foo { a: e1, b: e2 };` — pair patterns to
+      // initializer fields by name. Pat fields with no matching expr
+      // field (struct-update syntax `..base`) fall through to
+      // bind_walk against the whole init.
+      (PatKind::Struct(_, pat_fields, _), ExprKind::Struct(_, expr_fields, _)) => {
+        for pf in pat_fields {
+          match expr_fields.iter().find(|f| f.ident.name == pf.ident.name) {
+            Some(ef) => self.bind_pat(pf.pat, ef.expr, is_skipped),
+            None => self.bind_walk(pf.pat, init, is_skipped),
+          }
+        }
+      }
+      // `let &x = &y;` — recurse through the borrow on both sides.
+      (PatKind::Ref(inner_pat, _), ExprKind::AddrOf(_, _, inner_init)) => {
+        self.bind_pat(inner_pat, inner_init, is_skipped);
+      }
+      // `let [a, b] = [e1, e2];` — fixed-length slice destructure
+      // against an array literal of matching length. Pair element-wise.
+      // The mid-`Some` case (`let [a, .., b] = …`) only pairs cleanly
+      // when `mid` is Wild — when it's a binding we'd need a
+      // slice-typed source for it, which we don't have without MIR.
+      // Mid-binding falls through to bind_walk.
+      (PatKind::Slice(before, mid, after), ExprKind::Array(elems))
+        if mid.is_none_or(|m| matches!(m.kind, PatKind::Wild))
+          && before.len() + after.len() <= elems.len()
+          && (mid.is_some() || before.len() + after.len() == elems.len()) =>
+      {
+        for (sp, se) in before.iter().zip(elems.iter()) {
+          self.bind_pat(sp, se, is_skipped);
+        }
+        let after_start = elems.len() - after.len();
+        for (sp, se) in after.iter().zip(elems[after_start..].iter()) {
+          self.bind_pat(sp, se, is_skipped);
+        }
+        // mid-Wild: middle elements are explicitly discarded; their
+        // side effects were captured by the entry visit_expr.
+      }
+      // Canonical leaf: a single named binding consuming the init.
+      (PatKind::Binding(annotation, hirid, ident, sub_pat), _) => {
+        self.bind_one(ident.to_string(), annotation, hirid, init, is_skipped);
+        // `name @ inner_pat` — register any nested bindings too.
+        if let Some(sp) = sub_pat {
+          self.bind_walk(sp, init, is_skipped);
+        }
+      }
+      // `let _ = expr;` — value discarded. The RHS visit at entry
+      // already covered side effects; nothing else to register.
+      (PatKind::Wild, _) => {}
+      // Shape mismatch (e.g. tuple pat against a non-tuple init), or
+      // a refutable pattern under `let-else`, or a pattern shape we
+      // don't structurally decompose (slice, or, deref, …). Best
+      // effort: register every Binding the pattern names so the
+      // timeline isn't empty.
+      _ => self.bind_walk(pat, init, is_skipped),
+    }
+  }
+
+  /// Walk every `PatKind::Binding` reachable inside `pat` and register
+  /// each one as bound from the whole `init` expression. Used as the
+  /// fallback for pattern shapes [`bind_pat`] can't pair element-wise
+  /// against the init. Every PatKind variant is matched explicitly so
+  /// future additions surface as build errors rather than silent
+  /// drops.
+  fn bind_walk(
+    &mut self,
+    pat: &'tcx Pat<'tcx>,
+    init: &'tcx Expr<'tcx>,
+    is_skipped: bool,
+  ) {
+    match pat.kind {
+      PatKind::Binding(annotation, hirid, ident, sub_pat) => {
+        self.bind_one(ident.to_string(), annotation, hirid, init, is_skipped);
+        if let Some(sp) = sub_pat {
+          self.bind_walk(sp, init, is_skipped);
+        }
+      }
+      PatKind::Tuple(pats, _) | PatKind::TupleStruct(_, pats, _) => {
+        for p in pats {
+          self.bind_walk(p, init, is_skipped);
+        }
+      }
+      PatKind::Struct(_, fields, _) => {
+        for f in fields {
+          self.bind_walk(f.pat, init, is_skipped);
+        }
+      }
+      PatKind::Or(pats) => {
+        // Or-pattern alternatives bind the same names; registering
+        // from the first alt is enough — the other alts would
+        // duplicate the same RAPs.
+        if let Some(first) = pats.first() {
+          self.bind_walk(first, init, is_skipped);
+        }
+      }
+      PatKind::Ref(inner, _)
+      | PatKind::Box(inner)
+      | PatKind::Deref(inner)
+      | PatKind::Guard(inner, _) => {
+        self.bind_walk(inner, init, is_skipped);
+      }
+      PatKind::Slice(before, mid, after) => {
+        for p in before { self.bind_walk(p, init, is_skipped); }
+        if let Some(p) = mid { self.bind_walk(p, init, is_skipped); }
+        for p in after { self.bind_walk(p, init, is_skipped); }
+      }
+      // No bindings inside these.
+      PatKind::Wild
+      | PatKind::Never
+      | PatKind::Missing
+      | PatKind::Err(_)
+      | PatKind::Expr(_)
+      | PatKind::Range(..) => {}
+    }
+  }
+
+  /// Register a single named binding `name` introduced by a `let`
+  /// pattern, with `init` as its resource source. Same effect the
+  /// pre-#86 `PatKind::Binding` arm had: pick Move vs. Copy from the
+  /// LHS type, define the LHS RAP, and emit the move/copy event —
+  /// unless the binding's source line is on the skip list, in which
+  /// case we still register the RAP (so later references resolve)
+  /// but record it in `skip_raps` so events touching it get dropped.
+  fn bind_one(
+    &mut self,
+    name: String,
+    annotation: BindingMode,
+    hirid: HirId,
+    init: &'tcx Expr<'tcx>,
+    is_skipped: bool,
+  ) {
+    let tycheck_results = self.tcx.typeck(hirid.owner);
+    let lhs_ty = tycheck_results.node_type(hirid);
+    let is_copyable = self.tcx.type_is_copy_modulo_regions(
+      rustc_middle::ty::TypingEnv::post_analysis(self.tcx, hirid.owner),
+      lhs_ty,
+    );
+    let evt = if lhs_ty.is_ref() {
+      match lhs_ty.ref_mutability().unwrap() {
+        Mutability::Not => Evt::Copy,
+        Mutability::Mut => Evt::Move,
+      }
+    } else if is_copyable {
+      Evt::Copy
+    } else {
+      Evt::Move
+    };
+    self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+    if is_skipped {
+      self.skip_raps.insert(name);
+    } else {
+      let rap = self.raps.get(&name).unwrap().rap.to_owned();
+      self.match_rhs(ResourceTy::Value(rap), init, evt);
+    }
+  }
+}
