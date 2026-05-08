@@ -90,6 +90,12 @@ const EXPECTED_OK: &[&str] = &[
     "closure_move_multi",
     "closure_borrow_imm",
     "closure_borrow_mut",
+    // — Ref-arg call sites inside `println!` (#74): the visitor now
+    //   descends through synthetic macro scaffolding to user-spanned
+    //   subexpressions, so an inline `r.method()` / `f(&r)` inside a
+    //   formatter macro emits its call-site arrow.
+    "method_call_in_println",
+    "freefn_call_in_println",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -310,11 +316,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "inherent_method_rectangle",
         // The Rectangle/area pattern is the canonical "method on a
-        // user struct" shape we know works. We don't test for r.area's
-        // call-site arrow today — see #74 for the ref-arg-call-site
-        // PassByRef arrow that doesn't render yet.
+        // user struct" shape. After #74's macro-descent fix the
+        // inline `rect.area()` inside `print_area`'s `println!` body
+        // now emits its own call-site arrow alongside the outer
+        // `print_area(&r)` arrow.
         must_contain: &[
             "print_area reads from r",
+            "area reads from rect",
             "r acquires ownership of a resource",
             "r goes out of scope. Its resource is dropped.",
         ],
@@ -578,6 +586,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f owns a closure which owns",
             "f is the owner of the resource",
         ],
+    },
+
+    // ─── Ref-arg call sites inside `println!` (#74) ─────────────────
+    // The inline `r.method()` / `f(&r)` inside `println!("{}", …)`
+    // emits its call-site arrow once the visitor descends through
+    // synthetic macro scaffolding. Before #74's fix, the outer
+    // synthetic block's expansion span discarded the entire arg
+    // subtree before the MethodCall / Call arms could fire.
+    TooltipExpect {
+        name: "method_call_in_println",
+        must_contain: &[
+            "get reads from r",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "freefn_call_in_println",
+        must_contain: &[
+            "get reads from r",
+        ],
+        must_not_contain: &[],
     },
 ];
 

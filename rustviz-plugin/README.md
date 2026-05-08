@@ -53,10 +53,6 @@ not all of it. Currently unsupported (or known to misbehave):
   (`r.field.method()`), nested field access (`r.a.b`), and field
   access through a reference (`(&r).field`). Plain `r.field` and
   `&r.field` work.
-- Inherent methods (`impl S { fn ... }`) are fragile — the
-  Rectangle/area pattern (`fn area(&self) -> u32 { self.width *
-  self.height }`) works, but minor variants (e.g. a one-field
-  `fn get(&self) -> i32 { self.n }`) crash.
 
 ### To fix / implement
 

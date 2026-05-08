@@ -15,6 +15,76 @@ use rustc_middle::ty::adjustment::*;
 use std::collections::{HashSet, VecDeque};
 
 
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Walk through synthetic macro-expansion scaffolding to find any
+  /// user-written subexpressions and dispatch them back through
+  /// `visit_expr`. Called from the `from_expansion` guard at the top
+  /// of `visit_expr` (see comment there for why).
+  ///
+  /// We only descend through "transparent container" shapes — Block,
+  /// Call, MethodCall, AddrOf, Unary, DropTemps, Array, Tup. These
+  /// are the wrappers the formatter macros (`println!`,
+  /// `format_args!`, etc.) build around their args and that always
+  /// just hold subexpressions verbatim, so reaching the user's
+  /// subexpression is a straight recursive walk. Synthetic
+  /// control-flow shapes (If / Match / Loop / Closure) are
+  /// deliberately *not* descended through: those are how
+  /// `assert!(cond)`, `?`, and similar macros desugar, and treating
+  /// the synthesized panic-arm or capture-closure body as user code
+  /// would surface spurious events. The existing
+  /// from_expansion-guarded handlers in those arms cover what's
+  /// actually needed (e.g. visit just the assert's guard).
+  fn descend_through_expansion(&mut self, expr: &'tcx Expr<'tcx>) {
+    if !expr.span.from_expansion() {
+      // Re-enter normal dispatch — the user wrote this subexpression.
+      self.visit_expr(expr);
+      return;
+    }
+    match expr.kind {
+      ExprKind::Block(b, _) => {
+        for s in b.stmts {
+          match s.kind {
+            StmtKind::Let(l) => {
+              if let Some(init) = l.init {
+                self.descend_through_expansion(init);
+              }
+            }
+            StmtKind::Expr(e) | StmtKind::Semi(e) => {
+              self.descend_through_expansion(e);
+            }
+            StmtKind::Item(_) => {}
+          }
+        }
+        if let Some(e) = b.expr {
+          self.descend_through_expansion(e);
+        }
+      }
+      ExprKind::Call(_, args) => {
+        for a in args {
+          self.descend_through_expansion(a);
+        }
+      }
+      ExprKind::MethodCall(_, recv, args, _) => {
+        self.descend_through_expansion(recv);
+        for a in args {
+          self.descend_through_expansion(a);
+        }
+      }
+      ExprKind::AddrOf(_, _, inner)
+      | ExprKind::Unary(_, inner)
+      | ExprKind::DropTemps(inner) => {
+        self.descend_through_expansion(inner);
+      }
+      ExprKind::Array(items) | ExprKind::Tup(items) => {
+        for i in items {
+          self.descend_through_expansion(i);
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
 impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
   // A fn body
   fn visit_body(&mut self, body: &rustc_hir::Body<'tcx>) -> Self::Result {
@@ -128,31 +198,44 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
   }
 
   fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
-    // Skip everything synthesized by macro expansion. The user's source
-    // doesn't show e.g. `format_argument::new_display(&s)` from inside
-    // `println!("{}", s)` — surfacing those calls in the timeline (a
-    // spurious `args` column, a "reads from s" arrow into a synthetic
-    // formatter) is more confusing than informative. References to user
-    // variables that happen to live inside a macro argument are reached
-    // only through this outer macro Call, so skipping it also drops the
-    // inner reads — which matches the requested behavior of treating
-    // macro invocations as opaque.
+    // Two complementary behaviours for synthesized HIR nodes (those
+    // whose span originates from a macro / desugar expansion):
     //
-    // Exception: for-loop desugarings. rustc's lower_expr_for marks the
-    // outer Match's span with DesugaringKind::ForLoop, so it's
-    // technically from_expansion — but the Match's body still contains
-    // the user's actual loop body, which we want to render. The for-
-    // loop is also wrapped in a DropTemps (lower_expr_for emits
-    // `expr_drop_temps_mut(for_span, match_expr)` so that head temps
-    // are dropped before the surrounding scope), so peel that through
-    // too. Both shapes fall through to their normal match arms below;
-    // the inner re-entry on the Match handles the desugar.
-    if expr.span.from_expansion()
-       && !matches!(expr.kind,
-           ExprKind::Match(_, _, rustc_hir::MatchSource::ForLoopDesugar)
-           | ExprKind::DropTemps(_))
-    {
-      return;
+    //   1. Most synthetic shapes (`Block` / `Call` / `MethodCall` /
+    //      `AddrOf` / `Unary` / `DropTemps` / `Array` / `Tup`) are
+    //      transparent wrappers — the user's actual code lives at the
+    //      bottom. Modern `println!` / `format_args!` expand to a
+    //      tree like
+    //         { ::std::io::_print({ Arguments::new_v1(&[], &[Argument::new_display(&user_expr)]) }); }
+    //      and the historical blanket return discarded the lot,
+    //      meaning an inline `r.method()` inside a `println!` (issue
+    //      #74) never reached the MethodCall arm. `descend_through_expansion`
+    //      walks those wrappers until it hits a user-spanned
+    //      descendant and re-dispatches that node through `visit_expr`
+    //      so the normal arm logic runs on it. Synthetic control-flow
+    //      shapes (If / Match / Loop / Closure) are deliberately *not*
+    //      descended through: those are how `assert!`, `?`, etc.
+    //      desugar, and the existing arms have explicit
+    //      `from_expansion` handling.
+    //
+    //   2. For-loop desugarings need to fall through to their normal
+    //      arm dispatch. rustc's `lower_expr_for` marks the outer
+    //      Match's span with `DesugaringKind::ForLoop` and wraps it
+    //      in a `DropTemps` (so head temps drop before the surrounding
+    //      scope — both spans are `from_expansion=true`). The Match
+    //      arm's source-discriminator below has explicit
+    //      `ForLoopDesugar` handling that extracts head/pattern/body;
+    //      we exempt those two shapes from descend so that handling
+    //      runs.
+    if expr.span.from_expansion() {
+      if !matches!(expr.kind,
+          ExprKind::Match(_, _, rustc_hir::MatchSource::ForLoopDesugar)
+          | ExprKind::DropTemps(_))
+      {
+        self.descend_through_expansion(expr);
+        return;
+      }
+      // Fall through to the normal Match / DropTemps arm below.
     }
     match expr.kind {
       // fn call <expr>[<expr>]
