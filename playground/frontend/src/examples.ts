@@ -381,9 +381,20 @@ fn main() {
     examples: [
       {
         name: "if as let RHS",
+        // Branches written on their own lines on purpose. The
+        // timeline panel positions per-branch dots by source line,
+        // so the single-line form `if … { … } else { … }` collapses
+        // both branches onto one row and renders as a bowtie /
+        // X-shape rather than the intended pair of branches. Until
+        // the renderer grows synthetic offsets for same-line
+        // branches, the canonical examples stay multi-line.
         code: `fn main() {
     let n = 3;
-    let s = if n > 0 { String::from("a") } else { String::from("b") };
+    let s = if n > 0 {
+        String::from("a")
+    } else {
+        String::from("b")
+    };
     println!("{}", s);
 }`,
       },
