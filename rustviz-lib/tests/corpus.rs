@@ -96,6 +96,9 @@ const EXPECTED_OK: &[&str] = &[
     //   formatter macro emits its call-site arrow.
     "method_call_in_println",
     "freefn_call_in_println",
+    // — Tuple destructuring (#86): each tuple-literal element pairs
+    //   with its sub-pattern as if it were its own `let`.
+    "tuple_destructure",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -559,6 +562,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f is the owner of the resource",
         ],
     },
+    // ─── Tuple destructuring (#86) ──────────────────────────────────
+    TooltipExpect {
+        name: "tuple_destructure",
+        // `let (a, b) = (String::from("x"), String::from("y"));` —
+        // pairs sub-pat to sub-expr so each element renders as its
+        // own move into its own column, with its own scope-end drop.
+        must_contain: &[
+            "Move from String::from to a",
+            "Move from String::from to b",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+
     TooltipExpect {
         name: "closure_borrow_mut",
         // Non-`move` closure that mutates its upvar → mutable borrow.
