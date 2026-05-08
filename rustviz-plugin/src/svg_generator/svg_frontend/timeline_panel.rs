@@ -116,7 +116,11 @@ struct VerticalLineData {
     y1: i64,
     y2: i64,
     title: String,
-    opacity: f64
+    opacity: f64,
+    /// SVG `stroke-dasharray`. "none" for a solid line; "4 3" or
+    /// similar to dash an inactive (Gray-state) branch column so
+    /// readers can tell which lines a given branch is "passive" on.
+    dasharray: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -132,7 +136,11 @@ struct HollowLineData {
     x4: f64,
     y4: f64,
     title: String,
-    opacity: f64
+    opacity: f64,
+    /// Mirrors VerticalLineData::dasharray; propagated through
+    /// `compute_hollow_line_data` so a Gray-state hollow segment
+    /// renders dashed.
+    dasharray: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -282,13 +290,13 @@ fn prepare_registry(registry: &mut Handlebars) {
     let arrow_template =
         "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" style=\"fill: none;\"/>\n            <polygon points=\"{{head_points}}\" fill=\"gray\"/>\n        </g>\n";
     let vertical_line_template =
-        "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}};\"/>\n";
+        "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n";
     let hollow_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"hollow tooltip-trigger\" style=\"fill:transparent;\" d=\"M {{x1}},{{y1}} V {{y2}} h 3.5 V {{y1}} h -3.5\" data-tooltip-text=\"{{title}}\"/>\n";
-    let new_hollow_line_template = "<path 
+    let new_hollow_line_template = "<path
         data-hash=\"{{hash}}\"
         class=\"hollow tooltip-trigger\"
-        style=\"fill:transparent; stroke-opacity: {{opacity}};\"
+        style=\"fill:transparent; stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"
         d=\"M {{x1}},{{y1}} L {{x2}},{{y2}} L {{x3}},{{y3}} L {{x4}},{{y4}} Z\"
         data-tooltip-text=\"{{title}}\"/>";
     let solid_ref_line_template =
@@ -1717,10 +1725,15 @@ fn compute_hollow_line_data(v_data: VerticalLineData, w: f64) -> HollowLineData{
     let x4 = x2 + px;
     let y4 = y2 + py;
 
-    HollowLineData { line_class: v_data.line_class, 
-        hash: v_data.hash, 
-        x1: x1, x2: x2, x3: x4, x4: x3, 
-        y1: y1, y2: y2, y3: y4, y4: y3, title: v_data.title, opacity: v_data.opacity }
+    HollowLineData {
+        line_class: v_data.line_class,
+        hash: v_data.hash,
+        x1: x1, x2: x2, x3: x4, x4: x3,
+        y1: y1, y2: y2, y3: y4, y4: y3,
+        title: v_data.title,
+        opacity: v_data.opacity,
+        dasharray: v_data.dasharray,
+    }
 }
 
 // generate a Owner Line string from the RAP and its State
@@ -1733,9 +1746,16 @@ fn create_owner_line_string(
     // TODO: prevent creating line when function dot already exists
     let style = determine_owner_line_styles(rap, state);
 
+    // Gray-state segments are conditional-branch portions where
+    // *this* branch isn't actively doing anything on the line. Dash
+    // them so readers can scan vertically and see at-a-glance which
+    // arm is producing the events at each row. Faded opacity alone
+    // wasn't visually distinct enough — both arms read as solid
+    // columns to first glance.
     match state {
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
             data.opacity = 0.5;
+            data.dasharray = "4 3".to_owned();
         }
         _ => {}
     }
@@ -1768,6 +1788,7 @@ fn create_reference_line_string(
     match state {
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
             data.opacity = 0.5;
+            data.dasharray = "4 3".to_owned();
         }
         _ => {}
     }
@@ -1882,7 +1903,8 @@ fn render_timeline(
                         x2: branch.t_data.x_val as f64,
                         y2: get_y_axis_pos(*split_point + 1),
                         title: timeline_segment_title(&p_state, rap, visualization_data),
-                        opacity: 1.0
+                        opacity: 1.0,
+                        dasharray: "none".to_owned(),
                     };
 
                     if branch.e_data.is_empty() || i != 0{
@@ -1893,25 +1915,34 @@ fn render_timeline(
                     // get ending state
                     let e_state = branch.states.last().unwrap().2.clone();
 
-                    render_timeline(hash, 
-                        rap, 
+                    render_timeline(hash,
+                        rap,
                         &branch.e_data,
-                        &branch.states, 
-                        output, 
-                        visualization_data, 
-                        &branch.t_data, 
+                        &branch.states,
+                        output,
+                        visualization_data,
+                        &branch.t_data,
                         registry);
-                    
-                    // render line from branch to merge
+
+                    // Render the convergence diagonal so the join
+                    // dot at parent_x@merge_point is the meeting
+                    // point of every branch column. The diagonal
+                    // starts at branch_x@(merge_point - 1) — one
+                    // line above the join, where the branch column
+                    // has been trimmed to (see compute_branch_states
+                    // in data.rs) — and ends at parent_x@merge_point.
+                    // Previously y1 was at merge_point + 1, putting
+                    // the convergence one row past the join dot.
                     let mut merge_line_data = VerticalLineData {
                         line_class: String::new(),
                         hash: *hash,
                         x1: timeline_data.x_val as f64,
-                        y1: get_y_axis_pos(*merge_point + 1),
+                        y1: get_y_axis_pos(*merge_point),
                         x2: branch.t_data.x_val as f64,
-                        y2: get_y_axis_pos(*merge_point),
+                        y2: get_y_axis_pos(merge_point.saturating_sub(1)),
                         title: timeline_segment_title(&e_state, rap, visualization_data),
-                        opacity: 1.0
+                        opacity: 1.0,
+                        dasharray: "none".to_owned(),
                     };
 
                     if branch.e_data.is_empty() {
@@ -1935,7 +1966,8 @@ fn render_timeline(
                 x2: timeline_data.x_val as f64,
                 y2: get_y_axis_pos(*line_end),
                 title: timeline_segment_title(state, rap, visualization_data),
-                opacity: 1.0
+                opacity: 1.0,
+                dasharray: "none".to_owned(),
         };
         if *line_start != *line_end {
             append_line(state, & mut data, rap, timeline_data, output, registry);

@@ -1443,10 +1443,10 @@ impl Visualizable for VisualizationData {
         }
     }
 
-    fn compute_branch_states(&self, 
-    history: & mut Vec<(usize, Event)>, 
-    states: & mut Vec<(usize, usize, State)>, 
-    hash: &u64, 
+    fn compute_branch_states(&self,
+    history: & mut Vec<(usize, Event)>,
+    states: & mut Vec<(usize, usize, State)>,
+    hash: &u64,
     valid_range: (usize, usize),
     branch_start: usize,
     branch_end: usize,
@@ -1457,7 +1457,17 @@ impl Visualizable for VisualizationData {
             return previous_state;
         }
 
+        // Clamp valid_range to [branch_start, branch_end]. With the
+        // convergence-one-line-earlier work, callers now pass
+        // branch_end = merge_point - 1 so the branch column ends
+        // where the convergence diagonal starts. The body span used
+        // to derive valid_range still reaches `merge_point` (the
+        // closing brace), which would push reversed-range states
+        // (e.g. (7, 6, Gray)) without this clamp.
         let (begin, end) = valid_range;
+        let begin = begin.clamp(branch_start, branch_end);
+        let end = end.clamp(branch_start, branch_end);
+
         // Render opaque line if branch does not begin at split point
         if begin != branch_start {
             states.push((branch_start, begin, branch_state_converter(&previous_state)));
@@ -1473,12 +1483,17 @@ impl Visualizable for VisualizationData {
                     let mut ending_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         ending_states.push(self.compute_branch_states(
-                            & mut branch.e_data, 
-                            & mut branch.states, 
-                            hash, 
-                            ty.get_start_end(i), 
+                            & mut branch.e_data,
+                            & mut branch.states,
+                            hash,
+                            ty.get_start_end(i),
                             *split_point + 1,
-                            *merge_point,
+                            // Branch column ends one line above the
+                            // join dot — the convergence diagonal
+                            // bridges that last row. saturating_sub
+                            // guards against the (in practice
+                            // unreachable) merge_point = 0 case.
+                            merge_point.saturating_sub(1),
                             previous_state.clone()));
                     }
 
@@ -1517,12 +1532,17 @@ impl Visualizable for VisualizationData {
                     let mut ending_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         ending_states.push(self.compute_branch_states(
-                            & mut branch.e_data, 
-                            & mut branch.states, 
-                            hash, 
-                            ty.get_start_end(i), 
+                            & mut branch.e_data,
+                            & mut branch.states,
+                            hash,
+                            ty.get_start_end(i),
                             *split_point + 1,
-                            *merge_point,
+                            // Branch column ends one line above the
+                            // join dot — the convergence diagonal
+                            // bridges that last row. saturating_sub
+                            // guards against the (in practice
+                            // unreachable) merge_point = 0 case.
+                            merge_point.saturating_sub(1),
                             previous_state.clone()));
                     }
 
