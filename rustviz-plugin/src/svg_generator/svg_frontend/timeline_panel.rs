@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{convert_back, string_of_branch, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StructsInfo, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StructsInfo, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -636,8 +636,12 @@ fn render_dot(
             Event::RefDie { .. } => {
                 continue;
             }
-            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => {
-                // first append split dot
+            Event::Branch { is, branch_history, ty, merge_point, .. } => {
+                // Top-of-branch dot on the parent column. Tooltip
+                // explains the variable's role ("X is live in a
+                // conditional expression"). Anchors the parent
+                // column visually at the line where the conditional
+                // begins.
                 let b_data = EventDotData {
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,
@@ -646,38 +650,30 @@ fn render_dot(
                 };
                 append_dot(&b_data, output, timeline_data, registry);
 
-                // render dots for each of the branches
-                for (i, branch) in branch_history.iter().enumerate() {
-                    // render a dot at the beginning of the timeline
-                    let split_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: branch.t_data.x_val,
-                        dot_y: get_y_axis_pos(*split_point + 1),
-                        title: string_of_branch(ty, i)
-                    };
-                    append_dot(&split_data, output, &branch.t_data, registry);
-
+                // Each branch column gets its real events rendered.
+                // No "If"/"Else" bookend dots: the per-branch
+                // start-dot (at split_point + 1) was a teaching
+                // distraction — it landed on whichever line the
+                // *other* branch happened to acquire on, with the
+                // wrong arm's label. The per-branch end-dot at
+                // merge_point added another redundant pair on the
+                // closing-brace line. Branch identity is already
+                // communicated by column position; the join dot
+                // below speaks for what happened.
+                for branch in branch_history.iter() {
                     render_dot(hash, &branch.e_data, &branch.t_data, output, visualization_data, registry, false);
-
-                    // render a dot at the end of the timeline
-                    let merge_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: branch.t_data.x_val,
-                        dot_y: get_y_axis_pos(*merge_point),
-                        title: string_of_branch(ty, i)
-                    };
-                    append_dot(&merge_data, output, &branch.t_data, registry);
                 }
 
-                // render merge dot. Tooltip is the joined ownership
-                // state for this variable across the branches above —
-                // see `branch_join_message`. Title is empty for the
-                // Unchanged case so the dot stays as a structural
-                // marker without a stray hover.
+                // Per-variable merge dot, on the parent column at
+                // `merge_point` (the closing-brace line). Sat at
+                // `merge_point + 1` previously — a line below the
+                // conditional, which read as a stray dot on
+                // unrelated code below. Empty title for the
+                // Unchanged case keeps it as a structural marker.
                 let m_data = EventDotData {
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,
-                    dot_y: get_y_axis_pos(*merge_point + 1),
+                    dot_y: get_y_axis_pos(*merge_point),
                     title: branch_join_message(branch_history, ty, &is.real_name()),
                 };
                 append_dot(&m_data, output, timeline_data, registry);

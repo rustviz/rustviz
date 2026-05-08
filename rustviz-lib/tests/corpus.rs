@@ -685,7 +685,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // String::from. After the conditional `s` owns a freshly-bound
         // resource regardless of branch.
         must_contain: &[
-            "s is bound here from one of the branches above",
+            "s acquired ownership of a resource (in all branches above)",
         ],
         must_not_contain: &[
             "merge",
@@ -706,18 +706,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "if_no_else",
         // Plain `if cond { body }` with `s` moved inside the body.
-        // The Branch is single-branch — only "If" appears, no
-        // synthesized "Else" — and the merge dot tooltip says `s`
-        // may have been moved (the implicit-untouched else means
-        // BoundHere can't fire).
+        // The merge dot says `s` may have been moved — the implicit-
+        // untouched else means BoundHere can't fire. No "If" / "Else"
+        // tooltips: those bookend dots got dropped because they were
+        // a teaching distraction (see render_dot's Branch arm).
         must_contain: &[
-            "If",
             "s may have been moved (consumed in at least one branch above)",
         ],
         must_not_contain: &[
+            "If",
             "Else",
             "merge",
-            "is bound here from one of the branches above",
+            "acquired ownership of a resource (in all branches above)",
         ],
     },
 ];

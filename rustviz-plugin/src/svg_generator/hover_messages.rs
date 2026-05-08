@@ -766,7 +766,7 @@ pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
 pub fn event_dot_branch_merge_bound(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} is bound here from one of the branches above",
+        "{0} acquired ownership of a resource (in all branches above)",
         my_name_fmt
     )
 }
