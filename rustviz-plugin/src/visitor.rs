@@ -21,19 +21,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `visit_expr`. Called from the `from_expansion` guard at the top
   /// of `visit_expr` (see comment there for why).
   ///
-  /// We only descend through "transparent container" shapes — Block,
-  /// Call, MethodCall, AddrOf, Unary, DropTemps, Array, Tup. These
-  /// are the wrappers the formatter macros (`println!`,
-  /// `format_args!`, etc.) build around their args and that always
-  /// just hold subexpressions verbatim, so reaching the user's
-  /// subexpression is a straight recursive walk. Synthetic
-  /// control-flow shapes (If / Match / Loop / Closure) are
-  /// deliberately *not* descended through: those are how
-  /// `assert!(cond)`, `?`, and similar macros desugar, and treating
-  /// the synthesized panic-arm or capture-closure body as user code
-  /// would surface spurious events. The existing
-  /// from_expansion-guarded handlers in those arms cover what's
-  /// actually needed (e.g. visit just the assert's guard).
+  /// Descended through:
+  /// - "transparent container" shapes (Block, Call, MethodCall,
+  ///   AddrOf, Unary, DropTemps, Array, Tup) — these are the wrappers
+  ///   `println!` / `format_args!` build around their args.
+  /// - the *condition* of synthetic If / Match — `assert!(cond)`
+  ///   lowers to a `match cond { true => {}, _ => panic!(…) }` whose
+  ///   scrutinee is the user's `cond`, including any function calls
+  ///   inside it. Without descending the scrutinee we'd miss the
+  ///   call-site PassByRef events for `assert!(f(&x))` shapes (the
+  ///   user-visible symptom: no `f` icon on the timeline at the
+  ///   assert line).
+  ///
+  /// Not descended through: arm bodies, loop bodies, closure bodies.
+  /// Those are where macro internals (the synthetic panic arm of
+  /// assert!, the closure of `?`'s ControlFlow continuation, etc.)
+  /// live, and surfacing their events would pollute the diagram with
+  /// branches the user didn't write.
   fn descend_through_expansion(&mut self, expr: &'tcx Expr<'tcx>) {
     if !expr.span.from_expansion() {
       // Re-enter normal dispatch — the user wrote this subexpression.
@@ -79,6 +83,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         for i in items {
           self.descend_through_expansion(i);
         }
+      }
+      // `assert!(cond)` and `assert_eq!(...)` desugar to a `Match`
+      // whose scrutinee is the user-written cond and whose arms are
+      // synthesized panic / no-op branches. Descend into the
+      // scrutinee so calls like `compare_strings(r1, r2)` inside the
+      // assert get their normal Call-arm handling (PassByStaticRef
+      // events, function-dot icon on the timeline). Skip the arms —
+      // their bodies are synthetic panics we don't want to surface
+      // as user events.
+      ExprKind::Match(scrutinee, _, _) => {
+        self.descend_through_expansion(scrutinee);
+      }
+      // Symmetric for `if cond { … } else { … }` desugarings (older
+      // assert! shapes, `?`'s ControlFlow check, etc.). Walk the
+      // guard; skip the arms.
+      ExprKind::If(guard, _, _) => {
+        self.descend_through_expansion(guard);
       }
       _ => {}
     }
