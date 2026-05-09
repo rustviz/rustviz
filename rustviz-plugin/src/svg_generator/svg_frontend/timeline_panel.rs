@@ -2051,11 +2051,24 @@ fn render_branches(
                 for offset in [-half_w, half_w] {
                     let mut pieces: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
 
+                    // Parent-side endpoints carry the same `offset`
+                    // as the branch-side endpoints, so the two
+                    // parallel sides of the strip stay offset by
+                    // half_w throughout — including through the
+                    // convergence diagonals. Pre-fix the parent
+                    // endpoint sat at parent_x (a single apex
+                    // point), which made the two sides converge
+                    // to one point and produced a "diamond"
+                    // taper at each parent junction. Both
+                    // endpoints are inside the parent dot's
+                    // rendered radius so the strip visually meets
+                    // the dot cleanly without losing the
+                    // convergence cue.
                     if alive_at_start {
                         pieces.push((
                             leading_dashed,
                             vec![
-                                (parent_x, get_y_axis_pos(*split_point) as f64),
+                                (parent_x + offset, get_y_axis_pos(*split_point) as f64),
                                 (branch_x + offset, get_y_axis_pos(*split_point + 1) as f64),
                             ],
                             p_title.clone(),
@@ -2078,7 +2091,7 @@ fn render_branches(
                             trailing_dashed,
                             vec![
                                 (branch_x + offset, get_y_axis_pos(merge_point.saturating_sub(1)) as f64),
-                                (parent_x, get_y_axis_pos(*merge_point) as f64),
+                                (parent_x + offset, get_y_axis_pos(*merge_point) as f64),
                             ],
                             e_title.clone(),
                         ));
@@ -2115,6 +2128,76 @@ fn render_branches(
                             TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
                         )).0.timelines.push_str(&svg);
                     }
+                }
+
+                // Hover capture: a single transparent `<polygon>`
+                // covering the strip's perimeter for this branch.
+                // The visible polylines are 1.5px-wide and the
+                // ~3.5px gap between the two parallel sides isn't
+                // covered by any element on its own, so hovering
+                // anywhere in that gap fired no tooltip. The
+                // polygon spans both sides and the convergence
+                // wedges so a hover anywhere over the branch's
+                // visual strip surfaces the column's tooltip.
+                // Stroke is suppressed so it doesn't add visible
+                // outline; fill is transparent so it doesn't
+                // shade the area but still receives pointer
+                // events.
+                let split_y = get_y_axis_pos(*split_point) as f64;
+                let merge_y = get_y_axis_pos(*merge_point) as f64;
+                let column_top_y = get_y_axis_pos(*split_point + 1) as f64;
+                let column_bot_y = get_y_axis_pos(merge_point.saturating_sub(1)) as f64;
+                // Column extent within this strip: bounded by the
+                // first / last body group's row range. With no
+                // body groups (e.g. an `if` arm that consumed the
+                // var at the top of its body), the column extent
+                // collapses to `column_top_y` and the polygon
+                // becomes just the leading-wedge cap — matches
+                // the visible polylines, which are also just the
+                // leading edge in that case.
+                let (col_top_y, col_bot_y) = match (groups.first(), groups.last()) {
+                    (Some(first), Some(last)) => (
+                        get_y_axis_pos(first.1) as f64,
+                        get_y_axis_pos(last.2) as f64,
+                    ),
+                    _ => (column_top_y, column_top_y),
+                };
+                let mut perim: Vec<(f64, f64)> = Vec::new();
+                // Left side, top to bottom.
+                if alive_at_start {
+                    perim.push((parent_x - half_w, split_y));
+                }
+                perim.push((branch_x - half_w, col_top_y));
+                if !groups.is_empty() {
+                    perim.push((branch_x - half_w, col_bot_y));
+                }
+                if alive_at_end {
+                    perim.push((parent_x - half_w, merge_y));
+                }
+                // Right side, bottom to top.
+                if alive_at_end {
+                    perim.push((parent_x + half_w, merge_y));
+                }
+                if !groups.is_empty() {
+                    perim.push((branch_x + half_w, col_bot_y));
+                }
+                perim.push((branch_x + half_w, col_top_y));
+                if alive_at_start {
+                    perim.push((parent_x + half_w, split_y));
+                }
+                if perim.len() >= 3 {
+                    let pts_str = perim.iter()
+                        .map(|p| format!("{},{}", p.0, p.1))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let svg = format!(
+                        "        <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+                        hash, pts_str, p_title,
+                    );
+                    output.entry(-1).or_insert_with(|| (
+                        TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                        TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                    )).0.timelines.push_str(&svg);
                 }
 
                 // Recurse for any branches nested inside this
