@@ -1880,6 +1880,201 @@ fn append_line(
     }
 }
 
+// Style classifier for branch column segments: returns Some(true)
+// for "dashed" (Gray) states, Some(false) for "solid" (Full) states,
+// and None for states that render as nothing (OOS, ResourceMoved,
+// etc.). Used to slice a branch's `states` into per-style runs that
+// each become one polyline.
+fn segment_style(state: &State) -> Option<bool> {
+    match state {
+        State::FullPrivilege { s: LineState::Gray }
+        | State::PartialPrivilege { s: LineState::Gray } => Some(true),
+        State::FullPrivilege { s: LineState::Full }
+        | State::PartialPrivilege { s: LineState::Full } => Some(false),
+        _ => None,
+    }
+}
+
+/// Render every branch (and any nested branches) reachable through
+/// `history`. Each branch's column-plus-convergence is emitted as
+/// `<polyline>` elements: one per side of the strip, broken at
+/// style boundaries (solid ↔ dashed). Adjacent polylines share
+/// endpoints exactly so a dashed leading edge meets the column's
+/// dashed leading run with no gap, the column's solid body meets
+/// the trailing solid wedge with no gap, etc.
+///
+/// Replaces the previous "split_line + body + merge_line" trio of
+/// independently-rendered strip elements, where the strip-via-
+/// perpendicular orientation of the diagonals didn't line up with
+/// the column's horizontal-perpendicular sides at the corners.
+fn render_branches(
+    hash: &u64,
+    rap: &ResourceAccessPoint,
+    history: &Vec<(usize, Event)>,
+    parent_states: &Vec<(usize, usize, State)>,
+    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    visualization_data: &VisualizationData,
+    timeline_data: &TimelineColumnData,
+) {
+    if rap.is_fn() { return; }
+    for (_, ev) in history {
+        if let Event::Branch { branch_history, split_point, merge_point, .. } = ev {
+            // Find the parent state segment that *covers* the
+            // split point. Range-containment (rather than exact
+            // end-line match) handles the let-as-rhs case where
+            // the parent's pre-branch and during-branch OOS
+            // segments get merged by clean_states.
+            let begin_state = parent_states.iter()
+                .find(|item| item.0 <= *split_point && *split_point <= item.1)
+                .cloned()
+                .unwrap_or((0, 0, State::OutOfScope));
+            // Let-as-rhs (variable doesn't exist before the
+            // conditional, parent state is OOS): synthesize a
+            // FullPrivilege::Full leading state so the active
+            // arm's leading diagonal has something to render. The
+            // passive-arm dasharray override below handles the
+            // alternates.
+            let p_state = match begin_state.2 {
+                State::OutOfScope => State::FullPrivilege { s: LineState::Full },
+                ref s => convert_back(s),
+            };
+            let p_title = timeline_segment_title(&p_state, rap, visualization_data);
+
+            // Half the hollow column's strip width — matches
+            // `compute_hollow_line_data`'s w=3.5 / 2 on a vertical
+            // line, so the polyline endpoints share coordinates
+            // with the column body's two parallel `<line>`s.
+            let half_w: f64 = 1.75;
+            let parent_x = timeline_data.x_val as f64;
+
+            for (i, branch) in branch_history.iter().enumerate() {
+                let branch_x = branch.t_data.x_val as f64;
+                let e_state = branch.states.last().map(|s| s.2.clone()).unwrap_or(State::OutOfScope);
+                let e_title = timeline_segment_title(&e_state, rap, visualization_data);
+
+                // Leading edge style: passive arms (i != 0) and
+                // empty branches dash; the leading active arm
+                // renders solid.
+                let leading_dashed = branch.e_data.is_empty() || i != 0;
+                // Trailing edge style: tracks the branch's
+                // ending state (Gray → dashed, anything else →
+                // solid). Lets `else { println!(s) }` (active arm
+                // with no surfaced events but Owner end-state)
+                // converge solid into the join dot.
+                let trailing_dashed = matches!(
+                    e_state,
+                    State::FullPrivilege { s: LineState::Gray }
+                    | State::PartialPrivilege { s: LineState::Gray }
+                );
+
+                // Body groups: contiguous-style runs of state
+                // segments. Zero-length and unrenderable states
+                // (OOS, ResourceMoved, ...) drop out so the
+                // surrounding polylines connect through the gap.
+                let mut groups: Vec<(bool, usize, usize, String)> = Vec::new();
+                for seg in &branch.states {
+                    if seg.0 == seg.1 { continue; }
+                    if let Some(dashed) = segment_style(&seg.2) {
+                        let title = timeline_segment_title(&seg.2, rap, visualization_data);
+                        if let Some(last) = groups.last_mut() {
+                            if last.0 == dashed && last.2 == seg.0 {
+                                last.2 = seg.1;
+                                continue;
+                            }
+                        }
+                        groups.push((dashed, seg.0, seg.1, title));
+                    }
+                }
+
+                // For each side of the strip emit polylines:
+                // walk pieces (leading | body groups | trailing)
+                // in source order and merge consecutive same-
+                // style pieces into single `<polyline>`s. Where
+                // styles change, two abutting polylines share a
+                // common endpoint and meet seamlessly.
+                for offset in [-half_w, half_w] {
+                    let mut pieces: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
+
+                    pieces.push((
+                        leading_dashed,
+                        vec![
+                            (parent_x, get_y_axis_pos(*split_point) as f64),
+                            (branch_x + offset, get_y_axis_pos(*split_point + 1) as f64),
+                        ],
+                        p_title.clone(),
+                    ));
+
+                    for (dashed, top, bot, title) in &groups {
+                        pieces.push((
+                            *dashed,
+                            vec![
+                                (branch_x + offset, get_y_axis_pos(*top) as f64),
+                                (branch_x + offset, get_y_axis_pos(*bot) as f64),
+                            ],
+                            title.clone(),
+                        ));
+                    }
+
+                    pieces.push((
+                        trailing_dashed,
+                        vec![
+                            (branch_x + offset, get_y_axis_pos(merge_point.saturating_sub(1)) as f64),
+                            (parent_x, get_y_axis_pos(*merge_point) as f64),
+                        ],
+                        e_title.clone(),
+                    ));
+
+                    let mut polylines: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
+                    for (dashed, pts, title) in pieces {
+                        let merged = polylines.last().map(|l| l.0 == dashed).unwrap_or(false);
+                        if merged {
+                            let last = polylines.last_mut().unwrap();
+                            for (i, p) in pts.into_iter().enumerate() {
+                                if i == 0 && last.1.last() == Some(&p) {
+                                    continue;
+                                }
+                                last.1.push(p);
+                            }
+                        } else {
+                            polylines.push((dashed, pts, title));
+                        }
+                    }
+
+                    for (dashed, pts, title) in polylines {
+                        let pts_str = pts.iter()
+                            .map(|p| format!("{},{}", p.0, p.1))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let dasharray = if dashed { "4 4" } else { "none" };
+                        let svg = format!(
+                            "        <polyline data-hash=\"{}\" class=\"hollow tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:none; stroke-opacity: 1.0; stroke-dasharray: {};\"/>\n",
+                            hash, pts_str, title, dasharray,
+                        );
+                        output.entry(-1).or_insert_with(|| (
+                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                        )).0.timelines.push_str(&svg);
+                    }
+                }
+
+                // Recurse for any branches nested inside this
+                // branch's body. The nested call uses this
+                // branch's own state list as `parent_states` so
+                // its begin_state lookup hits the right segment.
+                render_branches(
+                    hash,
+                    rap,
+                    &branch.e_data,
+                    &branch.states,
+                    output,
+                    visualization_data,
+                    &branch.t_data,
+                );
+            }
+        }
+    }
+}
+
 // render timeline given a hash
 fn render_timeline(
     hash: &u64,
@@ -1892,117 +2087,13 @@ fn render_timeline(
     registry: &Handlebars
 ) {
     if rap.is_fn() { return; } // functions have no timelines
-    for (_, ev) in history {
-        match ev {
-            Event::Branch { branch_history, split_point, merge_point, ..} => {
-                // Find the state segment that *covers* the split point.
-                // Looking for `.1 == split_point` was a foothold from
-                // the days before let-as-rhs could put a Branch in
-                // live_vars: when the LHS variable doesn't exist
-                // before the conditional, the pre-branch state and
-                // the during-branch placeholder are both OutOfScope
-                // and clean_states merges them, so the boundary at
-                // split_point disappears. Range-containment finds the
-                // right segment in either case.
-                let begin_state = states.iter()
-                    .find(|item| item.0 <= *split_point && *split_point <= item.1)
-                    .unwrap_or_else(|| panic!("no state segment covers split_point {}", split_point))
-                    .clone();
-                // For let-as-rhs bindings the parent state is
-                // OutOfScope before the conditional — the variable
-                // doesn't exist yet. `create_owner_line_string`
-                // returns "" for OutOfScope, so the leading split
-                // diagonals from the fork dot down to each branch
-                // column would silently vanish, leaving the fork dot
-                // floating above disconnected branches. Treat the
-                // OOS-prior case as if the variable were
-                // FullPrivilege::Full at the split: the *active*
-                // branch's diagonal renders as the regular owner
-                // line (solid for mut, hollow for immut), and the
-                // passive-branch dasharray below dashes the rest.
-                let p_state = match begin_state.2 {
-                    State::OutOfScope => State::FullPrivilege { s: LineState::Full },
-                    ref s => convert_back(s),
-                };
-                for (i, branch) in branch_history.iter().enumerate() {
-                    let mut split_line_data = VerticalLineData {
-                        line_class: String::new(),
-                        hash: *hash,
-                        x1: timeline_data.x_val as f64,
-                        y1: get_y_axis_pos(*split_point),
-                        x2: branch.t_data.x_val as f64,
-                        y2: get_y_axis_pos(*split_point + 1),
-                        title: timeline_segment_title(&p_state, rap, visualization_data),
-                        opacity: 1.0,
-                        dasharray: "none".to_owned(),
-                    };
-
-                    // The first branch (i = 0, conventionally the
-                    // if-arm or the first match-arm) renders solid
-                    // — it's the "leading" path the user reads
-                    // first. Subsequent branches dash + fade their
-                    // leading split diagonal so it's clear they're
-                    // the alternate paths. Empty branches always
-                    // dash + fade. Pre-set dasharray here so a
-                    // non-Gray state (the OOS-promoted Full case
-                    // above, or a real pre-existing FullPrivilege)
-                    // still renders dashed for passive arms;
-                    // create_owner_line_string only sets dasharray
-                    // for Gray and won't otherwise.
-                    if branch.e_data.is_empty() || i != 0 {
-                        split_line_data.dasharray = "4 4".to_owned();
-                    }
-                    append_line(&p_state, &mut split_line_data, rap, timeline_data, output, registry);
-
-                    // get ending state
-                    let e_state = branch.states.last().unwrap().2.clone();
-
-                    render_timeline(hash,
-                        rap,
-                        &branch.e_data,
-                        &branch.states,
-                        output,
-                        visualization_data,
-                        &branch.t_data,
-                        registry);
-
-                    // Render the convergence diagonal so the join
-                    // dot at parent_x@merge_point is the meeting
-                    // point of every branch column. The diagonal
-                    // starts at branch_x@(merge_point - 1) — one
-                    // line above the join, where the branch column
-                    // has been trimmed to (see compute_branch_states
-                    // in data.rs) — and ends at parent_x@merge_point.
-                    // Previously y1 was at merge_point + 1, putting
-                    // the convergence one row past the join dot.
-                    let mut merge_line_data = VerticalLineData {
-                        line_class: String::new(),
-                        hash: *hash,
-                        x1: timeline_data.x_val as f64,
-                        y1: get_y_axis_pos(*merge_point),
-                        x2: branch.t_data.x_val as f64,
-                        y2: get_y_axis_pos(merge_point.saturating_sub(1)),
-                        title: timeline_segment_title(&e_state, rap, visualization_data),
-                        opacity: 1.0,
-                        dasharray: "none".to_owned(),
-                    };
-
-                    // Solid vs dashed for the convergence diagonal
-                    // is decided downstream by `create_owner_line_string`
-                    // / `create_reference_line_string` from `e_state`.
-                    // We don't force dashed for empty `e_data` — with
-                    // the body-span treatment of empty branches,
-                    // `e_state` is the active state at merge-1 and
-                    // already says "solid" when this branch is the
-                    // active path at the join (e.g. `else { println!(s) }`
-                    // — no events on s but else IS the active arm).
-
-                    append_line(&e_state, &mut merge_line_data, rap, timeline_data, output, registry);
-                }
-            }
-            _ => {}
-        }
-    }
+    // Branch columns + convergences render as polylines via
+    // `render_branches`; the per-state loop below only emits
+    // column lines for the parent timeline outside the branch
+    // ranges (clean_states leaves an OOS placeholder over the
+    // branch's split..merge span, so those rows naturally render
+    // as nothing).
+    render_branches(hash, rap, history, states, output, visualization_data, timeline_data);
 
     for (line_start, line_end, state) in states {
         // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
