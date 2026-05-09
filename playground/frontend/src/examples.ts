@@ -480,6 +480,19 @@ fn main() {
 }`,
       },
       {
+        name: "if let Some / else",
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let opt: Option<String> = Some(String::from("x"));
+    if let Some(x) = opt {
+        show(&x);
+    } else {
+        // pattern didn't match — opt was None
+    }
+}`,
+      },
+      {
         name: "match with a borrow in one arm",
         code: `fn show(_s: &String) {} // rustviz: hide
 
