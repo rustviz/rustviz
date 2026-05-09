@@ -1924,60 +1924,39 @@ fn render_timeline(
                     State::OutOfScope => State::FullPrivilege { s: LineState::Full },
                     ref s => convert_back(s),
                 };
-                // Half the hollow column's strip width — the column
-                // body is rendered with the two parallel `<line>`
-                // sides offset by ±1.75 from `branch_x` (matches
-                // `compute_hollow_line_data`'s w=3.5 / 2 on a
-                // vertical line). The split / merge convergences
-                // below use the same offset so their endpoints
-                // share exact coordinates with the column's edges
-                // — no corner gap where strip-based perpendicular
-                // offsets don't line up with horizontal column
-                // offsets.
-                let half_w: f64 = 1.75;
-                let parent_x = timeline_data.x_val as f64;
-
                 for (i, branch) in branch_history.iter().enumerate() {
-                    let branch_x = branch.t_data.x_val as f64;
-
-                    // Render the leading wedge: two `<line>`s from
-                    // the parent dot at split_point fanning out to
-                    // the column-top edges (branch_x ± half_w).
-                    // Sharing endpoints with the column's two
-                    // parallel sides — no corner gap. The first
-                    // branch (i = 0, the if-arm or first match-
-                    // arm) renders solid as the leading path;
-                    // alternates / empty branches render dashed.
-                    let leading_dasharray = if branch.e_data.is_empty() || i != 0 {
-                        "4 4".to_owned()
-                    } else {
-                        "none".to_owned()
+                    let mut split_line_data = VerticalLineData {
+                        line_class: String::new(),
+                        hash: *hash,
+                        x1: timeline_data.x_val as f64,
+                        y1: get_y_axis_pos(*split_point),
+                        x2: branch.t_data.x_val as f64,
+                        y2: get_y_axis_pos(*split_point + 1),
+                        title: timeline_segment_title(&p_state, rap, visualization_data),
+                        opacity: 1.0,
+                        dasharray: "none".to_owned(),
                     };
-                    let split_title = timeline_segment_title(&p_state, rap, visualization_data);
-                    for offset in [-half_w, half_w] {
-                        let line_data = VerticalLineData {
-                            line_class: "hollow".to_owned(),
-                            hash: *hash,
-                            x1: parent_x,
-                            y1: get_y_axis_pos(*split_point),
-                            x2: branch_x + offset,
-                            y2: get_y_axis_pos(*split_point + 1),
-                            title: split_title.clone(),
-                            opacity: 1.0,
-                            dasharray: leading_dasharray.clone(),
-                        };
-                        let s = registry.render("vertical_line_template", &line_data).unwrap();
-                        output.entry(-1).or_insert_with(|| (
-                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                        )).0.timelines.push_str(&s);
-                    }
 
-                    // Body of the branch column: state-driven,
-                    // hollow rendering already emits two parallel
-                    // `<line>`s aligned with branch_x ± half_w
-                    // through `compute_hollow_line_data`.
+                    // The first branch (i = 0, conventionally the
+                    // if-arm or the first match-arm) renders solid
+                    // — it's the "leading" path the user reads
+                    // first. Subsequent branches dash + fade their
+                    // leading split diagonal so it's clear they're
+                    // the alternate paths. Empty branches always
+                    // dash + fade. Pre-set dasharray here so a
+                    // non-Gray state (the OOS-promoted Full case
+                    // above, or a real pre-existing FullPrivilege)
+                    // still renders dashed for passive arms;
+                    // create_owner_line_string only sets dasharray
+                    // for Gray and won't otherwise.
+                    if branch.e_data.is_empty() || i != 0 {
+                        split_line_data.dasharray = "4 4".to_owned();
+                    }
+                    append_line(&p_state, &mut split_line_data, rap, timeline_data, output, registry);
+
+                    // get ending state
                     let e_state = branch.states.last().unwrap().2.clone();
+
                     render_timeline(hash,
                         rap,
                         &branch.e_data,
@@ -1987,37 +1966,38 @@ fn render_timeline(
                         &branch.t_data,
                         registry);
 
-                    // Trailing wedge: two `<line>`s from the
-                    // column-bottom edges (branch_x ± half_w at
-                    // merge_point - 1) converging to the parent
-                    // join dot at merge_point. Solid vs dashed
-                    // tracks `e_state` so a passive (Gray) end
-                    // state surfaces as a dashed wedge while an
-                    // active (Full) end state renders solid.
-                    let trailing_dasharray = match e_state {
-                        State::FullPrivilege { s: LineState::Gray }
-                        | State::PartialPrivilege { s: LineState::Gray } => "4 4".to_owned(),
-                        _ => "none".to_owned(),
+                    // Render the convergence diagonal so the join
+                    // dot at parent_x@merge_point is the meeting
+                    // point of every branch column. The diagonal
+                    // starts at branch_x@(merge_point - 1) — one
+                    // line above the join, where the branch column
+                    // has been trimmed to (see compute_branch_states
+                    // in data.rs) — and ends at parent_x@merge_point.
+                    // Previously y1 was at merge_point + 1, putting
+                    // the convergence one row past the join dot.
+                    let mut merge_line_data = VerticalLineData {
+                        line_class: String::new(),
+                        hash: *hash,
+                        x1: timeline_data.x_val as f64,
+                        y1: get_y_axis_pos(*merge_point),
+                        x2: branch.t_data.x_val as f64,
+                        y2: get_y_axis_pos(merge_point.saturating_sub(1)),
+                        title: timeline_segment_title(&e_state, rap, visualization_data),
+                        opacity: 1.0,
+                        dasharray: "none".to_owned(),
                     };
-                    let merge_title = timeline_segment_title(&e_state, rap, visualization_data);
-                    for offset in [-half_w, half_w] {
-                        let line_data = VerticalLineData {
-                            line_class: "hollow".to_owned(),
-                            hash: *hash,
-                            x1: branch_x + offset,
-                            y1: get_y_axis_pos(merge_point.saturating_sub(1)),
-                            x2: parent_x,
-                            y2: get_y_axis_pos(*merge_point),
-                            title: merge_title.clone(),
-                            opacity: 1.0,
-                            dasharray: trailing_dasharray.clone(),
-                        };
-                        let s = registry.render("vertical_line_template", &line_data).unwrap();
-                        output.entry(-1).or_insert_with(|| (
-                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                        )).0.timelines.push_str(&s);
-                    }
+
+                    // Solid vs dashed for the convergence diagonal
+                    // is decided downstream by `create_owner_line_string`
+                    // / `create_reference_line_string` from `e_state`.
+                    // We don't force dashed for empty `e_data` — with
+                    // the body-span treatment of empty branches,
+                    // `e_state` is the active state at merge-1 and
+                    // already says "solid" when this branch is the
+                    // active path at the join (e.g. `else { println!(s) }`
+                    // — no events on s but else IS the active arm).
+
+                    append_line(&e_state, &mut merge_line_data, rap, timeline_data, output, registry);
                 }
             }
             _ => {}
