@@ -730,9 +730,43 @@ pub fn state_invalid(my_name: &String) -> String {
 pub fn structure(my_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
-    
+
     format!(
         "the components in the box belong to struct {0}",
+        my_name_fmt
+    )
+}
+
+// ── Conditional join-point messages ────────────────────────────────
+//
+// Tooltip on the per-variable merge dot at the bottom of an `if` /
+// `match` / `if let`. Says what happened to the variable across the
+// branches, so the reader doesn't have to scan each branch's history
+// to figure out whether the resource is still owned. Wording follows
+// Rust's actual rule: "moved in any branch above" → unusable here,
+// no matter how many branches actually moved it. Resource ownership
+// at the join is binary (owned vs. not), and the messaging tracks
+// that, not the raw count.
+
+/// Variable was moved (consumed without being rebound) in at least
+/// one branch above. After the conditional Rust treats it as
+/// possibly-moved → can't be used.
+pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} may have been moved (consumed in at least one branch above)",
+        my_name_fmt
+    )
+}
+
+/// Every branch above contributed a value that ends up in this
+/// variable (the `let s = if … { … } else { … };` shape, plus the
+/// match-as-rhs analog). After the conditional the variable owns a
+/// freshly bound resource regardless of which branch ran.
+pub fn event_dot_branch_merge_bound(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} acquired ownership of a resource (in all branches above)",
         my_name_fmt
     )
 }

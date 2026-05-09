@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{convert_back, string_of_branch, string_of_external_event, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StructsInfo, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StructsInfo, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -116,7 +116,11 @@ struct VerticalLineData {
     y1: i64,
     y2: i64,
     title: String,
-    opacity: f64
+    opacity: f64,
+    /// SVG `stroke-dasharray`. "none" for a solid line; "4 3" or
+    /// similar to dash an inactive (Gray-state) branch column so
+    /// readers can tell which lines a given branch is "passive" on.
+    dasharray: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -132,7 +136,11 @@ struct HollowLineData {
     x4: f64,
     y4: f64,
     title: String,
-    opacity: f64
+    opacity: f64,
+    /// Mirrors VerticalLineData::dasharray; propagated through
+    /// `compute_hollow_line_data` so a Gray-state hollow segment
+    /// renders dashed.
+    dasharray: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -282,15 +290,20 @@ fn prepare_registry(registry: &mut Handlebars) {
     let arrow_template =
         "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" style=\"fill: none;\"/>\n            <polygon points=\"{{head_points}}\" fill=\"gray\"/>\n        </g>\n";
     let vertical_line_template =
-        "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}};\"/>\n";
+        "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n";
     let hollow_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"hollow tooltip-trigger\" style=\"fill:transparent;\" d=\"M {{x1}},{{y1}} V {{y2}} h 3.5 V {{y1}} h -3.5\" data-tooltip-text=\"{{title}}\"/>\n";
-    let new_hollow_line_template = "<path 
-        data-hash=\"{{hash}}\"
-        class=\"hollow tooltip-trigger\"
-        style=\"fill:transparent; stroke-opacity: {{opacity}};\"
-        d=\"M {{x1}},{{y1}} L {{x2}},{{y2}} L {{x3}},{{y3}} L {{x4}},{{y4}} Z\"
-        data-tooltip-text=\"{{title}}\"/>";
+    // Hollow column rendering: two parallel `<line>` elements,
+    // one per side of the strip. No closing horizontal at top or
+    // bottom — those were the source of the "stray dash tick" at
+    // segment boundaries (closed/open paths drew a dashed
+    // horizontal connector that appeared as an extra mark where a
+    // dashed segment met a solid one). Two independent lines have
+    // `stroke-linecap: butt` by default, so adjacent state
+    // segments — dashed leading + solid body + dashed trailing —
+    // meet at exact y-coordinates with nothing between them, and
+    // the column reads as one continuous strip with two textures.
+    let new_hollow_line_template = "<g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x1}}\" y1=\"{{y1}}\" x2=\"{{x2}}\" y2=\"{{y2}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x4}}\" y1=\"{{y4}}\" x2=\"{{x3}}\" y2=\"{{y3}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n        </g>\n";
     let solid_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"mutref {{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let hollow_ref_line_template =
@@ -374,51 +387,44 @@ fn update_timeline_data(events: & mut Vec<(usize, Event)>, parent_data: &Timelin
                     // copy the parent data
                     branch.t_data = parent_data.clone();
                 }
-                // update the xvalue based on width
+                // Update the x-value of each branch based on its width.
+                // The N-branch fanned-out layout used to be Match-only;
+                // the dedicated 2-branch If/Loop arm hardcoded
+                // `branch_history[1]`, which panicked when an `if`
+                // without an `else` produced a single-branch event.
+                // Math reduces to the same x-values as the old If
+                // layout for N=2, so use the generic path for every
+                // BranchType.
                 let mut parent_branch_data: Vec<TimelineColumnData> = Vec::new();
-                match ty {
-                    BranchType::Match(..) => {
-                        let halfway = branch_history.len() / 2;
-                        let mut running_x = parent_data.x_val;
-                        for i in (0..halfway).rev() {
-                            let b_data = branch_history.get_mut(i).unwrap();
-                            let b_width = b_data.width;
-                            let padding = if i == halfway - 1 {1} else {0};
-                            let left_side_coefficient = -1 * (b_width + padding) as i64;
-                            let x = left_side_coefficient * BRANCH_WEIGHT;
-                            running_x += x;
-                            b_data.t_data.x_val = running_x;
-                            running_x -= 2 * BRANCH_WEIGHT;
-                        }
-                        for i in 0..halfway {
-                          let b_data = branch_history.get(i).unwrap();
-                          parent_branch_data.push(b_data.t_data.clone());
-                        }
+                let _ = ty; // BranchType doesn't affect x-positioning
+                let halfway = branch_history.len() / 2;
+                let mut running_x = parent_data.x_val;
+                for i in (0..halfway).rev() {
+                    let b_data = branch_history.get_mut(i).unwrap();
+                    let b_width = b_data.width;
+                    let padding = if i == halfway - 1 { 1 } else { 0 };
+                    let left_side_coefficient = -1 * (b_width + padding) as i64;
+                    let x = left_side_coefficient * BRANCH_WEIGHT;
+                    running_x += x;
+                    b_data.t_data.x_val = running_x;
+                    running_x -= 2 * BRANCH_WEIGHT;
+                }
+                for i in 0..halfway {
+                    let b_data = branch_history.get(i).unwrap();
+                    parent_branch_data.push(b_data.t_data.clone());
+                }
 
-                        running_x = parent_data.x_val;
-                        for i in halfway..branch_history.len() {
-                            let b_data = branch_history.get_mut(i).unwrap();
-                            let b_width = b_data.width;
-                            let padding = if i == halfway {1} else {0};
-                            let right_side_coefficient = (b_width + padding) as i64;
-                            let x = right_side_coefficient * BRANCH_WEIGHT;
-                            running_x += x;
-                            b_data.t_data.x_val = running_x;
-                            running_x += 2 * BRANCH_WEIGHT;
-                            parent_branch_data.push(b_data.t_data.clone());
-                        }
-                    }
-                    _ => {
-                        let if_bw = branch_history.get(0).unwrap().width;
-                        let else_bw = branch_history.get(1).unwrap().width;
-                        let if_offset_coefficient: i64 = -1 * ((if_bw + 1) as i64); // + 1 for padding between branches
-                        let else_offset_coefficient: i64 = (else_bw + 1) as i64;
-
-                        branch_history.get_mut(0).unwrap().t_data.x_val = parent_data.x_val + (if_offset_coefficient * BRANCH_WEIGHT);
-                        branch_history.get_mut(1).unwrap().t_data.x_val = parent_data.x_val + (else_offset_coefficient * BRANCH_WEIGHT);
-                        parent_branch_data.push(branch_history.get(0).unwrap().t_data.clone());
-                        parent_branch_data.push(branch_history.get(1).unwrap().t_data.clone());
-                    }
+                running_x = parent_data.x_val;
+                for i in halfway..branch_history.len() {
+                    let b_data = branch_history.get_mut(i).unwrap();
+                    let b_width = b_data.width;
+                    let padding = if i == halfway { 1 } else { 0 };
+                    let right_side_coefficient = (b_width + padding) as i64;
+                    let x = right_side_coefficient * BRANCH_WEIGHT;
+                    running_x += x;
+                    b_data.t_data.x_val = running_x;
+                    running_x += 2 * BRANCH_WEIGHT;
+                    parent_branch_data.push(b_data.t_data.clone());
                 }
 
                 // recurse
@@ -643,8 +649,12 @@ fn render_dot(
             Event::RefDie { .. } => {
                 continue;
             }
-            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => {
-                // first append split dot
+            Event::Branch { is, branch_history, ty, merge_point, .. } => {
+                // Top-of-branch dot on the parent column. Tooltip
+                // explains the variable's role ("X is live in a
+                // conditional expression"). Anchors the parent
+                // column visually at the line where the conditional
+                // begins.
                 let b_data = EventDotData {
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,
@@ -653,35 +663,31 @@ fn render_dot(
                 };
                 append_dot(&b_data, output, timeline_data, registry);
 
-                // render dots for each of the branches
-                for (i, branch) in branch_history.iter().enumerate() {
-                    // render a dot at the beginning of the timeline
-                    let split_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: branch.t_data.x_val,
-                        dot_y: get_y_axis_pos(*split_point + 1),
-                        title: string_of_branch(ty, i)
-                    };
-                    append_dot(&split_data, output, &branch.t_data, registry);
-
+                // Each branch column gets its real events rendered.
+                // No "If"/"Else" bookend dots: the per-branch
+                // start-dot (at split_point + 1) was a teaching
+                // distraction — it landed on whichever line the
+                // *other* branch happened to acquire on, with the
+                // wrong arm's label. The per-branch end-dot at
+                // merge_point added another redundant pair on the
+                // closing-brace line. Branch identity is already
+                // communicated by column position; the join dot
+                // below speaks for what happened.
+                for branch in branch_history.iter() {
                     render_dot(hash, &branch.e_data, &branch.t_data, output, visualization_data, registry, false);
-
-                    // render a dot at the end of the timeline
-                    let merge_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: branch.t_data.x_val,
-                        dot_y: get_y_axis_pos(*merge_point),
-                        title: string_of_branch(ty, i)
-                    };
-                    append_dot(&merge_data, output, &branch.t_data, registry);
                 }
 
-                // render merge dot
+                // Per-variable merge dot, on the parent column at
+                // `merge_point` (the closing-brace line). Sat at
+                // `merge_point + 1` previously — a line below the
+                // conditional, which read as a stray dot on
+                // unrelated code below. Empty title for the
+                // Unchanged case keeps it as a structural marker.
                 let m_data = EventDotData {
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,
-                    dot_y: get_y_axis_pos(*merge_point + 1),
-                    title: "merge".to_owned()
+                    dot_y: get_y_axis_pos(*merge_point),
+                    title: branch_join_message(branch_history, ty, &is.real_name()),
                 };
                 append_dot(&m_data, output, timeline_data, registry);
                 continue;
@@ -808,6 +814,110 @@ fn render_dot(
         }
         // push to individual timelines
         append_dot(&data, output, timeline_data, registry);
+    }
+}
+
+// ── Conditional join-state computation ─────────────────────────────
+//
+// Computes the joined ownership state of one variable across the
+// branches of an `if` / `match` / `if let`, used to label the per-
+// variable merge dot at the bottom of the conditional.
+//
+// We classify each branch's *end state* for the variable as
+// (ends_moved, has_acquire) by walking the per-variable Event list
+// the conversion in data.rs already filtered for us. Move events on
+// that list mean the variable was moved out; Acquire events mean it
+// received a new resource (re-bind or first bind). Borrows / dies /
+// duplicates don't change ownership.
+//
+// Nested conditionals are handled recursively: if any nested path
+// moves the variable, we propagate that up as a possible move on the
+// containing path. If every nested path acquires the variable, we
+// propagate that up as an acquire.
+//
+// Joining across the outer branches:
+//   - Any branch ends moved             → MovedAfter
+//   - Every branch acquires AND every    → BoundHere
+//     conceptual path is represented
+//     (no missing else)
+//   - Otherwise                          → Unchanged (no tooltip)
+//
+// "Every conceptual path is represented" — for `if cond { body }`
+// without an else, the implicit-untouched else means the var can't
+// be considered freshly-bound regardless of what the if branch does.
+// Match arms are exhaustive in Rust, so all paths are present.
+
+enum BranchJoin {
+    Unchanged,
+    MovedAfter,
+    BoundHere,
+}
+
+fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
+    let mut moved = false;
+    let mut acquired = false;
+    for (_, e) in events {
+        match e {
+            Event::Move { .. } => { moved = true; acquired = false; }
+            Event::Acquire { .. } => { moved = false; acquired = true; }
+            Event::Branch { branch_history, ty, .. } => {
+                let mut nested_any_moved = false;
+                let mut nested_all_acquired = !branch_history.is_empty();
+                for nb in branch_history {
+                    let (m, a) = analyze_branch_for_join(&nb.e_data);
+                    if m { nested_any_moved = true; }
+                    if !a { nested_all_acquired = false; }
+                }
+                if nested_any_moved {
+                    moved = true; acquired = false;
+                } else if nested_all_acquired && all_paths_present(ty, branch_history.len()) {
+                    moved = false; acquired = true;
+                }
+            }
+            // Borrows, returns, copies-from-here, duplicates: don't
+            // change whether the variable still owns its resource.
+            _ => {}
+        }
+    }
+    (moved, acquired)
+}
+
+fn all_paths_present(ty: &BranchType, n_branches: usize) -> bool {
+    match ty {
+        // Plain `if cond { … }` without an else has only one branch
+        // recorded; the implicit-untouched else means not every
+        // conceptual path acquires, so BoundHere can't fire.
+        BranchType::If(labels, _) => labels.len() >= 2 && n_branches >= 2,
+        // Rust match is exhaustive — every path is one of the arms.
+        BranchType::Match(labels, _) => labels.len() == n_branches,
+        // Loop bodies are conditionally entered (zero or more times),
+        // so a "BoundHere" claim isn't appropriate for their merge.
+        BranchType::Loop(_, _) => false,
+    }
+}
+
+fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType) -> BranchJoin {
+    let mut any_moved = false;
+    let mut all_acquired = !branch_history.is_empty();
+    for b in branch_history {
+        let (m, a) = analyze_branch_for_join(&b.e_data);
+        if m { any_moved = true; }
+        if !a { all_acquired = false; }
+    }
+    if any_moved {
+        BranchJoin::MovedAfter
+    } else if all_acquired && all_paths_present(ty, branch_history.len()) {
+        BranchJoin::BoundHere
+    } else {
+        BranchJoin::Unchanged
+    }
+}
+
+fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, var_name: &String) -> String {
+    match compute_branch_join(branch_history, ty) {
+        BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
+        BranchJoin::BoundHere => hover_messages::event_dot_branch_merge_bound(var_name),
+        BranchJoin::Unchanged => String::new(),
     }
 }
 
@@ -1620,10 +1730,15 @@ fn compute_hollow_line_data(v_data: VerticalLineData, w: f64) -> HollowLineData{
     let x4 = x2 + px;
     let y4 = y2 + py;
 
-    HollowLineData { line_class: v_data.line_class, 
-        hash: v_data.hash, 
-        x1: x1, x2: x2, x3: x4, x4: x3, 
-        y1: y1, y2: y2, y3: y4, y4: y3, title: v_data.title, opacity: v_data.opacity }
+    HollowLineData {
+        line_class: v_data.line_class,
+        hash: v_data.hash,
+        x1: x1, x2: x2, x3: x4, x4: x3,
+        y1: y1, y2: y2, y3: y4, y4: y3,
+        title: v_data.title,
+        opacity: v_data.opacity,
+        dasharray: v_data.dasharray,
+    }
 }
 
 // generate a Owner Line string from the RAP and its State
@@ -1636,9 +1751,21 @@ fn create_owner_line_string(
     // TODO: prevent creating line when function dot already exists
     let style = determine_owner_line_styles(rap, state);
 
+    // Gray-state segments are conditional-branch portions where
+    // *this* branch isn't actively doing anything on the line. Dash
+    // them so readers can scan vertically and see at-a-glance which
+    // arm is producing the events at each row. Faded opacity alone
+    // wasn't visually distinct enough — both arms read as solid
+    // columns to first glance.
+    // Gray-state segments: render at full opacity so they read as
+    // the same line as the active solid segments, just textured
+    // differently. Pre-fix the dashed legs sat at 0.5 opacity which
+    // made the dashed-then-solid transitions look like two
+    // independent lines instead of one continuous timeline. The
+    // dash pattern is the only inactive cue now.
     match state {
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
-            data.opacity = 0.5;
+            data.dasharray = "4 4".to_owned();
         }
         _ => {}
     }
@@ -1668,9 +1795,15 @@ fn create_reference_line_string(
     data: &mut VerticalLineData,
     registry: &Handlebars,
 ) -> String {
+    // Gray-state segments: render at full opacity so they read as
+    // the same line as the active solid segments, just textured
+    // differently. Pre-fix the dashed legs sat at 0.5 opacity which
+    // made the dashed-then-solid transitions look like two
+    // independent lines instead of one continuous timeline. The
+    // dash pattern is the only inactive cue now.
     match state {
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
-            data.opacity = 0.5;
+            data.dasharray = "4 4".to_owned();
         }
         _ => {}
     }
@@ -1747,6 +1880,398 @@ fn append_line(
     }
 }
 
+// ── Branch column rendering: invariants ────────────────────────────
+//
+// A branch's column-plus-convergences is rendered from three
+// pieces of the variable's lifecycle within the branch:
+//
+//   • A leading convergence diagonal (parent split dot → top of
+//     column) — emitted iff the variable is "alive" entering the
+//     branch (i.e., owns or borrows a resource — not in OOS or
+//     ResourceMoved).
+//   • A column body, sliced into per-style runs (solid for
+//     active-arm states, dashed for Gray-converted passive-arm
+//     states). Unrenderable states (OOS, ResourceMoved) drop out
+//     of the body — the column visually ends where the variable
+//     stops owning a resource.
+//   • A trailing convergence diagonal (column bottom → parent
+//     merge dot) — emitted iff the variable is "alive" leaving
+//     the branch.
+//
+// The classifiers below name these decisions explicitly so the
+// renderer can never silently bridge across an empty body. The
+// previous regression was exactly that: leading and trailing
+// pieces both rendered solid, and `merge consecutive same-style
+// pieces` collapsed them into a single polyline that "stitched
+// over" a Move event. Naming the rule (`alive_at_end`) and
+// gating the trailing piece on it pulls that invariant into one
+// place where it can be tested and maintained.
+
+/// Classifier for branch column body segments. Returns:
+///   • `Some(true)`  for a dashed segment (Gray-converted, the
+///     branch is the inactive path on this row).
+///   • `Some(false)` for a solid segment (FullPrivilege /
+///     PartialPrivilege at LineState::Full — the active path).
+///   • `None` for states that don't draw a column line
+///     (OutOfScope, ResourceMoved). Their absence in the body
+///     run terminates the column visually so the variable's
+///     "departure" (Move, scope end) is reflected in the column
+///     ending, not in a stray faded line.
+fn segment_style(state: &State) -> Option<bool> {
+    match state {
+        State::FullPrivilege { s: LineState::Gray }
+        | State::PartialPrivilege { s: LineState::Gray } => Some(true),
+        State::FullPrivilege { s: LineState::Full }
+        | State::PartialPrivilege { s: LineState::Full } => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the variable owns / can-borrow a resource at this
+/// state. The convergence diagonals only render when the variable
+/// is alive at the corresponding branch boundary — drawing them
+/// otherwise would bridge a terminated column to the join dot
+/// across rows that should be empty.
+fn state_is_alive(state: &State) -> bool {
+    !matches!(
+        state,
+        State::ResourceMoved { .. } | State::OutOfScope
+    )
+}
+
+/// Unit-length perpendicular to the line `p1 → p2`. Used to offset
+/// each side of the strip by `half_w` perpendicular to the line
+/// direction so the *visual* gap between the two parallel sides is
+/// constant regardless of angle. Pre-fix the offset was applied in
+/// the x-axis only, which made diagonals' visual gap shrink as
+/// `cos(θ)` (a 40° diagonal was ~23% narrower than the vertical
+/// body), and the user noticed the diagonals reading as "too close
+/// together" compared to the column.
+fn perp_unit(p1: (f64, f64), p2: (f64, f64)) -> (f64, f64) {
+    let dx = p2.0 - p1.0;
+    let dy = p2.1 - p1.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-9 {
+        return (1.0, 0.0);
+    }
+    (-dy / len, dx / len)
+}
+
+/// One centerline segment of a branch's strip — the leading
+/// convergence, a body state run, or the trailing convergence.
+/// Each segment carries its own style (dashed/solid) and a
+/// tooltip; offsets are applied per-side at render time.
+struct CenterSeg {
+    style: bool, // dashed
+    p1: (f64, f64),
+    p2: (f64, f64),
+    title: String,
+}
+
+/// Render every branch (and any nested branches) reachable through
+/// `history`. Each branch's column-plus-convergence is emitted as
+/// `<polyline>` elements: one per side of the strip, broken at
+/// style boundaries (solid ↔ dashed). Adjacent polylines share
+/// endpoints exactly so a dashed leading edge meets the column's
+/// dashed leading run with no gap, the column's solid body meets
+/// the trailing solid wedge with no gap, etc.
+///
+/// Replaces the previous "split_line + body + merge_line" trio of
+/// independently-rendered strip elements, where the strip-via-
+/// perpendicular orientation of the diagonals didn't line up with
+/// the column's horizontal-perpendicular sides at the corners.
+fn render_branches(
+    hash: &u64,
+    rap: &ResourceAccessPoint,
+    history: &Vec<(usize, Event)>,
+    parent_states: &Vec<(usize, usize, State)>,
+    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    visualization_data: &VisualizationData,
+    timeline_data: &TimelineColumnData,
+) {
+    if rap.is_fn() { return; }
+    for (_, ev) in history {
+        if let Event::Branch { branch_history, split_point, merge_point, .. } = ev {
+            // Find the parent state segment that *covers* the
+            // split point. Range-containment (rather than exact
+            // end-line match) handles the let-as-rhs case where
+            // the parent's pre-branch and during-branch OOS
+            // segments get merged by clean_states.
+            let begin_state = parent_states.iter()
+                .find(|item| item.0 <= *split_point && *split_point <= item.1)
+                .cloned()
+                .unwrap_or((0, 0, State::OutOfScope));
+            // Let-as-rhs (variable doesn't exist before the
+            // conditional, parent state is OOS): synthesize a
+            // FullPrivilege::Full leading state so the active
+            // arm's leading diagonal has something to render. The
+            // passive-arm dasharray override below handles the
+            // alternates.
+            let p_state = match begin_state.2 {
+                State::OutOfScope => State::FullPrivilege { s: LineState::Full },
+                ref s => convert_back(s),
+            };
+            let p_title = timeline_segment_title(&p_state, rap, visualization_data);
+
+            // Half the hollow column's strip width — matches
+            // `compute_hollow_line_data`'s w=3.5 / 2 on a vertical
+            // line, so the polyline endpoints share coordinates
+            // with the column body's two parallel `<line>`s.
+            let half_w: f64 = 1.75;
+            let parent_x = timeline_data.x_val as f64;
+
+            for (i, branch) in branch_history.iter().enumerate() {
+                let branch_x = branch.t_data.x_val as f64;
+                let e_state = branch.states.last().map(|s| s.2.clone()).unwrap_or(State::OutOfScope);
+                let e_title = timeline_segment_title(&e_state, rap, visualization_data);
+
+                // Leading edge style: passive arms (i != 0) and
+                // empty branches dash; the leading active arm
+                // renders solid.
+                let leading_dashed = branch.e_data.is_empty() || i != 0;
+                // Trailing edge style: tracks the branch's
+                // ending state (Gray → dashed, anything else →
+                // solid). Lets `else { println!(s) }` (active arm
+                // with no surfaced events but Owner end-state)
+                // converge solid into the join dot.
+                let trailing_dashed = matches!(
+                    e_state,
+                    State::FullPrivilege { s: LineState::Gray }
+                    | State::PartialPrivilege { s: LineState::Gray }
+                );
+
+                // Body groups: contiguous-style runs of state
+                // segments. Zero-length and unrenderable states
+                // (OOS, ResourceMoved, ...) drop out so the
+                // surrounding polylines connect through the gap.
+                let mut groups: Vec<(bool, usize, usize, String)> = Vec::new();
+                for seg in &branch.states {
+                    if seg.0 == seg.1 { continue; }
+                    if let Some(dashed) = segment_style(&seg.2) {
+                        let title = timeline_segment_title(&seg.2, rap, visualization_data);
+                        if let Some(last) = groups.last_mut() {
+                            if last.0 == dashed && last.2 == seg.0 {
+                                last.2 = seg.1;
+                                continue;
+                            }
+                        }
+                        groups.push((dashed, seg.0, seg.1, title));
+                    }
+                }
+
+                // Lifecycle invariants — see the architectural
+                // note above this fn. Render the leading edge only
+                // when the variable is alive entering the branch;
+                // render the trailing edge only when alive leaving
+                // the branch. Without these gates a Move at the
+                // top of the body and a still-solid trailing
+                // convergence would form a polyline that bridged
+                // over the Move, putting a stray column line on a
+                // row the variable doesn't exist on.
+                //
+                // `alive_at_start` is checked on the *synthesized*
+                // `p_state` rather than the raw `begin_state.2`.
+                // For let-as-rhs (`let s = if … { … } else { … };`)
+                // the parent's pre-branch state is OutOfScope —
+                // the variable doesn't exist yet — but the branch
+                // *is* about to bring it into scope by acquiring.
+                // The synthesis above maps OOS → FullPrivilege so
+                // the leading diagonal has a renderable state, and
+                // the liveness check needs to run on that mapped
+                // state too, otherwise the leading edge falls off
+                // for every let-as-rhs binding.
+                let alive_at_start = state_is_alive(&p_state);
+                let alive_at_end = state_is_alive(&e_state);
+
+                // Build the centerline segment list for this branch.
+                // Each segment carries its own style and tooltip;
+                // perpendicular offsets get applied per-side below.
+                // The segments line up centerline-end to centerline-
+                // start at every transition, so the two sides are
+                // built by walking the same segment list with
+                // different offset signs.
+                let split_y = get_y_axis_pos(*split_point) as f64;
+                let merge_y = get_y_axis_pos(*merge_point) as f64;
+                let column_top_y = get_y_axis_pos(*split_point + 1) as f64;
+                let column_bot_y = get_y_axis_pos(merge_point.saturating_sub(1)) as f64;
+
+                let mut segs: Vec<CenterSeg> = Vec::new();
+                if alive_at_start {
+                    segs.push(CenterSeg {
+                        style: leading_dashed,
+                        p1: (parent_x, split_y),
+                        p2: (branch_x, column_top_y),
+                        title: p_title.clone(),
+                    });
+                }
+                for (dashed, top, bot, title) in &groups {
+                    segs.push(CenterSeg {
+                        style: *dashed,
+                        p1: (branch_x, get_y_axis_pos(*top) as f64),
+                        p2: (branch_x, get_y_axis_pos(*bot) as f64),
+                        title: title.clone(),
+                    });
+                }
+                if alive_at_end {
+                    segs.push(CenterSeg {
+                        style: trailing_dashed,
+                        p1: (branch_x, column_bot_y),
+                        p2: (parent_x, merge_y),
+                        title: e_title.clone(),
+                    });
+                }
+
+                // Build per-side edge lists (LEFT = +sign offsets
+                // perp.x < 0 outward, RIGHT = -sign). Each segment
+                // contributes one main edge at its perp-offset
+                // endpoints. Where two consecutive segments have
+                // different perp directions (the leading/body and
+                // body/trailing transitions are the canonical
+                // cases — diagonals rotate the perp away from the
+                // body's horizontal), a small bevel edge connects
+                // the previous segment's offset endpoint to the
+                // current segment's offset endpoint. The bevel
+                // inherits the *previous* segment's style so a
+                // dashed-leading → solid-body transition keeps the
+                // bevel dashed (matching what the user reads as
+                // "the leading edge ends here").
+                let build_edges = |sign: f64| -> Vec<(bool, (f64, f64), (f64, f64), String)> {
+                    let mut edges: Vec<(bool, (f64, f64), (f64, f64), String)> = Vec::new();
+                    let mut prev_off_p2: Option<(f64, f64)> = None;
+                    let mut prev_style: Option<bool> = None;
+                    let mut prev_title: Option<String> = None;
+                    for seg in &segs {
+                        let perp = perp_unit(seg.p1, seg.p2);
+                        let off_x = perp.0 * sign * half_w;
+                        let off_y = perp.1 * sign * half_w;
+                        let off_p1 = (seg.p1.0 + off_x, seg.p1.1 + off_y);
+                        let off_p2 = (seg.p2.0 + off_x, seg.p2.1 + off_y);
+                        if let (Some(prev_p2), Some(prev_st), Some(prev_t)) =
+                            (prev_off_p2, prev_style, prev_title.clone())
+                        {
+                            let diff_x = (prev_p2.0 - off_p1.0).abs();
+                            let diff_y = (prev_p2.1 - off_p1.1).abs();
+                            if diff_x > 1e-6 || diff_y > 1e-6 {
+                                edges.push((prev_st, prev_p2, off_p1, prev_t));
+                            }
+                        }
+                        edges.push((seg.style, off_p1, off_p2, seg.title.clone()));
+                        prev_off_p2 = Some(off_p2);
+                        prev_style = Some(seg.style);
+                        prev_title = Some(seg.title.clone());
+                    }
+                    edges
+                };
+
+                let group_edges = |edges: Vec<(bool, (f64, f64), (f64, f64), String)>| -> Vec<(bool, Vec<(f64, f64)>, String)> {
+                    let mut polylines: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
+                    for (style, p1, p2, title) in edges {
+                        if let Some(last) = polylines.last_mut() {
+                            if last.0 == style && last.1.last() == Some(&p1) {
+                                last.1.push(p2);
+                                continue;
+                            }
+                        }
+                        polylines.push((style, vec![p1, p2], title));
+                    }
+                    polylines
+                };
+
+                let path_from_edges = |edges: &[(bool, (f64, f64), (f64, f64), String)]| -> Vec<(f64, f64)> {
+                    let mut path: Vec<(f64, f64)> = Vec::new();
+                    if let Some(first) = edges.first() {
+                        path.push(first.1);
+                    }
+                    for e in edges {
+                        path.push(e.2);
+                    }
+                    path
+                };
+
+                // Build everything for both sides up-front so we
+                // can wrap the whole branch in a `<g>` for unified
+                // hover highlighting.
+                let left_edges = build_edges(1.0);
+                let right_edges = build_edges(-1.0);
+                let left_path = path_from_edges(&left_edges);
+                let right_path = path_from_edges(&right_edges);
+
+                let mut branch_svg = String::new();
+
+                for (style, pts, title) in group_edges(left_edges)
+                    .into_iter()
+                    .chain(group_edges(right_edges).into_iter())
+                {
+                    let pts_str = pts.iter()
+                        .map(|p| format!("{},{}", p.0, p.1))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let dasharray = if style { "4 4" } else { "none" };
+                    branch_svg.push_str(&format!(
+                        "            <polyline data-hash=\"{}\" class=\"hollow tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:none; stroke-opacity: 1.0; stroke-dasharray: {};\"/>\n",
+                        hash, pts_str, title, dasharray,
+                    ));
+                }
+
+                // Hover capture: a transparent `<polygon>` that
+                // traces the strip's perimeter (left path forward
+                // + right path reversed). The visible polylines
+                // are 1.5px-wide and the gap between the two
+                // parallel sides isn't covered by any element on
+                // its own; without this polygon, hovering in that
+                // gap fired no tooltip. `pointer-events:fill` so
+                // the transparent fill still receives mouse
+                // events.
+                let mut perim: Vec<(f64, f64)> = Vec::new();
+                perim.extend(left_path.iter().cloned());
+                perim.extend(right_path.iter().rev().cloned());
+                if perim.len() >= 3 {
+                    let pts_str = perim.iter()
+                        .map(|p| format!("{},{}", p.0, p.1))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    branch_svg.push_str(&format!(
+                        "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+                        hash, pts_str, p_title,
+                    ));
+                }
+
+                // Wrap polylines + polygon in a `<g class="branch-
+                // group">`. CSS rule (.branch-group:hover .tooltip-
+                // trigger) glows every element in the group when
+                // any one is hovered, so moving the mouse into the
+                // strip area highlights the entire branch column
+                // rather than just whichever line segment the
+                // pointer happens to be over. Single-element hover
+                // pre-fix only highlighted one of the two parallel
+                // sides at a time, with no feedback on the
+                // transparent gap or the convergences.
+                output.entry(-1).or_insert_with(|| (
+                    TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                    TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                )).0.timelines.push_str(&format!(
+                    "        <g class=\"branch-group\">\n{}        </g>\n",
+                    branch_svg,
+                ));
+
+                // Recurse for any branches nested inside this
+                // branch's body. The nested call uses this
+                // branch's own state list as `parent_states` so
+                // its begin_state lookup hits the right segment.
+                render_branches(
+                    hash,
+                    rap,
+                    &branch.e_data,
+                    &branch.states,
+                    output,
+                    visualization_data,
+                    &branch.t_data,
+                );
+            }
+        }
+    }
+}
+
 // render timeline given a hash
 fn render_timeline(
     hash: &u64,
@@ -1759,62 +2284,13 @@ fn render_timeline(
     registry: &Handlebars
 ) {
     if rap.is_fn() { return; } // functions have no timelines
-    for (_, ev) in history {
-        match ev {
-            Event::Branch { branch_history, split_point, merge_point, ..} => {
-                let begin_state = states.iter().find(|&item| item.1 == *split_point).unwrap().clone();
-                let p_state = convert_back(&begin_state.2);
-                for (i, branch) in branch_history.iter().enumerate() {
-                    let mut split_line_data = VerticalLineData {
-                        line_class: String::new(),
-                        hash: *hash,
-                        x1: timeline_data.x_val as f64,
-                        y1: get_y_axis_pos(*split_point),
-                        x2: branch.t_data.x_val as f64,
-                        y2: get_y_axis_pos(*split_point + 1),
-                        title: timeline_segment_title(&p_state, rap, visualization_data),
-                        opacity: 1.0
-                    };
-
-                    if branch.e_data.is_empty() || i != 0{
-                        split_line_data.opacity = 0.5;
-                    }
-                    append_line(&p_state, &mut split_line_data, rap, timeline_data, output, registry);
-
-                    // get ending state
-                    let e_state = branch.states.last().unwrap().2.clone();
-
-                    render_timeline(hash, 
-                        rap, 
-                        &branch.e_data,
-                        &branch.states, 
-                        output, 
-                        visualization_data, 
-                        &branch.t_data, 
-                        registry);
-                    
-                    // render line from branch to merge
-                    let mut merge_line_data = VerticalLineData {
-                        line_class: String::new(),
-                        hash: *hash,
-                        x1: timeline_data.x_val as f64,
-                        y1: get_y_axis_pos(*merge_point + 1),
-                        x2: branch.t_data.x_val as f64,
-                        y2: get_y_axis_pos(*merge_point),
-                        title: timeline_segment_title(&e_state, rap, visualization_data),
-                        opacity: 1.0
-                    };
-
-                    if branch.e_data.is_empty() {
-                        merge_line_data.opacity = 0.5;
-                    }
-
-                    append_line(&e_state, &mut merge_line_data, rap, timeline_data, output, registry);
-                }
-            }
-            _ => {}
-        }
-    }
+    // Branch columns + convergences render as polylines via
+    // `render_branches`; the per-state loop below only emits
+    // column lines for the parent timeline outside the branch
+    // ranges (clean_states leaves an OOS placeholder over the
+    // branch's split..merge span, so those rows naturally render
+    // as nothing).
+    render_branches(hash, rap, history, states, output, visualization_data, timeline_data);
 
     for (line_start, line_end, state) in states {
         // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
@@ -1826,7 +2302,8 @@ fn render_timeline(
                 x2: timeline_data.x_val as f64,
                 y2: get_y_axis_pos(*line_end),
                 title: timeline_segment_title(state, rap, visualization_data),
-                opacity: 1.0
+                opacity: 1.0,
+                dasharray: "none".to_owned(),
         };
         if *line_start != *line_end {
             append_line(state, & mut data, rap, timeline_data, output, registry);

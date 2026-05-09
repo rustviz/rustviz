@@ -874,9 +874,24 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // returned early on `from_expansion`; (2) a desugaring whose
       // fn_expr is `QPath::LangItem` that hirid_to_var_name can't
       // name. Same rationale as the Path / Field arms in get_rap.
-      let from = hirid_to_var_name(fn_expr.hir_id, &self.tcx)
-        .and_then(|n| self.raps.get(&n).map(|rd| rd.rap.to_owned()))
-        .map_or(ResourceTy::Anonymous, ResourceTy::Value);
+      //
+      // When match_rhs runs *before* visit_expr has reached this
+      // call site (the let-as-rhs reordering for If/Match init in
+      // process_let_binding), the fn name has a resolvable identity
+      // but isn't in `self.raps` yet. Register it on the fly so the
+      // Move/Copy arrow has a labeled source instead of falling back
+      // to Anonymous.
+      let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+        Some(n) => {
+          if !self.raps.contains_key(&n) {
+            self.add_fn(n.clone());
+          }
+          self.raps.get(&n)
+            .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+            .unwrap_or(ResourceTy::Anonymous)
+        }
+        None => ResourceTy::Anonymous,
+      };
       self.add_ev(line_num, evt, lhs, from, false);
     },
     
@@ -1049,14 +1064,26 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         None => {}
       }
     },
-    // TODO: implement conditional let bindings:
-    // let x = if {} else {};
-    // let x = match z {};
+    // `let x = if cond { e1 } else { e2 };` — recurse into each
+    // branch's trailing expression so the move/copy/bind arrow lands
+    // on the LHS once per branch. The branches themselves rendered
+    // their inner side-effects when visit_expr walked them earlier;
+    // this arm is purely about pairing the branch result with `lhs`.
     ExprKind::If(_, if_block, else_block) => {
       self.match_rhs(lhs.clone(), &if_block, evt.clone());
       match else_block {
         Some(e) => self.match_rhs(lhs, &e, evt),
         None => {}
+      }
+    }
+    // `let x = match scrutinee { … };` — same shape as If above.
+    // Each arm's body becomes the value bound to `lhs` on the path
+    // through that arm. Pre-fix this fell through silently and a
+    // match-as-rhs binding got zero move/copy arrows, even though
+    // the equivalent if/else form rendered fine (issue #87).
+    ExprKind::Match(_, arms, _) => {
+      for arm in arms.iter() {
+        self.match_rhs(lhs.clone(), arm.body, evt.clone());
       }
     }
     ExprKind::DropTemps(exp) => {

@@ -855,11 +855,22 @@ impl PartialEq for State {
 impl Eq for State {}
 
 
+/// Convert a state to its "passive" branch flavour — what the
+/// rendering layer turns into a dashed, half-opacity vertical so
+/// readers can tell which arm is the active one on a given row.
+///
+/// `OutOfScope` is converted to `FullPrivilege { Gray }` instead of
+/// staying `OutOfScope` so let-as-rhs bindings (where the variable
+/// doesn't exist before the conditional) still get a visible
+/// passive column on their inactive branch — without this, the
+/// pre-event segment of every let-as-rhs branch rendered as
+/// nothing at all.
 pub fn branch_state_converter(s: &State) -> State {
     match s {
         State::FullPrivilege { .. } => State::FullPrivilege { s: LineState::Gray },
         State::PartialPrivilege { .. } => State::PartialPrivilege { s: LineState::Gray },
-        _ => s.clone() 
+        State::OutOfScope => State::FullPrivilege { s: LineState::Gray },
+        _ => s.clone()
     }
 }
 
@@ -1443,21 +1454,48 @@ impl Visualizable for VisualizationData {
         }
     }
 
-    fn compute_branch_states(&self, 
-    history: & mut Vec<(usize, Event)>, 
-    states: & mut Vec<(usize, usize, State)>, 
-    hash: &u64, 
+    fn compute_branch_states(&self,
+    history: & mut Vec<(usize, Event)>,
+    states: & mut Vec<(usize, usize, State)>,
+    hash: &u64,
     valid_range: (usize, usize),
     branch_start: usize,
     branch_end: usize,
     mut previous_state: State) -> State{
-        // an empty branch - rendered as the same as previous state
+        // Clamp valid_range to [branch_start, branch_end]. With the
+        // convergence-one-line-earlier work, callers now pass
+        // branch_end = merge_point - 1 so the branch column ends
+        // where the convergence diagonal starts. The body span used
+        // to derive valid_range still reaches `merge_point` (the
+        // closing brace), which would push reversed-range states
+        // (e.g. (7, 6, Gray)) without this clamp.
+        let (begin, end) = valid_range;
+        let begin = begin.clamp(branch_start, branch_end);
+        let end = end.clamp(branch_start, branch_end);
+
+        // Empty branches still render: dashed leading segment from
+        // branch_start to begin (the OTHER branch's territory),
+        // solid segment from begin to end (this branch's body
+        // span — even with no per-line events the body range is
+        // active here, so we want it solid), and a dashed trailing
+        // segment from end to branch_end if any. Pre-fix, an empty
+        // branch dropped to a single Gray segment over the entire
+        // column, which made e.g. `else { println!(...) }` look
+        // entirely dashed even though else is the active path on
+        // its own body lines.
         if history.is_empty() {
-            states.push((branch_start, branch_end, branch_state_converter(&previous_state)));
+            if begin > branch_start {
+                states.push((branch_start, begin, branch_state_converter(&previous_state)));
+            }
+            if begin < end {
+                states.push((begin, end, previous_state.clone()));
+            }
+            if end < branch_end {
+                states.push((end, branch_end, branch_state_converter(&previous_state)));
+            }
             return previous_state;
         }
 
-        let (begin, end) = valid_range;
         // Render opaque line if branch does not begin at split point
         if begin != branch_start {
             states.push((branch_start, begin, branch_state_converter(&previous_state)));
@@ -1473,18 +1511,28 @@ impl Visualizable for VisualizationData {
                     let mut ending_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         ending_states.push(self.compute_branch_states(
-                            & mut branch.e_data, 
-                            & mut branch.states, 
-                            hash, 
-                            ty.get_start_end(i), 
+                            & mut branch.e_data,
+                            & mut branch.states,
+                            hash,
+                            ty.get_start_end(i),
                             *split_point + 1,
-                            *merge_point,
+                            // Branch column ends one line above the
+                            // join dot — the convergence diagonal
+                            // bridges that last row. saturating_sub
+                            // guards against the (in practice
+                            // unreachable) merge_point = 0 case.
+                            merge_point.saturating_sub(1),
                             previous_state.clone()));
                     }
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
-                    previous_line = *merge_point + 1; // timeline starts one line after the curly brace
+                    // Resume the parent timeline at `merge_point`,
+                    // not `merge_point + 1`. The join dot sits at
+                    // `merge_point` (see render_dot's Branch arm);
+                    // resuming a row later leaves a visible gap
+                    // between the join and the post-merge state.
+                    previous_line = *merge_point;
                 }
                 _ => {
                     previous_state = self.calc_state(&previous_state, e, *l, hash);
@@ -1517,18 +1565,28 @@ impl Visualizable for VisualizationData {
                     let mut ending_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         ending_states.push(self.compute_branch_states(
-                            & mut branch.e_data, 
-                            & mut branch.states, 
-                            hash, 
-                            ty.get_start_end(i), 
+                            & mut branch.e_data,
+                            & mut branch.states,
+                            hash,
+                            ty.get_start_end(i),
                             *split_point + 1,
-                            *merge_point,
+                            // Branch column ends one line above the
+                            // join dot — the convergence diagonal
+                            // bridges that last row. saturating_sub
+                            // guards against the (in practice
+                            // unreachable) merge_point = 0 case.
+                            merge_point.saturating_sub(1),
                             previous_state.clone()));
                     }
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
-                    previous_line = *merge_point + 1; // timeline starts one line after the curly brace
+                    // Resume the parent timeline at `merge_point`,
+                    // not `merge_point + 1`. The join dot sits at
+                    // `merge_point` (see render_dot's Branch arm);
+                    // resuming a row later leaves a visible gap
+                    // between the join and the post-merge state.
+                    previous_line = *merge_point;
 
                 }
                 _ => {

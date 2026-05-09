@@ -675,12 +675,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           };
         self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
         self.visit_expr(&if_expr);
-        let (else_live, else_decl) = match else_expr {
+        let else_decl = match else_expr {
           Some(e) => {
             self.visit_expr(e);
-            (get_live_of_expr(e, &self.tcx, &self.raps), get_decl_of_expr(e, &self.tcx, &self.raps))
+            get_decl_of_expr(e, &self.tcx, &self.raps)
           }
-          None => { (HashSet::new(), HashSet::new()) }
+          None => HashSet::new(),
         };
         self.inside_branch = false;
 
@@ -693,48 +693,75 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line
         };
 
-        // compute liveness
-        // live variables are defined as variables that are defined outside the conditional but
-        // are used inside of it (the ones whose timelines will have a branch in the visualization)
-        let if_live = get_live_of_expr(if_expr, &self.tcx, &self.raps);
         // Bindings declared by an `if let` guard belong in the if
         // branch's decl set (they live for the body block, same as a
         // top-level `let` inside it).
         let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
-        if_decl.extend(iflet_bindings);
-        let mut liveness: HashSet<ResourceAccessPoint> = if_live.union(&else_live).cloned().collect();
+        if_decl.extend(iflet_bindings.iter().cloned());
 
-        // If the guard sits on a line within the filter range below
-        // (i.e. when the source-level guard and body collapse onto the
-        // same line — the most common cause of this is a macro-expanded
-        // `assert!(cond)` becoming `if !cond { panic!(...) }`, but it
-        // also happens for hand-written one-liners like
-        // `if foo() { bar(); }`), the events emitted while visiting
-        // the guard get filtered into the branch's `e_data` alongside
-        // body events. Without adding the guard's live vars to
-        // `liveness`, the affected variables don't get a Branch entry
-        // on their timelines, and the renderer's fetch_timeline lookup
-        // panics when it tries to find a guard-side event id in the
-        // variable's history. In the normal multi-line case the guard
-        // line is strictly less than `split`, so this conditional is
-        // false and we don't add empty-Branch placeholders to
-        // unrelated timelines.
-        if line_num >= split && line_num <= merge {
-          let guard_live = get_live_of_expr(&guard_expr, &self.tcx, &self.raps);
-          liveness.extend(guard_live);
-        }
+        // Filter events that landed inside each branch's body. The
+        // ranges deliberately exclude the brace lines: `split` is the
+        // line of the if-body's opening `{` (which in normal Rust
+        // formatting is the same line as the guard), and the guard's
+        // events shouldn't be folded into the if-branch — the guard
+        // runs once before either branch, not as part of one. Same
+        // logic for the else side: the `} else {` line carries the
+        // closing of the if-body and the opening of the else-body,
+        // and any events on it are structural noise from either side.
+        // Single-line ifs (split == merge) collapse the ranges to
+        // empty, intentionally — line-based filtering can't separate
+        // body from guard there. The dropdown fix in #117 keeps the
+        // canonical examples multi-line for now.
+        let _ = line_num; // no longer used for guard-live extension
+        // For plain `if cond { … }` we exclude the split line (the
+        // line of the body's opening `{`, normally the same line as
+        // the guard) so guard reads stay on the global timeline. For
+        // `if let pat = expr { … }` the destructure events emitted by
+        // `register_iflet_let_bindings` *are* on the split line and
+        // belong inside the if-branch — include split when an if-let
+        // is in play.
+        let if_filter_lo = if iflet_bindings.is_empty() { split + 1 } else { split };
+        let if_filter_hi = if_end;
+        let else_filter_lo = if_end + 1;
+        let else_filter_hi = merge;
+        let mut if_ev: Vec<(usize, ExternalEvent)> =
+          self.preprocessed_events.iter()
+            .filter(|i| filter_ev(i, if_filter_lo, if_filter_hi))
+            .cloned().collect();
+        let mut else_ev: Vec<(usize, ExternalEvent)> =
+          self.preprocessed_events.iter()
+            .filter(|i| filter_ev(i, else_filter_lo, else_filter_hi))
+            .cloned().collect();
+        // Align the global-event purge with the per-branch filters
+        // above. Removing the entire `[split, merge]` slab (the old
+        // behaviour) drops events that *didn't* make it into either
+        // branch — chiefly the let-as-rhs Moves emitted on the split
+        // line for single-line ifs, and a plain `if cond { … }`'s
+        // guard reads (also on the split line). Those events still
+        // belong on the global timeline; only the events the
+        // branches claimed should be evicted from there.
+        self.preprocessed_events.retain(|(l, _)| {
+          let in_if = *l >= if_filter_lo && *l <= if_filter_hi;
+          let in_else = *l >= else_filter_lo && *l <= else_filter_hi;
+          !(in_if || in_else)
+        });
 
-        // filter events that happened in the if/else block
-        let mut if_ev: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter().filter(|i| filter_ev(i, split, if_end)).cloned().collect();
-        let mut else_ev: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter().filter(|i| filter_ev(i, if_end, merge)).cloned().collect();
-        self.preprocessed_events.retain(|(l, _)| 
-          if *l <= merge && *l >= split {
-            false
-          }
-          else {
-            true
-          }
-        );
+        // Compute liveness from the events actually inside the
+        // branches — only variables touched by a real event get a
+        // branched timeline. Avoids the previous behaviour where
+        // `get_live_of_expr(guard_expr)` always promoted guard
+        // variables (e.g. the `n` in `if n > 0 { … }`) into branched
+        // columns even when neither branch references them.
+        let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
+        collect_event_live_vars(&if_ev, &mut liveness);
+        collect_event_live_vars(&else_ev, &mut liveness);
+        // Variables declared inside a branch (let-stmts within the
+        // body, plus if-let pattern bindings) live only for that
+        // branch — they're not pre-existing variables that need a
+        // branched timeline. Subtract them out.
+        let declared_in_branches: HashSet<ResourceAccessPoint> =
+          if_decl.union(&else_decl).cloned().collect();
+        liveness = liveness.difference(&declared_in_branches).cloned().collect();
 
         // add gos events for variables declared in each block
         for var in if_decl.iter() {
@@ -749,16 +776,55 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         
         let if_map = create_line_map(&if_ev);
-        let else_map = create_line_map(&else_ev);
-        if if_end != merge { if_end += 1; } // this is for front-end formatting
-        let b_ty = BranchType::If(vec!["If".to_owned(), "Else".to_owned()], vec![(split + 1, if_end), (if_end, merge)]);
-        self.add_external_event(line_num, 
-          ExternalEvent::Branch { 
-            live_vars: liveness, 
-            branches: vec![ExtBranchData{ e_data: if_ev, line_map: if_map, decl_vars: if_decl }, 
-                          ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl }], 
-            branch_type: b_ty, 
-            split_point: split, 
+
+        // Per-branch "active" line ranges. Each branch is rendered
+        // solid inside its active range and dashed outside. The
+        // ranges are non-overlapping so the if-branch transitions
+        // to dashed at the line where the else-branch becomes
+        // active.
+        //
+        // For the if-branch we use its body content range
+        // (`split + 1 ..= if_end`); for the else-branch we use its
+        // body span starting at the `} else {` line so the
+        // active region has at least two rows even when the body
+        // has a single content line. Without that, an empty or
+        // single-line else (e.g. `else { println!(...) }` whose
+        // formatter doesn't emit per-event entries on `s`) would
+        // collapse to a zero-length solid segment, leaving the
+        // entire else column dashed.
+        //
+        // `merge_point - 1` is the last line each branch column is
+        // drawn on; the convergence diagonal then bridges that row
+        // to the join dot at `merge_point` (see render_timeline's
+        // Branch arm). Clamping the else-branch's end there keeps
+        // it consistent with the column-trim done in
+        // compute_branch_states.
+        let merge_minus_one = merge.saturating_sub(1);
+        let (b_labels, b_slices, b_branches) = match else_expr {
+          Some(_) => {
+            let else_map = create_line_map(&else_ev);
+            (
+              vec!["If".to_owned(), "Else".to_owned()],
+              vec![(split + 1, if_end), (if_end, merge_minus_one)],
+              vec![
+                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl   },
+                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl },
+              ],
+            )
+          }
+          None => (
+            vec!["If".to_owned()],
+            vec![(split + 1, if_end)],
+            vec![ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl }],
+          ),
+        };
+        let b_ty = BranchType::If(b_labels, b_slices);
+        self.add_external_event(line_num,
+          ExternalEvent::Branch {
+            live_vars: liveness,
+            branches: b_branches,
+            branch_type: b_ty,
+            split_point: split,
             merge_point: merge,
             id: *self.unique_id });
             *self.unique_id += 1;
@@ -880,7 +946,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut b_ty_names: Vec<String> = Vec::new();
         let mut b_slices: Vec<(usize, usize)> = Vec::new();
         let mut branch_data: Vec<ExtBranchData> = Vec::new();
-        let mut liveness: HashSet<ResourceAccessPoint> = get_live_of_expr(guard_expr, &self.tcx, &self.raps);
+        // Liveness is computed from the events actually folded into
+        // each arm's `branch_e_data` below — see the symmetric note
+        // in the If arm. Pat-decls (variables bound by the arm's
+        // pattern) are subtracted off per arm so they don't show up
+        // as branched columns of their own.
+        let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
+        // Track every binding introduced by an arm pattern so we
+        // can subtract the union from `liveness` after all arms have
+        // been processed.
+        let mut all_pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
 
         
         match source {
@@ -960,9 +1035,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.visit_expr(arm.body);
               self.inside_branch = false;
 
-              // update liveness info
-              liveness = liveness.union(&get_live_of_expr(arm.body, &self.tcx, &self.raps)).cloned().collect();
-              liveness = liveness.difference(&pat_decls).cloned().collect();
+              all_pat_decls.extend(pat_decls.iter().cloned());
               let arm_decls: HashSet<ResourceAccessPoint> = pat_decls.union(&get_decl_of_expr(arm.body, &self.tcx, &self.raps)).cloned().collect();
 
 
@@ -970,6 +1043,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               branch_e_data.extend(
                 self.preprocessed_events.iter().filter(|i| filter_ev(i, begin, end)).cloned()
               );
+
+              // contribute events-touched variables to liveness; the
+              // arm's own pat-decls are subtracted at the end.
+              collect_event_live_vars(&branch_e_data, &mut liveness);
 
               // remove elements from global container
               self.preprocessed_events.retain(|(l, _)| 
@@ -1001,13 +1078,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
               branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls});
             }
-            // add branch event
-            self.add_external_event(split, ExternalEvent::Branch { 
-              live_vars: liveness, 
-              branches: branch_data, 
-              branch_type: BranchType::Match(b_ty_names, b_slices), 
-              split_point: split, 
-              merge_point: merge - 1, // TODO: fix
+            // Variables introduced by an arm's pattern only exist
+            // inside that arm — strip them out so they don't get a
+            // branched timeline of their own.
+            liveness = liveness.difference(&all_pat_decls).cloned().collect();
+            // add branch event. merge_point is the closing-brace
+            // line of the match — same convention as If, where
+            // merge_point is the line of the else-block's closing
+            // `}`. Previously this used `merge - 1` (with a stale
+            // TODO marker), which landed the join dot one row above
+            // the `};`, on the last arm's body line.
+            self.add_external_event(split, ExternalEvent::Branch {
+              live_vars: liveness,
+              branches: branch_data,
+              branch_type: BranchType::Match(b_ty_names, b_slices),
+              split_point: split,
+              merge_point: merge,
               id: *self.unique_id });
             *self.unique_id += 1;
           }
@@ -1239,10 +1325,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     init: &'tcx Expr<'tcx>,
     is_skipped: bool,
   ) {
-    if !is_skipped {
+    // For `let s = if … { … } else { … };` (and the match analog),
+    // emit the Move-into-LHS events FIRST. Match_rhs's If/Match arms
+    // recurse into each branch's trailing expression and emit a
+    // Move/Copy/Bind event at that line — when those events exist
+    // in `preprocessed_events` before visit_expr's If arm filters
+    // events into per-branch e_data, the LHS naturally becomes a
+    // branched timeline with an Acquire dot inside each branch and
+    // the merge dot picks up the BoundHere join tooltip.
+    //
+    // For other init shapes the original ordering (visit RHS for
+    // side effects, then register LHS) stays — there's no Branch
+    // event to fold the bind into.
+    let init_is_branching = !is_skipped
+      && matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..));
+    if init_is_branching {
+      self.bind_pat(pat, init, is_skipped);
       self.visit_expr(init);
+    } else {
+      if !is_skipped {
+        self.visit_expr(init);
+      }
+      self.bind_pat(pat, init, is_skipped);
     }
-    self.bind_pat(pat, init, is_skipped);
   }
 
   /// Structural pat-against-init decomposition. When the pattern's

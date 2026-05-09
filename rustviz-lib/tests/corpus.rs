@@ -101,6 +101,15 @@ const EXPECTED_OK: &[&str] = &[
     //   variant takes the same path against an array literal RHS.
     "tuple_destructure",
     "slice_destructure",
+    // — Conditionals (#87, #108): match-as-rhs renders move arrows
+    //   per arm; arm labels show source-form (`0`, `_`); merge dot
+    //   carries a join-state tooltip; nested conditionals propagate;
+    //   no-else `if` doesn't synthesize an "Else" label.
+    "match_as_let_rhs",
+    "if_else_move_join",
+    "if_else_rebind_join",
+    "nested_if_move_join",
+    "if_no_else",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -640,6 +649,76 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "get reads from r",
         ],
         must_not_contain: &[],
+    },
+
+    // ─── Conditionals (#87, #108) ────────────────────────────────────
+    TooltipExpect {
+        name: "match_as_let_rhs",
+        // `let s = match n { 0 => ..., _ => ... };`. Pre-fix: zero
+        // Move arrows (match_rhs had no Match arm), and arm labels
+        // came out as `Int(Pu128(0), Unsuffixed)` / `Wild`. We pin
+        // both the move-arrow recursion and the source-form arm
+        // labels here.
+        must_contain: &[
+            "Move from String::from to s",
+        ],
+        must_not_contain: &[
+            "Int(Pu128(0), Unsuffixed)",
+            "Bool(",
+            "Wild",
+        ],
+    },
+    TooltipExpect {
+        name: "if_else_move_join",
+        // Variable `s` consumed in if branch, only borrowed in else
+        // branch. Merge dot says `s` may have been moved (Rust treats
+        // it as moved regardless of which branch ran).
+        must_contain: &[
+            "Move from s to consume",
+            "s may have been moved (consumed in at least one branch above)",
+        ],
+        must_not_contain: &["merge"],
+    },
+    TooltipExpect {
+        name: "if_else_rebind_join",
+        // Both branches consume `s` and reassign it from a fresh
+        // String::from. After the conditional `s` owns a freshly-bound
+        // resource regardless of branch.
+        must_contain: &[
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "merge",
+            "may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_if_move_join",
+        // Inner if: consume on one inner branch, borrow on the other
+        // → inner merge is "may have been moved". Outer if's else
+        // also consumes `s` → outer merge propagates the move.
+        // Two merge tooltips, both reading "may have been moved".
+        must_contain: &[
+            "s may have been moved (consumed in at least one branch above)",
+        ],
+        must_not_contain: &["merge"],
+    },
+    TooltipExpect {
+        name: "if_no_else",
+        // Plain `if cond { body }` with `s` moved inside the body.
+        // The merge dot says `s` may have been moved — the implicit-
+        // untouched else means BoundHere can't fire. No "If" / "Else"
+        // tooltips: those bookend dots got dropped because they were
+        // a teaching distraction (see render_dot's Branch arm).
+        must_contain: &[
+            "s may have been moved (consumed in at least one branch above)",
+        ],
+        must_not_contain: &[
+            "If",
+            "Else",
+            "merge",
+            "acquired ownership of a resource (in all branches above)",
+        ],
     },
 ];
 

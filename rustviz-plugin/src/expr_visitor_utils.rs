@@ -2,7 +2,7 @@
 use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet, VecDeque}, ops::Bound};
 use log::warn;
 use rustc_hir::Mutability;
-use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceTy};
+use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
 use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_span::Span;
 use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, StmtKind, Stmt, Block, UnOp};
@@ -176,19 +176,23 @@ pub fn get_name_of_pat(pat: &Pat, tcx: &TyCtxt) -> String {
     PatKind::Expr(rustc_hir::PatExpr { kind: rustc_hir::PatExprKind::Path(QPath::Resolved(_, p)), .. }) => {
       string_of_path(&p, tcx)
     }
-    // Literal-pattern arms like `true =>` / `0 =>` show up in
-    // macro-expanded code we have no source-text view of (chiefly
-    // `assert!(cond)`, which expands to a match with `true` and `_`
-    // arms). Render the literal's Debug form as the arm label rather
-    // than panicking; the value is used purely as a label, not for
-    // semantic analysis, so a "Bool(true)" / "Int(0, …)" label is
-    // sufficient. Avoids needing to import rustc_ast for a typed
-    // match on LitKind.
+    // Literal-pattern arms (`true =>`, `0 =>`). Prefer the source
+    // form via span_to_snippet so the user sees `0` / `true` instead
+    // of the debug-printed AST (`Int(Pu128(0), Unsuffixed)` /
+    // `Bool(true)`). Fall back to the debug print when the pattern
+    // came from macro expansion (no source-text view) — chiefly
+    // `assert!(cond)`, which lowers to `match cond { true => {}, _ =>
+    // panic!() }` with synthetic arms.
     PatKind::Expr(rustc_hir::PatExpr { kind: rustc_hir::PatExprKind::Lit { lit, .. }, .. }) => {
-      format!("{:?}", lit.node)
+      if pat.span.from_expansion() {
+        format!("{:?}", lit.node)
+      } else {
+        tcx.sess.source_map().span_to_snippet(pat.span)
+          .unwrap_or_else(|_| format!("{:?}", lit.node))
+      }
     }
     PatKind::Wild => {
-      String::from("Wild")
+      String::from("_")
     }
     PatKind::Tuple(pat_list, _) => {
       let mut res = String::from("(");
@@ -203,7 +207,16 @@ pub fn get_name_of_pat(pat: &Pat, tcx: &TyCtxt) -> String {
       }
       res
     }
-    _ => panic!("unexpected pat kind {:#?}", pat)
+    // Anything else — slice patterns, struct patterns, or-patterns,
+    // ranges, refs/box/deref, etc. We're rendering this purely as a
+    // human-readable arm label, so the source span is the right
+    // fallback. If span_to_snippet fails (synthetic spans on macro-
+    // expanded patterns we haven't classified above), drop a generic
+    // placeholder rather than panic.
+    _ => {
+      tcx.sess.source_map().span_to_snippet(pat.span)
+        .unwrap_or_else(|_| String::from("<pat>"))
+    }
   }
 }
 
@@ -221,6 +234,60 @@ pub fn num_derefs(expr: &Expr) -> usize{
 // LIVENESS + DECLARATION FUNCTIONS
 // Functions used for getting variables that are live inside of blocks
 // As well as variables that are declared inside of blocks
+
+/// Walk every `PatKind::Binding` reachable inside `pat` and accumulate
+/// the corresponding RAPs into `out`. Mirror of `bind_walk` in
+/// visitor.rs — used by `get_decl_of_stmt` so that destructuring let
+/// patterns inside a conditional body register every binding they
+/// introduce, not just simple `let x = …;` shapes. Skips bindings
+/// that haven't been registered yet (e.g. names skipped by
+/// `visit_local`'s from_expansion guard).
+fn collect_pat_bindings(
+  pat: &Pat,
+  raps: &HashMap<String, RapData>,
+  out: &mut HashSet<ResourceAccessPoint>,
+) {
+  match pat.kind {
+    PatKind::Binding(_, _, ident, sub_pat) => {
+      if let Some(rd) = raps.get(&ident.to_string()) {
+        out.insert(rd.rap.to_owned());
+      }
+      if let Some(sp) = sub_pat {
+        collect_pat_bindings(sp, raps, out);
+      }
+    }
+    PatKind::Tuple(pats, _) | PatKind::TupleStruct(_, pats, _) => {
+      for p in pats { collect_pat_bindings(p, raps, out); }
+    }
+    PatKind::Struct(_, fields, _) => {
+      for f in fields { collect_pat_bindings(f.pat, raps, out); }
+    }
+    PatKind::Or(pats) => {
+      // Or-pattern alts bind the same names; walking one alt is enough.
+      if let Some(first) = pats.first() {
+        collect_pat_bindings(first, raps, out);
+      }
+    }
+    PatKind::Ref(inner, _)
+    | PatKind::Box(inner)
+    | PatKind::Deref(inner)
+    | PatKind::Guard(inner, _) => {
+      collect_pat_bindings(inner, raps, out);
+    }
+    PatKind::Slice(before, mid, after) => {
+      for p in before { collect_pat_bindings(p, raps, out); }
+      if let Some(p) = mid { collect_pat_bindings(p, raps, out); }
+      for p in after { collect_pat_bindings(p, raps, out); }
+    }
+    // No bindings inside these.
+    PatKind::Wild
+    | PatKind::Never
+    | PatKind::Missing
+    | PatKind::Err(_)
+    | PatKind::Expr(_)
+    | PatKind::Range(..) => {}
+  }
+}
 
 pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint>{
   let mut res:HashSet<ResourceAccessPoint> = HashSet::new();
@@ -246,13 +313,7 @@ pub fn get_decl_of_stmt(stmt: &Stmt, _tcx: &TyCtxt, raps: &HashMap<String, RapDa
   if stmt.span.from_expansion() { return res; }
   match stmt.kind {
     StmtKind::Let(ref local) => {
-      let name = match local.pat.kind {
-        PatKind::Binding(_, _, ident, _) => {
-          ident.to_string()
-        }
-        _ => panic!("unexpected let binding pattern")
-      };
-      res.insert(raps.get(&name).unwrap().rap.to_owned());
+      collect_pat_bindings(&local.pat, raps, &mut res);
     }
     _ => {}
   }
@@ -432,6 +493,44 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
       HashSet::new()
     }
   }
+}
+
+/// Walk a per-branch event list and accumulate the resource-owning
+/// variables it touches. Used to build a Branch event's `live_vars`
+/// from the events that actually landed inside the branches —
+/// rather than from `get_live_of_expr`, which over-includes variables
+/// only read by the conditional's guard expression and produces a
+/// branched (and visually noisy) timeline for them. Function RAPs
+/// are filtered out: they're call sites, not per-branch lifecycles.
+/// Nested Branch events propagate their inner live_vars upward —
+/// anything live in an inner branch is also live in the outer.
+pub fn collect_event_live_vars(
+    events: &[(usize, ExternalEvent)],
+    out: &mut HashSet<ResourceAccessPoint>,
+) {
+    for (_, ev) in events {
+        match ev {
+            ExternalEvent::Branch { live_vars, .. } => {
+                out.extend(live_vars.iter().cloned());
+            }
+            // Synthesized cleanup events (added after filtering) and
+            // param-init events don't introduce live vars on their
+            // own; the param case is handled at fn-entry, not in a
+            // conditional's liveness set.
+            ExternalEvent::GoOutOfScope { .. }
+            | ExternalEvent::InitRefParam { .. } => {}
+            _ => {
+                let (from, to) = ResourceAccessPoint_extract(ev);
+                for rty in [from, to] {
+                    if let ResourceTy::Value(rap) = rty {
+                        if !rap.is_fn() {
+                            out.insert(rap.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Used for filtering events from the main event container
