@@ -293,11 +293,18 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n";
     let hollow_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"hollow tooltip-trigger\" style=\"fill:transparent;\" d=\"M {{x1}},{{y1}} V {{y2}} h 3.5 V {{y1}} h -3.5\" data-tooltip-text=\"{{title}}\"/>\n";
+    // No `Z` to close the path: the closed-quadrilateral form
+    // dashes the top and bottom horizontal caps too, which
+    // surfaces a stray ~3.5px tick at the top and bottom of any
+    // dashed segment. Leaving the path open means the dashes only
+    // run along the two parallel verticals plus the bottom
+    // connector — visually the segment reads as one dashed strip
+    // instead of three independent dashed sides.
     let new_hollow_line_template = "<path
         data-hash=\"{{hash}}\"
         class=\"hollow tooltip-trigger\"
         style=\"fill:transparent; stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"
-        d=\"M {{x1}},{{y1}} L {{x2}},{{y2}} L {{x3}},{{y3}} L {{x4}},{{y4}} Z\"
+        d=\"M {{x1}},{{y1}} L {{x2}},{{y2}} L {{x3}},{{y3}} L {{x4}},{{y4}}\"
         data-tooltip-text=\"{{title}}\"/>";
     let solid_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"mutref {{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
@@ -1752,10 +1759,15 @@ fn create_owner_line_string(
     // arm is producing the events at each row. Faded opacity alone
     // wasn't visually distinct enough — both arms read as solid
     // columns to first glance.
+    // Gray-state segments: render at full opacity so they read as
+    // the same line as the active solid segments, just textured
+    // differently. Pre-fix the dashed legs sat at 0.5 opacity which
+    // made the dashed-then-solid transitions look like two
+    // independent lines instead of one continuous timeline. The
+    // dash pattern is the only inactive cue now.
     match state {
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
-            data.opacity = 0.5;
-            data.dasharray = "4 3".to_owned();
+            data.dasharray = "4 4".to_owned();
         }
         _ => {}
     }
@@ -1785,10 +1797,15 @@ fn create_reference_line_string(
     data: &mut VerticalLineData,
     registry: &Handlebars,
 ) -> String {
+    // Gray-state segments: render at full opacity so they read as
+    // the same line as the active solid segments, just textured
+    // differently. Pre-fix the dashed legs sat at 0.5 opacity which
+    // made the dashed-then-solid transitions look like two
+    // independent lines instead of one continuous timeline. The
+    // dash pattern is the only inactive cue now.
     match state {
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
-            data.opacity = 0.5;
-            data.dasharray = "4 3".to_owned();
+            data.dasharray = "4 4".to_owned();
         }
         _ => {}
     }
@@ -1935,8 +1952,7 @@ fn render_timeline(
                     // create_owner_line_string only sets dasharray
                     // for Gray and won't otherwise.
                     if branch.e_data.is_empty() || i != 0 {
-                        split_line_data.opacity = 0.5;
-                        split_line_data.dasharray = "4 3".to_owned();
+                        split_line_data.dasharray = "4 4".to_owned();
                     }
                     append_line(&p_state, &mut split_line_data, rap, timeline_data, output, registry);
 
@@ -1974,7 +1990,7 @@ fn render_timeline(
                     };
 
                     if branch.e_data.is_empty() {
-                        merge_line_data.opacity = 0.5;
+                        merge_line_data.dasharray = "4 4".to_owned();
                     }
 
                     append_line(&e_state, &mut merge_line_data, rap, timeline_data, output, registry);
