@@ -778,17 +778,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let if_map = create_line_map(&if_ev);
 
         // Per-branch "active" line ranges. Each branch is rendered
-        // solid inside its active range and dashed outside. We use
-        // body content ranges (not body spans) so the if-branch's
-        // active range stops at its `}` line — at the line where
-        // the else-branch's body starts, the if-branch transitions
-        // to dashed and the else-branch becomes active. Ranges
-        // can't overlap, otherwise both would draw solid on the
-        // shared row.
+        // solid inside its active range and dashed outside. The
+        // ranges are non-overlapping so the if-branch transitions
+        // to dashed at the line where the else-branch becomes
+        // active.
+        //
+        // For the if-branch we use its body content range
+        // (`split + 1 ..= if_end`); for the else-branch we use its
+        // body span starting at the `} else {` line so the
+        // active region has at least two rows even when the body
+        // has a single content line. Without that, an empty or
+        // single-line else (e.g. `else { println!(...) }` whose
+        // formatter doesn't emit per-event entries on `s`) would
+        // collapse to a zero-length solid segment, leaving the
+        // entire else column dashed.
         //
         // `merge_point - 1` is the last line each branch column is
-        // drawn on (the convergence diagonal then bridges that row
-        // to the join dot at `merge_point` — see render_timeline's
+        // drawn on; the convergence diagonal then bridges that row
+        // to the join dot at `merge_point` (see render_timeline's
         // Branch arm). Clamping the else-branch's end there keeps
         // it consistent with the column-trim done in
         // compute_branch_states.
@@ -798,7 +805,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let else_map = create_line_map(&else_ev);
             (
               vec!["If".to_owned(), "Else".to_owned()],
-              vec![(split + 1, if_end), (if_end + 1, merge_minus_one)],
+              vec![(split + 1, if_end), (if_end, merge_minus_one)],
               vec![
                 ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl   },
                 ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl },

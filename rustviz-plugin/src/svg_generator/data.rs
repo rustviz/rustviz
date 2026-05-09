@@ -1462,12 +1462,6 @@ impl Visualizable for VisualizationData {
     branch_start: usize,
     branch_end: usize,
     mut previous_state: State) -> State{
-        // an empty branch - rendered as the same as previous state
-        if history.is_empty() {
-            states.push((branch_start, branch_end, branch_state_converter(&previous_state)));
-            return previous_state;
-        }
-
         // Clamp valid_range to [branch_start, branch_end]. With the
         // convergence-one-line-earlier work, callers now pass
         // branch_end = merge_point - 1 so the branch column ends
@@ -1478,6 +1472,29 @@ impl Visualizable for VisualizationData {
         let (begin, end) = valid_range;
         let begin = begin.clamp(branch_start, branch_end);
         let end = end.clamp(branch_start, branch_end);
+
+        // Empty branches still render: dashed leading segment from
+        // branch_start to begin (the OTHER branch's territory),
+        // solid segment from begin to end (this branch's body
+        // span — even with no per-line events the body range is
+        // active here, so we want it solid), and a dashed trailing
+        // segment from end to branch_end if any. Pre-fix, an empty
+        // branch dropped to a single Gray segment over the entire
+        // column, which made e.g. `else { println!(...) }` look
+        // entirely dashed even though else is the active path on
+        // its own body lines.
+        if history.is_empty() {
+            if begin > branch_start {
+                states.push((branch_start, begin, branch_state_converter(&previous_state)));
+            }
+            if begin < end {
+                states.push((begin, end, previous_state.clone()));
+            }
+            if end < branch_end {
+                states.push((end, branch_end, branch_state_converter(&previous_state)));
+            }
+            return previous_state;
+        }
 
         // Render opaque line if branch does not begin at split point
         if begin != branch_start {
