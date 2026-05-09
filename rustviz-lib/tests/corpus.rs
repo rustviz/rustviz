@@ -683,7 +683,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from s to consume",
             "s was moved in at least one branch above; \
-             in branches that didn't, its resource is dropped at the branch's end.",
+             in branches where it was not, its resource is dropped at the branch's end.",
         ],
         must_not_contain: &["merge"],
     },
@@ -709,7 +709,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // merge's implicit drop) → outer merge says every branch.
         must_contain: &[
             "s was moved in at least one branch above; \
-             in branches that didn't, its resource is dropped at the branch's end.",
+             in branches where it was not, its resource is dropped at the branch's end.",
             "s was moved or dropped in every branch above",
         ],
         must_not_contain: &["merge"],
@@ -755,7 +755,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "may have been moved",
-            "in branches that didn't",
+            "in branches where it was not",
         ],
     },
     TooltipExpect {
@@ -771,7 +771,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // At least one inner merge is the mixed implicit-drop
             // case (consume on one path, borrow on the other).
             "s was moved in at least one branch above; \
-             in branches that didn't, its resource is dropped at the branch's end.",
+             in branches where it was not, its resource is dropped at the branch's end.",
         ],
         must_not_contain: &[
             // The outer merge no longer hedges with "at least one";
@@ -789,7 +789,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from s to consume",
             "s was moved in at least one branch above; \
-             in branches that didn't, its resource is dropped at the branch's end.",
+             in branches where it was not, its resource is dropped at the branch's end.",
         ],
         must_not_contain: &[
             "may have been moved (consumed in at least one branch above)",
@@ -806,7 +806,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // render_dot's Branch arm).
         must_contain: &[
             "s was moved in at least one branch above; \
-             in branches that didn't, its resource is dropped at the branch's end.",
+             in branches where it was not, its resource is dropped at the branch's end.",
         ],
         must_not_contain: &[
             "If",

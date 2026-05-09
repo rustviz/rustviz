@@ -795,7 +795,7 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
         "{0} was moved in at least one branch above; \
-         in branches that didn't, its resource is dropped at the branch's end.",
+         in branches where it was not, its resource is dropped at the branch's end.",
         my_name_fmt
     )
 }
