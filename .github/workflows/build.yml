@@ -21,9 +21,26 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Cross-platform build + test. Verifies that `cargo xtask setup` and the
+  # workspace itself build cleanly on every host OS we claim to support —
+  # i.e. that the post-#43 Windows-support story actually holds. Docker
+  # and the playground end-to-end smoke tests run only on Linux (the
+  # GitHub-hosted macOS / Windows runners don't have a docker daemon
+  # available, and the playground binary's runtime path is Linux-only
+  # anyway via the docker:dind sandbox).
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # Use bash everywhere — Windows runners ship Git Bash under the
+    # `bash` shell name, so the same shell snippets work on all three
+    # OSes. Default `cmd` on Windows would need separate snippets.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
 
@@ -40,6 +57,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+          # Cache key is per-OS so the three legs don't share an index
+          # (binary artifacts under target/ are platform-specific).
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -50,9 +69,12 @@ jobs:
           cache-dependency-path: playground/frontend/package-lock.json
 
       - name: Set up Docker Buildx
+        if: runner.os == 'Linux'
         uses: docker/setup-buildx-action@v4
 
       - name: Run cargo xtask setup (toolchain, plugin install, frontend build, runner image)
+        # On macOS / Windows the docker step inside xtask skips silently
+        # because docker isn't on PATH; everything else runs normally.
         run: cargo xtask setup
 
       - name: cargo build --workspace
@@ -60,13 +82,15 @@ jobs:
 
       - name: cargo test --workspace
         env:
-          # Corpus tests use the in-process plugin path (faster than spinning
-          # up a fresh runner container per case, and we're not testing
-          # sandboxing here). The plugin itself was installed by xtask setup.
+          # Corpus tests use the in-process plugin path (faster than
+          # spinning up a fresh runner container per case, and we're
+          # not testing sandboxing here). The plugin itself was
+          # installed by xtask setup.
           RV_RUNNER: local
         run: cargo test --workspace --locked
 
       - name: Smoke test the playground end-to-end (sandboxed backend)
+        if: runner.os == 'Linux'
         env:
           RV_RUNNER: docker
         run: |
@@ -83,6 +107,7 @@ jobs:
             | grep -q '"code_panel"'
 
       - name: Smoke test rate limit (expects 429 after burst exhausted)
+        if: runner.os == 'Linux'
         run: |
           ok=0
           for i in $(seq 1 12); do
