@@ -303,11 +303,22 @@ fn prepare_registry(registry: &mut Handlebars) {
     // segments — dashed leading + solid body + dashed trailing —
     // meet at exact y-coordinates with nothing between them, and
     // the column reads as one continuous strip with two textures.
-    let new_hollow_line_template = "<g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x1}}\" y1=\"{{y1}}\" x2=\"{{x2}}\" y2=\"{{y2}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x4}}\" y1=\"{{y4}}\" x2=\"{{x3}}\" y2=\"{{y3}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n        </g>\n";
+    // Hollow column = two thin parallel lines plus a transparent
+    // fill polygon over the gap between them. The polygon catches
+    // mouse events in the strip's interior so hovering anywhere
+    // inside the column (not just precisely on a line) fires the
+    // wrapping `<g>`'s tooltip + glow. Without it, the cursor had
+    // to land on one of the 1.5px line strokes to highlight.
+    // (Same hover-capture pattern as branch strips in render_branch_run.)
+    let new_hollow_line_template = "<g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x1}}\" y1=\"{{y1}}\" x2=\"{{x2}}\" y2=\"{{y2}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x4}}\" y1=\"{{y4}}\" x2=\"{{x3}}\" y2=\"{{y3}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <polygon data-hash=\"{{hash}}\" points=\"{{x1}},{{y1}} {{x2}},{{y2}} {{x3}},{{y3}} {{x4}},{{y4}}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n        </g>\n";
+    // Borrow-region trapezoids — visible as outlines (fill is
+    // transparent), but `pointer-events:all` makes the fill area
+    // hit-test too so hovering anywhere inside the trapezoid fires
+    // the tooltip + glow, not just on the 2px outline strokes.
     let solid_ref_line_template =
-        "        <path data-hash=\"{{hash}}\" class=\"mutref {{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        <path data-hash=\"{{hash}}\" class=\"mutref {{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important; pointer-events: all;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let hollow_ref_line_template =
-        "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent; pointer-events: all;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
 
