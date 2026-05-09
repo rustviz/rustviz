@@ -38,7 +38,11 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Bumped from 10 min: a cold cargo cache rebuilds the rustviz
+    # plugin from scratch (~3-4 min on GitHub's runners) before the
+    # prerender step can run. Subsequent runs hit the rust-cache and
+    # finish well under the original budget.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -48,11 +52,40 @@ jobs:
           cache: npm
           cache-dependency-path: playground/frontend/package-lock.json
 
+      # The frontend's `prebuild` step runs `scripts/prerender.ts`,
+      # which shells out to the `rustviz` CLI for every curated
+      # dropdown example so the SPA can ship pre-rendered SVGs and
+      # skip the cold-start ~45 s API round-trip on first paint.
+      # That requires the plugin's pinned nightly toolchain + a
+      # built rustviz-cli on PATH.
+      - name: Install pinned Rust toolchain
+        # rust-toolchain.toml at the workspace root pins the nightly
+        # the plugin links against. `rustup show` materialises it.
+        run: rustup show
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Scope the cache key to the plugin's manifest so frontend-
+          # only changes still get cache hits.
+          shared-key: pages-prerender
+
+      - name: Install rustviz plugin + CLI
+        # `--locked` is critical — Cargo.lock pins transitive deps
+        # past their crates.io defaults; fresh resolution would fail
+        # against the pinned nightly. setup.sh uses the same flag.
+        run: |
+          cargo install --path rustviz-plugin --locked
+          cargo install --path rustviz-cli --locked
+
       - name: Install frontend deps
         run: npm ci
         working-directory: playground/frontend
 
       - name: Build SPA in pages mode
+        # `npm run build:pages` fires the prebuild hook which runs
+        # the prerender script (`tsx scripts/prerender.ts`); a
+        # failed render aborts the build by design.
         run: npm run build:pages
         working-directory: playground/frontend
 

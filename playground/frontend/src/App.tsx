@@ -7,6 +7,7 @@ import axios from 'axios';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import ErrorCard from './ErrorCard';
 import { exampleGroups } from './examples';
+import { get as cacheGet, put as cachePut } from './svgCache';
 import {
   codeForSelection,
   DEFAULT_SELECTION,
@@ -541,8 +542,27 @@ const App: React.FC = () => {
     const controller = new AbortController();
     inflightRef.current = controller;
 
-    setIsLoading(true);
     const code = editor.getCurrentCode();
+
+    // Cache lookup before we set the spinner. If we've rendered this
+    // exact source before — either at build time (any dropdown
+    // example) or earlier in this browser (any user-edited snippet
+    // they've already Generated once) — show it instantly with no
+    // /submit-code round-trip and no "compile server is waking up"
+    // message.
+    const cached = await cacheGet(code);
+    if (cached) {
+      // A newer request might have started between the await above
+      // and now; honour it.
+      if (inflightRef.current !== controller) return;
+      setCodeSvg(cached.code_panel);
+      setTimelineSvg(cached.timeline_panel);
+      setErr(false);
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
 
     try {
       const response = await axios.post(`${API_BASE}/submit-code`, { code }, {
@@ -556,6 +576,13 @@ const App: React.FC = () => {
         setCodeSvg(response.data.code_panel);
         setTimelineSvg(response.data.timeline_panel);
         setErr(false);
+        // Memoize so a re-run of the same snippet is instant. Fire-
+        // and-forget — a localStorage write failure here doesn't
+        // affect the rendering the user is about to see.
+        void cachePut(code, {
+          code_panel: response.data.code_panel,
+          timeline_panel: response.data.timeline_panel,
+        });
       } else {
         console.error('Error:', response.statusText);
         setError(response.data);
@@ -883,8 +910,10 @@ const App: React.FC = () => {
                 Generating visualization<span className="ellipsis"></span>
               </p>
               <p className="loading-note">
-                The first request after a quiet period can take up to ~30 s while the
-                compile server wakes up; subsequent requests are fast.
+                Dropdown examples and snippets you've rendered before are cached
+                client-side and load instantly. This wait is only for novel code:
+                the first compile after a quiet period can take up to ~45 s while
+                the compile server wakes up; subsequent compiles are fast.
               </p>
             </div>
           )}
