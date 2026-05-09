@@ -1880,11 +1880,43 @@ fn append_line(
     }
 }
 
-// Style classifier for branch column segments: returns Some(true)
-// for "dashed" (Gray) states, Some(false) for "solid" (Full) states,
-// and None for states that render as nothing (OOS, ResourceMoved,
-// etc.). Used to slice a branch's `states` into per-style runs that
-// each become one polyline.
+// ── Branch column rendering: invariants ────────────────────────────
+//
+// A branch's column-plus-convergences is rendered from three
+// pieces of the variable's lifecycle within the branch:
+//
+//   • A leading convergence diagonal (parent split dot → top of
+//     column) — emitted iff the variable is "alive" entering the
+//     branch (i.e., owns or borrows a resource — not in OOS or
+//     ResourceMoved).
+//   • A column body, sliced into per-style runs (solid for
+//     active-arm states, dashed for Gray-converted passive-arm
+//     states). Unrenderable states (OOS, ResourceMoved) drop out
+//     of the body — the column visually ends where the variable
+//     stops owning a resource.
+//   • A trailing convergence diagonal (column bottom → parent
+//     merge dot) — emitted iff the variable is "alive" leaving
+//     the branch.
+//
+// The classifiers below name these decisions explicitly so the
+// renderer can never silently bridge across an empty body. The
+// previous regression was exactly that: leading and trailing
+// pieces both rendered solid, and `merge consecutive same-style
+// pieces` collapsed them into a single polyline that "stitched
+// over" a Move event. Naming the rule (`alive_at_end`) and
+// gating the trailing piece on it pulls that invariant into one
+// place where it can be tested and maintained.
+
+/// Classifier for branch column body segments. Returns:
+///   • `Some(true)`  for a dashed segment (Gray-converted, the
+///     branch is the inactive path on this row).
+///   • `Some(false)` for a solid segment (FullPrivilege /
+///     PartialPrivilege at LineState::Full — the active path).
+///   • `None` for states that don't draw a column line
+///     (OutOfScope, ResourceMoved). Their absence in the body
+///     run terminates the column visually so the variable's
+///     "departure" (Move, scope end) is reflected in the column
+///     ending, not in a stray faded line.
 fn segment_style(state: &State) -> Option<bool> {
     match state {
         State::FullPrivilege { s: LineState::Gray }
@@ -1893,6 +1925,18 @@ fn segment_style(state: &State) -> Option<bool> {
         | State::PartialPrivilege { s: LineState::Full } => Some(false),
         _ => None,
     }
+}
+
+/// Whether the variable owns / can-borrow a resource at this
+/// state. The convergence diagonals only render when the variable
+/// is alive at the corresponding branch boundary — drawing them
+/// otherwise would bridge a terminated column to the join dot
+/// across rows that should be empty.
+fn state_is_alive(state: &State) -> bool {
+    !matches!(
+        state,
+        State::ResourceMoved { .. } | State::OutOfScope
+    )
 }
 
 /// Render every branch (and any nested branches) reachable through
@@ -1986,6 +2030,18 @@ fn render_branches(
                     }
                 }
 
+                // Lifecycle invariants — see the architectural
+                // note above this fn. Render the leading edge only
+                // when the variable is alive entering the branch;
+                // render the trailing edge only when alive leaving
+                // the branch. Without these gates a Move at the
+                // top of the body and a still-solid trailing
+                // convergence would form a polyline that bridged
+                // over the Move, putting a stray column line on a
+                // row the variable doesn't exist on.
+                let alive_at_start = state_is_alive(&begin_state.2);
+                let alive_at_end = state_is_alive(&e_state);
+
                 // For each side of the strip emit polylines:
                 // walk pieces (leading | body groups | trailing)
                 // in source order and merge consecutive same-
@@ -1995,14 +2051,16 @@ fn render_branches(
                 for offset in [-half_w, half_w] {
                     let mut pieces: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
 
-                    pieces.push((
-                        leading_dashed,
-                        vec![
-                            (parent_x, get_y_axis_pos(*split_point) as f64),
-                            (branch_x + offset, get_y_axis_pos(*split_point + 1) as f64),
-                        ],
-                        p_title.clone(),
-                    ));
+                    if alive_at_start {
+                        pieces.push((
+                            leading_dashed,
+                            vec![
+                                (parent_x, get_y_axis_pos(*split_point) as f64),
+                                (branch_x + offset, get_y_axis_pos(*split_point + 1) as f64),
+                            ],
+                            p_title.clone(),
+                        ));
+                    }
 
                     for (dashed, top, bot, title) in &groups {
                         pieces.push((
@@ -2015,14 +2073,16 @@ fn render_branches(
                         ));
                     }
 
-                    pieces.push((
-                        trailing_dashed,
-                        vec![
-                            (branch_x + offset, get_y_axis_pos(merge_point.saturating_sub(1)) as f64),
-                            (parent_x, get_y_axis_pos(*merge_point) as f64),
-                        ],
-                        e_title.clone(),
-                    ));
+                    if alive_at_end {
+                        pieces.push((
+                            trailing_dashed,
+                            vec![
+                                (branch_x + offset, get_y_axis_pos(merge_point.saturating_sub(1)) as f64),
+                                (parent_x, get_y_axis_pos(*merge_point) as f64),
+                            ],
+                            e_title.clone(),
+                        ));
+                    }
 
                     let mut polylines: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
                     for (dashed, pts, title) in pieces {
