@@ -73,7 +73,7 @@ jobs:
       - name: Install rustviz plugin + CLI
         # `--locked` is critical — Cargo.lock pins transitive deps
         # past their crates.io defaults; fresh resolution would fail
-        # against the pinned nightly. setup.sh uses the same flag.
+        # against the pinned nightly. `cargo xtask setup` does the same.
         run: |
           cargo install --path rustviz-plugin --locked
           cargo install --path rustviz-cli --locked

@@ -47,20 +47,22 @@ from a fork. See `rustviz init --help` for the full flag list.
 ```sh
 git clone https://github.com/rustviz/rustviz
 cd rustviz
-./setup.sh                 # toolchain + plugin install + frontend build + runner image
+cargo xtask setup          # toolchain + plugin install + frontend build + runner image
 ```
 
-`./setup.sh` is the canonical bootstrap for working *on* RustViz; it
-sets up everything you need to run any of the four entry points below
-plus the playground's React frontend. To undo it, run `./uninstall.sh`
-(see `--help` for what it touches and what it leaves alone — by
-default it spares the rustup toolchain and the cargo `target/` tree).
+`cargo xtask setup` is the canonical bootstrap for working *on* RustViz;
+it sets up everything you need to run any of the four entry points below
+plus the playground's React frontend. To undo it, run `cargo xtask
+uninstall` (see `--help` for what it touches and what it leaves alone —
+by default it spares the rustup toolchain and the cargo `target/`
+tree). The xtask driver is pure Rust, so it works the same on Linux,
+macOS, and Windows.
 
 ### Working from multiple checkouts in parallel
 
 If you keep several clones around (e.g. one branch per agent or per
-issue), they share `~/.cargo` by default — so `setup.sh`'s `cargo
-install` from each one races for `~/.cargo/bin/rustviz`, and
+issue), they share `~/.cargo` by default — so `cargo xtask setup`'s
+`cargo install` from each one races for `~/.cargo/bin/rustviz`, and
 concurrent playground builds collide on the `rustviz/rustviz-runner`
 docker tag. To isolate them, this repo ships an
 [`.envrc.example`](.envrc.example) for [direnv](https://direnv.net/)
@@ -174,9 +176,8 @@ top-level directory:
 | **`rustviz-cli/`**    | The `rustviz` command-line interface — `rustviz svg`, `rustviz html`, `rustviz init`. Wraps `rustviz-lib` with file I/O + self-contained-HTML output, plus a one-shot toolchain/plugin bootstrap (`init`). Published to crates.io as **`rustviz-cli`**. |
 | **`mdbook-rustviz/`** | An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor. Replaces ` ```rv ` fenced code blocks with embedded RustViz SVGs at build time. Includes a `test-book/` worked example. The full hands-on tutorial that uses it is in a [separate repo](https://github.com/rustviz/tutorial). Published to crates.io as **`mdbook-rustviz`**. |
 | **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/> with the compile API at <https://rustviz-playground.fly.dev/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. Not published to crates.io. |
+| **`xtask/`**          | Cross-platform driver for `cargo xtask setup` / `cargo xtask uninstall`. Installs the plugin + CLI, builds the frontend, pulls/builds the docker runner image; the uninstall subcommand reverses each step (with optional `--toolchain` / `--target` / `--everything` flags). Replaces the legacy bash scripts so the workspace boots the same way on Linux, macOS, and Windows. Not published. |
 | `scripts/bump-version.sh` | Synchronizes the version field across all four published crates' Cargo.toml files (and refreshes Cargo.lock). Run before tagging a release; see "Releasing" below. |
-| `setup.sh`            | One-shot dev bootstrap: installs the toolchain, builds the plugin, builds the frontend, builds the runner image. Run once after cloning. |
-| `uninstall.sh`        | Reverse of `setup.sh`. Removes the cargo-installed binaries + the local docker runner image + frontend artifacts; spares the rustup toolchain and `target/` by default (override with `--toolchain` / `--target` / `--everything`). |
 
 ---
 
@@ -218,7 +219,7 @@ checklist are in [`playground/SECURITY.md`](playground/SECURITY.md). Report find
 ## Contributing
 
 Issues and PRs welcome. Keep each PR focused on a single concern; for
-local-dev setup run `./setup.sh` then `cargo build --workspace --locked`.
+local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
 
 ## Releasing
 

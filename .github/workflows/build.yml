@@ -52,8 +52,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Run setup.sh (toolchain, plugin install, frontend build, runner image)
-        run: ./setup.sh
+      - name: Run cargo xtask setup (toolchain, plugin install, frontend build, runner image)
+        run: cargo xtask setup
 
       - name: cargo build --workspace
         run: cargo build --workspace --locked
@@ -62,7 +62,7 @@ jobs:
         env:
           # Corpus tests use the in-process plugin path (faster than spinning
           # up a fresh runner container per case, and we're not testing
-          # sandboxing here). The plugin itself was installed by setup.sh.
+          # sandboxing here). The plugin itself was installed by xtask setup.
           RV_RUNNER: local
         run: cargo test --workspace --locked
 
