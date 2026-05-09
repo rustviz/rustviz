@@ -110,6 +110,7 @@ const EXPECTED_OK: &[&str] = &[
     "if_else_rebind_join",
     "nested_if_move_join",
     "if_no_else",
+    "if_else_mut_reassign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -708,6 +709,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s was moved or dropped in every branch above",
         ],
         must_not_contain: &["merge"],
+    },
+    TooltipExpect {
+        name: "if_else_mut_reassign",
+        // mut binding consumed and reassigned in each arm. At the
+        // merge `s` is bound again (every branch rebound) so the
+        // join message is BoundHere, not MovedAfter.
+        must_contain: &[
+            "Move from s to consume",
+            "Move from String::from to s",
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
     },
     TooltipExpect {
         name: "if_no_else",
