@@ -109,12 +109,66 @@ function renderOne(code: string, label: string): Pair {
   }
 }
 
+/**
+ * Reuse path: if `prerendered.json` already covers every current
+ * example's hash, skip the per-snippet rustviz invocation entirely.
+ *
+ * Two reasons this matters:
+ *
+ *   1. Repeat builds with no example changes complete in <100 ms
+ *      instead of ~9 s — useful for `npm run build` in tight loops.
+ *   2. Build environments that don't have the rustviz CLI installed
+ *      can still pass through the prebuild step as long as a
+ *      complete-enough `prerendered.json` is already on disk. This
+ *      is what the Fly Dockerfile relies on if its layer cache hits
+ *      the prerender stage but not the SPA stage.
+ *
+ * Returns the inherited entries when all hashes are present, or
+ * null if any are missing (in which case main() falls back to the
+ * full render path).
+ */
+function tryReuseExisting(): Record<string, Pair> | null {
+  if (!existsSync(OUTPUT_PATH)) return null;
+  let parsed: { entries?: Record<string, Pair> };
+  try {
+    parsed = JSON.parse(readFileSync(OUTPUT_PATH, 'utf-8'));
+  } catch {
+    return null;
+  }
+  if (!parsed.entries || typeof parsed.entries !== 'object') return null;
+
+  const reused: Record<string, Pair> = {};
+  for (const group of exampleGroups) {
+    for (const ex of group.examples) {
+      const hash = sha256Hex(ex.code);
+      const existing = parsed.entries[hash];
+      if (
+        !existing ||
+        typeof existing.code_panel !== 'string' ||
+        typeof existing.timeline_panel !== 'string'
+      ) {
+        return null;
+      }
+      reused[hash] = existing;
+    }
+  }
+  return reused;
+}
+
 function main(): void {
+  const start = Date.now();
+
+  const reused = tryReuseExisting();
+  if (reused) {
+    console.log(
+      `prerender: ${Object.keys(reused).length} snippets all covered by existing JSON; skipping (${Date.now() - start} ms)`,
+    );
+    return;
+  }
+
   const entries: Record<string, Pair> = {};
   let total = 0;
   let collisions = 0;
-
-  const start = Date.now();
   for (const group of exampleGroups) {
     for (const ex of group.examples) {
       total += 1;
