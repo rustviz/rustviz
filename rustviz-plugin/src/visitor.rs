@@ -1023,11 +1023,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               match arm.pat.kind {
                 // (<pat>, <pat>, ..) => <expr>
                 // First need to annotate events that occur between parents (the variables being matched upon)
-                // and the pattern bindings in each arm
+                // and the pattern bindings in each arm.
+                //
+                // `parents.len() == pat_list.len()` is the
+                // "guard-was-a-tuple-literal" shape (`match (a, b)
+                // { (x, y) => … }`): each inner pattern maps to its
+                // own parent expression. Otherwise the guard is a
+                // single tuple-/enum-typed scrutinee and every
+                // inner pattern destructures out of it (`match
+                // pair { (x, y) => … }`, `match res { Ok(a, b, c)
+                // => … }`); use the single parent for all inner
+                // pattern slots. Without that fallback, `parents[i]`
+                // for i>0 panics with an index-out-of-bounds.
                 PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _)=> {
+                  let same_arity = pat_list.len() == parents.len();
                   for (i, p) in pat_list.iter().enumerate() {
+                    let parent_idx = if same_arity { i } else { 0 };
                     let mut associated_ro = Vec::new();
-                    self.get_dec_of_pat2(p, &typeck_res, &parents[i], &parents_ty[i], end, & mut associated_ro);
+                    self.get_dec_of_pat2(p, &typeck_res, &parents[parent_idx], &parents_ty[parent_idx], end, & mut associated_ro);
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -1036,7 +1049,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let is_partial = !(*parent_ty == typeck_res.node_type(p.hir_id));
                       let id = *self.unique_id;
                       *self.unique_id += 1;
-                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[i].clone(), id, is_partial);
+                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[parent_idx].clone(), id, is_partial);
                       if inline {
                         self.add_external_event(pat_line, ext_ev);
                       } else {
@@ -1044,10 +1057,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       }
                       match e {
                         Evt::SBorrow => {
-                          callback_events.push((parents[i].clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
+                          callback_events.push((parents[parent_idx].clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
                         }
                         Evt::MBorrow => {
-                          callback_events.push((parents[i].clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
+                          callback_events.push((parents[parent_idx].clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
                         }
                         _ => {}
                       }

@@ -117,6 +117,7 @@ const EXPECTED_OK: &[&str] = &[
     "match_three_arms",
     "if_let_no_else",
     "match_one_arm",
+    "match_tuple_destructure",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -793,6 +794,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from opt to x",
             "show reads from x",
             "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "match_tuple_destructure",
+        // Tuple pattern over a single tuple-typed scrutinee. Each
+        // inner binding destructures out of the same single parent
+        // (`pair`); pre-fix this panicked with index-out-of-bounds.
+        // Single-arm match also inlines.
+        must_contain: &[
+            "show reads from x",
+            "show reads from y",
+            "x goes out of scope. Its resource is dropped.",
+            "y goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "may have been moved",
