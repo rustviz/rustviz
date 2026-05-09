@@ -378,18 +378,80 @@ fn main() {
   },
   {
     chapter: 'Conditionals',
+    // Branches written on their own lines on purpose. The
+    // timeline positions per-branch dots by source line, so the
+    // single-line form `if … { … } else { … }` collapses both
+    // branches onto one row and renders as a bowtie / X-shape
+    // rather than the intended pair. The canonical examples stay
+    // multi-line until the renderer grows synthetic offsets for
+    // same-line branches.
+    //
+    // Helper bindings (`cond`, `n`, `c1`…) carry `// rustviz: skip`
+    // so they don't add scaffolding columns to the visualization —
+    // the diagrams stay focused on the variable whose ownership /
+    // borrow flow the example illustrates.
     examples: [
       {
+        name: "if/else: move on one side, borrow on other",
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let cond = true; // rustviz: skip
+    if cond {
+        consume(s);
+    } else {
+        show(&s);
+    }
+}`,
+      },
+      {
+        name: "if/else: move on both sides",
+        code: `fn consume(_s: String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let cond = true; // rustviz: skip
+    if cond {
+        consume(s);
+    } else {
+        consume(s);
+    }
+}`,
+      },
+      {
+        name: "if/else with disjoint variables",
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let cond = true; // rustviz: skip
+    let a = String::from("a");
+    let b = String::from("b");
+    if cond {
+        show(&a);
+    } else {
+        show(&b);
+    }
+}`,
+      },
+      {
+        name: "if without else",
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let cond = true; // rustviz: skip
+    if cond {
+        show(&s);
+    }
+    show(&s);
+}`,
+      },
+      {
         name: "if as let RHS",
-        // Branches written on their own lines on purpose. The
-        // timeline panel positions per-branch dots by source line,
-        // so the single-line form `if … { … } else { … }` collapses
-        // both branches onto one row and renders as a bowtie /
-        // X-shape rather than the intended pair of branches. Until
-        // the renderer grows synthetic offsets for same-line
-        // branches, the canonical examples stay multi-line.
         code: `fn main() {
-    let n = 3;
+    let n = 3; // rustviz: skip
     let s = if n > 0 {
         String::from("a")
     } else {
@@ -399,95 +461,26 @@ fn main() {
 }`,
       },
       {
-        name: "if without else",
-        code: `fn main() {
-    let s = String::from("hi");
-    if s.len() > 0 {
-        println!("non-empty: {}", s);
-    }
-    println!("{}", s);
-}`,
-      },
-      {
-        name: "if/else with disjoint variables",
-        code: `fn main() {
-    let cond = true;
-    let a = String::from("a");
-    let b = String::from("b");
-    if cond {
-        println!("{}", a);
-    } else {
-        println!("{}", b);
-    }
-}`,
-      },
-      {
-        name: "if/else: same var moved on one side",
-        code: `fn consume(_s: String) {}
+        name: "match as let RHS",
+        code: `fn show(_s: &String) {} // rustviz: hide
 
 fn main() {
-    let s = String::from("hi");
-    let cond = true;
-    if cond {
-        consume(s);
-    } else {
-        println!("kept: {}", s);
-    }
-}`,
-      },
-      {
-        name: "match as let RHS",
-        code: `fn main() {
-    let n = 3;
+    let n = 3; // rustviz: skip
     let s = match n {
         0 => String::from("zero"),
         _ => String::from("other"),
     };
-    println!("{}", s);
-}`,
-      },
-      {
-        name: "if let Some",
-        code: `fn main() {
-    let opt: Option<String> = Some(String::from("x"));
-    if let Some(x) = opt {
-        println!("got {}", x);
-    }
-}`,
-      },
-      {
-        name: "match with a borrow in one arm",
-        code: `fn main() {
-    let s = String::from("hello");
-    let n = 1;
-    match n {
-        0 => println!("zero"),
-        _ => println!("borrowed: {}", s),
-    }
-    println!("after: {}", s);
-}`,
-      },
-      {
-        name: "if/else: move on one side, borrow on other",
-        code: `fn consume(_s: String) {}
-
-fn main() {
-    let s = String::from("hi");
-    let cond = true;
-    if cond {
-        consume(s);
-    } else {
-        println!("borrow: {}", s);
-    }
+    show(&s);
 }`,
       },
       {
         name: "rebind on both sides (\"bound here\" join)",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
 
 fn main() {
     let mut s = String::from("orig");
-    let cond = true;
+    let cond = true; // rustviz: skip
     if cond {
         consume(s);
         s = String::from("new");
@@ -495,25 +488,66 @@ fn main() {
         consume(s);
         s = String::from("alt");
     }
-    println!("{}", s);
+    show(&s);
 }`,
       },
       {
         name: "nested if (move propagates outward)",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
 
 fn main() {
     let s = String::from("hi");
-    let c1 = true;
-    let c2 = false;
+    let c1 = true; // rustviz: skip
+    let c2 = false; // rustviz: skip
     if c1 {
         if c2 {
             consume(s);
         } else {
-            println!("kept inner: {}", s);
+            show(&s);
         }
     } else {
         consume(s);
+    }
+}`,
+      },
+      {
+        name: "deeply nested if (3 levels)",
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let c1 = true; // rustviz: skip
+    let c2 = false; // rustviz: skip
+    let c3 = true; // rustviz: skip
+    if c1 {
+        if c2 {
+            if c3 {
+                consume(s);
+            } else {
+                show(&s);
+            }
+        } else {
+            show(&s);
+        }
+    } else {
+        consume(s);
+    }
+}`,
+      },
+      {
+        name: "match: 3 arms (consume vs borrow)",
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let n = 1; // rustviz: skip
+    match n {
+        0 => consume(s),
+        1 => show(&s),
+        _ => show(&s),
     }
 }`,
       },

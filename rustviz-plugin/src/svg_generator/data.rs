@@ -1503,7 +1503,24 @@ impl Visualizable for VisualizationData {
 
         let mut previous_line = begin;
         for (l, e) in history {
-            states.push((previous_line, *l, previous_state.clone()));
+            // For let-as-rhs (`let s = if … { … } else { … };`) the
+            // parent's pre-branch state is OOS — the variable
+            // doesn't exist yet — but the rows between this arm's
+            // body span starting and its first acquire event are
+            // structurally passive (a column-position is reserved,
+            // we just haven't acquired into it yet). Render them
+            // as Gray rather than blank so the column stays
+            // visually continuous from the leading converge into
+            // the acquire dot. After the first state-changing
+            // event `previous_state` is no longer OOS so this
+            // conversion no-ops for subsequent pushes; the nested-
+            // branch OOS push below is in a different arm of the
+            // match and stays unaffected.
+            let pre_event_state = match previous_state {
+                State::OutOfScope => branch_state_converter(&previous_state),
+                ref s => s.clone(),
+            };
+            states.push((previous_line, *l, pre_event_state));
             match e {
                 Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
                     // Timeline is empty in the middle during a branch

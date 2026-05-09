@@ -759,6 +759,19 @@ pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
     )
 }
 
+/// Every branch above ended without the resource — either by a
+/// direct move/consume or because a nested merge already ended in
+/// an implicit-drop state. Distinct from the "may have been moved"
+/// wording: there's no maybe here, the variable definitely doesn't
+/// own anything after the conditional.
+pub fn event_dot_branch_merge_all_moved(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} was moved or dropped in every branch above",
+        my_name_fmt
+    )
+}
+
 /// Every branch above contributed a value that ends up in this
 /// variable (the `let s = if … { … } else { … };` shape, plus the
 /// match-as-rhs analog). After the conditional the variable owns a
@@ -767,6 +780,22 @@ pub fn event_dot_branch_merge_bound(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
         "{0} acquired ownership of a resource (in all branches above)",
+        my_name_fmt
+    )
+}
+
+/// Some-moved-some-alive case: at least one branch consumed the
+/// variable, at least one didn't. Rust treats the variable as
+/// possibly-moved after the conditional (so it can't be used) and
+/// inserts an *implicit drop* at the end of every branch where the
+/// variable wasn't moved — this keeps the merged state consistent
+/// across branches. The drop dot at the join makes that semantics
+/// visible; the tooltip names it.
+pub fn event_dot_branch_merge_moved_with_drop(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} was moved in at least one branch above; \
+         in branches where it was not, its resource is dropped at the branch's end.",
         my_name_fmt
     )
 }

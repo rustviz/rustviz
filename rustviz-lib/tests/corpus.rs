@@ -110,6 +110,26 @@ const EXPECTED_OK: &[&str] = &[
     "if_else_rebind_join",
     "nested_if_move_join",
     "if_no_else",
+    "if_else_mut_reassign",
+    "if_as_let_rhs_multiline",
+    "if_else_move_both",
+    "deep_nested_if",
+    "match_three_arms",
+    "if_let_no_else",
+    "match_one_arm",
+    "match_tuple_destructure",
+    // — Conditionals composed with iteration / capture. Verifies
+    //   the merge classifier from #116 picks the right wording
+    //   when the branches are non-trivially shaped (a closure
+    //   capture in one arm, a for-loop borrow in another, etc.).
+    //   Tooltip-level pinning lives below in EXPECTED_TOOLTIPS.
+    "cond_with_for_loop",
+    "cond_with_closure",
+    "if_inside_for",
+    "closure_with_cond",
+    "if_let_inside_for",
+    "cond_with_move_closure",
+    "match_with_closure_arms",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -671,11 +691,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "if_else_move_join",
         // Variable `s` consumed in if branch, only borrowed in else
-        // branch. Merge dot says `s` may have been moved (Rust treats
-        // it as moved regardless of which branch ran).
+        // branch. Mixed move/alive merge → drop dot with the
+        // implicit-drop explanation (Rust drops `s` at the end of
+        // any branch that didn't move it so the post-state is
+        // consistent across branches).
         must_contain: &[
             "Move from s to consume",
-            "s may have been moved (consumed in at least one branch above)",
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
         ],
         must_not_contain: &["merge"],
     },
@@ -694,30 +717,282 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "nested_if_move_join",
-        // Inner if: consume on one inner branch, borrow on the other
-        // → inner merge is "may have been moved". Outer if's else
-        // also consumes `s` → outer merge propagates the move.
-        // Two merge tooltips, both reading "may have been moved".
+        // Inner if: consume on one inner branch, borrow on the
+        // other → mixed → inner merge gets the implicit-drop
+        // tooltip. Outer if: both branches end without the
+        // resource (else by direct consume, then-arm by the inner
+        // merge's implicit drop) → outer merge says every branch.
         must_contain: &[
-            "s may have been moved (consumed in at least one branch above)",
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+            "s was moved or dropped in every branch above",
         ],
         must_not_contain: &["merge"],
     },
     TooltipExpect {
-        name: "if_no_else",
-        // Plain `if cond { body }` with `s` moved inside the body.
-        // The merge dot says `s` may have been moved — the implicit-
-        // untouched else means BoundHere can't fire. No "If" / "Else"
-        // tooltips: those bookend dots got dropped because they were
-        // a teaching distraction (see render_dot's Branch arm).
+        name: "if_as_let_rhs_multiline",
+        // Multi-line `let s = if cond { ... } else { ... };`. Both
+        // arms acquire `s`, so the merge is BoundHere. The pre-
+        // first-acquire rows in each arm are now Gray-Full so the
+        // rendered column stays continuous from the leading
+        // converge into the acquire event without a visible gap.
         must_contain: &[
-            "s may have been moved (consumed in at least one branch above)",
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "if_else_mut_reassign",
+        // mut binding consumed and reassigned in each arm. At the
+        // merge `s` is bound again (every branch rebound) so the
+        // join message is BoundHere, not MovedAfter.
+        must_contain: &[
+            "Move from s to consume",
+            "Move from String::from to s",
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "if_else_move_both",
+        // Both arms consume → merge is all-moved (no may-have-been
+        // hedge, no drop dot since there's no didn't-move branch
+        // to insert an implicit drop into).
+        must_contain: &[
+            "Move from s to consume",
+            "s was moved or dropped in every branch above",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "in branches where it was not",
+        ],
+    },
+    TooltipExpect {
+        name: "deep_nested_if",
+        // Three-level nesting. Each merge classifies on its own
+        // branches' end states; the outermost ends up all-moved
+        // because every path reaches a consume (some directly,
+        // some via the chain of nested merges already inserting
+        // implicit drops).
+        must_contain: &[
+            "Move from s to consume",
+            "s was moved or dropped in every branch above",
+            // At least one inner merge is the mixed implicit-drop
+            // case (consume on one path, borrow on the other).
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            // The outer merge no longer hedges with "at least one";
+            // the deepest mixed merges still do, but the corpus
+            // pins exact strings so an outer regression to the
+            // hedge wording is caught here too.
+            "may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_no_else",
+        // Single-arm if-let inlines: destructure Move from opt to
+        // x, then a borrow from x to show. No Branch event, so no
+        // merge tooltip wording.
+        must_contain: &[
+            "Move from Some to opt",
+            "Move from opt to x",
+            "show reads from x",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "match_tuple_destructure",
+        // Tuple pattern over a single tuple-typed scrutinee. Each
+        // inner binding destructures out of the same single parent
+        // (`pair`); pre-fix this panicked with index-out-of-bounds.
+        // Single-arm match also inlines.
+        must_contain: &[
+            "show reads from x",
+            "show reads from y",
+            "x goes out of scope. Its resource is dropped.",
+            "y goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "match_one_arm",
+        // Single-arm match with an irrefutable binding. Body shows
+        // inline; the pattern's Move (s → x) emits on the
+        // destructure line; show borrows x; x drops at arm end.
+        // No Branch event, no merge tooltip.
+        must_contain: &[
+            "Move from s to x",
+            "show reads from x",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "match_three_arms",
+        // 3-arm match: consume, borrow, borrow. Mixed merge →
+        // implicit-drop wording. Each arm gets its own column;
+        // even/odd N just affects placement, not classification.
+        must_contain: &[
+            "Move from s to consume",
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "if_no_else",
+        // Plain `if cond { body }`: the Branch event is now
+        // skipped (single-arm conditional). The Move from `s` to
+        // `consume` shows inline on the parent timeline, with no
+        // merge tooltip and no "live in a conditional expression"
+        // labelling.
+        must_contain: &[
+            "Move from s to consume",
         ],
         must_not_contain: &[
             "If",
             "Else",
             "merge",
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
             "acquired ownership of a resource (in all branches above)",
+        ],
+    },
+
+    // ─── Conditionals composed with iteration / capture ──────────────
+    TooltipExpect {
+        name: "cond_with_for_loop",
+        // for-loop body in if-arm borrows `s`; else consumes.
+        // Mixed merge → drop dot + implicit-drop wording.
+        must_contain: &[
+            "Move from s to consume",
+            "show reads from s",
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "cond_with_closure",
+        // Borrow-only closure captures `s` inside if-arm; else
+        // consumes. Mixed merge → drop dot.
+        must_contain: &[
+            "Closure capture (immutable borrow) from s to f",
+            "Move from s to consume",
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "cond_with_move_closure",
+        // `move` closure captures `s` (consuming it) in if-arm;
+        // else consumes directly. Both arms end without `s` →
+        // all-moved wording.
+        must_contain: &[
+            "Closure capture (move) from s to f",
+            "Move from s to consume",
+            "s was moved or dropped in every branch above",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "in branches where it was not",
+        ],
+    },
+    TooltipExpect {
+        name: "if_inside_for",
+        // if/else inside a for-loop body, both inner arms borrow
+        // the loop variable. Inner merge classifies as Unchanged,
+        // so no merge wording surfaces.
+        must_contain: &[
+            "show reads from x",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_with_cond",
+        // Closure body wraps an if/else over a captured variable;
+        // both inner arms borrow it. The closure-capture event is
+        // what surfaces at the outer scope (the if's body events
+        // live inside the closure, not on the parent timeline).
+        // No merge wording — the outer scope sees a regular
+        // closure capture + return, not a Branch.
+        must_contain: &[
+            "Closure capture (immutable borrow) from s to f",
+            "Return immutably borrowed resource from f to s",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_inside_for",
+        // Single-arm if-let inlines per #116 — no Branch event,
+        // no merge wording. Loop body's per-iteration destructure
+        // shows as inline events.
+        must_contain: &[
+            "show reads from inner",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "match_with_closure_arms",
+        // Each arm declares its own closure that borrows `s`.
+        // The capture events are per-arm. The shared scrutinee
+        // `s` stays alive throughout — no may-have-been-moved
+        // wording for it.
+        must_contain: &[
+            "Closure capture (immutable borrow) from s to f",
+            "Closure capture (immutable borrow) from s to g",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
         ],
     },
 ];
