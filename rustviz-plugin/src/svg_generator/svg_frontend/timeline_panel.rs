@@ -2217,22 +2217,34 @@ fn split_centerline_runs<'a>(segs: &'a [BranchSeg]) -> Vec<Vec<&'a BranchSeg>> {
 }
 
 /// Render one centerline-contiguous run: per-segment visible lines
-/// (solid or hollow per state) plus a single transparent perimeter
-/// polygon for hover capture.
+/// (solid or hollow per state), plus bevel lines at any corners
+/// between adjacent hollow segments where the perpendicular rotates
+/// (e.g. diagonal leading meeting vertical body), plus a single
+/// transparent perimeter polygon for hover capture.
 fn render_branch_run(
     rap: &ResourceAccessPoint,
     hash: u64,
     run: &[&BranchSeg],
 ) -> String {
     let mut svg = String::new();
-    for seg in run {
+
+    // Classify each segment up front so the bevel pass can
+    // consult both neighbors without re-evaluating the
+    // classifier.
+    let classified: Vec<(OwnerLine, bool, &BranchSeg)> = run.iter().map(|seg| {
+        let style = determine_owner_line_styles(rap, &seg.state);
         let dashed = matches!(
             seg.state,
             State::FullPrivilege { s: LineState::Gray }
             | State::PartialPrivilege { s: LineState::Gray }
         );
-        let dasharray = if dashed { "4 4" } else { "none" };
-        match determine_owner_line_styles(rap, &seg.state) {
+        (style, dashed, *seg)
+    }).collect();
+
+    // Visible lines per segment.
+    for (style, dashed, seg) in &classified {
+        let dasharray = if *dashed { "4 4" } else { "none" };
+        match style {
             OwnerLine::Solid => svg.push_str(&format!(
                 "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-dasharray: {};\"/>\n",
                 hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, dasharray,
@@ -2249,6 +2261,44 @@ fn render_branch_run(
                 }
             }
             OwnerLine::Empty | OwnerLine::Dotted => {} // unreachable: filtered before push
+        }
+    }
+
+    // Bevel pass. Adjacent hollow segments with different
+    // perpendicular directions (a diagonal converge meeting a
+    // vertical body, or vice versa) leave a small gap on each side
+    // because the offset endpoints don't quite touch — the
+    // diagonal's perp rotates relative to the body's. Emit a small
+    // connector line on each side bridging them. The connector
+    // inherits the previous segment's dasharray so a dashed
+    // leading-into-body transition reads as "the leading ends
+    // here". Solid segments share a centerline with their
+    // neighbors and need no bevel.
+    for window in classified.windows(2) {
+        let (prev_style, prev_dashed, prev_seg) = &window[0];
+        let (curr_style, _, curr_seg) = &window[1];
+        if !matches!(prev_style, OwnerLine::Hollow) { continue; }
+        if !matches!(curr_style, OwnerLine::Hollow) { continue; }
+        let prev_perp = perp_unit(prev_seg.p1, prev_seg.p2);
+        let curr_perp = perp_unit(curr_seg.p1, curr_seg.p2);
+        let dasharray = if *prev_dashed { "4 4" } else { "none" };
+        for sign in [1.0_f64, -1.0] {
+            let prev_off = (
+                prev_seg.p2.0 + prev_perp.0 * sign * BRANCH_HALF_W,
+                prev_seg.p2.1 + prev_perp.1 * sign * BRANCH_HALF_W,
+            );
+            let curr_off = (
+                curr_seg.p1.0 + curr_perp.0 * sign * BRANCH_HALF_W,
+                curr_seg.p1.1 + curr_perp.1 * sign * BRANCH_HALF_W,
+            );
+            if (prev_off.0 - curr_off.0).abs() > 1e-6
+                || (prev_off.1 - curr_off.1).abs() > 1e-6
+            {
+                svg.push_str(&format!(
+                    "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-dasharray: {};\"/>\n",
+                    hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, prev_seg.title, dasharray,
+                ));
+            }
         }
     }
 
