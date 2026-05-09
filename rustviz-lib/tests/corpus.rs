@@ -111,6 +111,7 @@ const EXPECTED_OK: &[&str] = &[
     "nested_if_move_join",
     "if_no_else",
     "if_else_mut_reassign",
+    "if_as_let_rhs_multiline",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -709,6 +710,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s was moved or dropped in every branch above",
         ],
         must_not_contain: &["merge"],
+    },
+    TooltipExpect {
+        name: "if_as_let_rhs_multiline",
+        // Multi-line `let s = if cond { ... } else { ... };`. Both
+        // arms acquire `s`, so the merge is BoundHere. The pre-
+        // first-acquire rows in each arm are now Gray-Full so the
+        // rendered column stays continuous from the leading
+        // converge into the acquire event without a visible gap.
+        must_contain: &[
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
     },
     TooltipExpect {
         name: "if_else_mut_reassign",
