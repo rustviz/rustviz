@@ -855,11 +855,22 @@ impl PartialEq for State {
 impl Eq for State {}
 
 
+/// Convert a state to its "passive" branch flavour — what the
+/// rendering layer turns into a dashed, half-opacity vertical so
+/// readers can tell which arm is the active one on a given row.
+///
+/// `OutOfScope` is converted to `FullPrivilege { Gray }` instead of
+/// staying `OutOfScope` so let-as-rhs bindings (where the variable
+/// doesn't exist before the conditional) still get a visible
+/// passive column on their inactive branch — without this, the
+/// pre-event segment of every let-as-rhs branch rendered as
+/// nothing at all.
 pub fn branch_state_converter(s: &State) -> State {
     match s {
         State::FullPrivilege { .. } => State::FullPrivilege { s: LineState::Gray },
         State::PartialPrivilege { .. } => State::PartialPrivilege { s: LineState::Gray },
-        _ => s.clone() 
+        State::OutOfScope => State::FullPrivilege { s: LineState::Gray },
+        _ => s.clone()
     }
 }
 
@@ -1499,7 +1510,12 @@ impl Visualizable for VisualizationData {
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
-                    previous_line = *merge_point + 1; // timeline starts one line after the curly brace
+                    // Resume the parent timeline at `merge_point`,
+                    // not `merge_point + 1`. The join dot sits at
+                    // `merge_point` (see render_dot's Branch arm);
+                    // resuming a row later leaves a visible gap
+                    // between the join and the post-merge state.
+                    previous_line = *merge_point;
                 }
                 _ => {
                     previous_state = self.calc_state(&previous_state, e, *l, hash);
@@ -1548,7 +1564,12 @@ impl Visualizable for VisualizationData {
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
-                    previous_line = *merge_point + 1; // timeline starts one line after the curly brace
+                    // Resume the parent timeline at `merge_point`,
+                    // not `merge_point + 1`. The join dot sits at
+                    // `merge_point` (see render_dot's Branch arm);
+                    // resuming a row later leaves a visible gap
+                    // between the join and the post-merge state.
+                    previous_line = *merge_point;
 
                 }
                 _ => {

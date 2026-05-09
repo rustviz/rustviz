@@ -776,18 +776,29 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         
         let if_map = create_line_map(&if_ev);
-        if if_end != merge { if_end += 1; } // this is for front-end formatting
 
-        // Emit the Branch event with one ExtBranchData per real branch.
-        // Plain `if cond { body }` (no else) is single-branch — emitting
-        // a synthesized "Else" label leaks an "Else" tooltip onto the
-        // visualization for code the user didn't write.
+        // Per-branch "active" line ranges. Each branch is rendered
+        // solid inside its active range and dashed outside. We use
+        // body content ranges (not body spans) so the if-branch's
+        // active range stops at its `}` line — at the line where
+        // the else-branch's body starts, the if-branch transitions
+        // to dashed and the else-branch becomes active. Ranges
+        // can't overlap, otherwise both would draw solid on the
+        // shared row.
+        //
+        // `merge_point - 1` is the last line each branch column is
+        // drawn on (the convergence diagonal then bridges that row
+        // to the join dot at `merge_point` — see render_timeline's
+        // Branch arm). Clamping the else-branch's end there keeps
+        // it consistent with the column-trim done in
+        // compute_branch_states.
+        let merge_minus_one = merge.saturating_sub(1);
         let (b_labels, b_slices, b_branches) = match else_expr {
           Some(_) => {
             let else_map = create_line_map(&else_ev);
             (
               vec!["If".to_owned(), "Else".to_owned()],
-              vec![(split + 1, if_end), (if_end, merge)],
+              vec![(split + 1, if_end), (if_end + 1, merge_minus_one)],
               vec![
                 ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl   },
                 ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl },
