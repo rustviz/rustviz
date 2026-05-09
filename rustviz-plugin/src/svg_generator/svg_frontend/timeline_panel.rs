@@ -1893,7 +1893,22 @@ fn render_timeline(
                     .find(|item| item.0 <= *split_point && *split_point <= item.1)
                     .unwrap_or_else(|| panic!("no state segment covers split_point {}", split_point))
                     .clone();
-                let p_state = convert_back(&begin_state.2);
+                // For let-as-rhs bindings the parent state is
+                // OutOfScope before the conditional — the variable
+                // doesn't exist yet. `create_owner_line_string`
+                // returns "" for OutOfScope, so the leading split
+                // diagonals from the fork dot down to each branch
+                // column would silently vanish, leaving the fork dot
+                // floating above disconnected branches. Treat the
+                // OOS-prior case as if the variable were
+                // FullPrivilege::Full at the split: the *active*
+                // branch's diagonal renders as the regular owner
+                // line (solid for mut, hollow for immut), and the
+                // passive-branch dasharray below dashes the rest.
+                let p_state = match begin_state.2 {
+                    State::OutOfScope => State::FullPrivilege { s: LineState::Full },
+                    ref s => convert_back(s),
+                };
                 for (i, branch) in branch_history.iter().enumerate() {
                     let mut split_line_data = VerticalLineData {
                         line_class: String::new(),
@@ -1907,8 +1922,21 @@ fn render_timeline(
                         dasharray: "none".to_owned(),
                     };
 
-                    if branch.e_data.is_empty() || i != 0{
+                    // The first branch (i = 0, conventionally the
+                    // if-arm or the first match-arm) renders solid
+                    // — it's the "leading" path the user reads
+                    // first. Subsequent branches dash + fade their
+                    // leading split diagonal so it's clear they're
+                    // the alternate paths. Empty branches always
+                    // dash + fade. Pre-set dasharray here so a
+                    // non-Gray state (the OOS-promoted Full case
+                    // above, or a real pre-existing FullPrivilege)
+                    // still renders dashed for passive arms;
+                    // create_owner_line_string only sets dasharray
+                    // for Gray and won't otherwise.
+                    if branch.e_data.is_empty() || i != 0 {
                         split_line_data.opacity = 0.5;
+                        split_line_data.dasharray = "4 3".to_owned();
                     }
                     append_line(&p_state, &mut split_line_data, rap, timeline_data, output, registry);
 
