@@ -118,6 +118,18 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_no_else",
     "match_one_arm",
     "match_tuple_destructure",
+    // — Conditionals composed with iteration / capture. Verifies
+    //   the merge classifier from #116 picks the right wording
+    //   when the branches are non-trivially shaped (a closure
+    //   capture in one arm, a for-loop borrow in another, etc.).
+    //   Tooltip-level pinning lives below in EXPECTED_TOOLTIPS.
+    "cond_with_for_loop",
+    "cond_with_closure",
+    "if_inside_for",
+    "closure_with_cond",
+    "if_let_inside_for",
+    "cond_with_move_closure",
+    "match_with_closure_arms",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -873,6 +885,114 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "in branches where it was not",
             "in a conditional expression",
             "acquired ownership of a resource (in all branches above)",
+        ],
+    },
+
+    // ─── Conditionals composed with iteration / capture ──────────────
+    TooltipExpect {
+        name: "cond_with_for_loop",
+        // for-loop body in if-arm borrows `s`; else consumes.
+        // Mixed merge → drop dot + implicit-drop wording.
+        must_contain: &[
+            "Move from s to consume",
+            "show reads from s",
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "cond_with_closure",
+        // Borrow-only closure captures `s` inside if-arm; else
+        // consumes. Mixed merge → drop dot.
+        must_contain: &[
+            "Closure capture (immutable borrow) from s to f",
+            "Move from s to consume",
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "cond_with_move_closure",
+        // `move` closure captures `s` (consuming it) in if-arm;
+        // else consumes directly. Both arms end without `s` →
+        // all-moved wording.
+        must_contain: &[
+            "Closure capture (move) from s to f",
+            "Move from s to consume",
+            "s was moved or dropped in every branch above",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "in branches where it was not",
+        ],
+    },
+    TooltipExpect {
+        name: "if_inside_for",
+        // if/else inside a for-loop body, both inner arms borrow
+        // the loop variable. Inner merge classifies as Unchanged,
+        // so no merge wording surfaces.
+        must_contain: &[
+            "show reads from x",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_with_cond",
+        // Closure body wraps an if/else over a captured variable;
+        // both inner arms borrow it. The closure-capture event is
+        // what surfaces at the outer scope (the if's body events
+        // live inside the closure, not on the parent timeline).
+        // No merge wording — the outer scope sees a regular
+        // closure capture + return, not a Branch.
+        must_contain: &[
+            "Closure capture (immutable borrow) from s to f",
+            "Return immutably borrowed resource from f to s",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_inside_for",
+        // Single-arm if-let inlines per #116 — no Branch event,
+        // no merge wording. Loop body's per-iteration destructure
+        // shows as inline events.
+        must_contain: &[
+            "show reads from inner",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "match_with_closure_arms",
+        // Each arm declares its own closure that borrows `s`.
+        // The capture events are per-arm. The shared scrutinee
+        // `s` stays alive throughout — no may-have-been-moved
+        // wording for it.
+        must_contain: &[
+            "Closure capture (immutable borrow) from s to f",
+            "Closure capture (immutable borrow) from s to g",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
         ],
     },
 ];
