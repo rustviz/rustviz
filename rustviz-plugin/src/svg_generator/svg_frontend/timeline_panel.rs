@@ -293,19 +293,17 @@ fn prepare_registry(registry: &mut Handlebars) {
         "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n";
     let hollow_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"hollow tooltip-trigger\" style=\"fill:transparent;\" d=\"M {{x1}},{{y1}} V {{y2}} h 3.5 V {{y1}} h -3.5\" data-tooltip-text=\"{{title}}\"/>\n";
-    // No `Z` to close the path: the closed-quadrilateral form
-    // dashes the top and bottom horizontal caps too, which
-    // surfaces a stray ~3.5px tick at the top and bottom of any
-    // dashed segment. Leaving the path open means the dashes only
-    // run along the two parallel verticals plus the bottom
-    // connector — visually the segment reads as one dashed strip
-    // instead of three independent dashed sides.
-    let new_hollow_line_template = "<path
-        data-hash=\"{{hash}}\"
-        class=\"hollow tooltip-trigger\"
-        style=\"fill:transparent; stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"
-        d=\"M {{x1}},{{y1}} L {{x2}},{{y2}} L {{x3}},{{y3}} L {{x4}},{{y4}}\"
-        data-tooltip-text=\"{{title}}\"/>";
+    // Hollow column rendering: two parallel `<line>` elements,
+    // one per side of the strip. No closing horizontal at top or
+    // bottom — those were the source of the "stray dash tick" at
+    // segment boundaries (closed/open paths drew a dashed
+    // horizontal connector that appeared as an extra mark where a
+    // dashed segment met a solid one). Two independent lines have
+    // `stroke-linecap: butt` by default, so adjacent state
+    // segments — dashed leading + solid body + dashed trailing —
+    // meet at exact y-coordinates with nothing between them, and
+    // the column reads as one continuous strip with two textures.
+    let new_hollow_line_template = "<g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x1}}\" y1=\"{{y1}}\" x2=\"{{x2}}\" y2=\"{{y2}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x4}}\" y1=\"{{y4}}\" x2=\"{{x3}}\" y2=\"{{y3}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n        </g>\n";
     let solid_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"mutref {{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let hollow_ref_line_template =
@@ -1989,9 +1987,15 @@ fn render_timeline(
                         dasharray: "none".to_owned(),
                     };
 
-                    if branch.e_data.is_empty() {
-                        merge_line_data.dasharray = "4 4".to_owned();
-                    }
+                    // Solid vs dashed for the convergence diagonal
+                    // is decided downstream by `create_owner_line_string`
+                    // / `create_reference_line_string` from `e_state`.
+                    // We don't force dashed for empty `e_data` — with
+                    // the body-span treatment of empty branches,
+                    // `e_state` is the active state at merge-1 and
+                    // already says "solid" when this branch is the
+                    // active path at the join (e.g. `else { println!(s) }`
+                    // — no events on s but else IS the active arm).
 
                     append_line(&e_state, &mut merge_line_data, rap, timeline_data, output, registry);
                 }
