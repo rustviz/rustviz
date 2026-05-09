@@ -1939,6 +1939,35 @@ fn state_is_alive(state: &State) -> bool {
     )
 }
 
+/// Unit-length perpendicular to the line `p1 → p2`. Used to offset
+/// each side of the strip by `half_w` perpendicular to the line
+/// direction so the *visual* gap between the two parallel sides is
+/// constant regardless of angle. Pre-fix the offset was applied in
+/// the x-axis only, which made diagonals' visual gap shrink as
+/// `cos(θ)` (a 40° diagonal was ~23% narrower than the vertical
+/// body), and the user noticed the diagonals reading as "too close
+/// together" compared to the column.
+fn perp_unit(p1: (f64, f64), p2: (f64, f64)) -> (f64, f64) {
+    let dx = p2.0 - p1.0;
+    let dy = p2.1 - p1.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-9 {
+        return (1.0, 0.0);
+    }
+    (-dy / len, dx / len)
+}
+
+/// One centerline segment of a branch's strip — the leading
+/// convergence, a body state run, or the trailing convergence.
+/// Each segment carries its own style (dashed/solid) and a
+/// tooltip; offsets are applied per-side at render time.
+struct CenterSeg {
+    style: bool, // dashed
+    p1: (f64, f64),
+    p2: (f64, f64),
+    title: String,
+}
+
 /// Render every branch (and any nested branches) reachable through
 /// `history`. Each branch's column-plus-convergence is emitted as
 /// `<polyline>` elements: one per side of the strip, broken at
@@ -2042,163 +2071,176 @@ fn render_branches(
                 let alive_at_start = state_is_alive(&begin_state.2);
                 let alive_at_end = state_is_alive(&e_state);
 
-                // For each side of the strip emit polylines:
-                // walk pieces (leading | body groups | trailing)
-                // in source order and merge consecutive same-
-                // style pieces into single `<polyline>`s. Where
-                // styles change, two abutting polylines share a
-                // common endpoint and meet seamlessly.
-                for offset in [-half_w, half_w] {
-                    let mut pieces: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
-
-                    // Parent-side endpoints carry the same `offset`
-                    // as the branch-side endpoints, so the two
-                    // parallel sides of the strip stay offset by
-                    // half_w throughout — including through the
-                    // convergence diagonals. Pre-fix the parent
-                    // endpoint sat at parent_x (a single apex
-                    // point), which made the two sides converge
-                    // to one point and produced a "diamond"
-                    // taper at each parent junction. Both
-                    // endpoints are inside the parent dot's
-                    // rendered radius so the strip visually meets
-                    // the dot cleanly without losing the
-                    // convergence cue.
-                    if alive_at_start {
-                        pieces.push((
-                            leading_dashed,
-                            vec![
-                                (parent_x + offset, get_y_axis_pos(*split_point) as f64),
-                                (branch_x + offset, get_y_axis_pos(*split_point + 1) as f64),
-                            ],
-                            p_title.clone(),
-                        ));
-                    }
-
-                    for (dashed, top, bot, title) in &groups {
-                        pieces.push((
-                            *dashed,
-                            vec![
-                                (branch_x + offset, get_y_axis_pos(*top) as f64),
-                                (branch_x + offset, get_y_axis_pos(*bot) as f64),
-                            ],
-                            title.clone(),
-                        ));
-                    }
-
-                    if alive_at_end {
-                        pieces.push((
-                            trailing_dashed,
-                            vec![
-                                (branch_x + offset, get_y_axis_pos(merge_point.saturating_sub(1)) as f64),
-                                (parent_x + offset, get_y_axis_pos(*merge_point) as f64),
-                            ],
-                            e_title.clone(),
-                        ));
-                    }
-
-                    let mut polylines: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
-                    for (dashed, pts, title) in pieces {
-                        let merged = polylines.last().map(|l| l.0 == dashed).unwrap_or(false);
-                        if merged {
-                            let last = polylines.last_mut().unwrap();
-                            for (i, p) in pts.into_iter().enumerate() {
-                                if i == 0 && last.1.last() == Some(&p) {
-                                    continue;
-                                }
-                                last.1.push(p);
-                            }
-                        } else {
-                            polylines.push((dashed, pts, title));
-                        }
-                    }
-
-                    for (dashed, pts, title) in polylines {
-                        let pts_str = pts.iter()
-                            .map(|p| format!("{},{}", p.0, p.1))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let dasharray = if dashed { "4 4" } else { "none" };
-                        let svg = format!(
-                            "        <polyline data-hash=\"{}\" class=\"hollow tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:none; stroke-opacity: 1.0; stroke-dasharray: {};\"/>\n",
-                            hash, pts_str, title, dasharray,
-                        );
-                        output.entry(-1).or_insert_with(|| (
-                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                            TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                        )).0.timelines.push_str(&svg);
-                    }
-                }
-
-                // Hover capture: a single transparent `<polygon>`
-                // covering the strip's perimeter for this branch.
-                // The visible polylines are 1.5px-wide and the
-                // ~3.5px gap between the two parallel sides isn't
-                // covered by any element on its own, so hovering
-                // anywhere in that gap fired no tooltip. The
-                // polygon spans both sides and the convergence
-                // wedges so a hover anywhere over the branch's
-                // visual strip surfaces the column's tooltip.
-                // Stroke is suppressed so it doesn't add visible
-                // outline; fill is transparent so it doesn't
-                // shade the area but still receives pointer
-                // events.
+                // Build the centerline segment list for this branch.
+                // Each segment carries its own style and tooltip;
+                // perpendicular offsets get applied per-side below.
+                // The segments line up centerline-end to centerline-
+                // start at every transition, so the two sides are
+                // built by walking the same segment list with
+                // different offset signs.
                 let split_y = get_y_axis_pos(*split_point) as f64;
                 let merge_y = get_y_axis_pos(*merge_point) as f64;
                 let column_top_y = get_y_axis_pos(*split_point + 1) as f64;
                 let column_bot_y = get_y_axis_pos(merge_point.saturating_sub(1)) as f64;
-                // Column extent within this strip: bounded by the
-                // first / last body group's row range. With no
-                // body groups (e.g. an `if` arm that consumed the
-                // var at the top of its body), the column extent
-                // collapses to `column_top_y` and the polygon
-                // becomes just the leading-wedge cap — matches
-                // the visible polylines, which are also just the
-                // leading edge in that case.
-                let (col_top_y, col_bot_y) = match (groups.first(), groups.last()) {
-                    (Some(first), Some(last)) => (
-                        get_y_axis_pos(first.1) as f64,
-                        get_y_axis_pos(last.2) as f64,
-                    ),
-                    _ => (column_top_y, column_top_y),
+
+                let mut segs: Vec<CenterSeg> = Vec::new();
+                if alive_at_start {
+                    segs.push(CenterSeg {
+                        style: leading_dashed,
+                        p1: (parent_x, split_y),
+                        p2: (branch_x, column_top_y),
+                        title: p_title.clone(),
+                    });
+                }
+                for (dashed, top, bot, title) in &groups {
+                    segs.push(CenterSeg {
+                        style: *dashed,
+                        p1: (branch_x, get_y_axis_pos(*top) as f64),
+                        p2: (branch_x, get_y_axis_pos(*bot) as f64),
+                        title: title.clone(),
+                    });
+                }
+                if alive_at_end {
+                    segs.push(CenterSeg {
+                        style: trailing_dashed,
+                        p1: (branch_x, column_bot_y),
+                        p2: (parent_x, merge_y),
+                        title: e_title.clone(),
+                    });
+                }
+
+                // Build per-side edge lists (LEFT = +sign offsets
+                // perp.x < 0 outward, RIGHT = -sign). Each segment
+                // contributes one main edge at its perp-offset
+                // endpoints. Where two consecutive segments have
+                // different perp directions (the leading/body and
+                // body/trailing transitions are the canonical
+                // cases — diagonals rotate the perp away from the
+                // body's horizontal), a small bevel edge connects
+                // the previous segment's offset endpoint to the
+                // current segment's offset endpoint. The bevel
+                // inherits the *previous* segment's style so a
+                // dashed-leading → solid-body transition keeps the
+                // bevel dashed (matching what the user reads as
+                // "the leading edge ends here").
+                let build_edges = |sign: f64| -> Vec<(bool, (f64, f64), (f64, f64), String)> {
+                    let mut edges: Vec<(bool, (f64, f64), (f64, f64), String)> = Vec::new();
+                    let mut prev_off_p2: Option<(f64, f64)> = None;
+                    let mut prev_style: Option<bool> = None;
+                    let mut prev_title: Option<String> = None;
+                    for seg in &segs {
+                        let perp = perp_unit(seg.p1, seg.p2);
+                        let off_x = perp.0 * sign * half_w;
+                        let off_y = perp.1 * sign * half_w;
+                        let off_p1 = (seg.p1.0 + off_x, seg.p1.1 + off_y);
+                        let off_p2 = (seg.p2.0 + off_x, seg.p2.1 + off_y);
+                        if let (Some(prev_p2), Some(prev_st), Some(prev_t)) =
+                            (prev_off_p2, prev_style, prev_title.clone())
+                        {
+                            let diff_x = (prev_p2.0 - off_p1.0).abs();
+                            let diff_y = (prev_p2.1 - off_p1.1).abs();
+                            if diff_x > 1e-6 || diff_y > 1e-6 {
+                                edges.push((prev_st, prev_p2, off_p1, prev_t));
+                            }
+                        }
+                        edges.push((seg.style, off_p1, off_p2, seg.title.clone()));
+                        prev_off_p2 = Some(off_p2);
+                        prev_style = Some(seg.style);
+                        prev_title = Some(seg.title.clone());
+                    }
+                    edges
                 };
+
+                let group_edges = |edges: Vec<(bool, (f64, f64), (f64, f64), String)>| -> Vec<(bool, Vec<(f64, f64)>, String)> {
+                    let mut polylines: Vec<(bool, Vec<(f64, f64)>, String)> = Vec::new();
+                    for (style, p1, p2, title) in edges {
+                        if let Some(last) = polylines.last_mut() {
+                            if last.0 == style && last.1.last() == Some(&p1) {
+                                last.1.push(p2);
+                                continue;
+                            }
+                        }
+                        polylines.push((style, vec![p1, p2], title));
+                    }
+                    polylines
+                };
+
+                let path_from_edges = |edges: &[(bool, (f64, f64), (f64, f64), String)]| -> Vec<(f64, f64)> {
+                    let mut path: Vec<(f64, f64)> = Vec::new();
+                    if let Some(first) = edges.first() {
+                        path.push(first.1);
+                    }
+                    for e in edges {
+                        path.push(e.2);
+                    }
+                    path
+                };
+
+                // Build everything for both sides up-front so we
+                // can wrap the whole branch in a `<g>` for unified
+                // hover highlighting.
+                let left_edges = build_edges(1.0);
+                let right_edges = build_edges(-1.0);
+                let left_path = path_from_edges(&left_edges);
+                let right_path = path_from_edges(&right_edges);
+
+                let mut branch_svg = String::new();
+
+                for (style, pts, title) in group_edges(left_edges)
+                    .into_iter()
+                    .chain(group_edges(right_edges).into_iter())
+                {
+                    let pts_str = pts.iter()
+                        .map(|p| format!("{},{}", p.0, p.1))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let dasharray = if style { "4 4" } else { "none" };
+                    branch_svg.push_str(&format!(
+                        "            <polyline data-hash=\"{}\" class=\"hollow tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:none; stroke-opacity: 1.0; stroke-dasharray: {};\"/>\n",
+                        hash, pts_str, title, dasharray,
+                    ));
+                }
+
+                // Hover capture: a transparent `<polygon>` that
+                // traces the strip's perimeter (left path forward
+                // + right path reversed). The visible polylines
+                // are 1.5px-wide and the gap between the two
+                // parallel sides isn't covered by any element on
+                // its own; without this polygon, hovering in that
+                // gap fired no tooltip. `pointer-events:fill` so
+                // the transparent fill still receives mouse
+                // events.
                 let mut perim: Vec<(f64, f64)> = Vec::new();
-                // Left side, top to bottom.
-                if alive_at_start {
-                    perim.push((parent_x - half_w, split_y));
-                }
-                perim.push((branch_x - half_w, col_top_y));
-                if !groups.is_empty() {
-                    perim.push((branch_x - half_w, col_bot_y));
-                }
-                if alive_at_end {
-                    perim.push((parent_x - half_w, merge_y));
-                }
-                // Right side, bottom to top.
-                if alive_at_end {
-                    perim.push((parent_x + half_w, merge_y));
-                }
-                if !groups.is_empty() {
-                    perim.push((branch_x + half_w, col_bot_y));
-                }
-                perim.push((branch_x + half_w, col_top_y));
-                if alive_at_start {
-                    perim.push((parent_x + half_w, split_y));
-                }
+                perim.extend(left_path.iter().cloned());
+                perim.extend(right_path.iter().rev().cloned());
                 if perim.len() >= 3 {
                     let pts_str = perim.iter()
                         .map(|p| format!("{},{}", p.0, p.1))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    let svg = format!(
-                        "        <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+                    branch_svg.push_str(&format!(
+                        "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
                         hash, pts_str, p_title,
-                    );
-                    output.entry(-1).or_insert_with(|| (
-                        TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                        TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
-                    )).0.timelines.push_str(&svg);
+                    ));
                 }
+
+                // Wrap polylines + polygon in a `<g class="branch-
+                // group">`. CSS rule (.branch-group:hover .tooltip-
+                // trigger) glows every element in the group when
+                // any one is hovered, so moving the mouse into the
+                // strip area highlights the entire branch column
+                // rather than just whichever line segment the
+                // pointer happens to be over. Single-element hover
+                // pre-fix only highlighted one of the two parallel
+                // sides at a time, with no feedback on the
+                // transparent gap or the convergences.
+                output.entry(-1).or_insert_with(|| (
+                    TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                    TimelinePanelData{ labels: String::new(), dots: String::new(), timelines: String::new(), ref_line: String::new(), arrows: String::new() },
+                )).0.timelines.push_str(&format!(
+                    "        <g class=\"branch-group\">\n{}        </g>\n",
+                    branch_svg,
+                ));
 
                 // Recurse for any branches nested inside this
                 // branch's body. The nested call uses this

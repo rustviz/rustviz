@@ -192,6 +192,15 @@ pub static CSS_TEMPLATE: &'static str =
     .tooltip-trigger:hover{
         filter: url(#glow);
     }
+
+    /* When the cursor is anywhere inside a branch column,
+       glow every element grouped under .branch-group.
+       Single-element hover otherwise only highlighted one of
+       the two parallel sides at a time, with no feedback on
+       the transparent gap between them. */
+    .branch-group:hover .tooltip-trigger {
+        filter: url(#glow);
+    }
     
     /* hash based styling */
     [data-hash=\"0\"] {
