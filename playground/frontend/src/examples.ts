@@ -400,30 +400,36 @@ fn main() {
       },
       {
         name: "if without else",
-        code: `fn main() {
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
     let s = String::from("hi");
-    if s.len() > 0 {
-        println!("non-empty: {}", s);
+    let cond = true;
+    if cond {
+        show(&s);
     }
-    println!("{}", s);
+    show(&s);
 }`,
       },
       {
         name: "if/else with disjoint variables",
-        code: `fn main() {
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
     let cond = true;
     let a = String::from("a");
     let b = String::from("b");
     if cond {
-        println!("{}", a);
+        show(&a);
     } else {
-        println!("{}", b);
+        show(&b);
     }
 }`,
       },
       {
         name: "if/else: same var moved on one side",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
 
 fn main() {
     let s = String::from("hi");
@@ -431,45 +437,81 @@ fn main() {
     if cond {
         consume(s);
     } else {
-        println!("kept: {}", s);
+        show(&s);
+    }
+}`,
+      },
+      {
+        name: "if/else: move on both sides",
+        code: `fn consume(_s: String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let cond = true;
+    if cond {
+        consume(s);
+    } else {
+        consume(s);
     }
 }`,
       },
       {
         name: "match as let RHS",
-        code: `fn main() {
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
     let n = 3;
     let s = match n {
         0 => String::from("zero"),
         _ => String::from("other"),
     };
-    println!("{}", s);
+    show(&s);
 }`,
       },
       {
         name: "if let Some",
-        code: `fn main() {
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
     let opt: Option<String> = Some(String::from("x"));
     if let Some(x) = opt {
-        println!("got {}", x);
+        show(&x);
     }
 }`,
       },
       {
         name: "match with a borrow in one arm",
-        code: `fn main() {
+        code: `fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
     let s = String::from("hello");
     let n = 1;
     match n {
-        0 => println!("zero"),
-        _ => println!("borrowed: {}", s),
+        0 => {}
+        _ => show(&s),
     }
-    println!("after: {}", s);
+    show(&s);
+}`,
+      },
+      {
+        name: "match: 3 arms (consume vs borrow)",
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let n = 1;
+    match n {
+        0 => consume(s),
+        1 => show(&s),
+        _ => show(&s),
+    }
 }`,
       },
       {
         name: "if/else: move on one side, borrow on other",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
 
 fn main() {
     let s = String::from("hi");
@@ -477,13 +519,14 @@ fn main() {
     if cond {
         consume(s);
     } else {
-        println!("borrow: {}", s);
+        show(&s);
     }
 }`,
       },
       {
         name: "rebind on both sides (\"bound here\" join)",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
 
 fn main() {
     let mut s = String::from("orig");
@@ -495,12 +538,13 @@ fn main() {
         consume(s);
         s = String::from("alt");
     }
-    println!("{}", s);
+    show(&s);
 }`,
       },
       {
         name: "nested if (move propagates outward)",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
 
 fn main() {
     let s = String::from("hi");
@@ -510,7 +554,32 @@ fn main() {
         if c2 {
             consume(s);
         } else {
-            println!("kept inner: {}", s);
+            show(&s);
+        }
+    } else {
+        consume(s);
+    }
+}`,
+      },
+      {
+        name: "deeply nested if (3 levels)",
+        code: `fn consume(_s: String) {} // rustviz: hide
+fn show(_s: &String) {} // rustviz: hide
+
+fn main() {
+    let s = String::from("hi");
+    let c1 = true;
+    let c2 = false;
+    let c3 = true;
+    if c1 {
+        if c2 {
+            if c3 {
+                consume(s);
+            } else {
+                show(&s);
+            }
+        } else {
+            show(&s);
         }
     } else {
         consume(s);

@@ -112,6 +112,9 @@ const EXPECTED_OK: &[&str] = &[
     "if_no_else",
     "if_else_mut_reassign",
     "if_as_let_rhs_multiline",
+    "if_else_move_both",
+    "deep_nested_if",
+    "match_three_arms",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -738,6 +741,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "may have been moved",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "if_else_move_both",
+        // Both arms consume → merge is all-moved (no may-have-been
+        // hedge, no drop dot since there's no didn't-move branch
+        // to insert an implicit drop into).
+        must_contain: &[
+            "Move from s to consume",
+            "s was moved or dropped in every branch above",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "in branches that didn't",
+        ],
+    },
+    TooltipExpect {
+        name: "deep_nested_if",
+        // Three-level nesting. Each merge classifies on its own
+        // branches' end states; the outermost ends up all-moved
+        // because every path reaches a consume (some directly,
+        // some via the chain of nested merges already inserting
+        // implicit drops).
+        must_contain: &[
+            "Move from s to consume",
+            "s was moved or dropped in every branch above",
+            // At least one inner merge is the mixed implicit-drop
+            // case (consume on one path, borrow on the other).
+            "s was moved in at least one branch above; \
+             in branches that didn't, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            // The outer merge no longer hedges with "at least one";
+            // the deepest mixed merges still do, but the corpus
+            // pins exact strings so an outer regression to the
+            // hedge wording is caught here too.
+            "may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    TooltipExpect {
+        name: "match_three_arms",
+        // 3-arm match: consume, borrow, borrow. Mixed merge →
+        // implicit-drop wording. Each arm gets its own column;
+        // even/odd N just affects placement, not classification.
+        must_contain: &[
+            "Move from s to consume",
+            "s was moved in at least one branch above; \
+             in branches that didn't, its resource is dropped at the branch's end.",
+        ],
+        must_not_contain: &[
+            "may have been moved (consumed in at least one branch above)",
             "moved or dropped in every branch",
         ],
     },
