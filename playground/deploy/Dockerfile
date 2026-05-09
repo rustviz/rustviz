@@ -1,8 +1,13 @@
 # syntax=docker/dockerfile:1.7
 #
 # Deploy image for the RustViz playground. Multi-stage:
-#   1. rust-builder: compile playground against the workspace's pinned nightly.
-#   2. frontend-builder: vite build for the SPA.
+#   1. rust-builder: compile playground against the workspace's pinned
+#      nightly, AND install the rustviz CLI for stage 2's prerender.
+#   2. frontend-builder: vite build for the SPA, including the prebuild
+#      hook that prerenders every dropdown example through `rustviz svg`
+#      so first-paint dropdown clicks don't pay for the cold-start
+#      compile-API round-trip. Inherits from stage 1 to avoid a second
+#      toolchain install.
 #   3. final: docker:dind base — playground runs alongside an in-VM dockerd
 #      and shells out to `docker run rustviz/rustviz-runner` per request
 #      (see ../SECURITY.md). The runner image itself is published separately
@@ -16,19 +21,19 @@ ARG RUST_NIGHTLY=nightly-2025-08-20
 # ---------- 1. rust-builder ----------
 # Alpine base shares its libc (musl) with the docker:dind final stage, so
 # the playground binary we produce here drops directly into stage 3 without
-# cross-compilation.
+# cross-compilation. We also install Node here so stage 2 can inherit and
+# run the SPA build without a second toolchain install.
 FROM rust:1.83-alpine AS rust-builder
 ARG RUST_NIGHTLY
-RUN apk add --no-cache musl-dev gcc make perl pkgconfig \
+RUN apk add --no-cache musl-dev gcc make perl pkgconfig nodejs npm \
  && rustup toolchain install ${RUST_NIGHTLY} --profile minimal \
         --component rust-src,rustc-dev,llvm-tools-preview \
  && rustup default ${RUST_NIGHTLY}
 
 WORKDIR /src
 # Build context is the repo root. Copy enough of the workspace that cargo
-# can resolve and build playground. (rustviz-plugin is excluded from the
-# playground binary's dep tree, so it's not compiled here even though its
-# manifest is part of the workspace resolution graph.)
+# can resolve and build playground + install the rustviz CLI (needed by
+# stage 2's prerender step).
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY rustviz-plugin/Cargo.toml ./rustviz-plugin/Cargo.toml
 COPY rustviz-plugin/src/ ./rustviz-plugin/src/
@@ -38,27 +43,31 @@ COPY mdbook-rustviz/ ./mdbook-rustviz/
 COPY playground/Cargo.toml ./playground/Cargo.toml
 COPY playground/src/ ./playground/src/
 
-RUN cargo build --release --locked -p rustviz-playground
+# Build the playground binary AND install rustviz-plugin + rustviz-cli
+# so the prerender script in stage 2 can shell out to `rustviz svg`.
+# `--locked` mirrors setup.sh: pinned-Cargo.lock-or-bust against the
+# workspace's pinned nightly.
+RUN cargo build --release --locked -p rustviz-playground \
+ && cargo install --path rustviz-plugin --locked \
+ && cargo install --path rustviz-cli --locked
 
 # ---------- 2. frontend-builder ----------
-FROM node:20-alpine AS frontend-builder
-WORKDIR /src
+# Inherits stage 1's filesystem so we get:
+#   - the rustviz CLI on PATH at /usr/local/cargo/bin/rustviz (used by
+#     the prebuild prerender hook)
+#   - the workspace tree at /src/, which is what vite.config.ts'
+#     `resolve(__dirname, '../../rust-toolchain.toml')` already expects
+#     when invoked from a normal local checkout — no special-case
+#     copies into / required.
+FROM rust-builder AS frontend-builder
+WORKDIR /src/playground/frontend
 COPY playground/frontend/package.json playground/frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY playground/frontend/ ./
-# vite.config.ts reads two files at build time to inject build-info
-# strings into the SPA bundle (the "Compiles with rustc … and
-# rustviz-plugin …" line under the Generate button):
-#   - rust-toolchain.toml       -> [toolchain].channel
-#   - rustviz-plugin/Cargo.toml -> [package].version
-# Both lookups use `resolve(__dirname, '../../<file>')` from
-# /src/vite.config.ts, so the files have to land at /<file> inside
-# this stage. Locally the same relative path walks up from
-# playground/frontend/ to the workspace root, so the same expressions
-# work in both contexts as long as we copy the files into matching
-# slots here.
-COPY rust-toolchain.toml /rust-toolchain.toml
-COPY rustviz-plugin/Cargo.toml /rustviz-plugin/Cargo.toml
+# `npm run build` triggers `prebuild` (tsx scripts/prerender.ts → calls
+# `rustviz svg` per dropdown example → writes src/prerendered.json),
+# then `tsc -b && vite build`. A failed prerender aborts the build by
+# design.
 RUN npm run build
 
 # ---------- 3. final (docker:dind) ----------
@@ -75,7 +84,7 @@ COPY --from=rust-builder /src/target/release/rustviz-playground /usr/local/bin/r
 # Frontend bundle (Vite output). The Vite build copies frontend/public/
 # into dist/, so ex-assets/{helpers.js,visualization.css} ride along.
 WORKDIR /app
-COPY --from=frontend-builder /src/dist/ /app/frontend/dist/
+COPY --from=frontend-builder /src/playground/frontend/dist/ /app/frontend/dist/
 
 # The runner image (rustviz/rustviz-runner:latest) is built and pushed by
 # .github/workflows/runner-image.yml to ghcr.io/rustviz/rustviz-runner.
