@@ -671,11 +671,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "if_else_move_join",
         // Variable `s` consumed in if branch, only borrowed in else
-        // branch. Merge dot says `s` may have been moved (Rust treats
-        // it as moved regardless of which branch ran).
+        // branch. Mixed move/alive merge → drop dot with the
+        // implicit-drop explanation (Rust drops `s` at the end of
+        // any branch that didn't move it so the post-state is
+        // consistent across branches).
         must_contain: &[
             "Move from s to consume",
-            "s may have been moved (consumed in at least one branch above)",
+            "s was moved in at least one branch above; \
+             in branches that didn't, its resource is dropped at the branch's end.",
         ],
         must_not_contain: &["merge"],
     },
@@ -694,24 +697,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "nested_if_move_join",
-        // Inner if: consume on one inner branch, borrow on the other
-        // → inner merge is "may have been moved". Outer if's else
-        // also consumes `s` → outer merge propagates the move.
-        // Two merge tooltips, both reading "may have been moved".
+        // Inner if: consume on one inner branch, borrow on the
+        // other → mixed → inner merge gets the implicit-drop
+        // tooltip. Outer if: both branches end without the
+        // resource (else by direct consume, then-arm by the inner
+        // merge's implicit drop) → outer merge says every branch.
         must_contain: &[
-            "s may have been moved (consumed in at least one branch above)",
+            "s was moved in at least one branch above; \
+             in branches that didn't, its resource is dropped at the branch's end.",
+            "s was moved or dropped in every branch above",
         ],
         must_not_contain: &["merge"],
     },
     TooltipExpect {
         name: "if_no_else",
         // Plain `if cond { body }` with `s` moved inside the body.
-        // The merge dot says `s` may have been moved — the implicit-
-        // untouched else means BoundHere can't fire. No "If" / "Else"
-        // tooltips: those bookend dots got dropped because they were
-        // a teaching distraction (see render_dot's Branch arm).
+        // The implicit untouched else keeps `s` alive on that
+        // path, so the merge is mixed → drop-dot tooltip with the
+        // implicit-drop wording. No "If" / "Else" bookend
+        // tooltips (dropped as a teaching distraction in
+        // render_dot's Branch arm).
         must_contain: &[
-            "s may have been moved (consumed in at least one branch above)",
+            "s was moved in at least one branch above; \
+             in branches that didn't, its resource is dropped at the branch's end.",
         ],
         must_not_contain: &[
             "If",
