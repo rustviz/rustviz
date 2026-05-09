@@ -699,16 +699,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
         if_decl.extend(iflet_bindings.iter().cloned());
 
-        // Single-arm `if let pat = expr { … }` (no else): inline.
-        // The destructure (Move from scrutinee to binding) and body
-        // events are already in `preprocessed_events`; emit
-        // GoOutOfScope events for the if-let bindings and skip the
-        // Branch construction so the column doesn't zigzag off into
-        // a lone arm with no symmetric merge. Plain `if cond { … }`
-        // no-else still records as a Branch — there's no implicit
-        // destructure that needs to weave inline alongside the
-        // parent column.
-        if !iflet_bindings.is_empty() && else_expr.is_none() {
+        // Single-arm `if cond { … }` and `if let pat = expr { … }`
+        // (both no-else): inline. Body events are already in
+        // `preprocessed_events` from the body visit above; the only
+        // thing the lone-arm Branch construction adds is a zigzag
+        // column off into a lone arm with no symmetric merge to
+        // counter-balance it. Skip it. Just emit GoOutOfScope events
+        // for any branch-local bindings (if-let pattern bindings,
+        // body-internal let-stmts) so they wind down at the closing
+        // brace as they would inside the Branch.
+        //
+        // Tradeoff: the conditionality of the body ("only runs if
+        // cond is true") is no longer encoded — a Move inside the
+        // body shows as an unconditional Move on the parent
+        // timeline. Acceptable given the alternative is the
+        // single-arm zigzag, which obscured the same flow with a
+        // structural anomaly.
+        if else_expr.is_none() {
             for var in if_decl.iter() {
                 self.preprocessed_events.push((
                     if_end,
@@ -981,6 +988,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         match source {
           // A normal match (not desugared)
           rustc_hir::MatchSource::Normal => {
+            // Single-arm match: inline. Don't filter body events
+            // out of preprocessed_events / don't emit a Branch
+            // event — same rationale as single-arm if / if-let
+            // above. The directly-built events (pattern
+            // destructures, post-arm callbacks, per-arm
+            // GoOutOfScope) get routed through add_external_event
+            // after the loop so line_map picks them up; body
+            // events are already in preprocessed_events from the
+            // arm's visit_expr below.
+            let inline = arms.len() == 1;
             for arm in arms.iter() {
               let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
               let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
@@ -997,6 +1014,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
               let mut pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
               // println!("arm pat {:#?}", arm.pat);
+              // Route pattern-destructure events into either
+              // `branch_e_data` (multi-arm: events live inside the
+              // Branch's per-arm event list) or `preprocessed_events`
+              // via `add_external_event` (single-arm inline: events
+              // join the global timeline before `visit_expr` so they
+              // appear in source order with the body).
               match arm.pat.kind {
                 // (<pat>, <pat>, ..) => <expr>
                 // First need to annotate events that occur between parents (the variables being matched upon)
@@ -1011,8 +1034,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     for (to_ro, e, parent_ty) in associated_ro.iter() {
                       // If the type of the pat is not the same as the parent associated with it then it must be a partial move
                       let is_partial = !(*parent_ty == typeck_res.node_type(p.hir_id));
-                      branch_e_data.push((pat_line, self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[i].clone(), *self.unique_id, is_partial)));
+                      let id = *self.unique_id;
                       *self.unique_id += 1;
+                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[i].clone(), id, is_partial);
+                      if inline {
+                        self.add_external_event(pat_line, ext_ev);
+                      } else {
+                        branch_e_data.push((pat_line, ext_ev));
+                      }
                       match e {
                         Evt::SBorrow => {
                           callback_events.push((parents[i].clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
@@ -1034,8 +1063,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
                     for (to_ro, e, _) in associated_ro.iter() {
-                      branch_e_data.push((pat_line, self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()),parents[i].clone(), *self.unique_id, false)));
+                      let id = *self.unique_id;
                       *self.unique_id += 1;
+                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[i].clone(), id, false);
+                      if inline {
+                        self.add_external_event(pat_line, ext_ev);
+                      } else {
+                        branch_e_data.push((pat_line, ext_ev));
+                      }
                       match e {               // A borrow, mut/immut must be returned at the end of the block
                         Evt::SBorrow => {
                           callback_events.push((parents[i].clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
@@ -1060,43 +1095,64 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
 
               // get events that occured in the arm
-              branch_e_data.extend(
-                self.preprocessed_events.iter().filter(|i| filter_ev(i, begin, end)).cloned()
-              );
+              if !inline {
+                branch_e_data.extend(
+                  self.preprocessed_events.iter().filter(|i| filter_ev(i, begin, end)).cloned()
+                );
 
-              // contribute events-touched variables to liveness; the
-              // arm's own pat-decls are subtracted at the end.
-              collect_event_live_vars(&branch_e_data, &mut liveness);
+                // contribute events-touched variables to liveness; the
+                // arm's own pat-decls are subtracted at the end.
+                collect_event_live_vars(&branch_e_data, &mut liveness);
 
-              // remove elements from global container
-              self.preprocessed_events.retain(|(l, _)| 
-                if *l <= end && *l >= begin {
-                  false
-                }
-                else {
-                  true
-                }
-              );
+                // remove elements from global container
+                self.preprocessed_events.retain(|(l, _)|
+                  if *l <= end && *l >= begin {
+                    false
+                  }
+                  else {
+                    true
+                  }
+                );
+              }
 
               // add callback events - events that need to happen at the end of an arm block
               // ex: if a pattern binding borrows from a parent
               for (to, from, e) in callback_events {
                 let name = from.real_name();
                 self.borrow_map.remove(&name);
-                branch_e_data.push((end, self.ext_ev_of_evt(e, to, from, *self.unique_id, false)));
+                let id = *self.unique_id;
                 *self.unique_id += 1;
+                let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
+                if inline {
+                  self.add_external_event(end, ext_ev);
+                } else {
+                  branch_e_data.push((end, ext_ev));
+                }
               }
 
               // add gos events
               for r in arm_decls.iter() {
-                branch_e_data.push((end, ExternalEvent::GoOutOfScope { ro: r.clone(), id: *self.unique_id }));
+                let id = *self.unique_id;
                 *self.unique_id += 1;
+                let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
+                if inline {
+                  self.add_external_event(end, gos);
+                } else {
+                  branch_e_data.push((end, gos));
+                }
               }
 
-              // branch_e_data.push((end, self.ext_ev_of_evt(parent_ev.clone(), ResourceTy::Anonymous, parent.clone())));
-              let branch_line_map = create_line_map(&branch_e_data);
-
-              branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls});
+              if !inline {
+                let branch_line_map = create_line_map(&branch_e_data);
+                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls });
+              }
+            }
+            // Single-arm: events already routed through
+            // add_external_event during the loop, nothing else
+            // to do — bail out of the Normal arm before the
+            // multi-arm Branch construction below.
+            if inline {
+                return;
             }
             // Variables introduced by an arm's pattern only exist
             // inside that arm — strip them out so they don't get a

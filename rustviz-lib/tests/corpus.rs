@@ -116,6 +116,7 @@ const EXPECTED_OK: &[&str] = &[
     "deep_nested_if",
     "match_three_arms",
     "if_let_no_else",
+    "match_one_arm",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -801,6 +802,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     TooltipExpect {
+        name: "match_one_arm",
+        // Single-arm match with an irrefutable binding. Body shows
+        // inline; the pattern's Move (s → x) emits on the
+        // destructure line; show borrows x; x drops at arm end.
+        // No Branch event, no merge tooltip.
+        must_contain: &[
+            "Move from s to x",
+            "show reads from x",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
+        ],
+    },
+    TooltipExpect {
         name: "match_three_arms",
         // 3-arm match: consume, borrow, borrow. Mixed merge →
         // implicit-drop wording. Each arm gets its own column;
@@ -817,20 +836,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "if_no_else",
-        // Plain `if cond { body }` with `s` moved inside the body.
-        // The implicit untouched else keeps `s` alive on that
-        // path, so the merge is mixed → drop-dot tooltip with the
-        // implicit-drop wording. No "If" / "Else" bookend
-        // tooltips (dropped as a teaching distraction in
-        // render_dot's Branch arm).
+        // Plain `if cond { body }`: the Branch event is now
+        // skipped (single-arm conditional). The Move from `s` to
+        // `consume` shows inline on the parent timeline, with no
+        // merge tooltip and no "live in a conditional expression"
+        // labelling.
         must_contain: &[
-            "s was moved in at least one branch above; \
-             in branches where it was not, its resource is dropped at the branch's end.",
+            "Move from s to consume",
         ],
         must_not_contain: &[
             "If",
             "Else",
             "merge",
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
             "acquired ownership of a resource (in all branches above)",
         ],
     },
