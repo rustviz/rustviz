@@ -2068,7 +2068,19 @@ fn render_branches(
                 // convergence would form a polyline that bridged
                 // over the Move, putting a stray column line on a
                 // row the variable doesn't exist on.
-                let alive_at_start = state_is_alive(&begin_state.2);
+                //
+                // `alive_at_start` is checked on the *synthesized*
+                // `p_state` rather than the raw `begin_state.2`.
+                // For let-as-rhs (`let s = if … { … } else { … };`)
+                // the parent's pre-branch state is OutOfScope —
+                // the variable doesn't exist yet — but the branch
+                // *is* about to bring it into scope by acquiring.
+                // The synthesis above maps OOS → FullPrivilege so
+                // the leading diagonal has a renderable state, and
+                // the liveness check needs to run on that mapped
+                // state too, otherwise the leading edge falls off
+                // for every let-as-rhs binding.
+                let alive_at_start = state_is_alive(&p_state);
                 let alive_at_end = state_is_alive(&e_state);
 
                 // Build the centerline segment list for this branch.
