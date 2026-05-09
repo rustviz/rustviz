@@ -1848,13 +1848,22 @@ fn compute_hollow_line_data(v_data: VerticalLineData, w: f64) -> HollowLineData{
     let y2 = v_data.y2 as f64;
     let dx = x1 - x2;
     let dy = y1 - y2;
-    
-    // Length of the direction vector
+
+    // Length of the direction vector. Zero-length inputs (a state
+    // segment whose top and bottom landed on the same line) would
+    // produce NaN coordinates downstream when we divide by it; the
+    // rendering filters such segments out today, but a defensive
+    // fallback to a vertical orientation keeps the output finite
+    // for any future caller that hasn't done that filtering.
     let d_length = (dx.powi(2) + dy.powi(2)).sqrt();
+    let (ux, uy) = if d_length < 1e-9 {
+        (0.0_f64, 1.0_f64)
+    } else {
+        (dx / d_length, dy / d_length)
+    };
 
-
-    let p_x = -dy / d_length * (-w / 2.0);
-    let p_y  = dx / d_length * (-w / 2.0);
+    let p_x = -uy * (-w / 2.0);
+    let p_y =  ux * (-w / 2.0);
 
     // create new x and y coordinates
     let x1 = x1 + p_x;
@@ -1863,8 +1872,8 @@ fn compute_hollow_line_data(v_data: VerticalLineData, w: f64) -> HollowLineData{
     let y2 = y2 + p_y;
     
     // Perpendicular vector components, normalized and scaled by the width
-    let px = -dy / d_length * w;
-    let py = dx / d_length * w;
+    let px = -uy * w;
+    let py =  ux * w;
 
     // Compute the remaining points
     let x3 = x1 + px;
