@@ -1075,13 +1075,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // inside that arm — strip them out so they don't get a
             // branched timeline of their own.
             liveness = liveness.difference(&all_pat_decls).cloned().collect();
-            // add branch event
+            // add branch event. merge_point is the closing-brace
+            // line of the match — same convention as If, where
+            // merge_point is the line of the else-block's closing
+            // `}`. Previously this used `merge - 1` (with a stale
+            // TODO marker), which landed the join dot one row above
+            // the `};`, on the last arm's body line.
             self.add_external_event(split, ExternalEvent::Branch {
               live_vars: liveness,
               branches: branch_data,
               branch_type: BranchType::Match(b_ty_names, b_slices),
               split_point: split,
-              merge_point: merge - 1, // TODO: fix
+              merge_point: merge,
               id: *self.unique_id });
             *self.unique_id += 1;
           }
