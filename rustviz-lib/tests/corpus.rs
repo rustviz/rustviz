@@ -115,6 +115,7 @@ const EXPECTED_OK: &[&str] = &[
     "if_else_move_both",
     "deep_nested_if",
     "match_three_arms",
+    "if_let_no_else",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -779,6 +780,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // pins exact strings so an outer regression to the
             // hedge wording is caught here too.
             "may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_no_else",
+        // Single-arm if-let inlines: destructure Move from opt to
+        // x, then a borrow from x to show. No Branch event, so no
+        // merge tooltip wording.
+        must_contain: &[
+            "Move from Some to opt",
+            "Move from opt to x",
+            "show reads from x",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+            "in branches where it was not",
+            "in a conditional expression",
         ],
     },
     TooltipExpect {

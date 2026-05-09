@@ -699,6 +699,26 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
         if_decl.extend(iflet_bindings.iter().cloned());
 
+        // Single-arm `if let pat = expr { … }` (no else): inline.
+        // The destructure (Move from scrutinee to binding) and body
+        // events are already in `preprocessed_events`; emit
+        // GoOutOfScope events for the if-let bindings and skip the
+        // Branch construction so the column doesn't zigzag off into
+        // a lone arm with no symmetric merge. Plain `if cond { … }`
+        // no-else still records as a Branch — there's no implicit
+        // destructure that needs to weave inline alongside the
+        // parent column.
+        if !iflet_bindings.is_empty() && else_expr.is_none() {
+            for var in if_decl.iter() {
+                self.preprocessed_events.push((
+                    if_end,
+                    ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
+                ));
+                *self.unique_id += 1;
+            }
+            return;
+        }
+
         // Filter events that landed inside each branch's body. The
         // ranges deliberately exclude the brace lines: `split` is the
         // line of the if-body's opening `{` (which in normal Rust
