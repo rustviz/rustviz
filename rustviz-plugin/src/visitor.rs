@@ -405,7 +405,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         // typecheck to figure out what type of event is going to occur
         let line_num = expr_to_line(&lhs_expr, &self.tcx);
-        let lhs_rty = self.resource_of_lhs(lhs_expr);
+        // None means the LHS is an unsupported shape (e.g. index, tuple
+        // destructure — #144) or an unregistered name; short-circuit the
+        // assignment so the rest of the program still renders.
+        let lhs_rty = match self.resource_of_lhs(lhs_expr) {
+          Some(rty) => rty,
+          None => return,
+        };
         let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
         let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
         let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner), lhs_ty);
