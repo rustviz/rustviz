@@ -3,7 +3,7 @@ use crate::svg_generator::data::{branch_state_converter, convert_back, string_of
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 use std::cmp::{self, max};
 
@@ -212,7 +212,16 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &registry); // headers
     render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry); // dot events
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry); // reference lines
-    render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &registry); // arrows
+
+    // Build a (x, y)-set of every event-dot position (incl. dots in
+    // branch arms, which use per-branch t_data coordinates that
+    // don't appear in the global `resource_owners_layout`). Arrow
+    // rendering uses this to detect when a horizontal gray arrow
+    // would pass through a dot and route it as a small "hop" over
+    // the dot instead, so the dot stays hoverable.
+    let dot_positions = collect_dot_positions(visualization_data, &resource_owners_layout);
+
+    render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &dot_positions, &registry); // arrows
     render_struct_box(&mut output, &structs_info, &visualization_data.fn_start_lines, &registry); // struct box
 
     let mut output_string : String = String::new();
@@ -1291,12 +1300,165 @@ fn fetch_line_map<'a>(
 }
 
 // render arrow
+/// Collect every event-dot's (x, y) position into a set used by the
+/// arrow renderer to detect "this gray arrow would pass through a dot
+/// on its way to its target" and route it through `render_hopping_arrow`
+/// instead.
+///
+/// Walks each timeline's history, including recursing into Branch
+/// events so per-arm dots (which sit at the branch's per-arm
+/// `t_data.x_val`, not the global column x) are captured too.
+/// Skips event kinds that don't actually emit a dot (RefDie is
+/// filtered out in `render_dot`; Branch events themselves do emit a
+/// dot at split / merge points which we DO want indexed).
+fn collect_dot_positions(
+    vd: &VisualizationData,
+    ro_layout: &BTreeMap<u64, TimelineColumnData>,
+) -> HashSet<(i64, i64)> {
+    fn walk(
+        history: &Vec<(usize, Event)>,
+        cur_x: i64,
+        out: &mut HashSet<(i64, i64)>,
+    ) {
+        for (line, event) in history {
+            // The dot for the event itself sits at (cur_x,
+            // get_y_axis_pos(line)). RefDie doesn't render a dot.
+            if !matches!(event, Event::RefDie { .. }) {
+                out.insert((cur_x, get_y_axis_pos(*line)));
+            }
+            // Recurse into branch arms; each arm has its own
+            // per-RAP x_val.
+            if let Event::Branch { branch_history, split_point, merge_point, .. } = event {
+                for branch in branch_history {
+                    let arm_x = branch.t_data.x_val;
+                    // The arm's split / merge dots are emitted at
+                    // split_point + 1 and merge_point in render_dot.
+                    out.insert((arm_x, get_y_axis_pos(*split_point + 1)));
+                    out.insert((arm_x, get_y_axis_pos(*merge_point)));
+                    walk(&branch.e_data, arm_x, out);
+                }
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for (hash, timeline) in vd.timelines.iter() {
+        if matches!(timeline.resource_access_point, ResourceAccessPoint::Function(_)) {
+            continue;
+        }
+        let x = ro_layout.get(hash).map(|t| t.x_val).unwrap_or(0);
+        walk(&timeline.history, x, &mut out);
+    }
+    out
+}
+
+/// Build the SVG markup for a horizontal arrow that "hops" over any
+/// event dot it would otherwise pass through.
+///
+/// `x1`/`x2` are the endpoint and source x positions (matching the
+/// caller's convention: arrowhead lands on x1, source side at x2).
+/// `from_hash` / `to_hash` are excluded from the overlap scan; every
+/// other column whose `x_val` lies strictly between them and that
+/// emits an event dot at `line_number` becomes a hop.
+///
+/// Returns `Some(markup)` if at least one hop is needed, in which
+/// case the caller should bypass the regular polyline pipeline and
+/// push the markup straight into the appropriate output bucket.
+/// Returns `None` if the path is clear — caller falls through to the
+/// existing polyline rendering. Keeping the no-hop path identical
+/// preserves all existing visual tests.
+fn render_hopping_arrow(
+    x1: i64, y: i64, x2: i64,
+    title: &str,
+    dot_positions: &HashSet<(i64, i64)>,
+) -> Option<String> {
+    let (lo_x, hi_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+
+    // Pull every (x, y) dot position that sits at this arrow's y
+    // and strictly between source/target x. Source and target dots
+    // (at exactly lo_x or hi_x) aren't intervening — they're the
+    // endpoints we're connecting.
+    let mut overlap_xs: Vec<i64> = dot_positions
+        .iter()
+        .filter_map(|(dx, dy)| {
+            if *dy == y && *dx > lo_x && *dx < hi_x { Some(*dx) } else { None }
+        })
+        .collect();
+    if overlap_xs.is_empty() { return None; }
+    overlap_xs.sort();
+    overlap_xs.dedup();
+
+    // The arrowhead is 12.75 units long and pulled back 18 from the
+    // dot center (matching the polyline path) so the tip lands on
+    // the dot's near edge. Sign of `head_dir` tells the head
+    // polygon which way to point.
+    let head_offset: f64 = 18.0;
+    let r: f64 = 10.0; // hop radius — clears a 5px dot plus stroke comfortably
+    let y_f = y as f64;
+    let source_x = x2 as f64;
+
+    // Always emit the path source → endpoint. Endpoint is x1 with
+    // pullback applied along the arrow's direction.
+    let goes_right = x2 < x1;
+    let head_dir = if goes_right { 1.0 } else { -1.0 };
+    let end_x_pulled = if goes_right {
+        x1 as f64 - head_offset
+    } else {
+        x1 as f64 + head_offset
+    };
+    // SVG arc sweep flag for "arc bulges upward in screen space"
+    // (smaller y) depends on direction of travel: counterclockwise
+    // (sweep=0) bulges up when going left-to-right; clockwise
+    // (sweep=1) bulges up when going right-to-left.
+    let sweep = if goes_right { "0" } else { "1" };
+
+    // Order the hops by path direction so we draw L/A segments in
+    // travel order. `overlap_xs` is ascending; reverse when going
+    // right-to-left.
+    let hops: Vec<i64> = if goes_right {
+        overlap_xs
+    } else {
+        overlap_xs.into_iter().rev().collect()
+    };
+
+    let mut d = format!("M {} {}", source_x, y_f);
+    for ox in &hops {
+        let oxf = *ox as f64;
+        let near = if goes_right { oxf - r } else { oxf + r };
+        let far  = if goes_right { oxf + r } else { oxf - r };
+        // Straight up to just before the hop, then a half-circle arc
+        // over the dot, then continue.
+        d.push_str(&format!(" L {} {}", near, y_f));
+        d.push_str(&format!(" A {} {} 0 0 {} {} {}", r, r, sweep, far, y_f));
+    }
+    d.push_str(&format!(" L {} {}", end_x_pulled, y_f));
+
+    // Inline arrow head triangle, same geometry the polyline path
+    // computes after its `head_offset` pullback. Direction at the
+    // endpoint is purely horizontal (head_dir = ±1), so the
+    // perpendicular base sits ±6 vertically and the tip extends
+    // 12.75 horizontally in the head direction.
+    let tip_x = end_x_pulled + 12.75 * head_dir;
+    let v1 = (end_x_pulled, y_f - 6.0);
+    let v2 = (tip_x, y_f);
+    let v3 = (end_x_pulled, y_f + 6.0);
+
+    Some(format!(
+        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+            \x20           <path stroke-width=\"5px\" stroke=\"gray\" d=\"{d}\" style=\"fill: none;\"/>\n\
+            \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+            \x20       </g>\n",
+        v1.0, v1.1, v2.0, v2.1, v3.0, v3.1,
+        title = title, d = d,
+    ))
+}
+
 fn render_arrow (
     line_number : &usize,
     external_event: &ExternalEvent,
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dot_positions: &HashSet<(i64, i64)>,
     registry: &Handlebars
 ) {
     match external_event {
@@ -1309,7 +1471,7 @@ fn render_arrow (
                         ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..} | ExternalEvent::InitRefParam { .. }
                         | ExternalEvent::RefDie {..} => {}
                         _ => {
-                            render_arrow(l, e,  output, visualization_data, resource_owners_layout, registry);
+                            render_arrow(l, e,  output, visualization_data, resource_owners_layout, dot_positions, registry);
                         }
                     }
                 }
@@ -1685,6 +1847,36 @@ fn render_arrow (
                         data.coordinates.push((x2 as f64, y2 as f64));
     
                     } else { // straight line
+                        // Hop over any event dot that sits between the
+                        // arrow's source and target columns at this line.
+                        // Without the hop the arrow's polyline runs
+                        // straight through those middle dots, visually
+                        // overlapping them and (more importantly) eating
+                        // their hover events because the arrow's <g>
+                        // tooltip-trigger sits on top.
+                        if let Some(rendered) = render_hopping_arrow(
+                            x1, y1, x2,
+                            &data.title,
+                            dot_positions,
+                        ) {
+                            // Inline render done; push to the right
+                            // output bucket and bypass the post-match
+                            // polyline pipeline by leaving coordinates
+                            // empty.
+                            if resource_owners_layout.contains_key(from.hash()) && resource_owners_layout[from.hash()].is_struct_group {
+                                let is_member = resource_owners_layout[from.hash()].is_member;
+                                let owner_key = resource_owners_layout[from.hash()].owner as i64;
+                                let owner_entry = ensure_owner_entry(output, owner_key);
+                                if is_member {
+                                    owner_entry.1.arrows.push_str(&rendered);
+                                } else {
+                                    owner_entry.0.arrows.push_str(&rendered);
+                                }
+                            } else {
+                                output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
+                            }
+                            return;
+                        }
                         data.coordinates.push((x1 as f64, y1 as f64));
                         data.coordinates.push((x2 as f64, y2 as f64));
                     }
@@ -1789,6 +1981,7 @@ fn render_arrows_string_external_events_version(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dot_positions: &HashSet<(i64, i64)>,
     registry: &Handlebars
 ){
     for (line_number, external_event) in &visualization_data.external_events {
@@ -1807,7 +2000,7 @@ fn render_arrows_string_external_events_version(
                 // render external event arrow
                 render_arrow(line_number,
                     external_event,
-                    output, visualization_data, resource_owners_layout, registry)
+                    output, visualization_data, resource_owners_layout, dot_positions, registry)
             }
         }
     }
