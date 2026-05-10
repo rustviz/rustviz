@@ -544,6 +544,24 @@ pub fn filter_ev((line_num, _ev): &(usize, ExternalEvent), split: usize, merge: 
 }
 
 // Fetch the mutability of the borrow
+/// True iff `pat` is a tuple-pattern of bindings all named `lhs` —
+/// the signature rustc uses when desugaring tuple-destructure
+/// assignment `(a, b) = (e1, e2)`. The desugar produces
+/// `let (lhs, lhs, ...) = (e1, e2, ...);` followed by per-element
+/// assignments. Detecting this lets visit_local skip the synthetic
+/// local so it doesn't get its own timeline column. (#151)
+pub fn is_tuple_destructure_desugar_pat(pat: &Pat<'_>) -> bool {
+  let pats = match pat.kind {
+    PatKind::Tuple(pats, _) => pats,
+    _ => return false,
+  };
+  if pats.is_empty() { return false; }
+  pats.iter().all(|p| matches!(
+    p.kind,
+    PatKind::Binding(_, _, ident, None) if ident.as_str() == "lhs"
+  ))
+}
+
 pub fn fetch_mutability(expr: & Expr) -> Option<Mutability> {
   match expr.kind {
     ExprKind::Block(b, _) => {

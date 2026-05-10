@@ -625,9 +625,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if expr.span.from_expansion() {
           return;
         }
-        let r = &self.raps.get(&name).unwrap().rap.clone();
+        // Path may reference a name we deliberately didn't register
+        // (the tuple-destructure desugar's `lhs` synthetic — #151 —
+        // is the canonical case). Skip the lifetime update rather
+        // than panic.
+        let r = match self.raps.get(&name) {
+          Some(rd) => rd.rap.clone(),
+          None => return,
+        };
         let line_num = span_to_line(&p.span, &self.tcx);
-        self.update_rap(r, line_num);
+        self.update_rap(&r, line_num);
       }
       
       // Don't know what this is honestly
@@ -1375,6 +1382,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     // as the from_expansion check on ExprKind::If/Match: macro
     // internals shouldn't appear as user-visible variables.
     if local.span.from_expansion() {
+      return;
+    }
+    // Tuple-destructure assignment `(a, b) = (e1, e2)` (Rust ≥1.59)
+    // desugars before HIR into `{ let (lhs, lhs, …) = (e1, e2, …);
+    //   a = lhs; b = lhs; … }` — synthetic locals all named `lhs`.
+    // The desugar's spans aren't from_expansion (they're at the
+    // user's source line), so the macro guard above doesn't catch
+    // them. Detect the pattern structurally and skip registration so
+    // the synthetic doesn't show up as its own timeline column.
+    // (#151)
+    if is_tuple_destructure_desugar_pat(local.pat) {
       return;
     }
     let local_line = self.tcx.sess.source_map().lookup_char_pos(local.span.lo()).line;
