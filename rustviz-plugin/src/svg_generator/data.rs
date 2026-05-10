@@ -560,6 +560,23 @@ impl ExternalEvent {
             &ExternalEvent::InitRefParam { id, .. }=> id
         }
     }
+
+    /// Overwrite the event's id. Used by the closure-body replay path
+    /// (#133): a buffered event is cloned for each call site and
+    /// stamped with a fresh id so the renderer's id-keyed event tree
+    /// has unique entries per replay.
+    pub fn set_id(&mut self, new_id: usize) {
+        match self {
+            ExternalEvent::Copy { id, .. } | ExternalEvent::Move { id, .. } |
+            ExternalEvent::StaticBorrow { id, .. } | ExternalEvent::StaticDie { id, .. } |
+            ExternalEvent::MutableBorrow { id, .. } | ExternalEvent::MutableDie { id, .. } |
+            ExternalEvent::Branch { id, .. } | ExternalEvent::GoOutOfScope { id, .. } |
+            ExternalEvent::OwnerDropAtReassign { id, .. } |
+            ExternalEvent::RefDie { id, .. } | ExternalEvent::Bind { id, .. } |
+            ExternalEvent::PassByStaticReference { id, .. } | ExternalEvent::PassByMutableReference { id, .. } |
+            ExternalEvent::InitRefParam { id, .. } => *id = new_id,
+        }
+    }
 }
 
 // Each branch has a history of events (e_data)
