@@ -226,6 +226,33 @@ fn f(s1: &String, s2: &String) {
 }`,
       },
       {
+        name: "Mutable reborrow",
+        // `&mut T` has move semantics, but the compiler implicitly
+        // reborrows when you pass a `&mut` variable to a function or
+        // write `&mut *r` — so `r` isn't consumed, just frozen for
+        // the borrow's duration. Hover the `f` icon and the borrow
+        // dots for the tooltips that spell that out.
+        code: `fn append_bang(s: &mut String) {
+    s.push_str("!");
+}
+
+fn main() {
+    let mut s = String::from("hello");
+    let r = &mut s;
+
+    // Implicit reborrow at the call site (r isn't moved).
+    append_bang(r);
+    append_bang(r);
+
+    // Explicit reborrow: same shape, spelled out.
+    let r2 = &mut *r;
+    r2.push_str("?");
+
+    // r2's last use was the line above, so r is usable again.
+    println!("{}", r);
+}`,
+      },
+      {
         name: "Non-lexical lifetimes",
         code: `fn main() {
     let mut x = String::from("Hello");
