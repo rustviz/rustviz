@@ -595,7 +595,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       //unary operator */! <expr>
       ExprKind::Unary(UnOp::Deref, exp) => { self.visit_expr(exp) }
 
-      // A path is a name for something 
+      // A path is a name for something
       // can be a variable, or a path to a definition (function)
       ExprKind::Path(QPath::Resolved(_,p)) => {
         match p.res {
@@ -608,6 +608,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
             }
             self.add_fn(name);
+            return;
+          }
+          // `const` and `static` items don't get RAP timelines —
+          // they're compile-time values (or `'static` references)
+          // that exist outside the function-local ownership story.
+          // Reading one in `let x = N;` makes `x` an owner of the
+          // resulting copy / static borrow; the const/static itself
+          // doesn't need a column. Skip the path-expression event so
+          // the lookup below doesn't trip on the missing RAP.
+          Res::Def(DefKind::Const | DefKind::AssocConst | DefKind::Static { .. }, _) => {
             return;
           }
           _ => ()

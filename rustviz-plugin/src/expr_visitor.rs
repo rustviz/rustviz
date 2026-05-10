@@ -843,6 +843,25 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
   }
   match rhs.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
+      // const / static items aren't function-local RAPs — they're
+      // compile-time values (or `'static` references) baked into
+      // the binary. Treat reading one on the RHS of a let as if
+      // the RHS were a literal: the LHS gets a Bind from an
+      // Anonymous source. Same handling as the path-arm in
+      // visitor.rs's main expression walker.
+      if matches!(
+        p.res,
+        Res::Def(
+          rustc_hir::def::DefKind::Const
+            | rustc_hir::def::DefKind::AssocConst
+            | rustc_hir::def::DefKind::Static { .. },
+          _
+        )
+      ) {
+        let line_num = span_to_line(&p.span, &self.tcx);
+        self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+        return;
+      }
       let line_num = span_to_line(&p.span, &self.tcx);
       let rhs_name: String = match p.res {
         Res::Def(rustc_hir::def::DefKind::Ctor(_, _), _) => {

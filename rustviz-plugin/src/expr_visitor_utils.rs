@@ -793,6 +793,24 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
 pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, borrow_map: &HashMap<String, RefData>) -> ResourceTy {
   match rhs.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
+      // const / static items aren't registered as RAPs — they're
+      // compile-time values / `'static` references baked into the
+      // binary. Treating them as `Anonymous` (the "external"
+      // source we already use for literals and fn-return values)
+      // gives `let s = GREETING;` a clean shape: s borrows from
+      // an external source rather than from a function-local
+      // lender.
+      if matches!(
+        p.res,
+        rustc_hir::def::Res::Def(
+          rustc_hir::def::DefKind::Const
+            | rustc_hir::def::DefKind::AssocConst
+            | rustc_hir::def::DefKind::Static { .. },
+          _
+        )
+      ) {
+        return ResourceTy::Anonymous;
+      }
       let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
       if borrow_map.contains_key(&name) {
         borrow_map.get(&name).unwrap().to_owned().lender
