@@ -224,7 +224,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable reborrow from r to r2",
             "Return mutably borrowed resource from r2 to *r",
             "Return mutably borrowed resource from r to s",
-            "push_str reads from/writes to r2",
+            // r2 is itself `&mut String`, so push_str's call-site
+            // dot picks up the implicit-reborrow suffix.
+            "push_str reads from/writes to r2 (mutable reborrow — r2 is frozen until push_str returns)",
         ],
         must_not_contain: &[],
     },
@@ -238,8 +240,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from y to x",
             "Mutable borrow from x to z",
             "Return mutably borrowed resource from z to x",
-            "world reads from/writes to y",
-            "world reads from/writes to z",
+            // y and z are both `&mut String`, so the call-site
+            // dot picks up the implicit-reborrow suffix.
+            "world reads from/writes to y (mutable reborrow — y is frozen until world returns)",
+            "world reads from/writes to z (mutable reborrow — z is frozen until world returns)",
         ],
         must_not_contain: &[],
     },
@@ -359,7 +363,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `print_area(&r)` arrow.
         must_contain: &[
             "print_area reads from r",
-            "area reads from rect",
+            // `print_area(rect: &Rectangle)` calls `rect.area()`
+            // — rect is itself a `&Rectangle`, so calling area on
+            // it picks up the static-reborrow suffix.
+            "area reads from rect (immutable reborrow — rect is read-only until area returns)",
             "r acquires ownership of a resource",
             "r goes out of scope. Its resource is dropped.",
         ],
@@ -943,7 +950,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the loop variable. Inner merge classifies as Unchanged,
         // so no merge wording surfaces.
         must_contain: &[
-            "show reads from x",
+            // `for x in &xs` makes x: `&String`, so calling show
+            // on it picks up the static-reborrow suffix.
+            "show reads from x (immutable reborrow — x is read-only until show returns)",
         ],
         must_not_contain: &[
             "may have been moved",
@@ -975,7 +984,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // no merge wording. Loop body's per-iteration destructure
         // shows as inline events.
         must_contain: &[
-            "show reads from inner",
+            // `if let Some(inner) = x` where x: `&Option<String>`
+            // partial-borrows out a `&String` for inner; calling
+            // show on it picks up the static-reborrow suffix.
+            "show reads from inner (immutable reborrow — inner is read-only until show returns)",
         ],
         must_not_contain: &[
             "may have been moved",

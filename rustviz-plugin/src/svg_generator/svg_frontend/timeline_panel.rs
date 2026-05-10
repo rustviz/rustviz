@@ -1588,11 +1588,42 @@ fn render_arrow (
                         ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
                         _ => unreachable!()
                     };
-                    
+
+                    // Implicit-reborrow note for the call-dot
+                    // tooltip. `f(r)` where r: `&mut T` is
+                    // compiler-rewritten to `f(&mut *r)` — the
+                    // reference isn't moved, but r is frozen for
+                    // the call's duration. Surface that here so a
+                    // reader hovering the call-site dot sees the
+                    // freeze without having to understand NLL on
+                    // their own. Static (immutable) reborrows have
+                    // a weaker freeze (source stays read-only,
+                    // doesn't lose access entirely) — call that out
+                    // too but with read-only wording.
+                    let from_is_mutref = match from_variable {
+                        ResourceTy::Value(rap) | ResourceTy::Deref(rap) => rap.is_mutref(),
+                        _ => false,
+                    };
+                    let from_is_static_ref = match from_variable {
+                        ResourceTy::Value(rap) | ResourceTy::Deref(rap) => rap.is_ref() && !rap.is_mutref(),
+                        _ => false,
+                    };
+                    let reborrow_suffix: String = match external_event {
+                        ExternalEvent::PassByMutableReference { .. } if from_is_mutref => format!(
+                            " (mutable reborrow — {} is frozen until {} returns)",
+                            styled_from_name, styled_fn_name,
+                        ),
+                        ExternalEvent::PassByStaticReference { .. } if from_is_static_ref => format!(
+                            " (immutable reborrow — {} is read-only until {} returns)",
+                            styled_from_name, styled_fn_name,
+                        ),
+                        _ => String::new(),
+                    };
+
                     let function_dot_data = FunctionDotData {
                         x: from_timeline.x_val,
                         y: get_y_axis_pos(*line_number),
-                        title: styled_fn_name + title_fn + &styled_from_name,
+                        title: format!("{}{}{}{}", styled_fn_name, title_fn, styled_from_name, reborrow_suffix),
                         hash: from_variable.hash().to_owned() as u64,
                     };
 

@@ -1211,11 +1211,25 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         ExternalEvent::MutableDie{ .. } => {
            String::from("Return mutably borrowed resource")
         },
-        ExternalEvent::PassByMutableReference{ .. } => {
-            String::from("Pass by mutable reference")
+        // Implicit reborrow at call site: passing a `&mut T`
+        // variable (or chain of them) to a fn that itself takes
+        // `&mut T` doesn't move the reference — the compiler
+        // synthesizes `&mut *r` for the call. Same arrow shape as
+        // a fresh borrow but worth naming distinctly so the user
+        // sees that r isn't being consumed.
+        ExternalEvent::PassByMutableReference{ from, .. } => {
+            if from.is_mutref() {
+                String::from("Pass by mutable reborrow")
+            } else {
+                String::from("Pass by mutable reference")
+            }
         },
-        ExternalEvent::PassByStaticReference{ .. } => {
-            String::from("Pass by immutable reference")
+        ExternalEvent::PassByStaticReference{ from, .. } => {
+            if from.is_ref() && !from.is_mutref() {
+                String::from("Pass by immutable reborrow")
+            } else {
+                String::from("Pass by immutable reference")
+            }
         },
         _ => unreachable!(),
     }
