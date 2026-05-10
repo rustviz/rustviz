@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
 use rustc_utils::SpanExt;
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, RustcFacts};
-use rustc_mir_dataflow::move_paths::MoveData;
 use rustc_span::Span;
 use polonius_engine::{Algorithm, Output, FactTypes};
 type Loan = <RustcFacts as FactTypes>::Loan;
@@ -194,23 +193,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         res
     }
 
-
-    // Would also be nice to use MoveData, https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_dataflow/move_paths/struct.MoveData.html
-    // To figure out where moves occur and where variables are initialized. Currently we can't handle L-values that are not initialized immediately
-    // ex: 
-    // let a: Vec<i32>;
-    // a = vec![9, 9];
-    // Additionally we would need to use this for better granularity of moves
-    // ex: 
-    // let a = (String::new(), String::new());
-    // let b = a.0; (only a.0 is moved)
-    // let c = a.1 (a.1 is moved)
-    // https://rustc-dev-guide.rust-lang.org/borrow_check/moves_and_initialization/move_paths.html
-    #[allow(dead_code)]
-    fn gather_move_data(&self, _body: &'tcx rustc_hir::Body, body_with_facts: &BodyWithBorrowckFacts<'tcx>) -> MoveData<'tcx> {
-        // The filter decides which types are tracked; `|_| true` tracks all.
-        MoveData::gather_moves(&body_with_facts.body, self.tcx, |_| true)
-    }
 
     // Helper function to help refine loan regions that we compute in HIR
     pub fn borrow_match(r: &RefData, b: &MIRBorrowData) -> Option<usize> {

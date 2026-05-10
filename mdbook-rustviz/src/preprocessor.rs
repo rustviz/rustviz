@@ -46,7 +46,6 @@ impl RustvizPlugin {
 		}
 	}
 
-	#[allow(dead_code)]
 	pub fn handle_preprocessing(&self) -> Result {
 		use std::io::{stdin, stdout};
 		use semver::{Version, VersionReq};

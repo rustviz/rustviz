@@ -1,5 +1,0 @@
-////! show-flows
-fn dangling_pointer() -> &String {
-  let s = String::from("Hello world");
-  &s
-}

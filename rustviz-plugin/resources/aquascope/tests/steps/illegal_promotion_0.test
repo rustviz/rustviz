@@ -1,5 +1,0 @@
-fn find_nth<T: Ord + Clone>(elems: &[T], n: usize) -> T {
-  elems.sort();
-  let t = &elems[n];
-  return t.clone();
-}
