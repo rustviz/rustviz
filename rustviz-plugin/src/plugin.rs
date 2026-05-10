@@ -173,6 +173,9 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               fn_ret: output,
               skip_lines: &skip_lines,
               skip_raps: HashSet::new(),
+              closure_body_events: HashMap::new(),
+              closure_move_captures: HashMap::new(),
+              current_closure: None,
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
@@ -248,6 +251,9 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           fn_ret: output,
           skip_lines: &skip_lines,
           skip_raps: HashSet::new(),
+          closure_body_events: HashMap::new(),
+          closure_move_captures: HashMap::new(),
+          current_closure: None,
         };
         visitor.visit_body(hir_body);
         visitor.print_lifetimes();

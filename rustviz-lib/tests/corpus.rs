@@ -130,6 +130,10 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Closure body events replay at call sites (#133).
+    //   `show(&s)` inside `let f = || show(&s); f();` now surfaces
+    //   as an event on `s`'s column at the `f()` call line.
+    "closure_body_event_replay",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -342,6 +346,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s",
             "len reads from s",
             "Copy from len to n",
+        ],
+        must_not_contain: &[],
+    },
+
+    TooltipExpect {
+        name: "closure_body_event_replay",
+        // The `show(&s)` call inside the closure body emits its
+        // PassByStaticReference event on `s`'s column at the f()
+        // call line, just as if the user had written `show(&s)`
+        // directly on that line.
+        must_contain: &[
+            "show reads from s",
+            "s's resource is captured (immutably borrowed) by closure f",
         ],
         must_not_contain: &[],
     },

@@ -11,7 +11,7 @@ use rustc_middle::{
   mir::Body,
   ty::*,
 };
-use rustc_hir::{Expr, ExprKind, QPath, PatKind, Mutability, UnOp, def::*, Pat};
+use rustc_hir::{Expr, ExprKind, QPath, PatKind, Mutability, UnOp, def::*, Pat, intravisit::Visitor};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
@@ -135,6 +135,25 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // it reaches the renderer — which is what gives the variable no
   // timeline column.
   pub skip_raps: std::collections::HashSet<String>,
+
+  // Events emitted while walking a closure body. Keyed by closure
+  // binding name. Buffered here instead of dispatching directly into
+  // preprocessed_events / event_line_map, then replayed at each call
+  // site of the closure (#133). For `move` closures, events whose
+  // source / destination is a captured upvar are dropped at replay
+  // time — the upvar's column ended at the capture, so re-adding
+  // events later would be misleading.
+  pub closure_body_events: HashMap<String, Vec<(usize, ExternalEvent)>>,
+
+  // Names of upvars captured `move` by each closure binding. Used
+  // to filter the captured-upvar events out when replaying a move
+  // closure's body at the call site.
+  pub closure_move_captures: HashMap<String, std::collections::HashSet<String>>,
+
+  // While walking a closure body, this is set to the closure binding's
+  // name. add_external_event redirects events into closure_body_events
+  // under this key instead of preprocessed_events.
+  pub current_closure: Option<String>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -343,6 +362,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// Replay every event captured during a closure body walk on this
+  /// call-site line. Events whose source or destination is a
+  /// move-captured upvar are dropped (the upvar's column ended at
+  /// the capture line — re-emitting later would be misleading). No-op
+  /// if the binding name isn't a known closure. Idempotent across
+  /// repeat call sites: each replay produces fresh `unique_id`s so
+  /// the renderer's id → event map stays consistent. (#133)
+  pub fn replay_closure_body(&mut self, closure_name: &str, call_line: usize) {
+    let events = match self.closure_body_events.get(closure_name) {
+      Some(events) => events.clone(),
+      None => return,
+    };
+    let empty = std::collections::HashSet::new();
+    let move_set = self.closure_move_captures
+      .get(closure_name)
+      .unwrap_or(&empty)
+      .clone();
+    let touches_move_upvar = |ty: &ResourceTy| -> bool {
+      match ty {
+        ResourceTy::Value(rap) | ResourceTy::Deref(rap) => move_set.contains(rap.name()),
+        _ => false,
+      }
+    };
+    for (_orig_line, mut ev) in events.into_iter() {
+      let (from, to) = ResourceAccessPoint_extract(&ev);
+      if touches_move_upvar(from) || touches_move_upvar(to) {
+        continue;
+      }
+      // Rewrite the event's id so each replay produces a unique id
+      // (the renderer uses ids as event-tree keys).
+      ev.set_id(*self.unique_id);
+      *self.unique_id += 1;
+      self.add_external_event(call_line, ev);
+    }
+  }
+
   pub fn add_external_event(&mut self, line_num: usize, event: ExternalEvent) {
     // Drop events whose source or destination is a `// rustviz: skip`-
     // marked variable. The marked RAP still exists (so non-skipped
@@ -352,6 +407,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // renderer only materialises a timeline when a hash sees its
     // first event, a RAP with zero events never gets a column.
     if self.event_touches_skipped(&event) {
+      return;
+    }
+
+    // While walking a closure body, buffer events under the closure's
+    // binding name instead of dispatching directly into the main event
+    // streams. The buffer is replayed at each visible call site of
+    // the closure so body events surface at the call site line
+    // rather than at the closure literal. (#133)
+    if let Some(closure_name) = self.current_closure.clone() {
+      self.closure_body_events
+        .entry(closure_name)
+        .or_default()
+        .push((line_num, event));
       return;
     }
 
@@ -1114,6 +1182,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // ownership of a resource" dot like other Bind sites.
       self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
 
+      // Closure binding name. Used to key the body-event buffer for
+      // call-site replay (#133).
+      let closure_name = lhs.real_name();
+
       // MIR loan facts for the enclosing fn body. Each ref capture
       // becomes one polonius loan whose `borrowed_place` is the
       // upvar and whose `region.1` is the NLL kill line — the line
@@ -1123,6 +1195,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // the captured borrow visually returns to its lender on the
       // line the user expects.
       let mir_b_data = self.gather_borrow_data(self.bwf);
+
+      // Collect move-captured upvar names so we can filter their
+      // events from the body replay later. Move captures end the
+      // upvar's column at the capture line — surfacing further
+      // events at the call site would be visually inconsistent.
+      let mut move_captured: HashSet<String> = HashSet::new();
 
       let typeck = self.tcx.typeck(closure.def_id);
       for capture in typeck.closure_min_captures_flattened(closure.def_id) {
@@ -1154,6 +1232,9 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             _ => Evt::SBorrow,
           },
         };
+        if matches!(evt_kind, Evt::Move) {
+          move_captured.insert(upvar_name.clone());
+        }
         self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false);
 
         // For ref captures, find the matching MIR loan and emit
@@ -1190,6 +1271,18 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           }
         }
       }
+
+      // Record move-captures keyed by closure name, then walk the
+      // body once with `current_closure` set so events emitted by
+      // body expressions buffer under the closure name instead of
+      // surfacing immediately. The call-site Call arm in visit_expr
+      // replays the buffer at the call line. (#133)
+      self.closure_move_captures.insert(closure_name.clone(), move_captured);
+      let prev_closure = self.current_closure.take();
+      self.current_closure = Some(closure_name);
+      let body = self.tcx.hir_body(closure.body);
+      self.visit_expr(body.value);
+      self.current_closure = prev_closure;
     }
     _ => {
       warn!("unmatched rhs {:#?}", rhs);

@@ -261,12 +261,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     match expr.kind {
       // fn call <expr>[<expr>]
       ExprKind::Call(fn_expr, args) => {
+        // If this Call invokes a local closure binding, replay the
+        // closure's buffered body events at this call site so reads
+        // / writes / borrows performed inside the body surface on
+        // the touched RAPs' columns. Done first so the events land
+        // on the call line before any arg processing below (which
+        // can update RAP lifetimes past it). (#133)
+        if let ExprKind::Path(QPath::Resolved(_, p)) = fn_expr.kind {
+          let call_line = expr_to_line(expr, &self.tcx);
+          let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
+          self.replay_closure_body(&name, call_line);
+        }
 
         // need to specifically handle println! macro because it's common
         // note that other macros will need to be resolved similarly (vec![], assert!, etc)
         // Need to match through all the desugaring and onto the args to the format ({}) function
         match fn_expr.kind {
-          ExprKind::Path(QPath::Resolved(_,rustc_hir::Path{res: rustc_hir::def::Res::Def(_, id), ..})) 
+          ExprKind::Path(QPath::Resolved(_,rustc_hir::Path{res: rustc_hir::def::Res::Def(_, id), ..}))
           if !id.is_local() => {
             // to see what the macro expansion looks like:
             // println!("{:#?}", expr);
