@@ -572,10 +572,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             expr,
           );
         },
-        AdtKind::Union => {
-          warn!("lhs union not implemented yet")
-        },
-        AdtKind::Enum => {
+        // Unions and enums both render as opaque single-owner columns:
+        // there's no statically-known discriminant we can attribute
+        // events to per-field, so we don't try. A union is a fixed
+        // memory slot whose interpretation depends on the active
+        // variant at runtime; modelling per-field timelines for it
+        // would be lying about which field is "the" field.
+        AdtKind::Union | AdtKind::Enum => {
           let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
           self.add_owner(name, mutability, is_copy, self.current_scope, !self.inside_branch);
         }
@@ -728,10 +731,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                             self.add_struct(field_name, owner_hash, true, muta, field_is_copy, scope, false);
                         }
                     },
-                    AdtKind::Union => {
-                        panic!("union not implemented yet")
-                    },
-                    AdtKind::Enum => {
+                    // Unions render as opaque single-owner columns —
+                    // see the matching note on the LHS-of-expr arm.
+                    AdtKind::Union | AdtKind::Enum => {
                         let is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                         self.add_owner(name.clone(), muta, is_copy, scope, false);
                     }
