@@ -397,7 +397,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         self.visit_expr(exp);
       }
 
-      // assignment 
+      // assignment
       // ex a = <expr> or a += <expr>
       ExprKind::Assign(lhs_expr, rhs_expr, _,) | ExprKind::AssignOp(_, lhs_expr, rhs_expr) => {
         self.visit_expr(lhs_expr);
@@ -405,9 +405,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         // typecheck to figure out what type of event is going to occur
         let line_num = expr_to_line(&lhs_expr, &self.tcx);
-        // None means the LHS is an unsupported shape (e.g. index, tuple
-        // destructure — #144) or an unregistered name; short-circuit the
-        // assignment so the rest of the program still renders.
+        // None means the LHS is an unsupported shape or an unregistered
+        // name; short-circuit the assignment so the rest of the program
+        // still renders. Tuple destructuring assignment `(a, b) = expr`
+        // doesn't fall through here — rustc desugars it before HIR into
+        // a synthetic temporary plus per-element field assignments, each
+        // of which hits this Assign arm individually.
         let lhs_rty = match self.resource_of_lhs(lhs_expr) {
           Some(rty) => rty,
           None => return,

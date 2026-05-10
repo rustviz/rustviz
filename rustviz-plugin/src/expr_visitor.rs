@@ -447,14 +447,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // the assignment instead of crashing.
   pub fn resource_of_lhs(&mut self, expr: &'tcx Expr) -> Option<ResourceTy> {
     match expr.kind {
-      // Path / Field (including chained `a.b.c`): walk the projection
-      // chain via `expr_to_rap_name` to get the qualified name and
-      // look it up. `register_struct_members` recursively registers
-      // nested struct fields under qualified names like `r.a.b`, so
-      // for value-typed locals chained-field LHS resolves directly.
-      // For ref-to-struct params, #147 adds per-field registration so
-      // `self.field = …` and `r.field = …` also resolve.
-      ExprKind::Path(_) | ExprKind::Field(..) => {
+      // Path / Field (including chained `a.b.c`) / Index (`v[i]`).
+      // `expr_to_rap_name` walks the projection chain, collapsing
+      // indexing onto its receiver (the plugin renders Vec/array as
+      // an opaque single-owner column, so `v[i] = …` attributes the
+      // event to `v`'s column). `register_struct_members` recursively
+      // registers nested struct fields under qualified names like
+      // `r.a.b`, so chained-field LHS resolves directly. #147 adds
+      // per-field registration for ref-to-struct params so
+      // `self.field = …` / `r.field = …` also resolve.
+      ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) => {
         let name = expr_to_rap_name(expr, &self.tcx)?;
         self.raps.get(&name).map(|rd| ResourceTy::Value(rd.rap.to_owned()))
       }

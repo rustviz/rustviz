@@ -134,6 +134,9 @@ const EXPECTED_OK: &[&str] = &[
     //   resolves through `expr_to_rap_name` to the nested field's
     //   pre-registered RAP and emits an Acquire event on that column.
     "chained_field_assign",
+    // — Index assignment (#144). `v[i] = …` attributes the event
+    //   to the receiver's opaque single-owner column.
+    "index_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -355,6 +358,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "o.inner.x, mutable",
             "o.inner.x acquires ownership of a resource",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "index_assign",
+        // `v[0] = 9` attributes the event to `v`'s column. Pinned via
+        // the "acquires ownership" tooltip (the renderer treats index
+        // assignment as a reassignment of the receiver's opaque
+        // resource).
+        must_contain: &[
+            "v acquires ownership of a resource",
         ],
         must_not_contain: &[],
     },
