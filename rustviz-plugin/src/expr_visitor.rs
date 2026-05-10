@@ -446,14 +446,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     match expr.kind {
       ExprKind::Path(QPath::Resolved(_, p)) => {
         let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-        Some(ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned()))
+        // Path that doesn't resolve to a registered RAP — most commonly
+        // a synthetic local from a macro expansion that visit_local
+        // declined to register. Skip the assignment rather than crash.
+        self.raps.get(&name).map(|rd| ResourceTy::Value(rd.rap.to_owned()))
       }
       ExprKind::Field(expr, ident) => {
         match expr {
           Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
             let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
             let total_name = format!("{}.{}", name, ident.as_str());
-            Some(ResourceTy::Value(self.raps.get(&total_name).unwrap().rap.to_owned()))
+            // No per-field RAP exists for `&Struct` / `&mut Struct`
+            // parameters today (e.g. `self.f = …` inside `&mut self`
+            // methods, or `r.f = …` inside `fn(r: &mut Struct)`).
+            // Tracked separately; here we just skip the assignment so
+            // the plugin keeps rendering the rest of the program.
+            self.raps.get(&total_name).map(|rd| ResourceTy::Value(rd.rap.to_owned()))
           }
           // Chained field LHS like `a.b.c = …` — see issue #143.
           _ => {
