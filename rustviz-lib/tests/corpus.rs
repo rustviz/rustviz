@@ -130,6 +130,10 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Chained field assignment (#143). `o.inner.x = …` now
+    //   resolves through `expr_to_rap_name` to the nested field's
+    //   pre-registered RAP and emits an Acquire event on that column.
+    "chained_field_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -342,6 +346,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s",
             "len reads from s",
             "Copy from len to n",
+        ],
+        must_not_contain: &[],
+    },
+
+    TooltipExpect {
+        name: "chained_field_assign",
+        must_contain: &[
+            "o.inner.x, mutable",
+            "o.inner.x acquires ownership of a resource",
         ],
         must_not_contain: &[],
     },
