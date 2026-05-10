@@ -130,6 +130,19 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Triaged from the previously-untracked fixture set (#140).
+    //   These are shapes the curated entries above don't directly
+    //   cover.
+    "question_mark",        // `?` desugar (used to panic; now graceful)
+    "question_mark_chain",  // chained `?`
+    "aliasing1",            // multi-level reference aliasing (`&&&x`)
+    "hatra2",               // multi-fn ownership / borrow scenario
+    "anonymous_call",       // fn returning &'static str fed into a method
+    "vec_macro",            // `let v = vec![…]` RHS
+    "assert_call_dot",      // call inside `assert!(…)` emits its event
+    "mv_back",              // shadow-after-move pattern
+    "mutAssignOp",          // `x += 5` compound assignment
+    "mutableReferences",    // `change(&mut s)` minimal mut-ref fn call
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
