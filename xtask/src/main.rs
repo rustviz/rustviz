@@ -122,9 +122,17 @@ fn setup(args: SetupArgs) -> Result<()> {
     run_in("playground/frontend", "npm", &["install"])?;
     run_in("playground/frontend", "npm", &["run", "build"])?;
 
-    // 5. Rest of the workspace.
-    section("cargo build --workspace --release");
-    run("cargo", &["build", "--workspace", "--release"])?;
+    // 5. Rest of the workspace. `--exclude xtask` skips the binary
+    //    that's currently running this code: on Windows the build
+    //    would otherwise fail at link time trying to overwrite the
+    //    in-use xtask.exe (Windows holds an exclusive lock on
+    //    running executables, unlike Linux / macOS where the file
+    //    can be replaced under a live process).
+    section("cargo build --workspace --release (excluding xtask)");
+    run(
+        "cargo",
+        &["build", "--workspace", "--release", "--exclude", "xtask"],
+    )?;
 
     // 6. Sandboxed runner image. Skipped silently when docker isn't on
     //    PATH so devs who only iterate against RV_RUNNER=local don't
