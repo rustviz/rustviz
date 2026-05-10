@@ -49,6 +49,10 @@ COPY rustviz-cli/ ./rustviz-cli/
 COPY mdbook-rustviz/ ./mdbook-rustviz/
 COPY playground/Cargo.toml ./playground/Cargo.toml
 COPY playground/src/ ./playground/src/
+# xtask isn't compiled in either build stage, but cargo workspace
+# resolution reads every member's manifest. Copy the (tiny) xtask
+# crate so resolution succeeds without dragging its build in.
+COPY xtask/ ./xtask/
 
 RUN cargo build --release --locked -p rustviz-playground
 
@@ -75,6 +79,10 @@ COPY rustviz-cli/ ./rustviz-cli/
 COPY mdbook-rustviz/ ./mdbook-rustviz/
 COPY playground/Cargo.toml ./playground/Cargo.toml
 COPY playground/src/ ./playground/src/
+# Workspace resolution needs xtask's manifest readable; see stage
+# 1's note. Copying just the (small) crate dir keeps the cost
+# negligible and avoids touching the workspace Cargo.toml itself.
+COPY xtask/ ./xtask/
 
 # Install the plugin + CLI so stage 3's prerender (which shells out to
 # `rustviz svg`) finds them on PATH at /usr/local/cargo/bin/.
