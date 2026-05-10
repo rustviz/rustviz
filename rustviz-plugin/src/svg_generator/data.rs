@@ -1195,19 +1195,41 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         ExternalEvent::StaticDie{ .. } => {
             String::from("Return immutably borrowed resource")
         },
-        ExternalEvent::MutableBorrow{ is_partial, to, .. } => {
+        ExternalEvent::MutableBorrow{ is_partial, from, to, .. } => {
             if *is_partial { String::from("Partial Mutable borrow") }
             else if to.is_closure() { String::from("Closure capture (mutable borrow)") }
+            // Reborrow: the source itself is a `&mut T` binding, so
+            // we're borrowing-the-borrow (`let r2 = &mut *r;` — also
+            // what's implicitly synthesized at function-call sites).
+            // Distinct from a fresh borrow off an owner: the source
+            // gets frozen for the reborrow's lifetime and then
+            // reactivated, where a fresh borrow's source stays
+            // frozen until *its* last use.
+            else if from.is_mutref() { String::from("Mutable reborrow") }
             else { String::from("Mutable borrow") }
         },
         ExternalEvent::MutableDie{ .. } => {
            String::from("Return mutably borrowed resource")
         },
-        ExternalEvent::PassByMutableReference{ .. } => {
-            String::from("Pass by mutable reference")
+        // Implicit reborrow at call site: passing a `&mut T`
+        // variable (or chain of them) to a fn that itself takes
+        // `&mut T` doesn't move the reference — the compiler
+        // synthesizes `&mut *r` for the call. Same arrow shape as
+        // a fresh borrow but worth naming distinctly so the user
+        // sees that r isn't being consumed.
+        ExternalEvent::PassByMutableReference{ from, .. } => {
+            if from.is_mutref() {
+                String::from("Pass by mutable reborrow")
+            } else {
+                String::from("Pass by mutable reference")
+            }
         },
-        ExternalEvent::PassByStaticReference{ .. } => {
-            String::from("Pass by immutable reference")
+        ExternalEvent::PassByStaticReference{ from, .. } => {
+            if from.is_ref() && !from.is_mutref() {
+                String::from("Pass by immutable reborrow")
+            } else {
+                String::from("Pass by immutable reference")
+            }
         },
         _ => unreachable!(),
     }
