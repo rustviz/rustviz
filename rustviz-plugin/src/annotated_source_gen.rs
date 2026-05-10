@@ -207,12 +207,21 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         _ => {}
       }
       for field in fields.iter() {
-        self.annotate_src(field.ident.to_string(), field.ident.span, false, *self.id_map.get(field.ident.as_str()).unwrap() as u64);
+        // Field idents the plugin didn't register as RAPs (e.g.
+        // tuple-struct numeric fields, union fields) get the
+        // colorization skipped instead of crashing the id_map lookup.
+        if let Some(hash) = self.id_map.get(field.ident.as_str()) {
+          self.annotate_src(field.ident.to_string(), field.ident.span, false, *hash as u64);
+        }
         self.annotate_expr(field.expr);
       }
     }
     ExprKind::Field(exp, ident) => {
-      self.annotate_src(ident.to_string(), ident.span, false, *self.id_map.get(ident.as_str()).unwrap() as u64);
+      // Same robustness for field-access projections: a `.0` on a
+      // tuple struct or a union field access won't appear in id_map.
+      if let Some(hash) = self.id_map.get(ident.as_str()) {
+        self.annotate_src(ident.to_string(), ident.span, false, *hash as u64);
+      }
       self.annotate_expr(exp);
     }
     ExprKind::DropTemps(exp) => {

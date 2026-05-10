@@ -130,6 +130,24 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Unsupported LHS shapes that the plugin used to panic on
+    //   (issues #143, #144). Each emits no event for the unsupported
+    //   assignment but renders the surrounding program; pinning these
+    //   here makes any future regression to the panic visible.
+    "assign_chained_field",
+    "assign_tuple_destructure",
+    "assign_index",
+    // — User-defined macros (#137). Plugin doesn't render an event
+    //   for the macro call yet, but it must not crash on shapes
+    //   that contain a user-defined macro_rules! invocation.
+    "user_macro_show_twice",
+    // — Inherent-method shapes that used to panic on field access
+    //   (#136). The plugin doesn't yet register per-field RAPs for
+    //   `&Struct` / `&mut Struct` parameters or numeric tuple-struct
+    //   fields, but the lookups are graceful so the rest of the
+    //   program still renders.
+    "method_assigns_field",
+    "tuple_struct_method",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
