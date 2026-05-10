@@ -380,6 +380,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "method_assigns_field",
+        // `&mut self` method that reassigns a field. After #147,
+        // `self.c` is registered as a per-field RAP whose column
+        // shows the reassignment Acquire event.
+        must_contain: &[
+            "self.c, mutable",
+            "self.c acquires ownership of a resource",
+            "self.c goes out of scope",
+        ],
+        must_not_contain: &[],
+    },
 
     // ─── Lifetimes ──────────────────────────────────────────────────
     TooltipExpect {

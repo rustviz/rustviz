@@ -190,6 +190,32 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           if let Some(rd) = self.borrow_map.get_mut(&name) {
             rd.lifetime = self.current_scope;
           }
+          // If the pointee is a user-defined ADT, register a member
+          // RAP for each field under the ref so projections like
+          // `self.x` / `r.field` resolve in both read and write
+          // positions (the assignment LHS path keys off the
+          // qualified `name.field` lookup). Without this, `&self` /
+          // `&mut self` methods that touch any field produce no
+          // event on that field's column (the read path's
+          // `fetch_rap` returns None and the write path returns
+          // None from `resource_of_lhs`). #147.
+          let pointee = ty.builtin_deref(true);
+          if let Some(pointee_ty) = pointee {
+            if pointee_ty.is_adt() && !ty_is_special_owner(&pointee_ty) {
+              let owner_hash = *self.raps.get(&name).unwrap().rap.hash();
+              let field_mut = matches!(ty.ref_mutability(), Some(Mutability::Mut));
+              let generic_args = match pointee_ty.kind() {
+                rustc_middle::ty::TyKind::Adt(_, args) => *args,
+                _ => unreachable!("pointee.is_adt() but kind is not Adt"),
+              };
+              for field in pointee_ty.ty_adt_def().unwrap().all_fields() {
+                let field_name = format!("{}.{}", name.clone(), field.name.as_str());
+                let field_ty = field.ty(self.tcx, generic_args);
+                let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
+                self.add_struct(field_name, owner_hash, true, field_mut, field_is_copy, self.current_scope, !self.inside_branch);
+              }
+            }
+          }
         }
         else if ty.is_adt() && !is_special{ // kind of weird given we don't have a InitStructParam
           let owner_hash = self.rap_hashes as u64;
