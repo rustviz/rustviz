@@ -130,6 +130,14 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Coverage gaps closed (#139): patterns the visitor has arms
+    //   for but which lacked corpus pinning, plus const/static and
+    //   unsafe blocks which were silently untested.
+    "match_range_pattern",
+    "match_with_guard",
+    "const_basic",
+    "static_basic",
+    "unsafe_raw_ptr",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -994,6 +1002,90 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "may have been moved (consumed in at least one branch above)",
         ],
+    },
+
+    // ─── Coverage gaps closed (#139) ───────────────────────────────
+    TooltipExpect {
+        name: "match_range_pattern",
+        // Range patterns in match arms (`0..=4`, `5..=9`, `_`).
+        // All three arms borrow `s`; merge classifies as Unchanged,
+        // so no merge wording. PatKind::Range is walked silently —
+        // no per-arm event from the range itself.
+        must_contain: &[
+            "Move from String::from to s",
+            "show reads from s",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "match_with_guard",
+        // Pattern guard (`x if x > 0`). The guard binds `x` from
+        // the scrutinee (`n`, Copy) — that's the "Copy from n to x"
+        // event. Both arms borrow `s`; merge is Unchanged.
+        must_contain: &[
+            "Move from String::from to s",
+            "Copy from n to x",
+            "show reads from s",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "const_basic",
+        // `let x = N;` where N is a const i32 → Copy treated as a
+        // Bind from Anonymous (the const has no column). Then
+        // `let y = x` is a regular Copy from x to y.
+        must_contain: &[
+            "x is bound to a value",
+            "y is initialized by copy from x",
+            "Copy from x to y",
+        ],
+        must_not_contain: &[
+            // The const itself shouldn't get a column or events.
+            "N is the owner",
+            "N holds a value",
+            "N goes out of scope",
+            // No Move from N — const reads aren't moves.
+            "Move from N to x",
+        ],
+    },
+    TooltipExpect {
+        name: "static_basic",
+        // `let s = GREETING;` where GREETING is a `&'static str`.
+        // The static itself isn't a function-local RAP; `s` borrows
+        // from an Anonymous source (external memory). show(s) reads
+        // through s.
+        must_contain: &[
+            "s holds a reference",
+            "show reads from s",
+        ],
+        must_not_contain: &[
+            // GREETING shouldn't get a column.
+            "GREETING is the owner",
+            "GREETING holds",
+            "GREETING goes out of scope",
+        ],
+    },
+    TooltipExpect {
+        name: "unsafe_raw_ptr",
+        // Raw-pointer code through an `unsafe` block. The plugin
+        // doesn't have explicit unsafe handling — this fixture
+        // pins what currently happens (binding x and p both
+        // surface as ordinary Bind events; the deref-write inside
+        // the unsafe block doesn't fire any event because the
+        // visitor doesn't model raw-pointer mutation). Guards
+        // against any future change accidentally panicking on raw
+        // pointers.
+        must_contain: &[
+            "x is bound to a value",
+            "*p is bound to a value",
+        ],
+        must_not_contain: &[],
     },
 ];
 
