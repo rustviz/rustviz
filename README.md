@@ -183,25 +183,53 @@ top-level directory:
 
 ## Limitations
 
-RustViz 2 is a research tool. It supports a meaningful subset of Rust but
-not all of it. Currently unsupported (or known to misbehave):
+RustViz 2 is a research / teaching tool. It supports a meaningful subset
+of Rust; some features render in a deliberately simplified form, others
+aren't yet handled. See the [issues
+tab](https://github.com/rustviz/rustviz/issues) for tracked work.
 
-- Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
-  objects (`Box<dyn T>`)
-- Indexing or slicing collections like `Vec` (string slices like
-  `&s[..]` on a `String` do work)
-- The `?` operator (and other desugaring-heavy forms like
-  `async`/`await`)
-- Some struct field access patterns: chaining a method onto a field
-  (`r.field.method()`), nested field access (`r.a.b`), and field
-  access through a reference (`(&r).field`). Plain `r.field` and
-  `&r.field` work.
-- Inherent methods (`impl S { fn ... }`) are fragile — the
-  Rectangle/area pattern (`fn area(&self) -> u32 { self.width *
-  self.height }`) works, but minor variants (e.g. a one-field
-  `fn get(&self) -> i32 { self.n }`) crash.
+**Rendered as opaque single-owner columns** — the wrapper has a column,
+the wrapped value doesn't get a separate timeline:
 
-The plugin has a TODO list with more detail in
+- Smart-pointer wrappers: `Box`, `Rc`, `Arc`, `RefCell`, `Mutex`, and
+  trait objects (`Box<dyn T>`). Shared-ownership semantics (refcount
+  sharing for `Rc` / `Arc`, runtime borrow tracking for `RefCell`)
+  aren't visualized.
+- Closures: capture events into the closure binding are visualized;
+  events inside the closure body aren't separately traced.
+
+**Rendered as a single iteration:**
+
+- `for` / `while` / `loop` bodies show one execution. Per-iteration
+  branching across iterations isn't visualized.
+
+**Not supported:**
+
+- Indexing into collections (`v[i]`). Slicing (`&v[..]` on a `Vec`,
+  `&s[..]` on a `String`) does work.
+- `async` / `await`, futures, and other heavily-desugared async
+  constructs.
+- Custom procedural or declarative macros — only standard-library
+  macros (`println!`, `vec!`, `assert!`, `?`) are unwrapped through
+  their desugaring; user-defined macros are invisible.
+- Method chains where each call's return is itself the receiver of the
+  next call (`a.get_mut().push(x)`). The first call renders, the rest
+  of the chain doesn't yet.
+- `unsafe` blocks aren't tested; raw-pointer behavior is undefined for
+  the visualization.
+- Union types (`union U { … }`) panic the plugin.
+
+**Limited / fragile:**
+
+- Inherent methods on user structs work for the canonical
+  Rectangle/area shape but minor variants (e.g. `fn get(&self) -> i32
+  { self.n }` on a one-field struct) can crash. File a bug if you hit
+  one.
+- Range patterns in match arms (`0..=9 => …`) and pattern guards (`pat
+  if cond => …`) are walked but not extensively tested.
+- `const` and `static` items aren't tested.
+
+The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).
 
 ---

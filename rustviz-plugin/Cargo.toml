@@ -14,20 +14,14 @@ description = "A tool that allows users to generate an interactive timeline depi
 readme = "README.md"
 
 exclude = [
-    "resources/",
     "tests/"
 ]
 
 [dependencies]
-env_logger = "0.10"
 clap = {version = "4.4", features = ["derive"]}
 serde = {version = "1", features = ["derive"]}
 anyhow = "1.0.0"
 log = "0.4"
-itertools = "0.10.5"
-ts-rs = "6.2"
-regex = "1"
-fluid-let = "1.0"
 rustc_utils = {version = "0.14.3-nightly-2025-08-20", features = ["graphviz", "ts-rs", "serde", "test"]}
 rustc_plugin = {version = "0.14.3-nightly-2025-08-20"}
 simplelog = "0.11"
