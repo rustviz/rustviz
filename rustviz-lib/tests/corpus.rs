@@ -130,6 +130,10 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Chained method calls (#132): each call in `a.foo().bar()`
+    //   now surfaces as its own event, attributed to the base
+    //   receiver `a` instead of the synthetic intermediate.
+    "method_chain_two_calls",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -342,6 +346,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s",
             "len reads from s",
             "Copy from len to n",
+        ],
+        must_not_contain: &[],
+    },
+
+    TooltipExpect {
+        name: "method_chain_two_calls",
+        // Both calls in the chain emit arrows, each attributed to
+        // the base receiver `b`. Previously the outer `push` arrow
+        // was silently dropped.
+        must_contain: &[
+            "get_mut reads from/writes to b",
+            "push reads from/writes to b",
         ],
         must_not_contain: &[],
     },

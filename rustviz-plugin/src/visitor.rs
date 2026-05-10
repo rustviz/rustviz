@@ -327,15 +327,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let line_num = expr_to_line(&rcvr, &self.tcx);
         let fn_name = name_and_generic_args.ident.as_str().to_owned();
         self.add_fn(fn_name.clone());
-        // need to recurse down to the variable calling the methods 
+        // need to recurse down to the variable calling the methods
         // necessary for chained method calls scenarios: ie a.get().unwrap()
         self.visit_expr(rcvr);
-        match rcvr.kind {
-          ExprKind::MethodCall(p_seg, ..) => { // return early if not at the base
-            let _rcvr_name = p_seg.ident.as_str().to_owned();
-            return;
-          }
-          _ => {}
+        // Chained method calls like `a.get_mut().push(x)` (#132): the
+        // outer call's receiver is itself a MethodCall whose return
+        // value has no registered RAP. Walk down the chain to the
+        // base receiver — the user-named RAP at the bottom — and
+        // attribute the outer call to that. Pedagogical
+        // simplification: pretends each call operates on the base
+        // receiver, glossing over the intermediate return values.
+        // Without this, only the innermost call in a chain emits
+        // an event.
+        let mut base_rcvr: &Expr = rcvr;
+        while let ExprKind::MethodCall(_, inner, ..) = base_rcvr.kind {
+          base_rcvr = inner;
         }
         // The receiver of `r.s.method()` is a Field expression, not
         // a bare path, so `hirid_to_var_name` can't name it.
@@ -346,7 +352,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // impl method, etc. — bail out of the rest of the
         // method-call processing rather than crash; the call site
         // simply produces no event for this method.
-        let rcvr_name = match expr_to_rap_name(rcvr, &self.tcx) {
+        let rcvr_name = match expr_to_rap_name(base_rcvr, &self.tcx) {
           Some(n) => n,
           None => return,
         };
