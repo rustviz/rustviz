@@ -192,18 +192,32 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
         else if ty.is_adt() && !is_special{ // kind of weird given we don't have a InitStructParam
-          let owner_hash = self.rap_hashes as u64;
-          let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-          self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.current_scope, !self.inside_branch);
-          let generic_args = match ty.kind() {
-            rustc_middle::ty::TyKind::Adt(_, args) => *args,
-            _ => unreachable!("ty.is_adt() but kind is not Adt"),
-          };
-          for field in ty.ty_adt_def().unwrap().all_fields() {
-            let field_name = format!("{}.{}", name.clone(), field.name.as_str());
-            let field_ty = field.ty(self.tcx, generic_args);
-            let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
-            self.add_struct(field_name, owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.current_scope, !self.inside_branch);
+          // Dispatch on the ADT kind so structs get per-field
+          // timelines while enums and unions stay opaque (same
+          // policy as the LHS-of-expr / pattern-binding sites in
+          // expr_visitor.rs). Without this branching, an enum or
+          // union parameter would silently get spurious field RAPs
+          // registered as if it were a struct.
+          match ty.ty_adt_def().unwrap().adt_kind() {
+            rustc_middle::ty::AdtKind::Struct => {
+              let owner_hash = self.rap_hashes as u64;
+              let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+              self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.current_scope, !self.inside_branch);
+              let generic_args = match ty.kind() {
+                rustc_middle::ty::TyKind::Adt(_, args) => *args,
+                _ => unreachable!("ty.is_adt() but kind is not Adt"),
+              };
+              for field in ty.ty_adt_def().unwrap().all_fields() {
+                let field_name = format!("{}.{}", name.clone(), field.name.as_str());
+                let field_ty = field.ty(self.tcx, generic_args);
+                let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
+                self.add_struct(field_name, owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.current_scope, !self.inside_branch);
+              }
+            }
+            rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
+              let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+              self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.current_scope, !self.inside_branch);
+            }
           }
         }
         else {
