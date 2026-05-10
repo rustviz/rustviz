@@ -218,7 +218,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "reborrow",
         must_contain: &[
             "Mutable borrow from s to r",
-            "Mutable borrow from r to r2",
+            // r is itself `&mut String`, so the borrow into r2 is a
+            // reborrow — `let r2 = &mut *r` — not a fresh borrow off
+            // the owner. The wording reflects that.
+            "Mutable reborrow from r to r2",
             "Return mutably borrowed resource from r2 to *r",
             "Return mutably borrowed resource from r to s",
             "push_str reads from/writes to r2",

@@ -1195,9 +1195,17 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         ExternalEvent::StaticDie{ .. } => {
             String::from("Return immutably borrowed resource")
         },
-        ExternalEvent::MutableBorrow{ is_partial, to, .. } => {
+        ExternalEvent::MutableBorrow{ is_partial, from, to, .. } => {
             if *is_partial { String::from("Partial Mutable borrow") }
             else if to.is_closure() { String::from("Closure capture (mutable borrow)") }
+            // Reborrow: the source itself is a `&mut T` binding, so
+            // we're borrowing-the-borrow (`let r2 = &mut *r;` — also
+            // what's implicitly synthesized at function-call sites).
+            // Distinct from a fresh borrow off an owner: the source
+            // gets frozen for the reborrow's lifetime and then
+            // reactivated, where a fresh borrow's source stays
+            // frozen until *its* last use.
+            else if from.is_mutref() { String::from("Mutable reborrow") }
             else { String::from("Mutable borrow") }
         },
         ExternalEvent::MutableDie{ .. } => {
