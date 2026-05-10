@@ -137,6 +137,10 @@ const EXPECTED_OK: &[&str] = &[
     "assign_chained_field",
     "assign_tuple_destructure",
     "assign_index",
+    // — User-defined macros (#137). Plugin doesn't render an event
+    //   for the macro call yet, but it must not crash on shapes
+    //   that contain a user-defined macro_rules! invocation.
+    "user_macro_show_twice",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
