@@ -548,13 +548,18 @@ pub fn fetch_mutability(expr: & Expr) -> Option<Mutability> {
   match expr.kind {
     ExprKind::Block(b, _) => {
       match b.expr {
-        Some(expr) => { fetch_mutability(expr) }
-        None => { panic!("invalid expr for fetching mutability") }
+        Some(expr) => fetch_mutability(expr),
+        // An empty block (`&{}`) has no inner expression to derive
+        // mutability from — propagate None so the outer `AddrOf` arm
+        // falls back to its own declared mutability. Borrowing a
+        // unit-valued empty block is valid Rust, so this branch is
+        // reachable on real user code; don't panic. (#146)
+        None => None,
       }
     }
     ExprKind::AddrOf(_, mutability, expr) => {
       match fetch_mutability(&expr) {
-        None => Some(mutability), 
+        None => Some(mutability),
         Some(m) => Some(m)
       }
     }
@@ -823,8 +828,11 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
     }
     ExprKind::Block(b, _) => {
       match b.expr {
-        Some(expr) => { find_lender(expr, tcx, raps, borrow_map) }
-        None => { panic!("invalid rhs lender block") }
+        Some(expr) => find_lender(expr, tcx, raps, borrow_map),
+        // Borrow of an empty block — `let r = &{};` borrows unit.
+        // No lender to attribute to; same `&{}` shape as #146's
+        // fetch_mutability fix.
+        None => ResourceTy::Anonymous,
       }
     }
     ExprKind::Unary(op, expr) => { 
