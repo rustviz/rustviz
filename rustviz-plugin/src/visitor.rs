@@ -442,7 +442,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // ref-reassignment and drop-at-reassign handling below.
         let lhs_is_union_field = matches!(lhs_expr.kind,
           ExprKind::Field(recv, _) if self.is_union_typed(recv));
-        let lhs_rty = self.resource_of_lhs(lhs_expr);
+        // None means the LHS is an unsupported shape (e.g. index, tuple
+        // destructure — #144) or an unregistered name; short-circuit the
+        // assignment so the rest of the program still renders.
+        let lhs_rty = match self.resource_of_lhs(lhs_expr) {
+          Some(rty) => rty,
+          None => return,
+        };
         let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
         let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner), lhs_ty);
         let e = if lhs_ty.is_ref() {
