@@ -130,6 +130,11 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Tuple-destructure assignment (#151). `(a, b) = (b, a)`
+    //   surfaces per-element events on a and b; the synthetic
+    //   `lhs` temporary from rustc's desugar is hidden from the
+    //   timeline.
+    "tuple_destructure_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -344,6 +349,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from len to n",
         ],
         must_not_contain: &[],
+    },
+
+    TooltipExpect {
+        name: "tuple_destructure_assign",
+        // After #151, the rustc-synthesized `lhs` temporary from
+        // desugaring `(a, b) = (b, a)` doesn't appear as a column.
+        // `a` and `b` each pick up two "bound to a value" events
+        // (initial bind + swap-assignment).
+        must_contain: &[
+            "a, mutable",
+            "b, mutable",
+            "a is bound to a value",
+            "b is bound to a value",
+        ],
+        must_not_contain: &[
+            "lhs, immutable",
+            "lhs, mutable",
+        ],
     },
 
     // ─── User-defined inherent methods ──────────────────────────────
