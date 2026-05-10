@@ -1,9 +1,0 @@
-fn bx() {
-  let bx = Box::new(0);
-  *bx += 1;
-}
-
-fn mut_bx() {
-  let mut bx = Box::new(0);
-  *bx += 1;
-}
