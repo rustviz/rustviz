@@ -859,9 +859,20 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned()
         }
       };
-      let rhs_rap = self.raps.get(&rhs_name).unwrap().rap.to_owned();
-      self.update_rap(&rhs_rap, line_num);
-      self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
+      // A path that doesn't resolve to a registered RAP — most
+      // commonly a synthetic local introduced by the `?` operator's
+      // desugar (`Ok(val) => val, ...`) — gets an Anonymous source.
+      // Without this fallback the plugin panics on `let n = expr?`.
+      match self.raps.get(&rhs_name) {
+        Some(rd) => {
+          let rhs_rap = rd.rap.to_owned();
+          self.update_rap(&rhs_rap, line_num);
+          self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
+        }
+        None => {
+          self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+        }
+      }
     },
     // fn_expr: resolves to function itself (Path)
     // second arg, is a list of args to the function
