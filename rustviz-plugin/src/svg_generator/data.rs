@@ -1098,7 +1098,11 @@ impl Event {
                 safe_message(hover_messages::event_dot_mut_reacquire, &self.deref_name(my_name), from)
             }
             Event::RefDie {..} => {
-              panic!("should never be calling this function with this event");
+              // `event_str` is the tooltip text for an event *dot*.
+              // RefDie is a bookkeeping event for reference-lifetime
+              // joins and never gets rendered as a dot, so no dispatch
+              // here is correct.
+              unreachable!("RefDie does not render as a dot — event_str is dot-only")
             },
             Event::Branch { .. } => {
               format!("{} is live in a conditional expression ", my_name)
@@ -1274,18 +1278,24 @@ impl Visualizable for VisualizationData {
                         // let c = a; (Copy(a -> c)) even though c is technically borrowing from b at the end of the day
                         if r.is_ref() && is_ro.is_ref() {
                             if r.is_mutref() {
-                                panic!("Not possible, has to be a move");
+                                // &mut T is not Copy; rustc rejects `let b = a` when
+                                // `a: &mut T`, so a Copy event with a mutref source
+                                // can never reach this analyzer.
+                                unreachable!("Copy from a mutable reference (rejected by borrowck)")
                             }
                             else {
                                 // we have to be copying an immutable reference, so the state must be partial
                                 State::PartialPrivilege { s: LineState::Full }
-                            }   
+                            }
                         }
                         else {
                             State::FullPrivilege {s: LineState::Full}
                         }
                     }
-                    _ => panic!("not possible")
+                    // Remaining ResourceTy variants are Caller, which only
+                    // represents a fn-return expression and is never the
+                    // *source* of a Copy event.
+                    _ => unreachable!("Copy source is ResourceTy::Caller (return-expr placeholder, not a value)")
                 }
             }
 
@@ -1302,7 +1312,10 @@ impl Visualizable for VisualizationData {
             (State::OutOfScope, Event::InitRefParam{ param: ro, .. })  => {
                 match ro {
                     ResourceAccessPoint::Function(..) => {
-                        panic!("Cannot initialize function as as valid parameter!")
+                        // Functions aren't fn-parameter RAPs; they're
+                        // registered as their own kind and never emit
+                        // InitRefParam, so this case is dead.
+                        unreachable!("InitRefParam fired with a Function RAP")
                     },
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::MutRef(..) => {
                         State::FullPrivilege{s:LineState::Full}
@@ -1325,8 +1338,12 @@ impl Visualizable for VisualizationData {
                 if self.is_mut(hash) {
                     State::FullPrivilege{ s: LineState::Full }
                 }
-                else { // immut variables cannot reacquire resource
-                    panic!("Immutable variable {} cannot reacquire resources!", self.get_name_from_hash(hash).unwrap());
+                else {
+                    // Reacquire on an immutable binding implies a reassignment
+                    // of a `let` (non-`mut`) variable, which the borrow checker
+                    // rejects. If the analyzed program compiled, this branch
+                    // cannot fire.
+                    unreachable!("Acquire after ResourceMoved on an immutable RAP (rejected by borrowck)")
                 }
             },
 
@@ -1649,7 +1666,9 @@ impl Visualizable for VisualizationData {
                 );
             },
             _ => {
-                panic!("Timeline disappeared right after creation or when we could index it. This is impossible.");
+                // Single-threaded BTreeMap mutation: we just inserted on the
+                // None path above, so this lookup must succeed.
+                unreachable!("BTreeMap entry vanished after insertion")
             }
         }
     }
@@ -1701,13 +1720,16 @@ impl Visualizable for VisualizationData {
                     else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }    
                   }
               }
-              _ => panic!("not possible")
+              // RefDie sources are always references (Value/Deref); the
+              // upstream construction in `add_external_event` never produces
+              // Anonymous/Caller as the `from` of a RefDie.
+              _ => unreachable!("RefDie source must be a reference RAP (Value/Deref)"),
           }
         },
         ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id} => {
-          if to_o { 
+          if to_o {
             vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
-            (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
+            (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})]
           }
           else { 
             vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id}),
@@ -1736,10 +1758,11 @@ impl Visualizable for VisualizationData {
               vec![(line_num, Event::RefGoOutOfScope)]
             },
             ResourceAccessPoint::Function(func) => {
-              panic!(
-                  "Functions do not go out of scope! We do not expect to see \"{}\" here.",
-                  func.name
-              );
+              // The plugin doesn't emit GoOutOfScope for fn RAPs in
+              // the first place (they don't have a binding lifetime),
+              // so this branch is dead.
+              let _ = &func.name;
+              unreachable!("GoOutOfScope for a Function RAP")
             }
           }
         },
@@ -1747,7 +1770,9 @@ impl Visualizable for VisualizationData {
           vec![(line_num, Event::OwnerDropAtReassign)]
         },
 
-        _ => panic!("should not be calling this on branches")
+        // Branch events are routed through `append_branch_event` and
+        // never flow through `event_of_exteranl_event`.
+        _ => unreachable!("event_of_exteranl_event called on a Branch event")
       }
     }
 
@@ -1952,12 +1977,14 @@ impl Visualizable for VisualizationData {
                             //maybe_append_event(self, &to_ro.clone(), Event::RefDie { from: from_ro, is: to_ro, num_curr_borrowers, id: id}, line_number);
                         }
                     }
-                    _ => panic!("not possible")
+                    // RefDie's `from` is always Value/Deref; see comment on the
+                    // mirror site in `event_of_exteranl_event` above.
+                    _ => unreachable!("RefDie source must be a reference RAP (Value/Deref)"),
                 }
             },
 
             // Technically appending individual events for PassByRef events is not necessary since
-            // they do not change the state of either variable - however - it's useful to have when 
+            // they do not change the state of either variable - however - it's useful to have when
             ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id} => {
                 maybe_append_event(self, &from_ro.to_owned(), Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
@@ -1982,10 +2009,10 @@ impl Visualizable for VisualizationData {
                         maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope, line_number);
                     },
                     ResourceAccessPoint::Function(func) => {
-                        panic!(
-                            "Functions do not go out of scope! We do not expect to see \"{}\" here.",
-                            func.name
-                        );
+                        // Functions don't have a binding lifetime; the plugin
+                        // doesn't emit GoOutOfScope for them.
+                        let _ = &func.name;
+                        unreachable!("GoOutOfScope for a Function RAP")
                     }
                 }
             },

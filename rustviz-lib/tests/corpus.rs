@@ -130,6 +130,13 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Unsupported LHS shapes that the plugin used to panic on
+    //   (issues #143, #144). Each emits no event for the unsupported
+    //   assignment but renders the surrounding program; pinning these
+    //   here makes any future regression to the panic visible.
+    "assign_chained_field",
+    "assign_tuple_destructure",
+    "assign_index",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to

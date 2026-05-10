@@ -397,7 +397,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         self.visit_expr(exp);
       }
 
-      // assignment 
+      // assignment
       // ex a = <expr> or a += <expr>
       ExprKind::Assign(lhs_expr, rhs_expr, _,) | ExprKind::AssignOp(_, lhs_expr, rhs_expr) => {
         self.visit_expr(lhs_expr);
@@ -405,7 +405,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         // typecheck to figure out what type of event is going to occur
         let line_num = expr_to_line(&lhs_expr, &self.tcx);
-        let lhs_rty = self.resource_of_lhs(lhs_expr);
+        // resource_of_lhs returns None for shapes the plugin doesn't model
+        // yet (chained field LHS — #143; index / tuple-destructure LHS —
+        // #144). In those cases we skip emitting an event for the
+        // assignment rather than crashing the plugin.
+        let lhs_rty = match self.resource_of_lhs(lhs_expr) {
+          Some(rty) => rty,
+          None => return,
+        };
         let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
         let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
         let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner), lhs_ty);
@@ -520,7 +527,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 r.aliasing.insert(deref_index + 1 + j, s.to_owned());
               }
             }
-            _ => panic!("not possible")
+            // ResourceTy::Anonymous / ResourceTy::Caller can't appear on the
+            // LHS of an assignment in valid Rust — `resource_of_lhs` only
+            // returns those for unsupported shapes, which the caller would
+            // have skipped before reaching the reference-reassignment path.
+            _ => unreachable!("non-RAP LHS reached the ref-reassignment dispatch"),
           }
         }
 

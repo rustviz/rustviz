@@ -223,7 +223,10 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
         } else {
             struct_name = match visualization_data.get_name_from_hash(&(hash as u64)) {
                 Some(_name) => _name,
-                None => panic!("no matching resource owner for hash {}", hash),
+                // Every hash that lands in `output` came from a RAP that was
+                // already registered in `timelines`; the inverse lookup must
+                // therefore succeed.
+                None => unreachable!("hash {} present in output but not in timelines", hash),
             };
         }
         let timelinepanel_string = registry.render("timeline_panel_template", &timelinepanel).unwrap();
@@ -539,7 +542,9 @@ fn compute_column_layout<'a>(
             let timeline = &visualization_data.timelines[hash];
             let name = match visualization_data.get_name_from_hash(hash) {
                 Some(_name) => _name,
-                None => panic!("no matching resource owner for hash {}", hash),
+                // `hashes` was just populated by iterating `timelines`, so the
+                // reverse lookup must succeed.
+                None => unreachable!("hash {} present in timelines but missing reverse-name", hash),
             };
             let mut x_space = cmp::max(70, (&(name.len() as i64) - 1) * 13);
             let (extent_left, extent_right) = *extent_map.get(hash).unwrap();
@@ -1251,7 +1256,10 @@ fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, 
 fn fetch_timeline<'a>(hash: &u64, vd: &'a VisualizationData, ro_layout: & 'a BTreeMap<u64, TimelineColumnData>, id: usize) -> & 'a TimelineColumnData {
     match traverse_timeline2(&ro_layout[hash], &vd.timelines[hash].history, id) {
         Some(t) => t,
-        None => panic!("Shouldn't be happening")
+        // `id` came from an ExternalEvent currently being rendered; that
+        // event was already inserted into the RAP's history during
+        // event-flattening, so the traversal must hit it.
+        None => unreachable!("event id {} for hash {} not found in any timeline column", id, hash),
     }
 }
 
@@ -1282,11 +1290,13 @@ fn traverse_events2<'a> (
 
 fn fetch_line_map<'a>(
     vd: &'a VisualizationData,
-    id: usize 
+    id: usize
 ) -> & 'a BTreeMap<usize, Vec<ExternalEvent>> {
     match traverse_events2(&vd.external_events, &vd.event_line_map, id) {
         Some(t) => t,
-        None => panic!("Error getting a line map")
+        // Same invariant as `fetch_timeline`: this id was produced by an
+        // event already present in the event tree, so traversal must find it.
+        None => unreachable!("event id {} not found in external_events tree", id),
     }
 }
 

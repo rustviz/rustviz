@@ -439,22 +439,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     *self.unique_id += 1;
   }
 
-  // Return the ResourceTy that corresponds to the LHS of a let stmt
-  pub fn resource_of_lhs(&mut self, expr: &'tcx Expr) -> ResourceTy {
+  // Return the ResourceTy that corresponds to the LHS of an assignment.
+  // `None` means the LHS is a shape the plugin doesn't yet model (#143,
+  // #144) — the caller should skip the assignment rather than crash.
+  pub fn resource_of_lhs(&mut self, expr: &'tcx Expr) -> Option<ResourceTy> {
     match expr.kind {
       ExprKind::Path(QPath::Resolved(_, p)) => {
         let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-        ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned())
+        Some(ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned()))
       }
       ExprKind::Field(expr, ident) => {
         match expr {
           Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
             let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
             let total_name = format!("{}.{}", name, ident.as_str());
-            ResourceTy::Value(self.raps.get(&total_name).unwrap().rap.to_owned())
+            Some(ResourceTy::Value(self.raps.get(&total_name).unwrap().rap.to_owned()))
           }
-          _ => { panic!("unexpected field expr") }
-        } 
+          // Chained field LHS like `a.b.c = …` — see issue #143.
+          _ => {
+            warn!("chained field LHS not supported (#143); skipping assignment at this location");
+            None
+          }
+        }
       }
       ExprKind::Unary(UnOp::Deref, exp) => {
         let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
@@ -462,12 +468,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         match rhs_rap {
           Some(x) => {
             self.update_rap(&x, line_num);
-            ResourceTy::Deref(x)
+            Some(ResourceTy::Deref(x))
           }
-          None => { ResourceTy::Anonymous }
+          None => Some(ResourceTy::Anonymous),
         }
       }
-      _ => panic!("invalid lhs")
+      // Index, tuple destructure, etc. — see issue #144.
+      _ => {
+        warn!("unsupported assignment LHS shape (#144); skipping assignment at this location");
+        None
+      }
     }
   }
 
@@ -918,7 +928,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       match fetch_mutability(&rhs) { // fetch last ref mutability in the chain -> &&&mut x
         Some(Mutability::Not) => self.add_ev(line_num, Evt::SBorrow, lhs, res, false),
         Some(Mutability::Mut) => self.add_ev(line_num, Evt::MBorrow, lhs, res, false),
-        None => panic!("Shouldn't have been able to get here")
+        // We arrived here via the AddrOf arm of `match_rhs`, so `rhs`
+        // is an AddrOf and `fetch_mutability` walks at least that node
+        // and returns Some.
+        None => unreachable!("fetch_mutability returned None for an AddrOf expression"),
       }
     }
     //a block: { <stmt1>...<stmt_n>, <expr> };
