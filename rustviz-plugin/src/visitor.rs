@@ -687,7 +687,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // compute split and merge points
         let line_num = expr_to_line(&guard_expr, &self.tcx);
         let split = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line;
-        let mut if_end = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line;
+        let if_end = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line;
         let merge = match else_expr {
           Some(e) => self.tcx.sess.source_map().lookup_char_pos(e.span.hi()).line,
           None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line

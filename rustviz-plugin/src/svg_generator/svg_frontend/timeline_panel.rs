@@ -1116,13 +1116,6 @@ fn closure_move_capture_count(
         .count()
 }
 
-fn closure_has_move_captures(
-    visualization_data: &VisualizationData,
-    closure_hash: u64,
-) -> bool {
-    closure_move_capture_count(visualization_data, closure_hash) > 0
-}
-
 // Title for a vertical timeline segment. Routes around the generic
 // `state.print_message_with_name` for closure bindings so the
 // FullPrivilege segment reads as "f owns a closure (which owns a
