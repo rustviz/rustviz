@@ -165,6 +165,29 @@ fn docker_runner(force_build: bool) -> Result<()> {
         return Ok(());
     }
 
+    // The rustviz-runner image is Linux-only. On hosts where the
+    // daemon is in Windows container mode (the default on GitHub-
+    // hosted Windows runners) we can't pull it and we can't build
+    // it from `playground/runner/Dockerfile`. Skip cleanly.
+    // Docker Desktop on macOS / Windows with Linux containers
+    // configured reports OSType "linux" (it runs an embedded Linux
+    // VM under the hood), so this check only excludes the genuinely-
+    // not-supported case.
+    let os_type = capture("docker", &["info", "--format", "{{.OSType}}"])
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    if !os_type.is_empty() && !os_type.contains("linux") {
+        println!();
+        println!(
+            "Skipping runner image: docker daemon is in {} container mode.",
+            os_type
+        );
+        println!("Switch Docker Desktop to Linux containers if you need the sandbox,");
+        println!("or set RV_RUNNER=local to run the plugin in-process for local dev.");
+        return Ok(());
+    }
+
     if force_build {
         println!("Building rustviz/rustviz-runner image locally...");
         run(
