@@ -207,12 +207,27 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         _ => {}
       }
       for field in fields.iter() {
-        self.annotate_src(field.ident.to_string(), field.ident.span, false, *self.id_map.get(field.ident.as_str()).unwrap() as u64);
+        // Field idents that aren't tied to a registered RAP — most
+        // commonly union fields, which we render as opaque single-
+        // owner columns and so don't add per-field id_map entries
+        // for — get the colorization skipped instead of panicking
+        // on an `id_map.get(...).unwrap()`. The expression in the
+        // initialiser is still walked normally below.
+        if let Some(hash) = self.id_map.get(field.ident.as_str()) {
+          self.annotate_src(field.ident.to_string(), field.ident.span, false, *hash as u64);
+        }
         self.annotate_expr(field.expr);
       }
     }
     ExprKind::Field(exp, ident) => {
-      self.annotate_src(ident.to_string(), ident.span, false, *self.id_map.get(ident.as_str()).unwrap() as u64);
+      // Same robustness: a field-access projection on a non-struct
+      // RAP (a union, an enum variant accessed through `unsafe`,
+      // etc.) won't have its field name in id_map. Skip the
+      // colorization for that token; the receiver expression is
+      // still walked.
+      if let Some(hash) = self.id_map.get(ident.as_str()) {
+        self.annotate_src(ident.to_string(), ident.span, false, *hash as u64);
+      }
       self.annotate_expr(exp);
     }
     ExprKind::DropTemps(exp) => {

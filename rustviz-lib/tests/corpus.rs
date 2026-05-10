@@ -130,6 +130,10 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Union (#131): rendered as an opaque single-owner column,
+    //   same as enums. Pre-fix the plugin panicked at the
+    //   AdtKind::Union arm with "union not implemented yet".
+    "union_basic",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -993,6 +997,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "may have been moved (consumed in at least one branch above)",
+        ],
+    },
+
+    // ─── Unions (#131) ──────────────────────────────────────────────
+    TooltipExpect {
+        name: "union_basic",
+        // Opaque-owner treatment: `u` gets a single column, the
+        // construction is a Bind (acquires), passing `u` to show
+        // is a Move, and the post-move OOS reports no resource
+        // dropped. No per-field timelines for `_a` / `_b` —
+        // unions don't have a statically-known active field.
+        must_contain: &[
+            "u acquires ownership of a resource",
+            "u's resource is moved",
+            "Move from u to show",
+            "u goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            // Pre-fix the AdtKind::Union arm panicked; a renderer
+            // that treated unions as structs would create field
+            // RAPs `u._a` / `u._b` with their own labels — guard
+            // against either regression.
+            "u._a",
+            "u._b",
         ],
     },
 ];
