@@ -3,6 +3,7 @@
 .DS_Store
 **/.DS_Store
 .vscode/
+.claude/
 
 # build outputs (workspace and per-package)
 target/
@@ -22,7 +23,7 @@ target/
 mdbook-rustviz/test-book/src/examples
 mdbook-rustviz/test-book/book
 
-# Frontend build artifacts (produced by setup.sh / npm run build)
+# Frontend build artifacts (produced by `cargo xtask setup` / npm run build)
 playground/frontend/dist/
 playground/frontend/node_modules/
 playground/frontend/*.tsbuildinfo

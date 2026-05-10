@@ -1,8 +1,9 @@
 # Per-clone isolation for working on RustViz from several checkouts at once.
 #
-# Without this, every clone shares ~/.cargo: setup.sh's `cargo install`
-# steps from each clone fight over ~/.cargo/bin/rustviz, and concurrent
-# playground processes collide on the docker image tag and bind port.
+# Without this, every clone shares ~/.cargo: `cargo xtask setup`'s
+# `cargo install` steps from each clone fight over ~/.cargo/bin/rustviz,
+# and concurrent playground processes collide on the docker image tag
+# and bind port.
 #
 # direnv (https://direnv.net/) auto-loads this file when you cd into the
 # checkout and unloads it when you cd out, so any tool launched from a
@@ -17,13 +18,20 @@
 #   cp .envrc.example .envrc
 #   direnv allow
 #
+# Windows: direnv doesn't run natively under PowerShell or cmd.exe; use
+# it from Git Bash or WSL, or set the same vars by hand in a per-shell
+# profile (`$env:CARGO_HOME = ...` in PowerShell). The xtask-based
+# setup itself works on any host — it's just the per-clone isolation
+# automation that's Unix-shell-only.
+#
 # The rustup toolchain (~/.rustup) is intentionally still shared — every
 # clone pins the same nightly via rust-toolchain.toml, so a per-clone
 # copy would just waste disk.
 
-# Per-clone cargo home. Houses the binaries setup.sh installs
-# (`rustviz`, `cargo-rv-plugin`, `rv-plugin-driver`) plus a private
-# registry cache, so installing from one clone doesn't shadow another.
+# Per-clone cargo home. Houses the binaries `cargo xtask setup`
+# installs (`rustviz`, `cargo-rv-plugin`, `rv-plugin-driver`) plus a
+# private registry cache, so installing from one clone doesn't shadow
+# another.
 export CARGO_HOME="$PWD/.cargo-home"
 export PATH="$CARGO_HOME/bin:$PATH"
 
@@ -36,8 +44,8 @@ export PATH="$CARGO_HOME/bin:$PATH"
 # export RV_RUNNER=local
 
 # Per-clone docker tag, so `docker build -t "$RV_RUNNER_IMAGE" ...` from
-# one clone doesn't clobber another's image. Pair with `setup.sh
-# --build-runner` after exporting.
+# one clone doesn't clobber another's image. Pair with `cargo xtask
+# setup --build-runner` after exporting.
 # export RV_RUNNER_IMAGE=rustviz/rustviz-runner:clone-a
 
 # Different bind address so two playgrounds can run simultaneously

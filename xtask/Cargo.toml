@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Cross-platform driver for `cargo xtask setup` / `cargo xtask uninstall`.
+# Replaces the legacy bash scripts so the workspace boots the same way on
+# Linux, macOS, and Windows. Invoked through the alias in the workspace
+# `.cargo/config.toml`.
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }

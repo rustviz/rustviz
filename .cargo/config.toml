@@ -1,0 +1,10 @@
+# Workspace-level cargo config. The alias makes `cargo xtask <subcmd>`
+# run the cross-platform setup / uninstall driver in xtask/, replacing
+# the legacy bash scripts.
+#
+# `--release` so subsequent xtask invocations don't re-pay the dev-build
+# debug-info cost; the xtask binary is small and the optimised binary
+# stays cached under target/release.
+
+[alias]
+xtask = "run --package xtask --release --quiet --"

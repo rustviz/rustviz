@@ -7,4 +7,5 @@ members = [
   "rustviz-cli",
   "mdbook-rustviz",
   "playground",
+  "xtask",
 ]

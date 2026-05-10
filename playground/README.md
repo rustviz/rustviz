@@ -20,7 +20,7 @@ nightly toolchain is auto-installed by `rustup` from
 ```sh
 git clone https://github.com/rustviz/rustviz
 cd rustviz
-./setup.sh                  # toolchain, plugin install, frontend build, runner image
+cargo xtask setup           # toolchain, plugin install, frontend build, runner image
 cd playground && cargo run --release
 open http://127.0.0.1:8080/
 ```
