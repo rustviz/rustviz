@@ -568,13 +568,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let is_special = ty_is_special_owner(&ty);
     if ty.is_ref() {
       let (lender, aliasing) = self.get_ref_data(&expr);
-      self.add_ref(name.clone(), 
-      bool_of_mut(ty.ref_mutability().unwrap()), 
-      mutability, 
+      self.add_ref(name.clone(),
+      bool_of_mut(ty.ref_mutability().unwrap()),
+      mutability,
       expr_to_line(&expr, &self.tcx),
       lender,
       aliasing,
       self.current_scope, !self.inside_branch);
+      // Mirror the visit_param ref-branch fix from #147: when the
+      // pointee is a user-defined ADT, register per-field member RAPs
+      // under the ref so `p.field` / `p.field = …` projections
+      // resolve. Without this, `let p = &mut foo; p.x = 5;` silently
+      // drops the assignment because `p.x` isn't in raps. (#152)
+      let pointee = ty.builtin_deref(true);
+      if let Some(pointee_ty) = pointee {
+        if pointee_ty.is_adt() && !ty_is_special_owner(&pointee_ty) {
+          let owner_hash = *self.raps.get(&name).unwrap().rap.hash();
+          let field_mut = matches!(ty.ref_mutability(), Some(Mutability::Mut));
+          let generic_args = match pointee_ty.kind() {
+            TyKind::Adt(_, args) => *args,
+            _ => unreachable!("pointee.is_adt() but kind is not Adt"),
+          };
+          for field in pointee_ty.ty_adt_def().unwrap().all_fields() {
+            let field_name = format!("{}.{}", name.clone(), field.name.as_str());
+            let field_ty = field.ty(self.tcx, generic_args);
+            let field_is_copy = self.ty_is_copy(field_ty, expr.hir_id.owner);
+            self.add_struct(field_name, owner_hash, true, field_mut, field_is_copy, self.current_scope, !self.inside_branch);
+          }
+        }
+      }
     }
     else if ty.is_adt() && !is_special {
       match ty.ty_adt_def().unwrap().adt_kind() {

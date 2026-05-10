@@ -148,6 +148,10 @@ const EXPECTED_OK: &[&str] = &[
     //   program still renders.
     "method_assigns_field",
     "tuple_struct_method",
+    // — Per-field RAPs for ref-to-struct locals (#152, mirror of
+    //   the param-side fix in #147). `let p = &mut foo; p.x = …`
+    //   now resolves and emits an event on `p.x`'s column.
+    "local_ref_field_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -377,6 +381,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "area reads from rect",
             "r acquires ownership of a resource",
             "r goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "local_ref_field_assign",
+        // After #152, `p.x = 5` resolves to `p.x`'s registered RAP
+        // and emits the reassignment event on that column.
+        must_contain: &[
+            "p.x, mutable",
+            "p.x acquires ownership of a resource",
         ],
         must_not_contain: &[],
     },
