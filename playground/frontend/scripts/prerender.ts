@@ -31,6 +31,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { exampleGroups } from '../src/examples';
+import { normalizeCode } from '../src/normalizeCode';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -140,7 +141,10 @@ function tryReuseExisting(): Record<string, Pair> | null {
   const reused: Record<string, Pair> = {};
   for (const group of exampleGroups) {
     for (const ex of group.examples) {
-      const hash = sha256Hex(ex.code);
+      // Match the runtime cache: hash the normalized source so a
+      // dropdown click and a paste-with-trailing-spaces collapse to
+      // the same key.
+      const hash = sha256Hex(normalizeCode(ex.code));
       const existing = parsed.entries[hash];
       if (
         !existing ||
@@ -172,7 +176,8 @@ function main(): void {
   for (const group of exampleGroups) {
     for (const ex of group.examples) {
       total += 1;
-      const hash = sha256Hex(ex.code);
+      const normalized = normalizeCode(ex.code);
+      const hash = sha256Hex(normalized);
       const label = `${group.chapter} / ${ex.name}`;
       if (entries[hash]) {
         // Two curated examples with byte-identical code is a sign of
@@ -186,7 +191,10 @@ function main(): void {
       }
       process.stdout.write(`prerender: ${label.padEnd(50)} `);
       const t0 = Date.now();
-      entries[hash] = renderOne(ex.code, label);
+      // Render the normalized form so the SVG that comes back
+      // corresponds to exactly what `rustviz svg` would emit for the
+      // user's submission (with their trailing whitespace stripped).
+      entries[hash] = renderOne(normalized, label);
       console.log(`${Date.now() - t0} ms`);
     }
   }

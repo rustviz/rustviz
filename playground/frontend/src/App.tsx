@@ -8,6 +8,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import ErrorCard from './ErrorCard';
 import { exampleGroups } from './examples';
 import { get as cacheGet, put as cachePut } from './svgCache';
+import { normalizeCode } from './normalizeCode';
 import {
   codeForSelection,
   DEFAULT_SELECTION,
@@ -542,7 +543,12 @@ const App: React.FC = () => {
     const controller = new AbortController();
     inflightRef.current = controller;
 
-    const code = editor.getCurrentCode();
+    // Strip trailing-on-each-line whitespace before hashing and
+    // POSTing. The editor often gets terminal-pasted snippets with
+    // invisible right-padding, which would otherwise miss the
+    // dropdown / user-side cache and force an API round-trip for
+    // visually-identical input.
+    const code = normalizeCode(editor.getCurrentCode());
 
     // Cache lookup before we set the spinner. If we've rendered this
     // exact source before — either at build time (any dropdown
