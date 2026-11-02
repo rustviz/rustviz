@@ -33,7 +33,7 @@ const pluginVersion = pluginVersionMatch ? pluginVersionMatch[1] : 'unknown';
 //   * pages (`npm run build:pages`, --mode pages): emits an SPA
 //     intended to be served by GitHub Pages at
 //     https://rustviz.github.io/, with API requests pointed at the
-//     Fly origin via VITE_API_BASE in .env.pages.
+//     Cloud Run compile API via VITE_API_BASE in .env.pages.
 //
 // Both modes use base = '/'. The Pages site is hosted at the org
 // root (rustviz/rustviz.github.io repo), not under a /playground

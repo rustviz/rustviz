@@ -30,8 +30,12 @@ on:
   push:
     branches: [main]
     paths:
-      # Only rebuild when the frontend or its config actually changes.
+      # The frontend, plus anything that changes the prerendered SVGs
+      # baked into the bundle (the plugin and its toolchain).
       - 'playground/frontend/**'
+      - 'rustviz-plugin/**'
+      - 'rust-toolchain.toml'
+      - 'Cargo.lock'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 

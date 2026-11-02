@@ -59,8 +59,8 @@ fails closed: `RV_RUNNER=sandbox` with an empty `RV_SANDBOX_CMD` is a
 configuration error, never "run unsandboxed". Any launcher with the same
 "prefix + command" shape (bubblewrap, nsjail) can be substituted.
 
-**Fly / docker (legacy, being retired).** `rustviz-lib/src/lib.rs::run_docker`,
-the backend the Fly deploy uses, invokes:
+**Docker (local development).** `rustviz-lib/src/lib.rs::run_docker`,
+the backend the playground binary uses by default outside Cloud Run, invokes:
 
 ```sh
 docker run --rm -i \
@@ -114,7 +114,7 @@ entrypoint. There is no shell access surface in the playground HTTP path.
 
 The static SPA is served from GitHub Pages at
 `https://rustviz.github.io/`, so cross-origin requests to the
-Fly API are required and gated by an explicit `actix-cors` allowlist in
+Cloud Run API are required and gated by an explicit `actix-cors` allowlist in
 `playground/src/main.rs`. The allowlist is the *only* control over which
 sites can drive the API from a browser:
 
@@ -140,12 +140,13 @@ deployment**. The `rustviz-lib` library defaults to `local` (the common case is
 trusted callers like the CLI or mdbook); the `playground` binary specifically
 overrides that default to `docker` at startup if the env var is unset, so
 you'd have to actively pass `RV_RUNNER=local` to the playground process to
-hit the unsafe path. The production deploy config sets `RV_RUNNER=docker`
-explicitly via `fly.toml`.
+hit the unsafe path. The production image sets `RV_RUNNER=sandbox`
+(`playground/cloudrun/Dockerfile`).
 
 ## Operator checklist
 
-Before exposing `playground` to the public internet:
+Production is configured by `playground/cloudrun/deploy.sh`. To expose the
+playground some other way (docker backend on your own host):
 
 1. Build and push the runner image: `docker build -t rustviz/rustviz-runner:latest -f playground/runner/Dockerfile .`
 2. Run `playground` with `RV_RUNNER=docker` (the playground's built-in
@@ -156,9 +157,9 @@ Before exposing `playground` to the public internet:
    `X-Forwarded-For`, and applies its own rate limit / WAF (Cloudflare,
    Caddy, nginx — whatever fits your platform).
 5. Run `playground` itself as an unprivileged user with no sudo / docker group
-   beyond what's needed to spawn child containers. On Fly.io this means
-   running the playground in a Machine with the docker socket exposed only
-   to the rustviz process; on a VM, restrict the `docker` group membership.
+   beyond what's needed to spawn child containers. On a VM, restrict the
+   `docker` group membership. (On Cloud Run the image runs as uid 1000 and
+   the service account has no IAM roles.)
 
 ## Reporting
 

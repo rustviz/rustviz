@@ -3,11 +3,11 @@
 The playground is a small web app — a CodeMirror editor that POSTs Rust
 snippets to a sandboxed backend, which renders them through the RustViz
 plugin and returns the two SVG panels. Hosted at
-<https://rustviz.github.io/> with the compile API at
-<https://rustviz-playground.fly.dev/>.
+<https://rustviz.github.io/> with the compile API on Cloud Run at
+<https://rustviz-api-816769776225.us-central1.run.app/>.
 
 The same `rustviz-playground` binary works as an all-in-one server (SPA + API
-on a single origin); the Pages/Fly split deployed to production is just
+on a single origin); the Pages/Cloud Run split deployed to production is just
 a latency optimization for the static page-load.
 
 ## Quick start (local)
@@ -43,18 +43,14 @@ Production runs in two pieces:
 
 - **Static SPA on GitHub Pages**, at <https://rustviz.github.io/>.
   Built from `playground/frontend/` by `.github/workflows/pages.yml` and
-  pushed to the `rustviz/rustviz.github.io` repo on every change. Loads instantly
-  even when no one has visited recently.
-- **Compile API on Fly.io**, at <https://rustviz-playground.fly.dev/>.
-  One Machine, auto-stopping when idle (raise with `RV_FLY_MACHINES=N`
-  before a planned spike). dockerd uses the `fuse-overlayfs` storage driver so
-  Machines don't need a per-Machine ext4 volume for `/var/lib/docker`
-  (see `fly.toml` and `playground/deploy/entrypoint.sh` for context). With 10 Machines the "idle"
-  fleet actually cost ~$25–28/mo (Oct 2026) from stray-connection wakeups.
-  Allowed origins for cross-origin requests are listed in
+  pushed to the `rustviz/rustviz.github.io` repo whenever the frontend or
+  the plugin changes (the bundle includes prerendered SVGs). Loads
+  instantly even when no one has visited recently.
+- **Compile API on Google Cloud Run**, at <https://rustviz-api-816769776225.us-central1.run.app/>.
+  See below. Allowed origins for cross-origin requests are listed in
   `playground/src/main.rs::cors`.
 
-### Compile API on Cloud Run (replacing Fly)
+### Compile API (Cloud Run)
 
 `playground/cloudrun/` holds a single image (pinned nightly + plugin + server
 + runner script) for Google Cloud Run. Each request compiles inside Cloud
@@ -74,62 +70,10 @@ free tier. `--max-instances 3` is the cost ceiling.
 - **Project:** `rustviz-playground` (owner cyology@gmail.com), with a $5/mo
   budget alert. Artifact Registry keeps the 5 newest images.
 
-### First-time setup (Fly compile API)
-
-```sh
-fly auth login                                  # browser OAuth
-
-# fly.toml lives at playground/deploy/fly.toml; pass --config so
-# `fly launch` finds it. The rest of the fly commands below run
-# from repo root via deploy.sh, which cds into playground/deploy/
-# itself.
-fly launch --config playground/deploy/fly.toml --copy-config --no-deploy
-
-# Trigger the runner-image workflow manually for the first publication.
-# It also auto-fires on every push to main that touches playground/runner/** or
-# rustviz-plugin/**, but the very first time it has to be kicked off
-# by hand because there's nothing in GHCR yet for the deploy to pull.
-gh workflow run runner-image.yml --ref main
-gh run watch                                    # blocks until the run finishes
-                                                # (~30 min first time, ~5 min later)
-
-# Mark the new GHCR package public so Fly Machines can pull without auth:
-#   GitHub → Org → Packages → rustviz-runner →
-#     Package settings → Change visibility → Public.
-# This step has to happen before the next command, otherwise the deploy's
-# first-boot `docker pull` fails.
-
-./playground/deploy/deploy.sh                             # two-phase Fly deploy
-```
-
-The first boot of each Fly Machine pulls the `rustviz/rustviz-runner`
-image from GHCR (~30 s for ~600 MB). It's then cached on the Machine's
-local filesystem; subsequent cold starts after auto-stop take ~10 s.
-
-`./playground/deploy/deploy.sh` also ensures the fleet stays at 1 Machine (override
-with `RV_FLY_MACHINES=N`). It used to default to 10, but idle Machines are
-not free in practice: a single stray connection woke ~7 of them for 20-30
-minutes at a time (see the comment in `deploy.sh`). Scale up deliberately
-before posting the URL somewhere.
-
-### Routine deploys
-
-```sh
-./playground/deploy/deploy.sh
-```
-
-When you change `playground/runner/**` or `rustviz-plugin/**`,
-`.github/workflows/runner-image.yml` automatically republishes the
-sandbox image to GHCR; the next `./playground/deploy/deploy.sh` picks it up on
-each Machine's first boot.
-
-Every push to `main` triggers `.github/workflows/build.yml`. The
-workflow runs the build + tests first (also on every PR), then on
-`main` pushes only a downstream `deploy` job runs `./playground/deploy/deploy.sh`
-on a hosted runner (requires a `FLY_API_TOKEN` repo secret). Because
-`deploy` declares `needs: build`, a failing test suite blocks the
-deploy. The deploy job opens a `deploy-failure`-labelled issue on
-failure, in addition to GitHub's default email-on-failure notification.
+History: until Nov 2026 the API ran on Fly.io as a docker-in-docker fleet.
+Stray bot connections kept waking ~7 of its 10 Machines, and slow,
+crash-prone boots made it worse, costing ~$25–28/mo with no real traffic.
+See PR #163.
 
 ### First-time setup (GitHub Pages SPA)
 
@@ -168,43 +112,3 @@ If you ever stand up the SPA at another URL (custom domain, mirror), add
 that origin to the CORS allowlist in `playground/src/main.rs` and redeploy
 the API. The allowlist is the gate — without it the new origin's browsers
 will refuse to call `/submit-code`.
-
-### Why a script instead of `fly deploy` directly
-
-`fly.toml` ships with `auto_stop_machines = 'off'` because Fly's
-autoscaler stops a Machine after ~40 s of "no incoming traffic", and
-our entrypoint takes 5–15 min on a fresh Machine to extract the
-~1 GiB runner image through fuse-overlayfs. With `'stop'` set at
-deploy time, every fresh Machine would be killed mid-bootstrap before
-the playground binary ever binds `:8080` — `fly deploy` would deadlock.
-So `'off'` is the only value that lets a fresh deploy actually finish.
-
-The cost-saving auto-stop behavior is applied per-Machine after
-deploy. `playground/deploy/deploy.sh` does a destroy-and-recreate every time:
-
-1. Destroys every existing Machine (parallel `fly machine destroy --force`).
-2. Runs `fly scale count` and `fly deploy --strategy immediate`, then
-   polls `fly status --json` until every freshly-created Machine's
-   HTTP check passes.
-3. Runs `fly machine update --autostop=stop --skip-health-checks`
-   against every Machine in parallel, flipping the per-Machine
-   service config via the Machines API. Verifies the config landed;
-   doesn't poll for health afterwards (auto-stop kicks in immediately,
-   so a poll-for-all-healthy loop is unwinnable).
-
-We destroy and recreate rather than incrementally updating the
-existing fleet because every iteration of the in-place approach hit
-a different stale-state edge case (stopped Machines that don't
-auto-start during deploy, drift between Machines created under
-different fly.toml settings, autoscaler racing the post-update
-bounce, etc.). Nuking the fleet sidesteps all of it for the cost
-of a few minutes of downtime per deploy — acceptable for a research
-tool with sparse traffic. End state: every Machine on the new
-release with `auto_stop = 'stop'`, fleet idles cheaply (~$2–3/mo
-for the IP and Machine baseline). In steady state between deploys
-the auto-stop / auto-start cycle is fast (~10 s cold start) thanks
-to `persist_rootfs = 'always'` keeping the runner image cached on
-each Machine's rootfs.
-
-Pass `--keep-warm` to skip step 3 if you want Machines to never
-auto-stop (~$24/mo per always-running Machine).

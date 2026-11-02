@@ -114,9 +114,9 @@ async fn main() -> std::io::Result<()> {
     // default flipped to `local` in PR C of the reorg — that's the
     // right choice for library callers + the CLI, but for this
     // binary specifically we want Docker-by-default to preserve
-    // the prior security posture. Production (Fly) sets RV_RUNNER
-    // explicitly via fly.toml; this guard catches the local-dev
-    // case where the env var is unset.
+    // the prior security posture. Production (Cloud Run) sets
+    // RV_RUNNER=sandbox in its image; this guard catches the
+    // local-dev case where the env var is unset.
     if std::env::var("RV_RUNNER").is_err() {
         std::env::set_var("RV_RUNNER", "docker");
     }
@@ -153,11 +153,10 @@ async fn main() -> std::io::Result<()> {
         .expect("governor config");
 
     HttpServer::new(move || {
-        // CORS allowlist. The all-in-one Fly deploy serves the SPA and the
-        // API from the same origin (no preflight needed) but we also support
-        // hosting the static frontend on GitHub Pages and only proxying
-        // /submit-code back to the Fly origin. That cross-origin path needs
-        // explicit CORS. Vite dev server origins are listed too so
+        // CORS allowlist. Local dev serves the SPA and the API from the
+        // same origin (no preflight needed); production hosts the SPA on
+        // GitHub Pages and calls /submit-code on the Cloud Run origin. That
+        // cross-origin path needs explicit CORS. Vite dev server origins are listed too so
         // `npm run dev` can talk to a locally-running playground.
         //
         // The allowlist is *the* control over who can drive the API from a

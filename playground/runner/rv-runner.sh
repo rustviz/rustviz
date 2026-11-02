@@ -5,7 +5,7 @@
 # "<code-svg>:::<timeline-svg>").
 #
 # Isolation comes from whoever launches this script: `docker run
-# --network=none --read-only --tmpfs=/work …` (Fly) or Cloud Run's
+# --network=none --read-only --tmpfs=/work …` (local docker) or Cloud Run's
 # per-request `sandbox do` (see SECURITY.md). The one control enforced
 # here is the wall-clock limit, because a launcher that is killed from
 # outside (e.g. a `docker run` client) can leave its payload running.

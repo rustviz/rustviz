@@ -231,7 +231,7 @@ fn runner_backend() -> Result<String, Box<dyn Error>> {
     Ok(env::var("RV_RUNNER").unwrap_or_else(|_| "local".to_string()))
 }
 
-/// Production path (Fly, docker-in-docker): spawn a sandboxed container,
+/// Docker path (local dev; formerly Fly production): spawn a sandboxed container,
 /// pipe the user's source on stdin, capture stdout. Container flags must be
 /// kept in sync with the guarantees described in playground/SECURITY.md.
 fn run_docker(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {

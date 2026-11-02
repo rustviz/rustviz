@@ -10,8 +10,6 @@ on:
 
 permissions:
   contents: read
-  # for the issue-on-failure step in the deploy job
-  issues: write
   # for the runner-image job to push to GHCR
   packages: write
 
@@ -122,11 +120,9 @@ jobs:
 
   # Build the rustviz/rustviz-runner sandbox image (per-request docker
   # container that compiles user-submitted Rust) and push it to GHCR.
-  # The deploy image's entrypoint pulls from this registry on first
-  # boot of each Fly Machine. Lives alongside `build` so deploy can
-  # gate on both — keeping `runner-image` in a separate workflow risks
-  # deploying tested plugin code against a stale `:latest` if the two
-  # workflows finish in a different order.
+  # Used for local development with RV_RUNNER=docker: `cargo xtask
+  # setup` pulls it when it can't build the image locally. (Production
+  # no longer uses it; Cloud Run bundles the plugin in its own image.)
   #
   # Per-arch jobs run on native runners (no QEMU). Compiling
   # rustviz-plugin under user-mode QEMU was sporadically crashing
@@ -262,77 +258,6 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             "$(jq -cr '.tags[0]' <<< '${{ steps.meta.outputs.json }}')"
-
-  # Deploy job, gated on build AND runner-image success and on a real
-  # push to main (so PR runs build but never deploy). Calls
-  # playground/deploy/deploy.sh, NOT `flyctl deploy` directly — the script does
-  # the two-phase deploy the playground needs (phase 1: fly scale +
-  # fly deploy with auto_stop_machines='off' so Machines survive the
-  # cold-pull bootstrap; phase 2: per-Machine `fly machine update
-  # --autostop=stop` so the fleet idles cheaply in steady state). A
-  # plain `flyctl deploy` skips phase 2 and leaves every Machine
-  # pinned at auto_stop='off', i.e. always-running, ~$24/mo per
-  # Machine.
-  #
-  # Requires a FLY_API_TOKEN secret in Settings → Secrets → Actions.
-  deploy:
-    needs: [build, runner-image-merge]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    # deploy.sh's phase 1 cold-pulls the runner image on every fresh
-    # Machine through fuse-overlayfs (5-15 min/Machine, parallelized
-    # via --strategy immediate). When a Machine gets stuck mid-pull
-    # (transient FUSE / GHCR flakiness), deploy.sh's retry path
-    # destroys + recreates and waits again — RV_DEPLOY_TIMEOUT_SECS
-    # × (RV_DEPLOY_RETRIES + 1) is the Phase 1 wait budget, default
-    # 30 min × 2 = 60 min. Plus Phase 2 (~few min) and fly deploy
-    # orchestration (~5 min). Worst-case observed: ~55 min. 90 leaves
-    # comfortable headroom; bump if you see CI hitting the cap.
-    timeout-minutes: 90
-    # On a burst of merges, kill the in-progress deploy and run the
-    # latest one. Aborting mid-deploy can briefly leave the fleet in
-    # a half-rolled state, but deploy.sh's Phase 1 is a
-    # destroy-and-recreate, so the run that immediately follows the
-    # cancel resets everything cleanly. Net effect on a 5-PR burst:
-    # only the last PR's image actually ends up live, vs. waiting
-    # ~30 min per intermediate deploy with cancel-in-progress=false.
-    concurrency:
-      group: fly-deploy
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@v5
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      # ubuntu-latest already has jq, but assert it explicitly so a
-      # future runner-image change doesn't silently break the script.
-      - name: verify jq
-        run: jq --version
-      - name: deploy.sh
-        run: ./playground/deploy/deploy.sh
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      # Open a tracking issue on failure so the failure surfaces in the
-      # repo's Issues tab, not just in the email-notification firehose.
-      # Default GitHub email-on-workflow-failure still fires too.
-      - name: open issue on deploy failure
-        if: failure()
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const sha = context.sha.slice(0, 7);
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `Deploy failed at ${sha}`,
-              body: [
-                `The deploy job failed for commit ${sha}.`,
-                ``,
-                `Run: ${runUrl}`,
-                ``,
-                `This issue was opened automatically by \`.github/workflows/build.yml\` on workflow failure. Investigate the run, fix the underlying issue, and close this issue once the next successful deploy lands.`,
-              ].join('\n'),
-              labels: ['deploy-failure'],
-            });
 
   # Cloud Run compile API (see playground/cloudrun/). Builds the single
   # image (toolchain + plugin + server), pushes it to Artifact Registry and
