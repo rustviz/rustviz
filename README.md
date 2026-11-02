@@ -209,9 +209,16 @@ the wrapped value doesn't get a separate timeline:
   `&s[..]` on a `String`) does work.
 - `async` / `await`, futures, and other heavily-desugared async
   constructs.
+- The `?` operator. Programs that use it currently crash the plugin
+  (see the `question_mark*.rs` corpus fixtures).
 - Custom procedural or declarative macros — only standard-library
-  macros (`println!`, `vec!`, `assert!`, `?`) are unwrapped through
-  their desugaring; user-defined macros are invisible.
+  macros (`println!`, `vec!`, `assert!`) are unwrapped through their
+  desugaring; user-defined macros are invisible.
+- Some assignment targets on the left of `=`: writing to a chained
+  field (`o.inner.x = …`), an index (`v[i] = …`), or a tuple
+  destructure (`(a, b) = …`) crashes the plugin or isn't shown.
+  Assigning to a plain variable or a single-level field (`r.field = …`)
+  works, and *reading* chained fields (`r.a.b`) works.
 - Method chains where each call's return is itself the receiver of the
   next call (`a.get_mut().push(x)`). The first call renders, the rest
   of the chain doesn't yet.
@@ -225,8 +232,11 @@ the wrapped value doesn't get a separate timeline:
   Rectangle/area shape but minor variants (e.g. `fn get(&self) -> i32
   { self.n }` on a one-field struct) can crash. File a bug if you hit
   one.
-- Range patterns in match arms (`0..=9 => …`) and pattern guards (`pat
-  if cond => …`) are walked but not extensively tested.
+- Range patterns in match arms (`0..=9 => …`) are walked but not
+  extensively tested.
+- Match guards (`pat if cond => …`): the arm itself renders, but the
+  guard expression isn't visualized — borrows, moves, or reads inside
+  `cond` produce no events.
 - `const` and `static` items aren't tested.
 
 The plugin has its own per-feature TODO checklist in
