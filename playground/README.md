@@ -46,13 +46,11 @@ Production runs in two pieces:
   pushed to the `rustviz/rustviz.github.io` repo on every change. Loads instantly
   even when no one has visited recently.
 - **Compile API on Fly.io**, at <https://rustviz-playground.fly.dev/>.
-  Ten Machines provisioned, all auto-stopping when idle; the edge proxy
-  routes traffic to whichever ones are awake and starts more from stopped
-  state when concurrency thresholds (`fly.toml::http_service.concurrency`)
-  are crossed. dockerd uses the `fuse-overlayfs` storage driver so
+  One Machine, auto-stopping when idle (raise with `RV_FLY_MACHINES=N`
+  before a planned spike). dockerd uses the `fuse-overlayfs` storage driver so
   Machines don't need a per-Machine ext4 volume for `/var/lib/docker`
-  (see `fly.toml` and `playground/deploy/entrypoint.sh` for context). Idle cost
-  ~$2–3/mo total; an HN-spike day adds ~$5–10 of Machine compute.
+  (see `fly.toml` and `playground/deploy/entrypoint.sh` for context). With 10 Machines the "idle"
+  fleet actually cost ~$25–28/mo (Oct 2026) from stray-connection wakeups.
   Allowed origins for cross-origin requests are listed in
   `playground/src/main.rs::cors`.
 
@@ -88,11 +86,11 @@ The first boot of each Fly Machine pulls the `rustviz/rustviz-runner`
 image from GHCR (~30 s for ~600 MB). It's then cached on the Machine's
 local filesystem; subsequent cold starts after auto-stop take ~10 s.
 
-`./playground/deploy/deploy.sh` also ensures the fleet stays at 10 Machines (override
-with `RV_FLY_MACHINES=N`). With auto-stop on, idle Machines are free; the
-extra capacity exists so the edge proxy has somewhere to spill load when
-one Machine gets saturated. No need to manually scale up before posting
-the URL somewhere.
+`./playground/deploy/deploy.sh` also ensures the fleet stays at 1 Machine (override
+with `RV_FLY_MACHINES=N`). It used to default to 10, but idle Machines are
+not free in practice: a single stray connection woke ~7 of them for 20-30
+minutes at a time (see the comment in `deploy.sh`). Scale up deliberately
+before posting the URL somewhere.
 
 ### Routine deploys
 
