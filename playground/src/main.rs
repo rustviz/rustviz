@@ -1,7 +1,11 @@
 use actix_cors::Cors;
 use actix_files::Files;
-use actix_governor::{Governor, GovernorConfigBuilder};
-use actix_web::{error, http::header, middleware::Logger, web, App, HttpResponse, HttpServer};
+use actix_governor::{Governor, GovernorConfigBuilder, KeyExtractor, SimpleKeyExtractionError};
+use actix_web::{
+    dev::ServiceRequest, error, http::header, middleware::Logger, web, App, HttpResponse,
+    HttpServer,
+};
+use std::net::IpAddr;
 use rustviz_lib::Rustviz;
 use serde::{Deserialize, Serialize};
 
@@ -34,18 +38,69 @@ async fn submit_code(payload: web::Json<SubmitCodePayload>) -> HttpResponse {
             .body(format!("code must be at most {} bytes", MAX_CODE_BYTES));
     }
 
-    match Rustviz::new(code) {
-        Ok(rv) => {
-            let body = serde_json::to_string(&SubmitResponse {
-                code_panel: rv.code_panel_string(),
-                timeline_panel: rv.timeline_panel_string(),
-            })
-            .unwrap();
-            HttpResponse::Ok().body(body.into_bytes())
+    // Rustviz::new blocks for the whole compile (up to the runner
+    // timeout). Run it on actix's blocking pool so the async workers keep
+    // serving other requests (and the platform health check) meanwhile.
+    let code = code.clone();
+    let result = web::block(move || Rustviz::new(&code).map_err(|e| e.to_string())).await;
+    match result {
+        Ok(Ok(rv)) => HttpResponse::Ok().json(SubmitResponse {
+            code_panel: rv.code_panel_string(),
+            timeline_panel: rv.timeline_panel_string(),
+        }),
+        Ok(Err(msg)) => {
+            // Timeouts and sandbox failures are ours; anything else is the
+            // user's code failing to compile or the plugin rejecting it.
+            if msg.starts_with("Visualization timed out") {
+                HttpResponse::GatewayTimeout().body(msg)
+            } else if msg.starts_with("Sandbox unavailable") || msg.starts_with("Invalid runner") {
+                eprintln!("runner failure: {}", msg);
+                HttpResponse::ServiceUnavailable().body("compile sandbox unavailable; try again shortly")
+            } else {
+                HttpResponse::InternalServerError().body(msg)
+            }
         }
-        Err(e) => HttpResponse::from_error(
-            <Box<dyn std::error::Error> as Into<error::Error>>::into(e),
-        ),
+        Err(e) => HttpResponse::from_error(error::ErrorInternalServerError(e)),
+    }
+}
+
+/// Rate-limit key: the real client IP.
+///
+/// Behind a platform proxy the TCP peer is the proxy, so keying on it
+/// (actix-governor's default) puts every user in one shared bucket. When
+/// `RV_CLIENT_IP_HEADER` names a header the platform sets, we key on that
+/// instead:
+///
+/// * Fly: `Fly-Client-IP` (single value, overwritten by Fly's proxy).
+/// * Cloud Run: `X-Forwarded-For`. Google's front end *appends* the client
+///   address, so clients can prepend junk but not forge the last entry; we
+///   take the rightmost value.
+///
+/// Unset (local dev) falls back to the peer address.
+#[derive(Clone)]
+struct ClientIp {
+    header: Option<header::HeaderName>,
+}
+
+impl KeyExtractor for ClientIp {
+    type Key = IpAddr;
+    type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
+
+    fn extract(&self, req: &ServiceRequest) -> Result<IpAddr, Self::KeyExtractionError> {
+        let from_header = self.header.as_ref().and_then(|h| {
+            req.headers()
+                .get(h)?
+                .to_str()
+                .ok()?
+                .rsplit(',')
+                .next()?
+                .trim()
+                .parse()
+                .ok()
+        });
+        from_header
+            .or_else(|| req.peer_addr().map(|a| a.ip()))
+            .ok_or_else(|| SimpleKeyExtractionError::new("could not determine client IP"))
     }
 }
 
@@ -59,14 +114,18 @@ async fn main() -> std::io::Result<()> {
     // default flipped to `local` in PR C of the reorg — that's the
     // right choice for library callers + the CLI, but for this
     // binary specifically we want Docker-by-default to preserve
-    // the prior security posture. Production (Fly) sets RV_RUNNER
-    // explicitly via fly.toml; this guard catches the local-dev
-    // case where the env var is unset.
+    // the prior security posture. Production (Cloud Run) sets
+    // RV_RUNNER=sandbox in its image; this guard catches the
+    // local-dev case where the env var is unset.
     if std::env::var("RV_RUNNER").is_err() {
         std::env::set_var("RV_RUNNER", "docker");
     }
 
-    let bind_addr = std::env::var("RV_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    // Cloud Run tells the container which port to listen on via $PORT.
+    let bind_addr = std::env::var("RV_BIND").unwrap_or_else(|_| match std::env::var("PORT") {
+        Ok(port) => format!("0.0.0.0:{}", port),
+        Err(_) => "127.0.0.1:8080".to_string(),
+    });
 
     // Per-IP token bucket. `seconds_per_replenish` controls the steady-state
     // rate (one token per N seconds); `burst_size` is the bucket depth.
@@ -74,23 +133,30 @@ async fn main() -> std::io::Result<()> {
     let seconds_per_replenish = std::env::var("RV_RATE_SECONDS_PER_REQUEST")
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|&n: &u64| n > 0)
         .unwrap_or(2u64);
     let rate_burst = std::env::var("RV_RATE_BURST")
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|&n: &u32| n > 0)
         .unwrap_or(5u32);
+    let client_ip = ClientIp {
+        header: std::env::var("RV_CLIENT_IP_HEADER")
+            .ok()
+            .and_then(|h| header::HeaderName::from_bytes(h.as_bytes()).ok()),
+    };
     let governor_conf = GovernorConfigBuilder::default()
+        .key_extractor(client_ip)
         .per_second(seconds_per_replenish)
         .burst_size(rate_burst)
         .finish()
         .expect("governor config");
 
     HttpServer::new(move || {
-        // CORS allowlist. The all-in-one Fly deploy serves the SPA and the
-        // API from the same origin (no preflight needed) but we also support
-        // hosting the static frontend on GitHub Pages and only proxying
-        // /submit-code back to the Fly origin. That cross-origin path needs
-        // explicit CORS. Vite dev server origins are listed too so
+        // CORS allowlist. Local dev serves the SPA and the API from the
+        // same origin (no preflight needed); production hosts the SPA on
+        // GitHub Pages and calls /submit-code on the Cloud Run origin. That
+        // cross-origin path needs explicit CORS. Vite dev server origins are listed too so
         // `npm run dev` can talk to a locally-running playground.
         //
         // The allowlist is *the* control over who can drive the API from a

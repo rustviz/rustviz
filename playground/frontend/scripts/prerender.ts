@@ -121,8 +121,8 @@ function renderOne(code: string, label: string): Pair {
  *   2. Build environments that don't have the rustviz CLI installed
  *      can still pass through the prebuild step as long as a
  *      complete-enough `prerendered.json` is already on disk. This
- *      is what the Fly Dockerfile relies on if its layer cache hits
- *      the prerender stage but not the SPA stage.
+ *      lets a Docker build whose layer cache hits the prerender stage
+ *      but not the SPA stage skip re-rendering.
  *
  * Returns the inherited entries when all hashes are present, or
  * null if any are missing (in which case main() falls back to the

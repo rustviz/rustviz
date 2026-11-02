@@ -21,3 +21,7 @@ include = [
 
 [dependencies]
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+# kill(2) on the runner's process group at the deadline.
+libc = "0.2"

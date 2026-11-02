@@ -28,9 +28,9 @@ import {
   type UserExample,
 } from './userExamples';
 
-// API origin. Empty (relative URL) for the default same-origin Fly deploy;
-// set to https://rustviz-playground.fly.dev for the GitHub Pages build via
-// .env.pages so the SPA hosted on rustviz.github.io can hit the API on Fly.
+// API origin. Empty (relative URL) when the playground binary serves the
+// SPA itself (local dev); set via .env.pages for the GitHub Pages build so
+// the SPA on rustviz.github.io calls the Cloud Run compile API.
 // rv-serve's CORS allowlist must include the SPA's origin in the latter case.
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
@@ -918,8 +918,8 @@ const App: React.FC = () => {
               <p className="loading-note">
                 Dropdown examples and snippets you've rendered before are cached
                 client-side and load instantly. This wait is only for novel code:
-                the first compile after a quiet period can take up to ~45 s while
-                the compile server wakes up; subsequent compiles are fast.
+                the first compile after a quiet period takes a few extra seconds
+                while the compile server wakes up; subsequent compiles are fast.
               </p>
             </div>
           )}
