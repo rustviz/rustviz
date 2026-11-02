@@ -382,7 +382,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 Adjust::Borrow(AutoBorrow::Ref(m)) => {
                   match m {
                     AutoBorrowMutability::Mut{allow_two_phase_borrow: AllowTwoPhase::Yes} => {
-                      self.add_ev(line_num, Evt::PassByMRef, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), false);
+                      // `r.push_str(..)` with r: `&mut String` is
+                      // `String::push_str(&mut *r, ..)` — an implicit
+                      // reborrow of r. With r an owner it's a plain
+                      // autoref (`&mut s`), not a reborrow.
+                      let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
+                      let is_reborrow = is_implicit_mut_reborrow(rcvr, typeck);
+                      let result_has_lifetime = call_result_has_lifetime(expr, typeck);
+                      self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime);
                     },
                     AutoBorrowMutability::Not => {
                       self.add_ev(line_num, Evt::PassBySRef, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), false);

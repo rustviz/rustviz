@@ -192,16 +192,29 @@ pub fn event_dot_copy_ref_to_caller(my_name: &String, _target_name: &String) -> 
 //
 // Source-side dot at the start of an immutable borrow. Names the
 // borrower so the tooltip ties back to the column the data is
-// flowing into (and reads as "X's resource is borrowed by Y, X is
-// read-only until Y's last use" — `&T` doesn't exclude further
-// `&T`s but does prevent any `&mut T` until the borrow ends).
-pub fn event_dot_static_lend(my_name: &String, target_name: &String) -> String {
+// flowing into. `&T` doesn't exclude further `&T`s but does prevent
+// mutating or moving X while the loan is live. The restriction is
+// phrased as "while the borrow is live" rather than "until Y's last
+// use": the loan can outlive Y (`let z = y;` copies/moves it on, and
+// for a function Y a returned reference can carry it past the call).
+//
+// When X is itself a shared reference (`&*r`, `&r`, `show(r)` with
+// r: `&T`) the clause is omitted: X was already read-only, so the
+// borrow adds no restriction worth teaching.
+pub fn event_dot_static_lend(my_name: &String, target_name: &String, source_is_shared_ref: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
-    format!(
-        "{0}'s resource is immutably borrowed by {1}; {0} is read-only until {1}'s last use",
-        my_name_fmt, target_name_fmt
-    )
+    if source_is_shared_ref {
+        format!(
+            "{0}'s resource is immutably borrowed by {1}",
+            my_name_fmt, target_name_fmt
+        )
+    } else {
+        format!(
+            "{0}'s resource is immutably borrowed by {1}; {0} is read-only while the borrow is live",
+            my_name_fmt, target_name_fmt
+        )
+    }
 }
 
 // 1   0
@@ -211,15 +224,15 @@ pub fn event_dot_static_lend(my_name: &String, target_name: &String) -> String {
 //
 // Source-side dot at the start of a mutable borrow. The freeze
 // note is the pedagogical payload — `&mut T` is exclusive, so X
-// is unusable (not just read-only) until the borrower's last
-// use. Same wording shape as `event_dot_static_lend`'s read-only
-// variant so a reader can spot the read-only-vs-frozen
+// is unusable (not just read-only) while the loan is live. Same
+// "while the borrow is live" phrasing as `event_dot_static_lend`,
+// for the same reason, so a reader can spot the read-only-vs-frozen
 // distinction by hovering both kinds.
 pub fn event_dot_mut_lend(my_name: &String, target_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
     format!(
-        "{0}'s resource is mutably borrowed by {1}; {0} is frozen until {1}'s last use",
+        "{0}'s resource is mutably borrowed by {1}; {0} is frozen while the borrow is live",
         my_name_fmt, target_name_fmt
     )
 }

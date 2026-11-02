@@ -1618,33 +1618,25 @@ fn render_arrow (
                         _ => unreachable!()
                     };
 
-                    // Implicit-reborrow note for the call-dot
-                    // tooltip. `f(r)` where r: `&mut T` is
-                    // compiler-rewritten to `f(&mut *r)` — the
-                    // reference isn't moved, but r is frozen for
-                    // the call's duration. Surface that here so a
-                    // reader hovering the call-site dot sees the
-                    // freeze without having to understand NLL on
-                    // their own. Static (immutable) reborrows have
-                    // a weaker freeze (source stays read-only,
-                    // doesn't lose access entirely) — call that out
-                    // too but with read-only wording.
-                    let from_is_mutref = match from_variable {
-                        ResourceTy::Value(rap) | ResourceTy::Deref(rap) => rap.is_mutref(),
-                        _ => false,
-                    };
-                    let from_is_static_ref = match from_variable {
-                        ResourceTy::Value(rap) | ResourceTy::Deref(rap) => rap.is_ref() && !rap.is_mutref(),
-                        _ => false,
-                    };
+                    // Reborrow note for the call-dot tooltip. `f(r)`
+                    // with r: `&mut T` and f taking `&mut T` is
+                    // compiler-rewritten to `f(&mut *r)`: r isn't
+                    // moved, it's frozen while the reborrow is live
+                    // and usable again afterwards. When f's result
+                    // can't carry a borrow, the reborrow ends when f
+                    // returns; otherwise (`let w = first(r);`) it can
+                    // last as long as the result, so don't promise
+                    // "until f returns". No note for `&T` arguments:
+                    // passing a shared reference copies it, and r is
+                    // read-only before, during and after the call.
                     let reborrow_suffix: String = match external_event {
-                        ExternalEvent::PassByMutableReference { .. } if from_is_mutref => format!(
+                        ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: false, .. } => format!(
                             " (mutable reborrow — {} is frozen until {} returns)",
                             styled_from_name, styled_fn_name,
                         ),
-                        ExternalEvent::PassByStaticReference { .. } if from_is_static_ref => format!(
-                            " (immutable reborrow — {} is read-only until {} returns)",
-                            styled_from_name, styled_fn_name,
+                        ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: true, .. } => format!(
+                            " (mutable reborrow — {} is frozen while the reborrow is live)",
+                            styled_from_name,
                         ),
                         _ => String::new(),
                     };

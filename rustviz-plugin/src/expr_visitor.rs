@@ -422,10 +422,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
       Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial },
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial },
-      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial },
-      Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial },
+      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
+      Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id },
-      Evt::PassByMRef => ExternalEvent::PassByMutableReference { from: rhs, to: lhs, id },
+      Evt::PassByMRef => ExternalEvent::PassByMutableReference {
+        from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false,
+      },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id }
     }
@@ -442,6 +444,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// per-field RAP that was never registered.
   pub fn is_union_typed(&self, e: &Expr) -> bool {
     self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_union()
+  }
+
+  /// `add_ev` for an `SBorrow` / `MBorrow` whose reborrow-ness the
+  /// caller has decided (see `is_explicit_reborrow`).
+  pub fn add_borrow_ev(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, is_reborrow: bool) {
+    let mut ev = self.ext_ev_of_evt(evt, lhs, rhs, *self.unique_id, false);
+    if let ExternalEvent::StaticBorrow { is_reborrow: r, .. }
+         | ExternalEvent::MutableBorrow { is_reborrow: r, .. } = &mut ev {
+      *r = is_reborrow;
+    }
+    self.add_external_event(line_num, ev);
+    *self.unique_id += 1;
+  }
+
+  /// `add_ev` for a `PassByMRef`, tagged with whether the call
+  /// reborrows the `&mut` argument and whether the call's result
+  /// can carry that reborrow past the call.
+  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool) {
+    let id = *self.unique_id;
+    self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
+      from: arg, to: func, id, is_reborrow, result_has_lifetime,
+    });
+    *self.unique_id += 1;
   }
 
   // Return the ResourceTy that corresponds to the LHS of an assignment.
@@ -516,7 +541,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if arg_ty.is_ref() {
       match arg_ty.ref_mutability().unwrap() {
         Mutability::Not => self.add_ev(line_num, Evt::PassBySRef, to_ro, from_ro, false),
-        Mutability::Mut => self.add_ev(line_num, Evt::PassByMRef, to_ro, from_ro, false)
+        Mutability::Mut => {
+          // Reborrow if written `f(&mut *r)`, or if rustc inserted
+          // the reborrow for `f(r)` (param type `&mut T`). `take(r)`
+          // into a generic `T` has no such adjustment: r is moved.
+          let is_reborrow = match arg.kind {
+            ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, tycheck_results),
+            _ => is_implicit_mut_reborrow(arg, tycheck_results),
+          };
+          // Unknown parent → assume the result may hold the borrow;
+          // that only selects the weaker (always-true) wording.
+          let result_has_lifetime = match self.tcx.parent_hir_node(arg.hir_id) {
+            rustc_hir::Node::Expr(call) => call_result_has_lifetime(call, tycheck_results),
+            _ => true,
+          };
+          self.add_pass_by_mref_ev(line_num, to_ro, from_ro, is_reborrow, result_has_lifetime)
+        }
       }
     }
     else {
@@ -975,9 +1015,17 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         Some(x) => ResourceTy::Value(x),
         None => ResourceTy::Anonymous
       };
+      // `&*r` / `&mut *r` with r a reference borrows *through* r (a
+      // reborrow); `&r` / `&mut r` borrows the variable r itself.
+      // Both resolve to the same source RAP, so decide here from the
+      // syntax rather than from r's kind downstream.
+      let is_reborrow = is_explicit_reborrow(
+        innermost_addr_of_operand(rhs),
+        self.tcx.typeck(rhs.hir_id.owner),
+      );
       match fetch_mutability(&rhs) { // fetch last ref mutability in the chain -> &&&mut x
-        Some(Mutability::Not) => self.add_ev(line_num, Evt::SBorrow, lhs, res, false),
-        Some(Mutability::Mut) => self.add_ev(line_num, Evt::MBorrow, lhs, res, false),
+        Some(Mutability::Not) => self.add_borrow_ev(line_num, Evt::SBorrow, lhs, res, is_reborrow),
+        Some(Mutability::Mut) => self.add_borrow_ev(line_num, Evt::MBorrow, lhs, res, is_reborrow),
         None => panic!("Shouldn't have been able to get here")
       }
     }

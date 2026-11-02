@@ -55,6 +55,9 @@ const EXPECTED_OK: &[&str] = &[
     "field_through_ref",
     // — References: more nuanced shapes.
     "reborrow",
+    "reborrow_kinds",
+    "borrow_moved_on",
+    "call_reborrow_kinds",
     "nll_two_borrows",
     // — Reassignment / move-out / take-and-return.
     "reassign_with_drop",
@@ -516,6 +519,76 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[],
     },
     TooltipExpect {
+        name: "reborrow_kinds",
+        // Reborrow-ness is decided by the syntax at the `&` site:
+        // only `&mut *r` / `&*r` borrow *through* r. `&mut r` /
+        // `&r` borrow the reference variable itself — same source
+        // RAP, different meaning, so the arrow labels must differ.
+        must_contain: &[
+            "Mutable reborrow from ra to ra2",
+            "Mutable borrow from rb to rb2",
+            "Immutable reborrow from rc to rc2",
+            "Immutable borrow from rd to rd2",
+            // Lend dots: a `&mut` source is frozen while the
+            // borrow is live; an owner lent immutably is read-only.
+            "ra's resource is mutably borrowed by ra2; ra is frozen while the borrow is live",
+            "rb's resource is mutably borrowed by rb2; rb is frozen while the borrow is live",
+            "c's resource is immutably borrowed by rc; c is read-only while the borrow is live",
+            // A `&String` source was already read-only, so the
+            // borrow adds no restriction worth stating.
+            "rc's resource is immutably borrowed by rc2",
+            "rd's resource is immutably borrowed by rd2",
+        ],
+        must_not_contain: &[
+            "Mutable reborrow from rb to rb2",
+            "Immutable borrow from rc to rc2",
+            "Immutable reborrow from rd to rd2",
+            "rc's resource is immutably borrowed by rc2; rc is read-only while the borrow is live",
+        ],
+    },
+    TooltipExpect {
+        name: "borrow_moved_on",
+        // `let z = y;` moves the `&mut` on (and `let b = a;` copies
+        // the `&`), so the lender stays frozen / read-only past the
+        // first holder's last use. The lend-dot wording must not
+        // tie the restriction to y's / a's last use.
+        must_contain: &[
+            "s's resource is mutably borrowed by y; s is frozen while the borrow is live",
+            "t's resource is immutably borrowed by a; t is read-only while the borrow is live",
+            "Return mutably borrowed resource from z to s",
+            "Return immutably borrowed resource from b to t",
+        ],
+        must_not_contain: &[
+            "s's resource is mutably borrowed by y; s is frozen until y's last use",
+            "t's resource is immutably borrowed by a; t is read-only until a's last use",
+        ],
+    },
+    TooltipExpect {
+        name: "call_reborrow_kinds",
+        // Call-site dot suffix depends on what the call does to the
+        // reference argument, read off rustc's adjustments and the
+        // call's result type rather than the argument's type alone.
+        must_contain: &[
+            // `push(y)`, push: `&mut String` → `()`: implicit
+            // reborrow that ends when push returns.
+            "push reads from/writes to y (mutable reborrow — y is frozen until push returns)",
+            // `let w = first(y)` returns a `&mut String` derived
+            // from y: the reborrow lives on in w after first returns.
+            "first reads from/writes to y (mutable reborrow — y is frozen while the reborrow is live)",
+            // `take(y)` into a generic `T`: y is moved, not reborrowed.
+            "take reads from/writes to y",
+            // `show(x)` with x: `&String`: the reference is copied.
+            "show reads from x",
+            "x's resource is immutably borrowed by show",
+            "y's resource is mutably borrowed by push; y is frozen while the borrow is live",
+        ],
+        must_not_contain: &[
+            "first reads from/writes to y (mutable reborrow — y is frozen until first returns)",
+            "take reads from/writes to y (mutable reborrow — y is frozen until take returns)",
+            "show reads from x (immutable reborrow — x is read-only until show returns)",
+        ],
+    },
+    TooltipExpect {
         name: "nll_two_borrows",
         // Two consecutive &mut borrows, with the loan released between
         // them. The renderer should draw both borrow-and-return pairs
@@ -702,14 +775,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `print_area(&r)` arrow.
         must_contain: &[
             "print_area reads from r",
-            // `print_area(rect: &Rectangle)` calls `rect.area()`
-            // — rect is itself a `&Rectangle`, so calling area on
-            // it picks up the static-reborrow suffix.
-            "area reads from rect (immutable reborrow — rect is read-only until area returns)",
+            // `print_area(rect: &Rectangle)` calls `rect.area()`.
+            // rect is a `&Rectangle`, and passing a shared reference
+            // just copies it — rect is read-only before, during and
+            // after the call — so no "reborrow / read-only until
+            // area returns" note.
+            "area reads from rect",
             "r acquires ownership of a resource",
             "r goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &[],
+        must_not_contain: &[
+            "area reads from rect (immutable reborrow — rect is read-only until area returns)",
+        ],
     },
 
     // ─── Lifetimes ──────────────────────────────────────────────────
@@ -1289,11 +1366,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the loop variable. Inner merge classifies as Unchanged,
         // so no merge wording surfaces.
         must_contain: &[
-            // `for x in &xs` makes x: `&String`, so calling show
-            // on it picks up the static-reborrow suffix.
-            "show reads from x (immutable reborrow — x is read-only until show returns)",
+            // `for x in &xs` makes x: `&String`; passing it to show
+            // copies the shared reference, so no reborrow note.
+            "show reads from x",
         ],
         must_not_contain: &[
+            "show reads from x (immutable reborrow — x is read-only until show returns)",
             "may have been moved",
             "moved or dropped in every branch",
             "in branches where it was not",
@@ -1324,11 +1402,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // shows as inline events.
         must_contain: &[
             // `if let Some(inner) = x` where x: `&Option<String>`
-            // partial-borrows out a `&String` for inner; calling
-            // show on it picks up the static-reborrow suffix.
-            "show reads from inner (immutable reborrow — inner is read-only until show returns)",
+            // gives inner: `&String`; passing it to show copies the
+            // shared reference, so no reborrow note.
+            "show reads from inner",
         ],
         must_not_contain: &[
+            "show reads from inner (immutable reborrow — inner is read-only until show returns)",
             "may have been moved",
             "moved or dropped in every branch",
             "in branches where it was not",

@@ -3,7 +3,8 @@ use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet, VecDeque}, ops::Bo
 use log::warn;
 use rustc_hir::Mutability;
 use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
-use rustc_middle::ty::{Ty, TyCtxt};
+use rustc_middle::ty::{Ty, TyCtxt, TypeckResults};
+use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability};
 use rustc_span::Span;
 use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, StmtKind, Stmt, Block, UnOp};
 
@@ -552,6 +553,59 @@ pub fn filter_ev((line_num, _ev): &(usize, ExternalEvent), split: usize, merge: 
   else {
     false
   }
+}
+
+// REBORROW HELPERS
+//
+// "Reborrow" here means borrowing *through* an existing reference:
+// `&mut *r` / `&*r` with `r: &mut T` / `&T`. It is decided from the
+// syntax (explicit `*` under the `&`) or from rustc's adjustments
+// (implicit `Deref` + `Borrow` that the compiler inserts at coercion
+// sites and method receivers), never from the source RAP's kind alone:
+// `&mut r` with `r: &mut T` is a fresh borrow of the variable `r`
+// (type `&mut &mut T`), not a reborrow, and `take(r)` into a generic
+// `T` parameter moves `r` rather than reborrowing it.
+
+/// Strip nested `&` / `&mut` wrappers: for `&&mut *r` returns `*r`.
+pub fn innermost_addr_of_operand<'tcx>(expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
+  match expr.kind {
+    ExprKind::AddrOf(_, _, inner) => innermost_addr_of_operand(inner),
+    _ => expr,
+  }
+}
+
+/// True iff `operand` (the expression under a `&` / `&mut`) is `*e`
+/// with `e` a reference — i.e. the borrow is an explicit reborrow.
+/// `*b` for a `Box` or `*s` via an overloaded `Deref` impl is not.
+pub fn is_explicit_reborrow(operand: &Expr, typeck: &TypeckResults) -> bool {
+  match operand.kind {
+    ExprKind::Unary(UnOp::Deref, inner) => typeck.expr_ty(inner).is_ref(),
+    _ => false,
+  }
+}
+
+/// True iff rustc implicitly mutably reborrowed `expr` (a `&mut T`
+/// value): its adjustments start with a deref of the reference and
+/// include a `&mut` autoborrow — `f(r)` becoming `f(&mut *r)`, or
+/// `r.push_str(..)` becoming `String::push_str(&mut *r, ..)`.
+pub fn is_implicit_mut_reborrow(expr: &Expr, typeck: &TypeckResults) -> bool {
+  if !typeck.expr_ty(expr).is_ref() {
+    return false;
+  }
+  let adjs = typeck.expr_adjustments(expr);
+  matches!(adjs.first().map(|a| &a.kind), Some(Adjust::Deref(_)))
+    && adjs.iter().any(|a| matches!(
+      a.kind,
+      Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Mut { .. }))
+    ))
+}
+
+/// True iff the type of `call` (a call / method-call expression)
+/// mentions a lifetime, so the call's result may carry a borrow that
+/// outlives the call itself (`let w = first(r);` keeps `r` frozen
+/// until `w`'s last use, not just until `first` returns).
+pub fn call_result_has_lifetime(call: &Expr, typeck: &TypeckResults) -> bool {
+  typeck.expr_ty(call).walk().any(|arg| arg.as_region().is_some())
 }
 
 // Fetch the mutability of the borrow

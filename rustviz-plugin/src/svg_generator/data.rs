@@ -450,16 +450,23 @@ pub enum ExternalEvent {
         is_partial: bool,
         id: usize
     },
+    // `is_reborrow`: the borrow was written `&*r` / `&mut *r` with
+    // `r` a reference — a reborrow through `r`, as opposed to a fresh
+    // borrow of an owner (`&s`) or of the reference variable itself
+    // (`&r`, `&mut r`). Decided syntactically at the `AddrOf` site in
+    // `match_rhs`; every other producer passes `false`.
     StaticBorrow {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
+        is_reborrow: bool,
         id: usize
     },
     MutableBorrow {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
+        is_reborrow: bool,
         id: usize
     },
     StaticDie {
@@ -489,9 +496,17 @@ pub enum ExternalEvent {
         to: ResourceTy, // must be a function
         id: usize
     },
+    // `is_reborrow`: `from` is a `&mut T` that the call reborrows
+    // (`f(&mut *r)`, or `f(r)` / `r.m()` with rustc inserting the
+    // reborrow) rather than moves (`take(r)` into a generic `T`).
+    // `result_has_lifetime`: the call's result type mentions a
+    // lifetime, so the reborrow may outlive the call
+    // (`let w = first(r);`). Both drive the call-site dot's suffix.
     PassByMutableReference {
         from: ResourceTy,
         to: ResourceTy, // must be a function
+        is_reborrow: bool,
+        result_has_lifetime: bool,
         id: usize
     },
     GoOutOfScope {
@@ -1035,11 +1050,16 @@ impl Event {
                 }
 
             }
-            Event::StaticLend{ to ,..} => {
+            Event::StaticLend{ to, is, ..} => {
                 if to.is_closure() {
                     safe_message(hover_messages::event_dot_capture_static_lend_to_closure, &self.deref_name(my_name), to)
                 } else {
-                    safe_message(hover_messages::event_dot_static_lend, &self.deref_name(my_name), to)
+                    // `is` is the lender. A `&T` lender was read-only
+                    // already; see event_dot_static_lend.
+                    let source_is_shared_ref = is.extract_rap()
+                        .map_or(false, |r| r.is_ref() && !r.is_mutref());
+                    let target_name = safe_message(|_, t| t.clone(), my_name, to);
+                    hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, source_is_shared_ref)
                 }
             }
             Event::MutableLend{ to ,..} => {
@@ -1205,49 +1225,40 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
             else if to.is_closure() { String::from("Closure capture (move)") }
             else { String::from("Move") }
         },
-        ExternalEvent::StaticBorrow{ is_partial, to, .. } => {
+        ExternalEvent::StaticBorrow{ is_partial, is_reborrow, to, .. } => {
             if *is_partial { String::from("Partial immutable borrow") }
             else if to.is_closure() { String::from("Closure capture (immutable borrow)") }
+            else if *is_reborrow { String::from("Immutable reborrow") }
             else { String::from("Immutable borrow") }
         },
         ExternalEvent::StaticDie{ .. } => {
             String::from("Return immutably borrowed resource")
         },
-        ExternalEvent::MutableBorrow{ is_partial, from, to, .. } => {
+        ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, .. } => {
             if *is_partial { String::from("Partial Mutable borrow") }
             else if to.is_closure() { String::from("Closure capture (mutable borrow)") }
-            // Reborrow: the source itself is a `&mut T` binding, so
-            // we're borrowing-the-borrow (`let r2 = &mut *r;` — also
-            // what's implicitly synthesized at function-call sites).
-            // Distinct from a fresh borrow off an owner: the source
-            // gets frozen for the reborrow's lifetime and then
-            // reactivated, where a fresh borrow's source stays
-            // frozen until *its* last use.
-            else if from.is_mutref() { String::from("Mutable reborrow") }
+            // Reborrow: `let r2 = &mut *r;` with r: `&mut T` borrows
+            // *through* r — r is frozen while r2 is live and usable
+            // again afterwards. Distinct from `&mut r`, which is a
+            // fresh borrow of the variable r itself (r2: `&mut &mut T`).
+            else if *is_reborrow { String::from("Mutable reborrow") }
             else { String::from("Mutable borrow") }
         },
         ExternalEvent::MutableDie{ .. } => {
            String::from("Return mutably borrowed resource")
         },
-        // Implicit reborrow at call site: passing a `&mut T`
-        // variable (or chain of them) to a fn that itself takes
-        // `&mut T` doesn't move the reference — the compiler
-        // synthesizes `&mut *r` for the call. Same arrow shape as
-        // a fresh borrow but worth naming distinctly so the user
-        // sees that r isn't being consumed.
-        ExternalEvent::PassByMutableReference{ from, .. } => {
-            if from.is_mutref() {
-                String::from("Pass by mutable reborrow")
-            } else {
-                String::from("Pass by mutable reference")
-            }
+        // Reached only when the callee isn't a Function RAP — a call
+        // through a closure variable (`f(&x)`, `g(r)`); calls to real
+        // fns get their "f reads from x" title from render_arrow's
+        // function-target arm instead. Deliberately no "reborrow"
+        // wording here: whether `g(r)` reborrows or moves `r` depends
+        // on the callee's parameter type, which this event doesn't
+        // carry for the closure case, and passing a `&T` is a copy.
+        ExternalEvent::PassByMutableReference{ .. } => {
+            String::from("Pass by mutable reference")
         },
-        ExternalEvent::PassByStaticReference{ from, .. } => {
-            if from.is_ref() && !from.is_mutref() {
-                String::from("Pass by immutable reborrow")
-            } else {
-                String::from("Pass by immutable reference")
-            }
+        ExternalEvent::PassByStaticReference{ .. } => {
+            String::from("Pass by immutable reference")
         },
         _ => unreachable!(),
     }
@@ -1765,7 +1776,7 @@ impl Visualizable for VisualizationData {
             (line_num,  Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
         },
-        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id} => {
+        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, ..} => {
           if to_o { 
             vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
             (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})]
@@ -2015,7 +2026,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::StaticDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id} => {
+            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
