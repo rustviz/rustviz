@@ -1620,6 +1620,17 @@ impl Visualizable for VisualizationData {
     fn compute_states(&mut self) {
         let mut timelines = self.timelines.clone(); // I am a lazy rust programmer
         for (hash, timeline) in timelines.iter_mut() {
+            // Function RAPs are call-site labels keyed by name, not
+            // owners: every `Cons(..)` / `id(..)` call shares one
+            // timeline. Their states are never rendered (no column),
+            // and running the owner state machine over them panics as
+            // soon as the same name receives a second value — nested
+            // constructors `Cons(1, Box::new(Cons(2, ..)))`, or simply
+            // calling `id(s1)` then `id(s2)` (ResourceMoved -> Acquire
+            // on a non-`mut` RAP).
+            if matches!(timeline.resource_access_point, ResourceAccessPoint::Function(_)) {
+                continue;
+            }
             self.compute_timeline_states(& mut timeline.history, &mut timeline.states, hash);
         }
         self.timelines = timelines;
