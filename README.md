@@ -208,9 +208,11 @@ The plugin has a TODO list with more detail in
 
 ## Security
 
-The playground compiles untrusted Rust source. Proc-macro expansion in user
-code is arbitrary code execution, so the playground runs the plugin inside
-a sandboxed container by default. The full threat model and operator
+The playground compiles untrusted Rust source. Snippets are compiled as a
+dependency-free library crate, so they can't run code at compile time
+without a rustc bug, but rustc is a large attack surface: every request runs
+in a per-request sandbox (Cloud Run's `sandbox do` in production, a locked-
+down container locally). The full threat model and operator
 checklist are in [`playground/SECURITY.md`](playground/SECURITY.md). Report findings to
 `comar@umich.edu`.
 
@@ -220,6 +222,9 @@ checklist are in [`playground/SECURITY.md`](playground/SECURITY.md). Report find
 
 Issues and PRs welcome. Keep each PR focused on a single concern; for
 local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
+[`CLAUDE.md`](CLAUDE.md) has the project's ground rules (for human and AI
+contributors alike): tooltips must be semantically correct, tests must pin
+correct behaviour, and the three limitations lists stay in sync.
 
 ## Releasing
 
