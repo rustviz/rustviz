@@ -54,7 +54,7 @@ async fn submit_code(payload: web::Json<SubmitCodePayload>) -> HttpResponse {
             if msg.starts_with("Visualization timed out") {
                 HttpResponse::GatewayTimeout().body(msg)
             } else if msg.starts_with("Sandbox unavailable") || msg.starts_with("Invalid runner") {
-                log::error!("runner failure: {}", msg);
+                eprintln!("runner failure: {}", msg);
                 HttpResponse::ServiceUnavailable().body("compile sandbox unavailable; try again shortly")
             } else {
                 HttpResponse::InternalServerError().body(msg)
