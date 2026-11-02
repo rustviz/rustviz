@@ -1,15 +1,18 @@
 # Security model
 
 The RustViz playground accepts arbitrary Rust source from anonymous users on
-the public web and feeds it to a real `rustc`. This is dangerous by default,
-because **proc-macro expansion executes user code as part of compilation**
-— a hostile macro can do anything the compiler process can do (network,
-filesystem, exec). RustViz only ever needs HIR/MIR, but there is no way to
-ask `rustc` to skip macro expansion, so the playground has to assume any
-submitted source is hostile.
+the public web and feeds it to a real `rustc`.
 
-This document describes the controls that make running the playground on the
-public internet defensible.
+**What user code can and can't do.** The runner (`playground/runner/rv-runner.sh`)
+compiles the snippet as the `src/lib.rs` of a fresh `cargo new --lib` crate
+with a generated `Cargo.toml`: no dependencies, no `build.rs`, and the plugin
+only runs `cargo check`. A proc macro can't be defined and used in the same
+crate, so compiling a snippet does **not** execute user code; executing code
+would take a bug in rustc itself. What a snippet *can* do is make rustc read
+files (`include!`, `include_str!`) and echo their contents in error messages,
+and make rustc burn CPU and memory (const-eval loops, huge types). The
+controls below assume a hostile submitter anyway: rustc is a large attack
+surface, and defense in depth is cheap here.
 
 ## Threat model
 
@@ -31,8 +34,33 @@ described below, not at the type-system layer.
 
 ### 1. Sandboxed plugin execution
 
-`rustviz-lib/src/lib.rs::run_docker` is the only execution backend used in
-production. It invokes:
+**Cloud Run (production).** `RV_RUNNER=sandbox`: the server runs
+`rv-runner.sh` under the launcher in `RV_SANDBOX_CMD`, which
+`playground/cloudrun/deploy.sh` sets to Cloud Run's built-in
+`/usr/local/gcp/bin/sandbox do` (service deployed with `--sandbox-launcher`,
+gen2 execution environment). Each request gets a fresh sandbox:
+
+- **No network egress** (the launcher's default; we never pass `--allow-egress`).
+- **Read-only view of the image**; only a private `/tmp` is writable, and it
+  is discarded with the sandbox.
+- **No access to the service's env vars, secrets, or the metadata server.**
+  Only the variables listed in `RV_SANDBOX_CMD` are visible. Verified with
+  `include!("/proc/self/environ")`: none of `K_SERVICE`, `PORT`, `RV_*`
+  service settings appear.
+- **Wall-clock cap**: `rv-runner.sh` kills the compile after 18 s, and the
+  server kills the launcher's process group at 20 s.
+- **One compile per instance** (`--concurrency 1`), so a runaway compile
+  only affects its own request, and **at most `--max-instances` (3)
+  instances**, which is the cost and abuse ceiling.
+- The service runs as `rv-runtime`, a service account with no IAM roles.
+
+The launcher is a Cloud Run **Preview** feature. If it changes, the server
+fails closed: `RV_RUNNER=sandbox` with an empty `RV_SANDBOX_CMD` is a
+configuration error, never "run unsandboxed". Any launcher with the same
+"prefix + command" shape (bubblewrap, nsjail) can be substituted.
+
+**Fly / docker (legacy, being retired).** `rustviz-lib/src/lib.rs::run_docker`,
+the backend the Fly deploy uses, invokes:
 
 ```sh
 docker run --rm -i \
@@ -51,7 +79,7 @@ docker run --rm -i \
 Each request gets a fresh container. Properties:
 
 - **No network.** `--network=none` removes the loopback interface; outbound
-  TCP/UDP/DNS all fail closed. A malicious build script cannot phone home or
+  TCP/UDP/DNS all fail closed. A compromised rustc cannot phone home or
   contact internal services.
 - **Read-only root FS.** The toolchain and plugin binaries cannot be
   modified, so a successful exploit cannot persist a backdoor.

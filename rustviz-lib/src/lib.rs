@@ -30,6 +30,10 @@
 //!   untrusted input** — proc-macro expansion in user code is arbitrary
 //!   code execution. Right choice for library callers, the CLI, mdbook
 //!   builds, and any other context where the input is trusted.
+//! - `RV_RUNNER=sandbox` runs `playground/runner/rv-runner.sh` under the
+//!   per-request sandbox launcher named by `RV_SANDBOX_CMD` (on Cloud Run,
+//!   its built-in `sandbox do`). Used by the Cloud Run playground image,
+//!   which bundles the toolchain, plugin and runner script.
 //! - `RV_RUNNER=docker` runs the plugin inside the
 //!   `rustviz/rustviz-runner` image with no network, a read-only
 //!   filesystem, tmpfs-backed `/work`, and capped memory / CPU / pids /
@@ -45,7 +49,7 @@ use std::{
     env,
     error::Error,
     fmt, fs,
-    io::Write,
+    io::{Read, Write},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -150,9 +154,9 @@ impl fmt::Display for RvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RvError::FsError(msg) => write!(f, "File system error: {}", msg),
-            RvError::PluginError(msg) => write!(f, "Internal plugin error {}", msg),
+            RvError::PluginError(msg) => write!(f, "{}", msg),
             RvError::Timeout => write!(f, "Visualization timed out"),
-            RvError::DockerUnavailable(msg) => write!(f, "Docker unavailable: {}", msg),
+            RvError::DockerUnavailable(msg) => write!(f, "Sandbox unavailable: {}", msg),
             RvError::BadConfig(msg) => write!(f, "Invalid runner configuration: {}", msg),
         }
     }
@@ -186,10 +190,11 @@ impl Rustviz {
     pub fn new(code_str: &str) -> Result<Rustviz, Box<dyn Error>> {
         let raw = match runner_backend()?.as_str() {
             "docker" => run_docker(code_str)?,
+            "sandbox" => run_sandbox(code_str)?,
             "local" => run_local(code_str)?,
             other => {
                 return Err(Box::new(RvError::BadConfig(format!(
-                    "RV_RUNNER must be \"docker\" or \"local\" (got {:?})",
+                    "RV_RUNNER must be \"docker\", \"sandbox\" or \"local\" (got {:?})",
                     other
                 ))));
             }
@@ -226,65 +231,173 @@ fn runner_backend() -> Result<String, Box<dyn Error>> {
     Ok(env::var("RV_RUNNER").unwrap_or_else(|_| "local".to_string()))
 }
 
-/// Production path: spawn a sandboxed container, pipe the user's source on
-/// stdin, capture stdout. Container flags must be kept in sync with the
-/// guarantees described in playground/SECURITY.md.
+/// Production path (Fly, docker-in-docker): spawn a sandboxed container,
+/// pipe the user's source on stdin, capture stdout. Container flags must be
+/// kept in sync with the guarantees described in playground/SECURITY.md.
 fn run_docker(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let image = env::var("RV_RUNNER_IMAGE").unwrap_or_else(|_| DEFAULT_RUNNER_IMAGE.to_string());
+    let mut cmd = Command::new("docker");
+    cmd.args([
+        "run",
+        "--rm",
+        "-i",
+        "--network=none",
+        "--read-only",
+        "--memory=512m",
+        "--memory-swap=512m",
+        "--cpus=1",
+        "--pids-limit=64",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--tmpfs=/work:rw,size=128m,mode=1777",
+        "--tmpfs=/tmp:rw,size=32m",
+        &image,
+    ]);
+    run_with_deadline(cmd, code_str, "docker")
+}
 
-    let mut child = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-i",
-            "--network=none",
-            "--read-only",
-            "--memory=512m",
-            "--memory-swap=512m",
-            "--cpus=1",
-            "--pids-limit=64",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--tmpfs=/work:rw,size=128m,mode=1777",
-            "--tmpfs=/tmp:rw,size=32m",
-            &image,
-        ])
-        .stdin(Stdio::piped())
+/// Production path (Cloud Run): run the runner script inside a
+/// per-request sandbox whose launcher is given by `RV_SANDBOX_CMD`, an
+/// argv prefix split on whitespace. On Cloud Run that is the built-in
+/// launcher, e.g.
+///
+/// ```text
+/// RV_SANDBOX_CMD="/usr/local/gcp/bin/sandbox do --env PATH=… --"
+/// ```
+///
+/// which gives each request a fresh sandbox with no network egress, a
+/// read-only view of the image, a private writable /tmp, and no access to
+/// the service's env, secrets or metadata server. Any launcher with the
+/// same "prefix + command" shape (bubblewrap, nsjail, firejail) works.
+///
+/// Fails closed: an unset or empty `RV_SANDBOX_CMD` is a configuration
+/// error, never "run unsandboxed".
+fn run_sandbox(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let prefix = env::var("RV_SANDBOX_CMD").unwrap_or_default();
+    let mut argv = prefix.split_whitespace();
+    let program = argv.next().ok_or_else(|| {
+        RvError::BadConfig("RV_RUNNER=sandbox requires RV_SANDBOX_CMD".to_string())
+    })?;
+    let script =
+        env::var("RV_RUNNER_SCRIPT").unwrap_or_else(|_| "/usr/local/bin/rv-runner".to_string());
+    let mut cmd = Command::new(program);
+    cmd.args(argv).arg(script);
+    run_with_deadline(cmd, code_str, "sandbox launcher")
+}
+
+/// Printed on stderr by playground/runner/rv-runner.sh when its inner
+/// timeout kills the plugin.
+const RUNNER_TIMEOUT_SENTINEL: &str = "rustviz-runner: compile timed out";
+
+/// Cap on how much of each child stream we keep. The largest curated
+/// example renders to ~30 KiB; anything beyond a few MiB is pathological.
+/// Excess output is drained (so the child never blocks on a full pipe)
+/// and discarded.
+const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read `r` to EOF on a background thread, keeping at most
+/// `MAX_STREAM_BYTES`.
+fn drain_capped<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let room = MAX_STREAM_BYTES.saturating_sub(kept.len());
+                    kept.extend_from_slice(&buf[..n.min(room)]);
+                }
+            }
+        }
+        kept
+    })
+}
+
+/// Spawn `cmd` with `code_str` on stdin and wait up to
+/// `RUNNER_TIMEOUT_SECS`, returning stdout on success.
+///
+/// * stdin, stdout and stderr are each serviced on their own thread, so a
+///   child that writes more than a pipe buffer before exiting can't
+///   deadlock against us.
+/// * On Unix the child leads its own process group and the deadline kills
+///   the whole group, not just the launcher, so whatever it spawned
+///   (cargo, rustc) dies with it. Launchers that daemonize their payload
+///   (e.g. `docker run`, whose container outlives a killed client) must
+///   also be bounded from the inside; `rv-runner.sh` wraps the plugin in
+///   `timeout` for that reason.
+fn run_with_deadline(
+    mut cmd: Command,
+    code_str: &str,
+    what: &str,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| RvError::DockerUnavailable(format!("failed to spawn docker: {}", e)))?;
-
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(code_str.as_bytes())?;
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
-    drop(child.stdin.take());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| RvError::DockerUnavailable(format!("failed to spawn {}: {}", what, e)))?;
+
+    let stdin = child.stdin.take();
+    let input = code_str.as_bytes().to_vec();
+    let writer = thread::spawn(move || {
+        if let Some(mut s) = stdin {
+            // A child that exits without reading stdin gives EPIPE here;
+            // its exit status is the interesting error, not this one.
+            let _ = s.write_all(&input);
+        }
+    });
+    let out = drain_capped(child.stdout.take().expect("piped stdout"));
+    let err = drain_capped(child.stderr.take().expect("piped stderr"));
 
     let deadline = Instant::now() + Duration::from_secs(RUNNER_TIMEOUT_SECS);
-    loop {
+    let status = loop {
         if let Some(status) = child.try_wait()? {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            if let Some(mut s) = child.stdout.take() {
-                std::io::Read::read_to_end(&mut s, &mut stdout)?;
-            }
-            if let Some(mut s) = child.stderr.take() {
-                std::io::Read::read_to_end(&mut s, &mut stderr)?;
-            }
-            if !status.success() {
-                return Err(Box::new(RvError::PluginError(
-                    String::from_utf8_lossy(&stderr).to_string(),
-                )));
-            }
-            return Ok(stdout);
+            break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            kill_tree(&mut child);
             let _ = child.wait();
+            let _ = writer.join();
             return Err(Box::new(RvError::Timeout));
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(20));
+    };
+    let _ = writer.join();
+    let stdout = out.join().unwrap_or_default();
+    let stderr = err.join().unwrap_or_default();
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr).to_string();
+        // rv-runner's own `timeout` fired before ours. Launchers that pass
+        // the exit status through give 124; the ones that don't (Cloud
+        // Run's `sandbox do` exits 1) still carry the sentinel on stderr.
+        if status.code() == Some(124) || stderr.contains(RUNNER_TIMEOUT_SENTINEL) {
+            return Err(Box::new(RvError::Timeout));
+        }
+        return Err(Box::new(RvError::PluginError(stderr)));
     }
+    Ok(stdout)
+}
+
+#[cfg(unix)]
+fn kill_tree(child: &mut std::process::Child) {
+    // process_group(0) above made the child's pid its pgid.
+    let pgid = child.id() as libc::pid_t;
+    // SAFETY: plain syscall; a stale pgid just yields ESRCH.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn kill_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 /// Dev-only path: run the plugin in-process against a tempdir. Convenient

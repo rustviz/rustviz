@@ -1895,6 +1895,7 @@ dependencies = [
 name = "rustviz-lib"
 version = "2.0.0"
 dependencies = [
+ "libc",
  "tempfile",
 ]
 

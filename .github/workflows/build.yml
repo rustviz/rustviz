@@ -334,6 +334,47 @@ jobs:
               labels: ['deploy-failure'],
             });
 
+  # Cloud Run compile API (see playground/cloudrun/). Builds the single
+  # image (toolchain + plugin + server), pushes it to Artifact Registry and
+  # deploys it. Auth is keyless: GitHub's OIDC token is exchanged via
+  # Workload Identity Federation for the rv-deployer service account,
+  # which only accepts tokens from rustviz/rustviz on refs/heads/main.
+  deploy-cloudrun:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: cloudrun-deploy
+      cancel-in-progress: true
+    env:
+      IMAGE: us-central1-docker.pkg.dev/rustviz-playground/rustviz/playground
+    steps:
+      - uses: actions/checkout@v5
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/816769776225/locations/global/workloadIdentityPools/github/providers/rustviz
+          service_account: rv-deployer@rustviz-playground.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: beta
+      - name: docker login to Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: playground/cloudrun/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=cloudrun
+          cache-to: type=gha,mode=max,scope=cloudrun
+      - name: deploy
+        run: ./playground/cloudrun/deploy.sh "$IMAGE:${{ github.sha }}"
+
   # Re-deploy the rustviz/tutorial book whenever a push to main here
   # touches anything the tutorial actually depends on (the rustc plugin,
   # the mdbook preprocessor, the rustviz library, or the toolchain pin).

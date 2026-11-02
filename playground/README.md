@@ -54,6 +54,26 @@ Production runs in two pieces:
   Allowed origins for cross-origin requests are listed in
   `playground/src/main.rs::cors`.
 
+### Compile API on Cloud Run (replacing Fly)
+
+`playground/cloudrun/` holds a single image (pinned nightly + plugin + server
++ runner script) for Google Cloud Run. Each request compiles inside Cloud
+Run's per-request `sandbox do` launcher (no egress, read-only image, private
+`/tmp`; see [`SECURITY.md`](SECURITY.md)), so there's no docker-in-docker,
+no privileged mode and no fleet to manage. With min-instances 0 and
+request-based billing, idle costs nothing; normal use fits in Cloud Run's
+free tier. `--max-instances 3` is the cost ceiling.
+
+- **CI:** the `deploy-cloudrun` job in `.github/workflows/build.yml` builds
+  the image, pushes it to `us-central1-docker.pkg.dev/rustviz-playground/rustviz/playground:<sha>`
+  and runs `playground/cloudrun/deploy.sh`, which deploys and smoke-tests.
+  Auth is keyless (GitHub OIDC → Workload Identity Federation →
+  `rv-deployer`, accepted only from `rustviz/rustviz` on `main`).
+- **Roll back:** `playground/cloudrun/deploy.sh us-central1-docker.pkg.dev/rustviz-playground/rustviz/playground:<older-sha>`
+- **Logs:** `gcloud run services logs read rustviz-api --region us-central1`
+- **Project:** `rustviz-playground` (owner cyology@gmail.com), with a $5/mo
+  budget alert. Artifact Registry keeps the 5 newest images.
+
 ### First-time setup (Fly compile API)
 
 ```sh
