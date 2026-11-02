@@ -435,6 +435,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         // typecheck to figure out what type of event is going to occur
         let line_num = expr_to_line(&lhs_expr, &self.tcx);
+        // `u._a = …` on a union: resource_of_lhs maps it to the
+        // union's own column. The field's type (possibly a ref, or
+        // a non-Copy ManuallyDrop<T>) says nothing about `u`, and a
+        // union field write never runs a destructor, so skip the
+        // ref-reassignment and drop-at-reassign handling below.
+        let lhs_is_union_field = matches!(lhs_expr.kind,
+          ExprKind::Field(recv, _) if self.is_union_typed(recv));
         let lhs_rty = self.resource_of_lhs(lhs_expr);
         let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
         let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
@@ -451,7 +458,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         };
         // if we are pointing at a new piece of data
-        if lhs_ty.is_ref() {
+        if lhs_ty.is_ref() && !lhs_is_union_field {
           match lhs_rty {
             // ex:
             // let mut a = &b (where b is &&i32)
@@ -573,7 +580,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // the white down-arrow triangle and the drop becomes
         // invisible.
         let drop_target: Option<ResourceAccessPoint> =
-          if !lhs_ty.is_ref() && !is_copyable {
+          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field {
             match &lhs_rty {
               ResourceTy::Value(rap) => {
                 // Plain reassign — only emit the drop if y currently

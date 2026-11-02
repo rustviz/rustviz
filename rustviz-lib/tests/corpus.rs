@@ -166,6 +166,9 @@ const EXPECTED_OK: &[&str] = &[
     //   same as enums. Pre-fix the plugin panicked at the
     //   AdtKind::Union arm with "union not implemented yet".
     "union_basic",
+    // — Enum-typed fn parameter (#131): one opaque owner column, no
+    //   phantom per-field (`s.0`) column.
+    "enum_param",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1178,13 +1181,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── Unions (#131) ──────────────────────────────────────────────
     TooltipExpect {
         name: "union_basic",
-        // Opaque-owner treatment: `u` gets a single column, the
-        // construction is a Bind (acquires), passing `u` to show
-        // is a Move, and the post-move OOS reports no resource
-        // dropped. No per-field timelines for `_a` / `_b` —
-        // unions don't have a statically-known active field.
+        // Opaque-owner treatment: `u` gets a single column. The
+        // construction is a Bind (acquires); field writes, the
+        // `unsafe { u._a }` read, and the `&u._b` borrow are all
+        // events on `u`'s own column; passing `u` to show is a
+        // Move, and the post-move OOS reports no resource dropped.
+        // No per-field timelines for `_a` / `_b` — unions don't
+        // have a statically-known active field.
         must_contain: &[
             "u acquires ownership of a resource",
+            // `u._a = y;` — the field write lands on u's column.
+            "Copy from y to u",
+            "u is initialized by copy from y",
+            // `let x = unsafe { u._a };` — a copy out of u.
+            "Copy from u to x",
+            "x is initialized by copy from u",
+            "u's resource is copied",
+            // `let r = unsafe { &u._b };` — u is the lender.
+            "Immutable borrow from u to r",
+            "Return immutably borrowed resource from r to u",
             "u's resource is moved",
             "Move from u to show",
             "u goes out of scope. No resource is dropped.",
@@ -1193,9 +1208,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Pre-fix the AdtKind::Union arm panicked; a renderer
             // that treated unions as structs would create field
             // RAPs `u._a` / `u._b` with their own labels — guard
-            // against either regression.
+            // against either regression. (Matching is exact, so
+            // name the column-label tooltips explicitly.)
             "u._a",
             "u._b",
+            "u._a, mutable",
+            "u._b, mutable",
+            // The read / borrow must not lose their source.
+            "x is bound to a value",
+            "Return immutably borrowed resource from r to *r",
+        ],
+    },
+    TooltipExpect {
+        name: "enum_param",
+        // `fn area(s: Shape)` — the enum param is one owner column
+        // that acquires from the caller; the match arms copy their
+        // payloads out of it.
+        must_contain: &[
+            "s acquires ownership from the caller",
+            "Partial copy from s to r",
+            "Partial copy from s to w",
+            "Move from c to area",
+        ],
+        must_not_contain: &[
+            // Pre-#131 the param was registered like a struct and
+            // got a phantom column for the first variant's field.
+            "s.0, immutable",
+            "s.0 goes out of scope. No resource is dropped.",
         ],
     },
 ];

@@ -436,6 +436,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     *self.unique_id += 1;
   }
 
+  /// True when `e`'s own type (no auto-deref) is a `union`. Used to
+  /// route field projections on a union-typed local (`u._a`) to the
+  /// union's single opaque owner column instead of looking up a
+  /// per-field RAP that was never registered.
+  pub fn is_union_typed(&self, e: &Expr) -> bool {
+    self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_union()
+  }
+
   // Return the ResourceTy that corresponds to the LHS of a let stmt
   pub fn resource_of_lhs(&mut self, expr: &'tcx Expr) -> ResourceTy {
     match expr.kind {
@@ -447,6 +455,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         match expr {
           Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
             let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
+            // `u._a = 5;` on a union-typed local: unions are one
+            // opaque owner column with no per-field RAPs (see the
+            // AdtKind::Union arms in define_lhs / the pat-binding
+            // site), so a field write is a write to the union itself.
+            if self.is_union_typed(expr) {
+              return ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
+            }
             let total_name = format!("{}.{}", name, ident.as_str());
             ResourceTy::Value(self.raps.get(&total_name).unwrap().rap.to_owned())
           }
@@ -1080,13 +1095,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // (nested field access we never registered, `self.field` in
       // an impl method, fields through a deref/borrow) falls
       // through silently rather than panicking.
-      if let Some(base) = expr_to_rap_name(inner, &self.tcx) {
-        let total_name = format!("{}.{}", base, id.as_str());
-        if let Some(rd) = self.raps.get(&total_name) {
-          let line_num = span_to_line(&inner.span, &self.tcx);
-          let rhs_rap = rd.rap.to_owned();
-          self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
-        }
+      // Union fields (`unsafe { u._a }`) resolve to the union's own
+      // column via field_rap, so the read shows as a copy / move out
+      // of `u`.
+      if let Some(rhs_rap) = field_rap(inner, id.as_str(), &self.tcx, &self.raps) {
+        let line_num = span_to_line(&inner.span, &self.tcx);
+        self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
       }
     }
     // explicitly using return keyword
