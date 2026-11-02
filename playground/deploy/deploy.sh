@@ -47,20 +47,20 @@
 # Pass --keep-warm to skip step 4 (Machines never auto-stop; ~$24/mo
 # *per always-running Machine*).
 #
-# The script also ensures the fleet is at $RV_FLY_MACHINES (default 10)
-# Machines on every deploy. Idle Machines auto-stop, so the extra capacity
-# costs nothing in steady state — it's there so the edge proxy can spill
-# concurrent load to additional Machines when one gets saturated, e.g. when
-# someone posts the URL on Hacker News. With hard_limit = 5 per Machine in
-# fly.toml::http_service.concurrency, ten Machines = ~50 concurrent compile
-# capacity at peak, which covers a meaningful HN-frontpage spike.
+# The script also ensures the fleet is at $RV_FLY_MACHINES (default 1)
+# Machines on every deploy. The default used to be 10 on the theory that
+# idle Machines cost nothing. In practice (Oct 2026 bill: ~1,200
+# Machine-hours with ~12 requests/day) a single stray connection made the
+# edge proxy wake ~7 Machines, because each cold boot is slow and the proxy
+# keeps starting more while the first isn't ready, and auto-stop then
+# retires them one at a time over 20-30 min. One Machine bounds that.
 #
 # Usage:
 #   deploy/deploy.sh             # cheap mode, two-phase
 #   deploy/deploy.sh --keep-warm # always-warm mode, skips phase 2
 #
 # Env:
-#   RV_FLY_MACHINES          fleet size; default 10
+#   RV_FLY_MACHINES          fleet size; default 1
 #   RV_DEPLOY_TIMEOUT_SECS   per-attempt timeout for the health-check
 #                            wait, in seconds; default 1800 (30 min)
 #   RV_DEPLOY_RETRIES        retries after the first wait timeout;
@@ -267,17 +267,17 @@ fi
 # count at $DESIRED_COUNT + 2. Running fly deploy first establishes
 # the "app" group with HA default; the subsequent fly scale count
 # scales that group up to $DESIRED_COUNT.
-DESIRED_COUNT="${RV_FLY_MACHINES:-10}"
+DESIRED_COUNT="${RV_FLY_MACHINES:-1}"
 
 say "==> fly deploy (creates HA-default initial Machines in the 'app' group)"
 # --strategy immediate: with no existing Machines this just means
 # "apply the new release as fast as possible to whatever fly creates".
 fly_deploy --strategy immediate
 
-if [ "$DESIRED_COUNT" -gt 1 ]; then
-    say "==> Scaling fleet up to ${DESIRED_COUNT} Machine(s)"
-    "$FLY" scale count "$DESIRED_COUNT" --yes
-fi
+# Unconditional: fly deploy's HA default creates 2 Machines, so even
+# DESIRED_COUNT=1 needs a scale call (down, in that case).
+say "==> Scaling fleet to ${DESIRED_COUNT} Machine(s)"
+"$FLY" scale count "$DESIRED_COUNT" --yes
 
 # Per-attempt timeout: how long we'll wait for *every* Machine to pass
 # its HTTP check before giving up on this attempt. Default 30 min,

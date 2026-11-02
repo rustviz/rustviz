@@ -18,6 +18,13 @@ LOCAL_TAG="rustviz/rustviz-runner:latest"
 # 1. Start dockerd in the background. The default dind entrypoint takes
 #    care of cgroup setup, certificate handling for TLS, etc.
 LOG "starting dockerd..."
+# persist_rootfs='always' (fly.toml) keeps /var/run across stop/start, so
+# an unclean shutdown leaves stale docker/containerd pid files and sockets
+# behind. On the next boot a stale containerd.pid can name a live,
+# unrelated PID, dockerd decides "containerd is still running", times out
+# waiting on it, and this script exits 1 -> Fly restart loop. Runtime
+# state is never meaningful across boots, so wipe it.
+rm -rf /var/run/docker /var/run/docker.pid /var/run/docker.sock /run/containerd
 # fuse-overlayfs storage driver: works on top of the Fly Machine's overlay
 # rootfs without needing a per-Machine ext4 volume mounted at
 # /var/lib/docker. Slightly slower than the kernel overlay2 driver
