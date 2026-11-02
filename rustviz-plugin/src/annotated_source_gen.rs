@@ -20,20 +20,16 @@ pub fn annotate_src(&mut self, name: String, s: Span, is_func: bool, hash: u64) 
   let left:usize = self.tcx.sess.source_map().lookup_char_pos(s.lo()).col_display;
   let right: usize = self.tcx.sess.source_map().lookup_char_pos(s.hi()).col_display;
 
-  // the reason we replace the '<' and '>' characters with [_ and _] is that
-  // < and > characters are illegal on their own in html (need to use &gt; / &lt: / &amp; etc)
-  // We eventually replace all the [_ and _] after we replace the </>
+  // The tspan markup is written with MARK_OPEN/MARK_CLOSE instead of `<`/`>`
+  // because the whole line is HTML-escaped later; generate_annotated_src
+  // turns the markers into real angle brackets after escaping.
   // Synthetic spans (e.g. desugared macro expansions) can map to lines outside the user's
   // source; skip annotation for those rather than panic.
   let mut line_contents = match self.source_map.get(&line) {
     Some(c) => c.clone(),
     None => return,
   };
-  let replace_with: String = if is_func {
-      format!("[_tspan class=\"fn\" data-hash=\"{}\" hash=\"{}\"_]{}[_/tspan_]", 0, hash, name)
-    } else {
-      format!("[_tspan data-hash=\"{}\"_]{}[_/tspan_]", hash, name)
-  };
+  let replace_with: String = crate::utils::tspan_markup(&name, hash, is_func);
 
   if right > line_contents.len() || left > right {
     return;

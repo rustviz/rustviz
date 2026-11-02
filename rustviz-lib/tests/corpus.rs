@@ -1180,3 +1180,59 @@ fn corpus_expected_tooltips_present() {
         failures.join("\n  ")
     );
 }
+
+/// Visible text of an SVG fragment: tags stripped, the three entities the
+/// plugin emits decoded.
+fn svg_text(svg: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in svg.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+}
+
+/// The code panel must show the user's source verbatim. The annotation
+/// pass used `[_` / `_]` as stand-ins for `<` / `>`, so `[_` in ordinary
+/// Rust became raw markup, and array literals on lines with several
+/// annotations were emitted once per annotation.
+#[test]
+fn code_panel_shows_source_verbatim() {
+    env::set_var("RV_RUNNER", "local");
+    let lines = [
+        "fn main() {",
+        "    let x = 1;",
+        "    let y = 2;",
+        "    let w = [x, y];",
+        "    let z: [_; 2] = w;",
+        "    let s = String::from(\"[_b_] \u{E000}tspan\u{E001}\");",
+        "    let t = s;",
+        "    println!(\"{:?} {}\", z, t);",
+        "}",
+    ];
+    let src = lines.join("\n") + "\n";
+    let rv = Rustviz::new(&src).expect("plugin run");
+    let code = rv.code_panel_string();
+    let text = svg_text(&code);
+    for line in &lines[..5] {
+        let want = line.trim();
+        assert_eq!(
+            text.matches(want).count(),
+            1,
+            "expected {:?} exactly once in code panel text:\n{}",
+            want,
+            text
+        );
+    }
+    assert!(text.contains("[_b_]"), "string literal mangled:\n{}", text);
+    assert!(
+        !code.contains('\u{E000}') && !code.contains('\u{E001}'),
+        "marker code points leaked into output"
+    );
+    assert!(!code.contains("<b_]"), "user text became markup:\n{}", code);
+}
