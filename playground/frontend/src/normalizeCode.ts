@@ -7,11 +7,13 @@
 // of a terminal that strips through its scrollback buffer or adds
 // alignment spaces.
 //
-// Only trailing-on-each-line is stripped. Leading whitespace
-// (indentation) and interior whitespace are load-bearing for Rust
-// parsers and for the user's mental model. Trailing newlines at
-// end-of-file are also left alone — many `let x = …;` snippets need
-// the final newline for `rustc` to accept them as a valid module.
+// Only trailing spaces/tabs on each line are stripped. Indentation and
+// interior whitespace are kept so the rendered code panel matches what
+// the user typed, and newlines (including a final one) are untouched so
+// line numbers in the visualization line up with the editor. The one
+// semantic change is inside a multi-line string literal, where trailing
+// spaces are part of the string's value; that doesn't affect ownership
+// or borrowing, which is all RustViz visualizes.
 //
 // The same normalization runs at prerender time so the build-time
 // SVG cache's keys are consistent with the runtime ones; see
