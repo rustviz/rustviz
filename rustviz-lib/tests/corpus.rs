@@ -130,6 +130,10 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_inside_for",
     "cond_with_move_closure",
     "match_with_closure_arms",
+    // — Borrowing the unit value of an empty block (#146). Used to
+    //   panic in fetch_mutability; pinned here so the no-crash
+    //   floor doesn't regress.
+    "borrow_empty_block",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
