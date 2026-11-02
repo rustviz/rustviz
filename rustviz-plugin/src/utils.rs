@@ -64,7 +64,7 @@ pub fn annotate_struct_field (
   let right: usize = m.sess.source_map().lookup_char_pos(field.ident.span.hi()).col_display;
 
   let mut line_contents = line_str.to_string();
-  let replace_with = format!("[_tspan data-hash=\"{}\"_]{}[_/tspan_]", hash, name);
+  let replace_with = tspan_markup(&name, hash, false);
   line_contents.replace_range(left..right, &replace_with);
   let v = a_map.get_mut(&line).unwrap();
   if !v.contains(&line_contents) {
@@ -96,7 +96,7 @@ pub fn annotate_toplevel_fn (
 
 
   let mut line_contents = line_str.to_string();
-  let replace_with: String = format!("[_tspan class=\"fn\" data-hash=\"{}\" hash=\"{}\"_]{}[_/tspan_]", 0, hash, func_name);
+  let replace_with: String = tspan_markup(&func_name, hash, true);
   line_contents.replace_range(left..right, &replace_with);
   let v = a_map.get_mut(&line).unwrap();
   if !v.contains(&line_contents) {
@@ -122,7 +122,7 @@ pub fn annotate_enum_variant(
     let right = m.sess.source_map().lookup_char_pos(span.hi()).col_display;
 
     let mut line_contents = line_str.to_string();
-    let replace_with = format!("[_tspan class=\"fn\" data-hash=\"{}\" hash=\"{}\"_]{}[_/tspan_]", 0, hash, ctor_name);
+    let replace_with = tspan_markup(&ctor_name, hash, true);
     line_contents.replace_range(left..right, &replace_with);
     let v = a_map.get_mut(&line).unwrap();
     if !v.contains(&line_contents) {
@@ -193,7 +193,7 @@ impl RV1Helper {
 
         let lines: Vec<&str> = res_str.lines().collect();
         for (line_num, line_content) in lines.iter().enumerate() {
-          line_map.insert(line_num + 1, line_content.to_string());
+          line_map.insert(line_num + 1, sanitize_source_line(line_content));
         }
       }
 
@@ -259,17 +259,51 @@ impl RV1Helper {
 
 }
 
+/// Delimiters for the `<tspan …>` markup the annotation pass splices into
+/// source lines. The real `<`/`>` can't be used directly because the line
+/// is HTML-escaped afterwards (see `generate_annotated_src`), so annotations
+/// are written as `MARK_OPEN tspan … MARK_CLOSE` and turned into real angle
+/// brackets after escaping.
+///
+/// These are Unicode private-use code points. The previous delimiters were
+/// `[_` and `_]`, which ordinary Rust contains (`let [_, b] = pair;`,
+/// `[_; 3]`), so user source was turned into raw markup: a broken code panel
+/// at best, injected SVG/HTML at worst. Any occurrence of these code points
+/// in user source is replaced on ingestion (`sanitize_source_line`), so
+/// after that only the annotation pass can produce them.
+pub const MARK_OPEN: char = '\u{E000}';
+pub const MARK_CLOSE: char = '\u{E001}';
+
+/// `MARK_OPEN tspan data-hash="…" MARK_CLOSE name MARK_OPEN /tspan MARK_CLOSE`,
+/// with the extra `class="fn" … hash="…"` attributes for function names.
+pub fn tspan_markup(name: &str, hash: impl std::fmt::Display, is_fn: bool) -> String {
+  let (o, c) = (MARK_OPEN, MARK_CLOSE);
+  if is_fn {
+    format!("{o}tspan class=\"fn\" data-hash=\"0\" hash=\"{hash}\"{c}{name}{o}/tspan{c}")
+  } else {
+    format!("{o}tspan data-hash=\"{hash}\"{c}{name}{o}/tspan{c}")
+  }
+}
+
+/// Replace any literal marker code points in user source so they can't
+/// masquerade as annotation markup. Same UTF-8 width (3 bytes) as the
+/// replacement character, so byte/column offsets are unchanged.
+pub fn sanitize_source_line(line: &str) -> String {
+  line.replace([MARK_OPEN, MARK_CLOSE], "\u{FFFD}")
+}
+
 /// Merge a set of annotations of the same source line into a single line
-/// that contains every annotation's `[_..._]…[_/_]` wrappers.
+/// that contains every annotation's marker-delimited wrappers.
 ///
 /// Each input string is the underlying source line with zero or more
-/// `[_open_]name[_/close_]` regions inserted (see `annotate_src`). Stripping
-/// every `[_..._]` from each input must yield the same underlying text, which
+/// `‹open›name‹/close›` regions inserted (see `annotate_src`; `‹` and `›`
+/// stand for `MARK_OPEN` / `MARK_CLOSE`). Stripping every `‹…›` from each
+/// input must yield the same underlying text, which
 /// is the invariant the merge relies on.
 ///
 /// The original implementation walked `strings[0]` character-by-character and
 /// assumed that, between any two consecutive characters of the underlying
-/// text, every other string had **at most one** `[_..._]` marker. That broke
+/// text, every other string had **at most one** marker. That broke
 /// (with `assert_eq!(char_at_i, '[')`) any time two annotations landed at
 /// the same source position — increasingly common after rustc 1.91 (HIR
 /// span behavior changed). This rewrite tolerates arbitrary numbers of
@@ -291,21 +325,24 @@ fn union_strings(strings: &Vec<String>) -> String {
   let mut res = String::new();
 
   loop {
-    // Emit every leading `[_..._]` marker from any input until none remain.
+    // Emit every leading `‹…›` marker from any input until none remain.
     // We loop here because two strings can each carry a marker at the same
     // underlying position, and a single string can carry several markers
-    // back-to-back (e.g. `[_open_][_close_]`).
+    // back-to-back (e.g. `‹open›‹close›`).
     let mut emitted_marker = true;
     while emitted_marker {
       emitted_marker = false;
       for k in 0..bufs.len() {
-        if offsets[k] < bufs[k].len() && bufs[k][offsets[k]] == '[' {
-          // Copy from `[` through the matching `]` into res, advance offset.
+        if offsets[k] < bufs[k].len() && bufs[k][offsets[k]] == MARK_OPEN {
+          // Copy from MARK_OPEN through the matching MARK_CLOSE into res,
+          // advance offset. (Matching on a plain `[` here used to treat
+          // array literals in the source as markers and emit them once per
+          // annotated copy of the line: `[1, 2]` -> `[1, 2][1, 2]`.)
           while offsets[k] < bufs[k].len() {
             let c = bufs[k][offsets[k]];
             res.push(c);
             offsets[k] += 1;
-            if c == ']' { break; }
+            if c == MARK_CLOSE { break; }
           }
           emitted_marker = true;
         }
@@ -338,8 +375,8 @@ pub fn generate_annotated_src(annotated_line_map: & mut BTreeMap<usize, Vec<Stri
   annotated_str = annotated_str.replace("&", "&amp;");
   annotated_str = annotated_str.replace("<", "&lt;");
   annotated_str = annotated_str.replace(">", "&gt;");
-  annotated_str = annotated_str.replace("[_", "<");
-  annotated_str = annotated_str.replace("_]", ">");
+  annotated_str = annotated_str.replace(MARK_OPEN, "<");
+  annotated_str = annotated_str.replace(MARK_CLOSE, ">");
 
   annotated_str
 }
