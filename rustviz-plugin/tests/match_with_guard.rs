@@ -1,8 +1,10 @@
 // Pattern guard (`pat if cond`). Verifies that:
 //   * the bound pattern variable still gets a column,
-//   * any borrow / read inside the guard surfaces on the right
-//     timeline,
 //   * arm-body events still fire normally regardless of guard outcome.
+// The guard expression itself (`x > 0`) is NOT visualized: the
+// visitor never walks `arm.guard`, so reads / borrows / moves inside
+// a guard produce no events. This fixture only pins that a guarded
+// arm doesn't crash or disturb the rest of the match.
 
 fn show(_s: &String) {} // rustviz: hide
 

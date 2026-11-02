@@ -1086,9 +1086,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "match_with_guard",
-        // Pattern guard (`x if x > 0`). The guard binds `x` from
+        // Pattern guard (`x if x > 0`). The pattern `x` binds from
         // the scrutinee (`n`, Copy) — that's the "Copy from n to x"
-        // event. Both arms borrow `s`; merge is Unchanged.
+        // event. The guard expression itself is never visited, so
+        // nothing is asserted about it. Both arms borrow `s`; merge
+        // is Unchanged.
         must_contain: &[
             "Move from String::from to s",
             "Copy from n to x",
@@ -1138,13 +1140,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "unsafe_raw_ptr",
         // Raw-pointer code through an `unsafe` block. The plugin
-        // doesn't have explicit unsafe handling — this fixture
-        // pins what currently happens (binding x and p both
-        // surface as ordinary Bind events; the deref-write inside
-        // the unsafe block doesn't fire any event because the
-        // visitor doesn't model raw-pointer mutation). Guards
-        // against any future change accidentally panicking on raw
-        // pointers.
+        // doesn't model raw pointers, so this pins current,
+        // known-imperfect output rather than correct semantics:
+        // the deref-write `*p = 2` surfaces as "*p is bound to a
+        // value" at the start of p's column (it's really a write to
+        // x), and the `let p = &mut x as *mut i32` line shows
+        // nothing (no borrow of x, no binding of p). Mainly guards
+        // against a future change panicking on raw pointers; update
+        // these strings if raw-pointer handling is ever fixed.
         must_contain: &[
             "x is bound to a value",
             "*p is bound to a value",
