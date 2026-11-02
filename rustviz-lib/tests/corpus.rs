@@ -137,10 +137,9 @@ const EXPECTED_OK: &[&str] = &[
     // — Triaged from the previously-untracked fixture set (#140).
     //   These are shapes the curated entries above don't directly
     //   cover.
-    "question_mark",        // `?` desugar (used to panic; now graceful)
+    "question_mark",        // `?` desugar (used to panic)
     "question_mark_chain",  // chained `?`
     "aliasing1",            // multi-level reference aliasing (`&&&x`)
-    "hatra2",               // multi-fn ownership / borrow scenario
     "anonymous_call",       // fn returning &'static str fed into a method
     "vec_macro",            // `let v = vec![…]` RHS
     "assert_call_dot",      // call inside `assert!(…)` emits its event
@@ -1010,6 +1009,37 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "may have been moved (consumed in at least one branch above)",
+        ],
+    },
+
+    // ─── `?` operator (#140) ────────────────────────────────────────
+    TooltipExpect {
+        name: "question_mark",
+        // `let n: i32 = "5".parse()?;` — the `?` desugar's Match is
+        // unwrapped to its operand, so `n` is a copy out of the
+        // `parse` call. Pre-fix match_rhs walked the desugar's
+        // synthetic arms and emitted two anonymous "n is bound to a
+        // value" Binds on line 2 with no arrow from `parse`.
+        must_contain: &[
+            "Copy from parse to n",
+            "n is initialized by copy from parse",
+            "Copy from n to Ok",
+        ],
+        must_not_contain: &[
+            "n is bound to a value",
+        ],
+    },
+    TooltipExpect {
+        name: "question_mark_chain",
+        // `let n = "5".parse::<i32>().map(|x| x + 1)?;` — same
+        // shape, with the source being the outermost call in the
+        // chain (`map`).
+        must_contain: &[
+            "Copy from map to n",
+            "n is initialized by copy from map",
+        ],
+        must_not_contain: &[
+            "n is bound to a value",
         ],
     },
 ];

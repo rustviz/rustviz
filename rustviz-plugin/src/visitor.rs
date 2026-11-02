@@ -1425,9 +1425,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     //
     // For other init shapes the original ordering (visit RHS for
     // side effects, then register LHS) stays — there's no Branch
-    // event to fold the bind into.
+    // event to fold the bind into. That includes `let n = e?;`:
+    // the `?` lowers to a `MatchSource::TryDesugar` match, but
+    // visit_expr emits no Branch for it and match_rhs unwraps it to
+    // `e`, so it wants the plain visit-then-bind order (visiting `e`
+    // first registers the callee, which gives the bind its source).
     let init_is_branching = !is_skipped
-      && matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..));
+      && match init.kind {
+        ExprKind::If(..) => true,
+        ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) => false,
+        ExprKind::Match(..) => true,
+        _ => false,
+      };
     if init_is_branching {
       self.bind_pat(pat, init, is_skipped);
       self.visit_expr(init);

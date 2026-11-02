@@ -859,10 +859,13 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned()
         }
       };
-      // A path that doesn't resolve to a registered RAP — most
-      // commonly a synthetic local introduced by the `?` operator's
-      // desugar (`Ok(val) => val, ...`) — gets an Anonymous source.
-      // Without this fallback the plugin panics on `let n = expr?`.
+      // Last-resort fallback: a path that doesn't resolve to a
+      // registered RAP gets an Anonymous source instead of
+      // panicking. The `?` desugar used to be the main way to land
+      // here (the synthetic `val` in `Continue(val) => val`), but
+      // the Match arm below now unwraps `?` to its operand before
+      // we get this far. If this fires, some other desugaring is
+      // leaking a synthetic local — worth a look, hence the warn.
       match self.raps.get(&rhs_name) {
         Some(rd) => {
           let rhs_rap = rd.rap.to_owned();
@@ -870,6 +873,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
         }
         None => {
+          warn!(
+            "match_rhs: path `{}` (line {}) has no registered RAP; binding {} from an anonymous source",
+            rhs_name, line_num, lhs.name()
+          );
           self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
         }
       }
@@ -1092,7 +1099,39 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // through that arm. Pre-fix this fell through silently and a
     // match-as-rhs binding got zero move/copy arrows, even though
     // the equivalent if/else form rendered fine (issue #87).
-    ExprKind::Match(_, arms, _) => {
+    //
+    // Exception: the `?` operator. On the pinned nightly `e?`
+    // lowers to
+    //
+    //   match Try::branch(e) {                      // MatchSource::TryDesugar
+    //     ControlFlow::Break(residual) => return FromResidual::from_residual(residual),
+    //     ControlFlow::Continue(val) => val,
+    //   }
+    //
+    // Neither arm is user code: the Break arm diverges (it never
+    // produces the value bound to `lhs`), and the Continue arm's
+    // `val` is a synthetic local with no RAP. Walking them emitted
+    // two anonymous Binds on the same line and lost the call the
+    // value actually came from. Instead, pair `lhs` with `e`, the
+    // argument of the `Try::branch(..)` scrutinee, as if the `?`
+    // weren't there.
+    ExprKind::Match(scrutinee, arms, source) => {
+      if let rustc_hir::MatchSource::TryDesugar(_) = source {
+        match scrutinee.kind {
+          ExprKind::Call(_, [operand]) => {
+            self.match_rhs(lhs, operand, evt);
+          }
+          _ => {
+            // Not the shape we expect from lower_expr_try. Don't
+            // walk the synthetic arms; bind anonymously at the `?`
+            // expression's line instead.
+            warn!("match_rhs: unexpected `?` desugar scrutinee {:?}", scrutinee.kind);
+            let line_num = span_to_line(&rhs.span, &self.tcx);
+            self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+          }
+        }
+        return;
+      }
       for arm in arms.iter() {
         self.match_rhs(lhs.clone(), arm.body, evt.clone());
       }
