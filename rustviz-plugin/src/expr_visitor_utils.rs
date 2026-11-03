@@ -109,8 +109,19 @@ pub fn bool_of_mut (m: Mutability) -> bool {
 }
 
 
+/// Line (in the user's file) where `span` starts. Spans produced by a
+/// macro expansion (`println!(..)`, `vec![..]`, ..) point into the
+/// macro's definition — for std macros a line in libstd, which the
+/// renderer then places far below the SVG. `source_callsite` maps
+/// them back to the macro call the user wrote; plain spans are
+/// returned unchanged.
 pub fn span_to_line(span:&Span, tcx: &TyCtxt) -> usize{
-  tcx.sess.source_map().lookup_char_pos(span.lo()).line
+  tcx.sess.source_map().lookup_char_pos(span.source_callsite().lo()).line
+}
+
+/// Line (in the user's file) where `span` ends; see `span_to_line`.
+pub fn span_end_line(span:&Span, tcx: &TyCtxt) -> usize{
+  tcx.sess.source_map().lookup_char_pos(span.source_callsite().hi()).line
 }
 
 pub fn expr_to_line(expr:&Expr, tcx: &TyCtxt) -> usize{

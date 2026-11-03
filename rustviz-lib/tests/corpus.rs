@@ -211,6 +211,13 @@ const EXPECTED_OK: &[&str] = &[
     "str_literal_ref",
     "match_str_literal_arms",
     "cell_ref_return",
+    // — Compiler-generated code stays out of the diagram: derived
+    //   impls draw no timelines, macro-bodied match arms end on the
+    //   arm's own line, Copy returns read as copies.
+    "derive_debug",
+    "match_arm_macro_body",
+    "copy_return_param",
+    "return_shared_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -245,11 +252,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "copy2Caller",
+        // `y: u32` is Copy: returning it copies the value out. This
+        // entry used to pin the arrow's "moved to the caller" text.
         must_contain: &[
             "Copy from f to x",
+            "y's resource is copied to the caller",
+        ],
+        must_not_contain: &[
             "y's resource is moved to the caller",
         ],
-        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "copy_return_param",
+        // i32 and bool returns are copies, never moves.
+        must_contain: &[
+            "x's resource is copied to the caller",
+            "big's resource is copied to the caller",
+        ],
+        must_not_contain: &[
+            "x's resource is moved to the caller",
+            "big's resource is moved to the caller",
+        ],
+    },
+    TooltipExpect {
+        name: "return_shared_ref",
+        // Returning a `&T` copies the reference (references are Copy),
+        // never the String behind it. A returned String is still moved.
+        must_contain: &[
+            "a reference from s is returned to the caller; the data it points to is not copied",
+            "a reference from r is returned to the caller; the data it points to is not copied",
+            "t's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            "s's resource is copied to the caller",
+            "s's resource is moved to the caller",
+            "r's resource is copied to the caller",
+            "r's resource is moved to the caller",
+        ],
     },
     TooltipExpect {
         name: "reassign_with_drop",
@@ -1615,6 +1654,40 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s2 goes out of scope. Its resource is dropped.",
         ],
     },
+    // ─── Compiler-generated code ─────────────────────────────────────
+    TooltipExpect {
+        name: "derive_debug",
+        // `#[derive(Debug, Clone, PartialEq)]` generates `fmt(&self,
+        // f: &mut Formatter)`, `clone(&self)` and `eq(&self, other)`.
+        // None of that is user code, so no `f` / `other` columns.
+        // The hand-written `impl Rectangle` and `impl Display` still
+        // render (`out` is the Display impl's own parameter).
+        must_contain: &[
+            "self is an immutable borrow from the caller",
+            "out is a mutable borrow from the caller",
+            "area reads from rect1",
+        ],
+        must_not_contain: &[
+            "f, immutable",
+            "f holds a mutable reference",
+            "f is a mutable borrow from the caller",
+            "other, immutable",
+            "other is an immutable borrow from the caller",
+        ],
+    },
+    TooltipExpect {
+        name: "match_arm_macro_body",
+        // Bare-macro arm bodies (`Some(s) => println!(..)`): the
+        // bindings drop at the end of their arm. Position is checked
+        // by `match_arm_macro_body_stays_on_canvas`.
+        must_contain: &[
+            "Partial move from opt to s",
+            "s goes out of scope. Its resource is dropped.",
+            "n goes out of scope",
+            "e goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -1674,6 +1747,65 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         "{}: timeline has no tooltip-trigger elements (annotations missing)",
         name
     );
+    for (panel, svg) in [("code", &code), ("timeline", &timeline)] {
+        let off = off_canvas_ys(svg);
+        assert!(
+            off.is_empty(),
+            "{}: {} panel draws {} element(s) below the SVG height: {:?}",
+            name,
+            panel,
+            off.len(),
+            &off[..off.len().min(5)]
+        );
+    }
+}
+
+/// Every y coordinate (`y`, `y1`, `y2`, `cy`, and the y half of each
+/// `points` pair) that lies outside `0..=height` of the panel's root
+/// `<svg height="..">`. Elements out there are never visible: a
+/// macro-expansion span once put match-arm drops at y=4375 in a
+/// 370px panel.
+fn off_canvas_ys(svg: &str) -> Vec<String> {
+    let num = |v: &str| v.trim_end_matches("px").parse::<f64>().ok();
+    let root = &svg[..svg.find('>').unwrap_or(svg.len())];
+    let height = match root
+        .split("height=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .and_then(num)
+    {
+        Some(h) => h,
+        None => return vec!["<svg> has no height".to_string()],
+    };
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(eq) = rest.find("=\"") {
+        let attr_start = rest[..eq]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .map_or(0, |i| i + 1);
+        let attr = &rest[attr_start..eq];
+        let after = &rest[eq + 2..];
+        let end = after.find('"').unwrap_or(after.len());
+        let value = &after[..end];
+        let ys: Vec<f64> = match attr {
+            "y" | "y1" | "y2" | "cy" => num(value).into_iter().collect(),
+            "points" => value
+                .split(|c: char| c == ' ' || c == ',')
+                .filter(|t| !t.is_empty())
+                .filter_map(num)
+                .skip(1)
+                .step_by(2)
+                .collect(),
+            _ => Vec::new(),
+        };
+        for y in ys {
+            if !(0.0..=height).contains(&y) {
+                out.push(format!("{}={} (height {})", attr, y, height));
+            }
+        }
+        rest = &after[end.min(after.len())..];
+    }
+    out
 }
 
 /// Extract every tooltip text from a rendered timeline panel.
@@ -1795,6 +1927,22 @@ fn corpus_expected_tooltips_present() {
         EXPECTED_TOOLTIPS.len(),
         failures.join("\n  ")
     );
+}
+
+/// A match arm whose body is a bare macro call used to take its line
+/// range from the macro's expansion span (a line inside libstd), so
+/// the binding's drop and borrow-end were drawn far below the panel.
+/// `assert_well_formed` checks the same bound for every EXPECTED_OK
+/// snippet; this names the regression directly.
+#[test]
+fn match_arm_macro_body_stays_on_canvas() {
+    let rv = run_with_local_backend("match_arm_macro_body");
+    let timeline = rv.timeline_panel_string();
+    let off = off_canvas_ys(&timeline);
+    assert!(off.is_empty(), "elements below the timeline SVG: {:?}", off);
+    let code = rv.code_panel_string();
+    let off = off_canvas_ys(&code);
+    assert!(off.is_empty(), "elements below the code SVG: {:?}", off);
 }
 
 /// Visible text of an SVG fragment: tags stripped, the three entities the

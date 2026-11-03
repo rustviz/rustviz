@@ -1018,8 +1018,11 @@ impl Event {
                 }
             }
             // arrow going out
-            Event::Duplicate{ to ,..} => {
+            Event::Duplicate{ to, is, ..} => {
                 match to {
+                    // Returning a `&T` copies the reference, not the referent.
+                    ResourceTy::Caller if matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
+                        safe_message(hover_messages::event_dot_copy_ref_to_caller, &self.deref_name(my_name), to),
                     ResourceTy::Caller => safe_message(hover_messages::event_dot_copy_to_caller, &self.deref_name(my_name), to),
                     _ => safe_message(hover_messages::event_dot_copy_to, &self.deref_name(my_name), to)
                 }
