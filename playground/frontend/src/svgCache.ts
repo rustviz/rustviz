@@ -16,14 +16,31 @@
 // which is what you want: any change to the source could change the
 // rendering.
 //
-// Invalidation: the prerendered map ships with a `version` (the git
-// commit hash at build time). The runtime tier carries the version
-// it was created under. On boot we sweep any localStorage entries
-// whose version doesn't match the current build, so a fresh deploy
-// drops the entire user-side cache atomically and we never serve a
-// stale rendering against a newer plugin.
+// Invalidation: the prerendered map ships with a `version`, a hash of
+// the curated renderings *and* of the plugin that produced them
+// (crate version, pinned toolchain, and a digest of the installed
+// plugin/CLI binaries; see `pluginFingerprint` in prerender.ts). The
+// runtime tier carries the version it was created under. On boot we
+// sweep any localStorage entries whose version doesn't match the
+// current build, so a deploy with a changed plugin drops the entire
+// user-side cache atomically and we never serve a stale rendering
+// against a newer plugin, even if no curated example changed.
+//
+// Size: localStorage is ~5 MB per origin and is shared with the
+// user's saved examples (userExamples.ts) and, on GitHub Pages, with
+// everything else served from rustviz.github.io. Each rendering is
+// 15-60 KB, so the runtime tier is an LRU capped by entry count and
+// total size, and `setItemEvictingCache` lets more important writes
+// (the user's own code) evict cached renderings when the quota is hit.
 
-import prerendered from './prerendered.json';
+// `import.meta.glob` instead of a plain `import` so a fresh clone can
+// run `npm run dev` before `prerendered.json` exists (it is generated
+// by the `prebuild` hook and gitignored); the build-time tier is then
+// just empty. Production builds always run the prebuild first.
+const prerenderedModules = import.meta.glob<PrerenderManifest>('./prerendered.json', {
+  eager: true,
+  import: 'default',
+});
 
 export type SvgPair = {
   code_panel: string;
@@ -32,13 +49,44 @@ export type SvgPair = {
 
 type PrerenderManifest = {
   version: string;
+  /** Plugin identity the entries were rendered with (informational). */
+  plugin?: string;
   entries: Record<string, SvgPair>;
 };
 
-const PR = prerendered as PrerenderManifest;
+const PR: PrerenderManifest = prerenderedModules['./prerendered.json'] ?? {
+  version: 'no-prerender',
+  entries: {},
+};
 
 const RUNTIME_KEY_PREFIX = 'rustviz.svgcache.';
 const RUNTIME_VERSION_KEY = 'rustviz.svgcache.version';
+/** JSON array of `[hash, size]`, least recently used first. */
+const RUNTIME_INDEX_KEY = 'rustviz.svgcache.index';
+
+/** At most this many cached renderings... */
+export const MAX_ENTRIES = 50;
+/** ...and at most this many UTF-16 code units of them in total (~1/3 of
+ *  a 5 MB quota even if the browser counts 2 bytes per unit). */
+export const MAX_TOTAL_CHARS = 1_500_000;
+
+function isEntryKey(k: string | null): k is string {
+  return (
+    k !== null &&
+    k.startsWith(RUNTIME_KEY_PREFIX) &&
+    k !== RUNTIME_VERSION_KEY &&
+    k !== RUNTIME_INDEX_KEY
+  );
+}
+
+function entryKeys(): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (isEntryKey(k)) keys.push(k);
+  }
+  return keys;
+}
 
 /**
  * Drop every runtime cache entry tagged with a different build
@@ -51,19 +99,92 @@ function sweepStaleEntries(): void {
     const recordedVersion = localStorage.getItem(RUNTIME_VERSION_KEY);
     if (recordedVersion === PR.version) return; // already current
 
-    const toRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(RUNTIME_KEY_PREFIX) && k !== RUNTIME_VERSION_KEY) {
-        toRemove.push(k);
-      }
-    }
-    for (const k of toRemove) localStorage.removeItem(k);
+    for (const k of entryKeys()) localStorage.removeItem(k);
+    localStorage.removeItem(RUNTIME_INDEX_KEY);
     localStorage.setItem(RUNTIME_VERSION_KEY, PR.version);
   } catch {
     // localStorage disabled (private browsing, quota issues). The
     // cache silently degrades to "build-time tier only", which is
     // still a big win over no cache.
+  }
+}
+
+type IndexEntry = [hash: string, size: number];
+
+/**
+ * Read the LRU index, reconciled against the keys actually present:
+ * index rows whose entry is gone are dropped, and entries missing
+ * from the index (written by an older build, or by another tab that
+ * lost a race) are adopted as least recently used. Re-read on every
+ * mutation rather than cached in memory so two open tabs can't
+ * resurrect each other's evictions.
+ */
+function readIndex(): IndexEntry[] {
+  const present = new Set(entryKeys().map(k => k.slice(RUNTIME_KEY_PREFIX.length)));
+  let rows: IndexEntry[] = [];
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(RUNTIME_INDEX_KEY) ?? '[]');
+    if (Array.isArray(parsed)) {
+      rows = parsed.filter(
+        (r): r is IndexEntry =>
+          Array.isArray(r) && typeof r[0] === 'string' && typeof r[1] === 'number',
+      );
+    }
+  } catch {
+    // corrupt index: rebuild from the keys below
+  }
+  const seen = new Set<string>();
+  rows = rows.filter(([h]) => present.has(h) && !seen.has(h) && seen.add(h));
+  const orphans: IndexEntry[] = [];
+  for (const h of present) {
+    if (!seen.has(h)) {
+      orphans.push([h, localStorage.getItem(runtimeKey(h))?.length ?? 0]);
+    }
+  }
+  return [...orphans, ...rows];
+}
+
+function writeIndex(rows: IndexEntry[]): void {
+  try {
+    localStorage.setItem(RUNTIME_INDEX_KEY, JSON.stringify(rows));
+  } catch {
+    // The index is tiny; if even it doesn't fit, readIndex() will
+    // rebuild it from the entry keys next time.
+  }
+}
+
+/**
+ * Remove the least recently used cached rendering. Returns false if
+ * the runtime tier was already empty (or storage is unusable), so
+ * callers looping "evict until the write fits" terminate.
+ */
+export function evictOldest(): boolean {
+  try {
+    const rows = readIndex();
+    const oldest = rows.shift();
+    if (!oldest) return false;
+    localStorage.removeItem(runtimeKey(oldest[0]));
+    writeIndex(rows);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `localStorage.setItem` that, when the write throws (quota exceeded),
+ * evicts cached renderings oldest-first and retries until it fits or
+ * the cache is empty. Returns whether the value was stored. For data
+ * that matters more than the cache, i.e. the user's own examples.
+ */
+export function setItemEvictingCache(key: string, value: string): boolean {
+  for (;;) {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch {
+      if (!evictOldest()) return false;
+    }
   }
 }
 
@@ -84,6 +205,15 @@ async function sha256Hex(s: string): Promise<string> {
 
 function runtimeKey(hash: string): string {
   return RUNTIME_KEY_PREFIX + hash;
+}
+
+/** Mark `hash` most recently used (no-op if it isn't indexed). */
+function touch(hash: string): void {
+  const rows = readIndex();
+  const at = rows.findIndex(([h]) => h === hash);
+  if (at < 0 || at === rows.length - 1) return;
+  rows.push(...rows.splice(at, 1));
+  writeIndex(rows);
 }
 
 /**
@@ -108,6 +238,7 @@ export async function get(code: string): Promise<SvgPair | null> {
       typeof (parsed as SvgPair).code_panel === 'string' &&
       typeof (parsed as SvgPair).timeline_panel === 'string'
     ) {
+      touch(hash);
       return parsed as SvgPair;
     }
   } catch {
@@ -122,19 +253,43 @@ export async function get(code: string): Promise<SvgPair | null> {
  * is exactly the dropdown list, so any successful API render is by
  * definition a user-side snippet.
  *
- * Storage failure is silent: localStorage might be full, disabled,
- * or in a private-browsing mode that quota-throttles it. Either way
- * the SPA already has the rendering from the API response in memory
- * for this session; missing the persistent cache just means a re-run
- * later will re-pay the API cost.
+ * Evicts least-recently-used renderings to stay within
+ * `MAX_ENTRIES` / `MAX_TOTAL_CHARS`, and further if the browser
+ * still reports the quota exceeded. Failure is otherwise silent: the
+ * SPA already has the rendering in memory for this session; missing
+ * the persistent cache just means a re-run later will re-pay the API
+ * cost. This never evicts anything but cached renderings.
  */
 export async function put(code: string, pair: SvgPair): Promise<void> {
   const hash = await sha256Hex(code);
   if (PR.entries[hash]) return;
+  const value = JSON.stringify(pair);
+  if (value.length > MAX_TOTAL_CHARS) return;
   try {
-    localStorage.setItem(runtimeKey(hash), JSON.stringify(pair));
+    const rows = readIndex().filter(([h]) => h !== hash);
+    let total = rows.reduce((n, [, size]) => n + size, value.length);
+    while (rows.length > 0 && (rows.length >= MAX_ENTRIES || total > MAX_TOTAL_CHARS)) {
+      const [h, size] = rows.shift()!;
+      localStorage.removeItem(runtimeKey(h));
+      total -= size;
+    }
+    for (;;) {
+      try {
+        localStorage.setItem(runtimeKey(hash), value);
+        break;
+      } catch {
+        const oldest = rows.shift();
+        if (!oldest) {
+          writeIndex(rows);
+          return; // doesn't fit even with the cache empty
+        }
+        localStorage.removeItem(runtimeKey(oldest[0]));
+      }
+    }
+    rows.push([hash, value.length]);
+    writeIndex(rows);
   } catch {
-    // Quota / disabled. See comment above.
+    // localStorage disabled. See comment above.
   }
 }
 
@@ -144,14 +299,19 @@ export async function put(code: string, pair: SvgPair): Promise<void> {
  * surface that. Kept here so the implementation details don't leak
  * out into App.tsx.
  */
-export function stats(): { prebuilt: number; runtime: number; version: string } {
+export function stats(): {
+  prebuilt: number;
+  runtime: number;
+  runtimeChars: number;
+  version: string;
+  plugin: string | undefined;
+} {
   let runtime = 0;
+  let runtimeChars = 0;
   try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(RUNTIME_KEY_PREFIX) && k !== RUNTIME_VERSION_KEY) {
-        runtime += 1;
-      }
+    for (const [, size] of readIndex()) {
+      runtime += 1;
+      runtimeChars += size;
     }
   } catch {
     // ignore
@@ -159,6 +319,8 @@ export function stats(): { prebuilt: number; runtime: number; version: string } 
   return {
     prebuilt: Object.keys(PR.entries).length,
     runtime,
+    runtimeChars,
     version: PR.version,
+    plugin: PR.plugin,
   };
 }

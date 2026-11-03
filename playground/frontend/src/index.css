@@ -205,6 +205,31 @@ code {
   flex-shrink: 0;
 }
 
+/* Non-blocking "your edits aren't being saved" notice between the
+   toolbar and the editor (see saveUserExamples). */
+.storage-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #5c3d00;
+  background: #fff4d6;
+  border-bottom: 1px solid #f0d58c;
+  flex-shrink: 0;
+}
+.storage-warning span { flex: 1; }
+.storage-warning-dismiss {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
 .example-picker {
   display: flex;
   align-items: center;
