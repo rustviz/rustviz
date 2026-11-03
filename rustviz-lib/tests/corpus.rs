@@ -275,6 +275,9 @@ const EXPECTED_OK: &[&str] = &[
     // A String moved into a field of a method call's result, and a
     // nested field write through one (from closed PR #186).
     "field_of_method_result_assign",
+    // A struct item between two fns (#231): main's variables used to
+    // reuse helper's RAP hashes, and here the renderer panicked.
+    "struct_after_fn_panic",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2420,6 +2423,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from a to x",
         ],
     },
+
+    // ─── Struct item between fns (#231) ─────────────────────────────
+    TooltipExpect {
+        name: "struct_after_fn_hashes",
+        // main's s and t have their own columns. Before #231 they
+        // shared helper's b and c columns (helper's ninth binding
+        // pushed the RAP hash counter past 9, and the struct's field
+        // wrapped it back), so main read as b and c, including a
+        // borrow by helper's i32 `a` that the program never makes.
+        must_contain: &[
+            "s is the owner of the resource",
+            "t is the owner of the resource",
+            "Move from s to t",
+            "t goes out of scope. Its resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a immutably borrows a resource",
+            "b's resource is moved",
+            "c acquires ownership of a resource",
+            "b goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -2686,11 +2712,15 @@ fn corpus_expected_tooltips_present() {
 ///   * `overlapping_borrow_regions`: grouping chained borrows into
 ///     regions depended on set order, which changed which return
 ///     arrows were drawn at all.
+///   * `struct_after_fn_hashes` (#231): two RAPs shared a hash, and
+///     the fn line kept for that hash (which places the column labels)
+///     was whichever one the HashMap visited last.
 const DETERMINISM_CASES: &[&str] = &[
     "str_literal_copy",
     "basic_deref3",
     "multiple_imm_borrows",
     "overlapping_borrow_regions",
+    "struct_after_fn_hashes",
 ];
 const DETERMINISM_RUNS: usize = 6;
 
