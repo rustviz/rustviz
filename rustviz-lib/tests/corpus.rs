@@ -1409,19 +1409,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "unsafe_raw_ptr",
         // Raw-pointer code through an `unsafe` block. The plugin
-        // doesn't model raw pointers, so this pins current,
-        // known-imperfect output rather than correct semantics:
-        // the deref-write `*p = 2` surfaces as "*p is bound to a
-        // value" at the start of p's column (it's really a write to
-        // x), and the `let p = &mut x as *mut i32` line shows
-        // nothing (no borrow of x, no binding of p). Mainly guards
-        // against a future change panicking on raw pointers; update
-        // these strings if raw-pointer handling is ever fixed.
+        // doesn't model raw pointers (#194): the `let p = &mut x as
+        // *mut i32` line shows no borrow of x, and p's lifeline isn't
+        // tied to x. The write `*p = 2` is described correctly, as a
+        // modification through *p (it used to read "*p is bound to a
+        // value", as if *p were a fresh binding; #167's wording fixed
+        // that). Mainly guards against a future change panicking on
+        // raw pointers; update these strings when #194 is fixed.
         must_contain: &[
             "x is bound to a value",
-            "*p is bound to a value",
+            "the resource p points to is modified through *p",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["*p is bound to a value"],
     },
     TooltipExpect {
         name: "static_mut_write",

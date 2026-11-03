@@ -253,8 +253,7 @@ rather than listed here.
 - `async` / `await`, and user-defined macros (only standard-library
   macros like `println!`, `vec!`, `assert!` are unwrapped).
 - Raw pointers aren't modelled: `let p = &mut x as *mut i32;` shows no
-  borrow of `x`, and a write `*p = 2` is drawn as `*p` getting a value
-  rather than as a write to `x`.
+  borrow of `x`, so a write `*p = 2` isn't connected to `x`.
 - `const` and `static` items get no column of their own; reading one
   shows only the binding it's read into.
 
