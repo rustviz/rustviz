@@ -229,6 +229,20 @@ const EXPECTED_OK: &[&str] = &[
     "self_method_user",
     "self_method_ref_receiver",
     "string_add_in_fn",
+    // Struct fields follow whole-struct moves / copies, struct update
+    // syntax and field-init shorthand (#174).
+    "struct_move_drop",
+    "struct_move_let",
+    "struct_move_fn_param",
+    "struct_update_syntax",
+    "struct_field_init_shorthand",
+    "struct_nested_whole_move",
+    "struct_copy_whole",
+    "struct_return_whole",
+    "struct_reassign_whole",
+    "struct_update_return",
+    "struct_partial_move_two",
+    "struct_literal_same_line_arrows",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -267,6 +281,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // entry used to pin the arrow's "moved to the caller" text.
         must_contain: &[
             "Copy from f to x",
+            // `y: u32` is Copy: returning it copies (the arrow's
+            // tooltip used to say "moved" regardless).
             "y's resource is copied to the caller",
         ],
         must_not_contain: &[
@@ -1913,6 +1929,192 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from b to +",
             "b's resource is moved",
             "b goes out of scope. No resource is dropped.",
+        ],
+    },
+    // ─── Struct fields follow whole-struct transfers (#174) ─────────
+    TooltipExpect {
+        name: "struct_move_drop",
+        // `drop(c)` moves `c` and with it `c.data`; nothing is left
+        // for `c.data` to drop at the end of main.
+        must_contain: &[
+            "Move from c to drop",
+            "c.data's resource is moved",
+            "c.data goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c.data goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_move_let",
+        // `let d = c;` moves each field into the matching field of `d`.
+        must_contain: &[
+            "Move from c to d",
+            "Move from c.data to d.data",
+            "Move from c.n to d.n",
+            "c.data goes out of scope. No resource is dropped.",
+            "d.data goes out of scope. Its resource is dropped.",
+            // Copy-typed field: plain scope end, nothing to drop.
+            "d.n goes out of scope",
+        ],
+        must_not_contain: &[
+            "c.data goes out of scope. Its resource is dropped.",
+            "d.data goes out of scope. No resource is dropped.",
+            "d.n goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_move_fn_param",
+        // Caller side: `c.data` moves with `c`. Callee side: the
+        // by-value param's field owns the String and drops it (both
+        // fns name their struct `c`, so only the moved-out message
+        // tells the two `c.data` columns apart here).
+        must_contain: &[
+            "Move from c to take",
+            "c.data's resource is moved",
+            "c.data goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "struct_update_syntax",
+        // `..user1` moves `username`, copies `active`, and leaves
+        // `user1.email` (overridden) owned by user1.
+        must_contain: &[
+            "Move from user1.username to user2.username",
+            "Copy from user1.active to user2.active",
+            "user1.username goes out of scope. No resource is dropped.",
+            "user1.email goes out of scope. Its resource is dropped.",
+            "user2.username goes out of scope. Its resource is dropped.",
+            "user2.active goes out of scope",
+        ],
+        must_not_contain: &[
+            "user1.username goes out of scope. Its resource is dropped.",
+            "user2.username goes out of scope. No resource is dropped.",
+            "user2.active goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_field_init_shorthand",
+        // `User { active: true, username, email }` as build_user's
+        // result: the shorthand fields move the parameters out.
+        must_contain: &[
+            "email's resource is moved to the caller",
+            "username's resource is moved to the caller",
+            "email goes out of scope. No resource is dropped.",
+            "u.email goes out of scope. Its resource is dropped.",
+            "u.username goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "email goes out of scope. Its resource is dropped.",
+            "username goes out of scope. Its resource is dropped.",
+            "u.email goes out of scope. No resource is dropped.",
+            "u.username goes out of scope. No resource is dropped.",
+            "u.active goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_nested_whole_move",
+        must_contain: &[
+            "Move from r to s",
+            "Move from r.a to s.a",
+            "Move from r.a.b to s.a.b",
+            "r.a.b goes out of scope. No resource is dropped.",
+            "s.a.b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "r.a.b goes out of scope. Its resource is dropped.",
+            "s.a.b goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_copy_whole",
+        // Copy struct: the fields are copied, the source stays usable.
+        must_contain: &[
+            "Copy from p to q",
+            "Copy from p.x to q.x",
+            "q.x is initialized by copy from p.x",
+            "q.x goes out of scope",
+        ],
+        must_not_contain: &[
+            "q.x goes out of scope. No resource is dropped.",
+            "p.x's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_return_whole",
+        must_contain: &[
+            "c's resource is moved to the caller",
+            "c.data's resource is moved to the caller",
+            "c.data goes out of scope. No resource is dropped.",
+            "x.data acquires ownership of a resource",
+            "x.data goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c.data goes out of scope. Its resource is dropped.",
+            "x.data goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_reassign_whole",
+        // `d = c;` drops the old `d.data` and moves `c.data` in.
+        must_contain: &[
+            "d acquires ownership of a new resource; its previous resource is dropped",
+            "d.data acquires ownership of a new resource; its previous resource is dropped",
+            "Move from c.data to d.data",
+            "c.data goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c.data goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_update_return",
+        // `User { name, ..u }` returned: `name`, `u.email` move and
+        // `u.active` copies to the caller; the overridden `u.name`
+        // is dropped with `u`. In main, `u1` (moved into rename) has
+        // nothing left and `u2`'s fields own the result.
+        must_contain: &[
+            "name's resource is moved to the caller",
+            "u.email's resource is moved to the caller",
+            "u.active's resource is copied to the caller",
+            "u.name goes out of scope. Its resource is dropped.",
+            "u.email goes out of scope. No resource is dropped.",
+            "u1.email goes out of scope. No resource is dropped.",
+            "u2.email goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "name goes out of scope. Its resource is dropped.",
+            "u.name goes out of scope. No resource is dropped.",
+            "u1.email goes out of scope. Its resource is dropped.",
+            "u2.email goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_partial_move_two",
+        // Partial moves keep working per field (unchanged by #174).
+        must_contain: &[
+            "Move from p.name to n",
+            "Copy from p.age to a",
+            "p.name goes out of scope. No resource is dropped.",
+            "p.nick goes out of scope. Its resource is dropped.",
+            "p.age goes out of scope",
+        ],
+        must_not_contain: &[
+            "p.name goes out of scope. Its resource is dropped.",
+            "p.nick goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_literal_same_line_arrows",
+        // Both arrows on the `let s = S { … }` line render.
+        must_contain: &[
+            "Move from String::from to s.b",
+            "Move from t to s.c",
+            "s.b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s.b goes out of scope. No resource is dropped.",
         ],
     },
 ];

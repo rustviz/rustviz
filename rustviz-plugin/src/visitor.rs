@@ -143,7 +143,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               };
               
               let line_num = expr_to_line(e, &self.tcx);
-              self.add_ev(line_num, evt, to_ro, from_ro, false);
+              if matches!(e.kind, ExprKind::Struct(..)) && !e.span.from_expansion() {
+                // `User { email, .. }` as the tail expression: the
+                // struct literal's field initialisers move/copy
+                // their sources into the returned value.
+                self.match_rhs(to_ro, e, evt);
+              } else {
+                self.add_ev(line_num, evt, to_ro, from_ro, false);
+              }
             }
           }
           _ => {}
@@ -226,6 +233,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         }
         self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id });
         *self.unique_id += 1;
+        // A by-value struct parameter owns its fields' resources too
+        // (and drops them at the end of the body unless moved on).
+        self.bind_struct_fields(line_num, &name);
         self.annotate_src(name.clone(), ident.span, false, *self.raps.get(&name).unwrap().rap.hash());
       }
       _ => {}
@@ -681,9 +691,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             None
           };
 
+        // Overwriting a whole struct drops the resources its fields
+        // still own too (`d = c;` drops the old `d.data`).
+        let field_drop_targets: Vec<ResourceAccessPoint> = match (&drop_target, &lhs_rty) {
+          (Some(rap @ ResourceAccessPoint::Struct(_)), ResourceTy::Value(_)) => {
+            self.struct_fields_holding_resource(rap.name())
+          }
+          _ => Vec::new(),
+        };
+
         self.match_rhs(lhs_rty.clone(), rhs_expr, e);
 
-        if let Some(rap) = drop_target {
+        for rap in drop_target.into_iter().chain(field_drop_targets) {
           self.add_external_event(line_num, ExternalEvent::OwnerDropAtReassign {
             ro: rap,
             id: *self.unique_id,
