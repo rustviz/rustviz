@@ -16,6 +16,10 @@ writes through `&mut` mutate the referent, drops happen at scope end).
   reading it as a Rust teacher would.
 - If a fixture deliberately pins known-wrong output, say so in a comment
   next to it.
+- The Rust Book corpus (`rustviz-lib/tests/book.rs`, snippets in
+  `rustviz-plugin/tests/book/`) tracks what main gets right and wrong on
+  127 Book-style programs; a fix PR moves its snippets' `known_wrong`
+  strings to `must_not_contain` (see `rustviz-plugin/tests/book/README.md`).
 - Corpus tests run the *installed* plugin (`cargo rv-plugin` on PATH), not
   the source tree. Reinstall after plugin changes:
   `cargo install --locked --path rustviz-plugin`, or the tests silently
