@@ -24,8 +24,8 @@ writes through `&mut` mutate the referent, drops happen at scope end).
 ## Keep the limitations lists in sync
 
 What RustViz can't do is documented in two places. A PR that changes what
-the plugin supports (fixes a crash, fixes wrong output, adds a construct,
-or discovers a new gap) updates both in the same PR:
+the plugin supports (fixes wrong output, adds a construct, or discovers a
+new gap) updates both in the same PR:
 
 1. `README.md` → **Limitations**, the canonical list. It describes `main`
    exactly, so each fix PR deletes or rewrites the bullets it fixes.
@@ -33,6 +33,16 @@ or discovers a new gap) updates both in the same PR:
    students see in the playground (a shorter, student-facing version).
 
 `rustviz-plugin/README.md` only links to the README list.
+
+**Crashes are not listed in either place.** A plugin panic on valid Rust
+is tracked only as a GitHub issue labelled `crash` (minimal repro, and the
+file:line of the panic). Both lists just link to
+[that issue search](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash).
+A PR that fixes a crash closes its issue ("Fixes #N") and adds the repro as
+a fixture in `rustviz-plugin/tests/` with a corpus entry in
+`rustviz-lib/tests/corpus.rs`, so the crash stays fixed. A crash fix
+doesn't touch the limitations lists, unless the program now renders with
+something wrong; that goes in the lists as usual.
 
 ## Bumping the toolchain
 

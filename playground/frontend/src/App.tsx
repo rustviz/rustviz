@@ -282,17 +282,18 @@ const Description: React.FC = () => (
         <code>Rc</code> clones each appear to drop the value.
       </li>
     </ul>
-    <p><strong>These crash the visualizer:</strong></p>
-    <ul>
-      <li>
-        Tuple fields (<code>t.0</code>) and tuple structs; unions.
-      </li>
-      <li>
-        Assigning to a field through a reference (<code>self.n += 1</code> in a{' '}
-        <code>&amp;mut self</code> method), to <code>v[i]</code>, to{' '}
-        <code>o.inner.x</code>, or through <code>*cell.borrow_mut()</code>.
-      </li>
-    </ul>
+    <p>
+      <strong>Some valid programs crash the visualizer.</strong> We track the
+      ones we know about as{' '}
+      <a
+        href="https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash"
+        target="_blank"
+        rel="noreferrer"
+      >
+        issues labelled <code>crash</code>
+      </a>
+      .
+    </p>
     <p><strong>Simplified or not shown:</strong></p>
     <ul>
       <li>

@@ -42,8 +42,9 @@ cargo install --path . --locked
 
 The authoritative list is in the top-level
 [`README.md`](../README.md#limitations) (mirrored in the playground's
-"Known limitations" panel). The checklist below is the plugin's
-implementation-level TODO list.
+"Known limitations" panel). Known crashes are tracked as [issues labelled
+`crash`](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash).
+The checklist below is the plugin's implementation-level TODO list.
 
 ### To fix / implement
 

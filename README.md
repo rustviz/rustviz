@@ -217,17 +217,10 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
 - Arrows for functions returning a `Copy` value say "moved to the
   caller" rather than "copied".
 
-**Crashes the plugin:**
-
-- Tuple field access (`t.0`) and tuple structs (`struct Color(u8, u8,
-  u8)`).
-- Assigning to a field through a reference: `self.n += 1` in a `&mut
-  self` method, or `c.n = …` where `c: &mut T`.
-- Assigning to a chained field (`o.inner.x = …`), an index (`v[i] = …`),
-  or a tuple destructure (`(a, b) = …`).
-- Union types.
-- `*cell.borrow_mut() += 1` and other assignments through a method's
-  result; nested constructors like `Cons(1, Box::new(Cons(2, …)))`.
+**Crashes the plugin:** some valid programs do. Known crashes are
+tracked as [issues labelled
+`crash`](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash)
+rather than listed here.
 
 **Simplified or not shown:**
 
