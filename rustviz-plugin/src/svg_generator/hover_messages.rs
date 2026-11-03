@@ -726,7 +726,7 @@ pub fn state_mut_ref_full_privilege(my_name: &String) -> String {
 pub fn state_static_ref_full_privilege(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} holds an immutable reference; it can read but not modify the borrowed resource",
+        "{0} holds an immutable reference; it can read the borrowed resource",
         my_name_fmt
     )
 }

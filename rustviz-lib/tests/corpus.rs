@@ -210,6 +210,7 @@ const EXPECTED_OK: &[&str] = &[
     "box_deref_assign",
     "str_literal_ref",
     "match_str_literal_arms",
+    "cell_ref_return",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -339,7 +340,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from map to count",
             "the resource count points to is modified through *count",
             "text is bound to an immutable reference",
-            "text holds an immutable reference; it can read but not modify the borrowed resource",
+            "text holds an immutable reference; it can read the borrowed resource",
         ],
         must_not_contain: &[
             "*count acquires ownership of a resource",
@@ -404,7 +405,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let s: &str = "hello";` — s borrows static string data.
         must_contain: &[
             "s is bound to an immutable reference",
-            "s holds an immutable reference; it can read but not modify the borrowed resource",
+            "s holds an immutable reference; it can read the borrowed resource",
             "t is initialized by copy from s",
         ],
         must_not_contain: &[
@@ -419,12 +420,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "msg is bound to an immutable reference",
             "msg is bound to an immutable reference (in all branches above)",
-            "msg holds an immutable reference; it can read but not modify the borrowed resource",
+            "msg holds an immutable reference; it can read the borrowed resource",
         ],
         must_not_contain: &[
             "msg acquired ownership of a resource (in all branches above)",
             "msg acquires ownership of a resource",
             "msg is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "cell_ref_return",
+        // `r: &Cell<i32>` (returned by a fn, so its lifeline is in
+        // FullPrivilege) is written through with `r.set(2)`. A shared
+        // reference to a Cell/RefCell/Mutex can modify the referent, so
+        // the lifeline must not claim r can't modify it, nor that r owns it.
+        must_contain: &[
+            "r holds an immutable reference; it can read the borrowed resource",
+        ],
+        must_not_contain: &[
+            "r holds an immutable reference; it can read but not modify the borrowed resource",
+            "r is the owner of the resource",
         ],
     },
     TooltipExpect {
