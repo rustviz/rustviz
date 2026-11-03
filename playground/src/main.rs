@@ -6,7 +6,7 @@ use actix_web::{
     HttpServer,
 };
 use std::net::IpAddr;
-use rustviz_lib::Rustviz;
+use rustviz_lib::{error_kind, ErrorKind, Rustviz};
 use serde::{Deserialize, Serialize};
 
 /// Hard cap on the JSON body Actix will accept on /submit-code.
@@ -42,26 +42,47 @@ async fn submit_code(payload: web::Json<SubmitCodePayload>) -> HttpResponse {
     // timeout). Run it on actix's blocking pool so the async workers keep
     // serving other requests (and the platform health check) meanwhile.
     let code = code.clone();
-    let result = web::block(move || Rustviz::new(&code).map_err(|e| e.to_string())).await;
+    let result = web::block(move || {
+        Rustviz::new(&code).map_err(|e| (error_kind(e.as_ref()), e.to_string()))
+    })
+    .await;
     match result {
         Ok(Ok(rv)) => HttpResponse::Ok().json(SubmitResponse {
             code_panel: rv.code_panel_string(),
             timeline_panel: rv.timeline_panel_string(),
         }),
-        Ok(Err(msg)) => {
-            // Timeouts and sandbox failures are ours; anything else is the
-            // user's code failing to compile or the plugin rejecting it.
-            if msg.starts_with("Visualization timed out") {
-                HttpResponse::GatewayTimeout().body(msg)
-            } else if msg.starts_with("Sandbox unavailable") || msg.starts_with("Invalid runner") {
-                eprintln!("runner failure: {}", msg);
-                HttpResponse::ServiceUnavailable().body("compile sandbox unavailable; try again shortly")
-            } else {
-                HttpResponse::InternalServerError().body(msg)
-            }
-        }
+        Ok(Err((kind, msg))) => error_response(kind, msg),
         Err(e) => HttpResponse::from_error(error::ErrorInternalServerError(e)),
     }
+}
+
+/// Response header naming the [`ErrorKind`] of a failed /submit-code
+/// (`does-not-compile`, `unsupported`, `timeout`, ...). The body stays the
+/// plain-text message, so frontends that predate the header still show it.
+const ERROR_KIND_HEADER: &str = "X-RustViz-Error-Kind";
+
+fn error_response(kind: ErrorKind, msg: String) -> HttpResponse {
+    let mut resp = match kind {
+        // The student's program, not the service: 422 Unprocessable Content.
+        ErrorKind::DoesNotCompile => HttpResponse::UnprocessableEntity(),
+        ErrorKind::Unsupported => {
+            // Which constructs crash the plugin, for triage. The message
+            // names the plugin source location, not the user's code.
+            eprintln!("unsupported: {}", msg);
+            HttpResponse::UnprocessableEntity()
+        }
+        ErrorKind::Timeout => HttpResponse::GatewayTimeout(),
+        ErrorKind::SandboxUnavailable => {
+            eprintln!("runner failure: {}", msg);
+            return HttpResponse::ServiceUnavailable()
+                .insert_header((ERROR_KIND_HEADER, kind.as_str()))
+                .body("compile sandbox unavailable; try again shortly");
+        }
+        _ => HttpResponse::InternalServerError(),
+    };
+    resp.insert_header((ERROR_KIND_HEADER, kind.as_str()))
+        .content_type("text/plain; charset=utf-8")
+        .body(msg)
 }
 
 /// Rate-limit key: the real client IP.
@@ -168,6 +189,8 @@ async fn main() -> std::io::Result<()> {
             .allowed_origin("http://127.0.0.1:3000")
             .allowed_methods(["GET", "POST", "OPTIONS"])
             .allowed_headers([header::CONTENT_TYPE])
+            // Cross-origin JS can only read response headers listed here.
+            .expose_headers([ERROR_KIND_HEADER])
             .max_age(3600);
 
         App::new()
@@ -187,4 +210,38 @@ async fn main() -> std::io::Result<()> {
     .bind(bind_addr)?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::http::StatusCode;
+
+    fn kind_header(resp: &HttpResponse) -> &str {
+        resp.headers()
+            .get(ERROR_KIND_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    }
+
+    #[test]
+    fn student_errors_are_422_with_kind_header() {
+        for kind in [ErrorKind::DoesNotCompile, ErrorKind::Unsupported] {
+            let resp = error_response(kind, "msg".to_string());
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(kind_header(&resp), kind.as_str());
+        }
+    }
+
+    #[test]
+    fn service_errors_keep_their_statuses() {
+        let resp = error_response(ErrorKind::Timeout, "Visualization timed out".to_string());
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(kind_header(&resp), "timeout");
+        let resp = error_response(ErrorKind::SandboxUnavailable, "Sandbox unavailable: x".to_string());
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let resp = error_response(ErrorKind::Other, "boom".to_string());
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(kind_header(&resp), "other");
+    }
 }

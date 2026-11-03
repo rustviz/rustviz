@@ -38,6 +38,19 @@ rustup toolchain install nightly-2026-05-01 \
 cargo install --path . --locked
 ```
 
+## When the plugin crashes
+
+A panic inside the visitor is reported as a single rustc error line,
+
+```text
+error: rustviz: unsupported: RustViz can't visualize this program yet (internal error at visitor.rs:628: <panic message>). Please report it at https://github.com/rustviz/rustviz/issues with your snippet.
+```
+
+which `rustviz-lib` turns into an "unsupported" error (the playground,
+CLI and mdbook preprocessor show it to the user). To get the stock panic
+output with a backtrace while debugging, set `RUSTVIZ_DEBUG=1` or
+`RUST_BACKTRACE=1`.
+
 ## Limitations
 
 The authoritative list is in the top-level

@@ -1,0 +1,8 @@
+
+thread 'rustc' (14075476) panicked at rustviz-plugin/src/expr_visitor.rs:862:46:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: could not compile `user-code` (lib)
+
+Caused by:
+  process didn't exit successfully: `/home/user/.cargo/bin/rv-plugin-driver /home/user/.rustup/toolchains/nightly-2025-08-20-aarch64-apple-darwin/bin/rustc --crate-name user_code --edition=2024 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=19f895746444b5d2 -C extra-filename=-f5d61219f4f5b82d --out-dir /tmp/.tmpAbC123/user-code/target/plugin-nightly-2025-08-20/debug/deps -C incremental=/tmp/.tmpAbC123/user-code/target/plugin-nightly-2025-08-20/debug/incremental -L dependency=/tmp/.tmpAbC123/user-code/target/plugin-nightly-2025-08-20/debug/deps` (exit status: 101)

@@ -124,7 +124,13 @@ fn stem(input: &Path) -> Result<String> {
 fn render(input: &Path) -> Result<Rustviz> {
     let code = fs::read_to_string(input)
         .with_context(|| format!("failed to read {}", input.display()))?;
-    Rustviz::new(&code).map_err(|e| anyhow!(e.to_string()))
+    // rustviz-lib shows the generated crate's file as "your code"; here
+    // there is a real file, so point the diagnostics at it.
+    Rustviz::new(&code).map_err(|e| {
+        anyhow!(e
+            .to_string()
+            .replace("--> your code:", &format!("--> {}:", input.display())))
+    })
 }
 
 fn render_svg(input: &Path, output_dir: Option<&Path>) -> Result<()> {

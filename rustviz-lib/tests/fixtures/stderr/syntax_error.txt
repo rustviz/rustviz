@@ -1,0 +1,9 @@
+error: expected expression, found `;`
+ --> src/lib.rs:1:21
+  |
+1 | fn main() { let x = ; }
+  |                     ^ expected expression
+  |
+  = note: -Ztrack-diagnostics: created at compiler/rustc_parse/src/parser/diagnostics.rs:2430:34
+
+error: could not compile `user-code` (lib) due to 1 previous error

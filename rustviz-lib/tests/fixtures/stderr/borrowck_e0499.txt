@@ -1,0 +1,15 @@
+error[E0499]: cannot borrow `s` as mutable more than once at a time
+ --> src/lib.rs:5:14
+  |
+4 |     let r1 = &mut s;
+  |              ------ first mutable borrow occurs here
+5 |     let r2 = &mut s;
+  |              ^^^^^^ second mutable borrow occurs here
+6 |
+7 |     println!("{}, {}", r1, r2);
+  |                        -- first borrow later used here
+  |
+  = note: -Ztrack-diagnostics: created at compiler/rustc_borrowck/src/borrowck_errors.rs:61:23
+
+For more information about this error, try `rustc --explain E0499`.
+error: could not compile `user-code` (lib) due to 1 previous error
