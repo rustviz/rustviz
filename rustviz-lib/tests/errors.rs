@@ -92,6 +92,9 @@ fn run_plugin_raw(src: &str) -> (bool, String) {
         .current_dir(&crate_dir)
         // The developer escape hatches restore the full panic output.
         .env_remove("RUST_BACKTRACE")
+        // CI sets CARGO_TERM_COLOR=always; rustviz-lib forces "never" for
+        // user-facing output, so do the same here.
+        .env("CARGO_TERM_COLOR", "never")
         .env_remove("RUSTVIZ_DEBUG")
         .output()
         .unwrap();

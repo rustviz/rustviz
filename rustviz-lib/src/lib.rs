@@ -669,6 +669,9 @@ fn run_local(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
     let output = Command::new("cargo")
         .arg("rv-plugin")
+        // Plain diagnostics: these end up in user-facing error cards, and
+        // CI (or a user's shell) may set CARGO_TERM_COLOR=always.
+        .env("CARGO_TERM_COLOR", "never")
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

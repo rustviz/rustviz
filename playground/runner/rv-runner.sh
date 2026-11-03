@@ -41,6 +41,8 @@ cat > src/lib.rs
 # announced on stderr with a sentinel the server matches on
 # (rustviz-lib::RUNNER_TIMEOUT_SENTINEL).
 set +e
+# Plain diagnostics (no ANSI colour codes) for the user-facing error card.
+export CARGO_TERM_COLOR=never
 timeout -s KILL "${RV_INNER_TIMEOUT_SECS:-18}" cargo rv-plugin
 rc=$?
 set -e
