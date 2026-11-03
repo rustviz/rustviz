@@ -625,7 +625,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if expr.span.from_expansion() {
           return;
         }
-        let r = &self.raps.get(&name).unwrap().rap.clone();
+        // A local that was never registered as a RAP, e.g. one bound by
+        // an `if let` guard on a match arm (stable since Rust 1.95; guards
+        // aren't visited, see README Limitations). Skip the use rather
+        // than crash the whole render.
+        let Some(rap) = self.raps.get(&name) else {
+          log::warn!("use of unregistered local `{}`; skipping", name);
+          return;
+        };
+        let r = &rap.rap.clone();
         let line_num = span_to_line(&p.span, &self.tcx);
         self.update_rap(r, line_num);
       }
