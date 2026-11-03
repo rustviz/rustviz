@@ -602,7 +602,7 @@ pub fn is_implicit_mut_reborrow(expr: &Expr, typeck: &TypeckResults) -> bool {
 
 /// True iff the type of `call` (a call / method-call expression)
 /// mentions a lifetime, so the call's result may carry a borrow that
-/// outlives the call itself (`let w = first(r);` keeps `r` frozen
+/// outlives the call itself (`let w = first(r);` keeps `r` unusable
 /// until `w`'s last use, not just until `first` returns).
 pub fn call_result_has_lifetime(call: &Expr, typeck: &TypeckResults) -> bool {
   typeck.expr_ty(call).walk().any(|arg| arg.as_region().is_some())

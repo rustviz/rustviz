@@ -230,13 +230,13 @@ pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_o
 // note is the pedagogical payload — `&mut T` is exclusive, so X
 // is unusable (not just read-only) while the loan is live. Same
 // "while the borrow is live" phrasing as `event_dot_static_lend`,
-// for the same reason, so a reader can spot the read-only-vs-frozen
+// for the same reason, so a reader can spot the read-only-vs-unusable
 // distinction by hovering both kinds.
 pub fn event_dot_mut_lend(my_name: &String, target_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
     format!(
-        "{0}'s resource is mutably borrowed by {1}; {0} is frozen while the borrow is live",
+        "{0}'s resource is mutably borrowed by {1}; {0} can't be used while the borrow is live",
         my_name_fmt, target_name_fmt
     )
 }

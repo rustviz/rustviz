@@ -1252,7 +1252,7 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
             if *is_partial { String::from("Partial Mutable borrow") }
             else if to.is_closure() { String::from("Closure capture (mutable borrow)") }
             // Reborrow: `let r2 = &mut *r;` with r: `&mut T` borrows
-            // *through* r — r is frozen while r2 is live and usable
+            // *through* r — r can't be used while r2 is live and usable
             // again afterwards. Distinct from `&mut r`, which is a
             // fresh borrow of the variable r itself (r2: `&mut &mut T`).
             else if *is_reborrow { String::from("Mutable reborrow") }

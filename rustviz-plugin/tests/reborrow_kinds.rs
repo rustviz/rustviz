@@ -7,7 +7,7 @@
 fn main() {
     let mut a = String::from("a");
     let ra = &mut a;
-    let ra2 = &mut *ra;     // mutable reborrow: ra frozen while ra2 is live
+    let ra2 = &mut *ra;     // mutable reborrow: ra unusable while ra2 is live
     ra2.push_str("!");
     ra.push_str("?");
 

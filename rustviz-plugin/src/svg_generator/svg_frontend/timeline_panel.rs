@@ -1621,7 +1621,7 @@ fn render_arrow (
                     // Reborrow note for the call-dot tooltip. `f(r)`
                     // with r: `&mut T` and f taking `&mut T` is
                     // compiler-rewritten to `f(&mut *r)`: r isn't
-                    // moved, it's frozen while the reborrow is live
+                    // moved, it's unusable while the reborrow is live
                     // and usable again afterwards. When f's result
                     // can't carry a borrow, the reborrow ends when f
                     // returns; otherwise (`let w = first(r);`) it can
@@ -1631,11 +1631,11 @@ fn render_arrow (
                     // read-only before, during and after the call.
                     let reborrow_suffix: String = match external_event {
                         ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: false, .. } => format!(
-                            " (mutable reborrow — {} is frozen until {} returns)",
+                            " (mutable reborrow — {} can't be used until {} returns)",
                             styled_from_name, styled_fn_name,
                         ),
                         ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: true, .. } => format!(
-                            " (mutable reborrow — {} is frozen while the reborrow is live)",
+                            " (mutable reborrow — {} can't be used while the reborrow is live)",
                             styled_from_name,
                         ),
                         _ => String::new(),

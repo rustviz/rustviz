@@ -16,7 +16,7 @@ fn take<T>(t: T) {}
 fn main() {
     let mut s = String::from("s");
     let y = &mut s;
-    push(y);                // implicit reborrow: y frozen until push returns
+    push(y);                // implicit reborrow: y unusable until push returns
     let w = first(y);       // reborrow kept alive by w, past first's return
     w.push_str("?");
     take(y);                // generic T: y is moved, not reborrowed
