@@ -303,6 +303,10 @@ const Description: React.FC = () => (
         <code>async</code>/<code>await</code> aren&apos;t visualized.
       </li>
       <li>
+        Writes to a field through a reference (<code>self.n += 1</code> in a{' '}
+        <code>&amp;mut self</code> method) or to <code>v[i]</code> aren&apos;t drawn.
+      </li>
+      <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)
         and unions are drawn as a single owner; a write through{' '}
         <code>*cell.borrow_mut()</code> shows only the call, as a read.
