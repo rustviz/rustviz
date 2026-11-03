@@ -22,8 +22,8 @@ clap = {version = "4.4", features = ["derive"]}
 serde = {version = "1", features = ["derive"]}
 anyhow = "1.0.0"
 log = "0.4"
-rustc_utils = {version = "0.14.3-nightly-2025-08-20"}
-rustc_plugin = {version = "0.14.3-nightly-2025-08-20"}
+rustc_utils = {version = "0.15.2-nightly-2026-05-01"}
+rustc_plugin = {version = "0.15.2-nightly-2026-05-01"}
 simplelog = "0.11"
 handlebars = "3.0.1"
 

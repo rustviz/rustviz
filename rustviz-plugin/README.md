@@ -32,7 +32,7 @@ rustviz init
 To install from source against a local checkout:
 
 ```sh
-rustup toolchain install nightly-2025-08-20 \
+rustup toolchain install nightly-2026-05-01 \
     --profile minimal \
     --component rust-src,rustc-dev,llvm-tools-preview
 cargo install --path . --locked

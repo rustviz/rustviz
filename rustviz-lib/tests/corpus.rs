@@ -146,6 +146,10 @@ const EXPECTED_OK: &[&str] = &[
     "mv_back",              // shadow-after-move pattern
     "mutAssignOp",          // `x += 5` compound assignment
     "mutableReferences",    // `change(&mut s)` minimal mut-ref fn call
+    // `if let` guards on match arms (stable since 1.95). The guard isn't
+    // visualized, but the program must render (it used to crash on the
+    // guard-bound variable).
+    "match_if_let_guard",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1278,4 +1282,18 @@ fn code_panel_shows_source_verbatim() {
         "marker code points leaked into output"
     );
     assert!(!code.contains("<b_]"), "user text became markup:\n{}", code);
+}
+
+/// A failing compile must surface as an error carrying rustc's diagnostic,
+/// not as empty output. rustc_plugin 0.15 changed `cli_main` /
+/// `driver_main` to *return* an `ExitCode`; dropping it made every failure
+/// (compile errors and plugin panics alike) exit 0 with empty stdout,
+/// which reached users as "Unexpected output format".
+#[test]
+fn compile_errors_are_reported_not_swallowed() {
+    env::set_var("RV_RUNNER", "local");
+    let err = Rustviz::new("fn f() {\n    let x: i32 = \"not a number\";\n}\n")
+        .expect_err("a type error must not render");
+    let msg = err.to_string();
+    assert!(msg.contains("mismatched types"), "expected rustc's diagnostic, got:\n{}", msg);
 }

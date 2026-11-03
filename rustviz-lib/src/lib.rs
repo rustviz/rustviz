@@ -71,7 +71,7 @@ use tempfile::tempdir;
 /// below asserts they match when both exist.
 pub const TOOLCHAIN: &str = include_str!("../rust-toolchain.toml");
 
-/// Channel string from `rust-toolchain.toml` — e.g. `"nightly-2025-08-20"`.
+/// Channel string from `rust-toolchain.toml` — e.g. `"nightly-2026-05-01"`.
 /// Used by `rustviz init` to pin the `+toolchain` selector when
 /// invoking `cargo install` against the plugin.
 pub fn toolchain_channel() -> &'static str {

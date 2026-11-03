@@ -3,7 +3,7 @@
 # rustviz-runner — sandboxed execution image for the RustViz playground.
 #
 # The plugin must be built against the same nightly that rustc_private was
-# pinned to (nightly-2025-08-20), so we use a builder that installs that
+# pinned to (nightly-2026-05-01), so we use a builder that installs that
 # specific toolchain, then carry only the binaries + a matching runtime
 # toolchain into the final image. The host (playground) invokes:
 #
@@ -16,7 +16,7 @@
 # throwaway crate in /work, runs `cargo rv-plugin`, and prints the SVG
 # payload on stdout.
 
-ARG RUST_NIGHTLY=nightly-2025-08-20
+ARG RUST_NIGHTLY=nightly-2026-05-01
 
 # ---------- builder ----------
 FROM rust:1.83-bookworm AS builder

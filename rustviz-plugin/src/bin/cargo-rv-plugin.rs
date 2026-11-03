@@ -4,6 +4,8 @@
 
 extern crate rustc_driver;
 
-fn main() {
-  rustc_plugin::cli_main(rustviz_plugin::RVPlugin);
+// rustc_plugin >= 0.15 returns the exit code instead of calling exit();
+// it must be returned from main, or failures exit 0.
+fn main() -> std::process::ExitCode {
+  rustc_plugin::cli_main(rustviz_plugin::RVPlugin)
 }

@@ -9,7 +9,7 @@
 # Build context: repo root.
 #   docker build -f playground/cloudrun/Dockerfile .
 
-ARG RUST_NIGHTLY=nightly-2025-08-20
+ARG RUST_NIGHTLY=nightly-2026-05-01
 
 # ---------- builder ----------
 FROM rust:1.83-bookworm AS builder

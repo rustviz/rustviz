@@ -198,10 +198,11 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
       }
     }
     ExprKind::Struct(qpath, fields, _) => {
-      match qpath {
-        QPath::LangItem(..) => { return; }
-        _ => {}
-      }
+      // Compiler-desugared struct literals (e.g. `a..b` lowering to a
+      // `Range { start, end }`) have no user-written field names to annotate.
+      // (Older nightlies marked these with `QPath::LangItem`, since removed.)
+      let _ = qpath;
+      if expr.span.desugaring_kind().is_some() || expr.span.from_expansion() { return; }
       for field in fields.iter() {
         self.annotate_src(field.ident.to_string(), field.ident.span, false, *self.id_map.get(field.ident.as_str()).unwrap() as u64);
         self.annotate_expr(field.expr);
