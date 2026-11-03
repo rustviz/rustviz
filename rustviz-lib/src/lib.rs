@@ -377,13 +377,18 @@ fn clean_diagnostics(stderr: &str) -> String {
 
 /// Replace the generated crate's `src/lib.rs` (relative, as cargo reports
 /// it, or absolute, e.g. `/tmp/.tmpXYZ/user-code/src/lib.rs`) with
-/// `your code`, keeping any `:line:col` suffix.
+/// `your code`, keeping any `:line:col` suffix. Windows paths
+/// (`src\\lib.rs`, `C:\\...\\user-code\\src\\lib.rs`) are handled too.
 fn rewrite_crate_paths(line: &str) -> String {
-    const FILE: &str = "src/lib.rs";
+    const FILES: [&str; 2] = ["src/lib.rs", "src\\lib.rs"];
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
-    while let Some(i) = rest.find(FILE) {
-        let end = i + FILE.len();
+    while let Some((i, file)) = FILES
+        .iter()
+        .filter_map(|f| rest.find(f).map(|i| (i, *f)))
+        .min_by_key(|(i, _)| *i)
+    {
+        let end = i + file.len();
         let start = rest[..i]
             .rfind(|c: char| c.is_whitespace() || "`'\"(=".contains(c))
             .map_or(0, |j| j + 1);
@@ -392,7 +397,8 @@ fn rewrite_crate_paths(line: &str) -> String {
             .chars()
             .next()
             .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
-        let ours = token == FILE || token == "./src/lib.rs" || token.ends_with("user-code/src/lib.rs");
+        let norm = token.replace('\\', "/");
+        let ours = norm == "src/lib.rs" || norm == "./src/lib.rs" || norm.ends_with("user-code/src/lib.rs");
         out.push_str(&rest[..start]);
         if ours && boundary_ok {
             out.push_str("your code");
@@ -945,6 +951,10 @@ mod tests {
             (" --> /tmp/work/user-code/src/lib.rs:5:14", " --> your code:5:14"),
             (" --> /tmp/.tmpAbC123/user-code/src/lib.rs:12:1", " --> your code:12:1"),
             (" --> ./src/lib.rs:3:9", " --> your code:3:9"),
+            // Windows: rustc reports backslash paths.
+            (" --> src\\lib.rs:2:18", " --> your code:2:18"),
+            (" --> C:\\Users\\r\\AppData\\Local\\Temp\\.tmpAb1\\user-code\\src\\lib.rs:5:14", " --> your code:5:14"),
+            (" --> C:\\rustc\\abc\\library\\core\\src\\lib.rs:1:1", " --> C:\\rustc\\abc\\library\\core\\src\\lib.rs:1:1"),
             ("::: src/lib.rs:2:4 and `src/lib.rs`", "::: your code:2:4 and `your code`"),
             ("(src/lib.rs:1:1)", "(your code:1:1)"),
             // Not the user's crate: left alone.
