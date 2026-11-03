@@ -6,6 +6,11 @@ on:
   # Run for PRs against any base so the stacked chore/phase-* branches get CI
   # on every push, not only when they're rebased onto main.
   pull_request:
+  # Merge queue: re-run the required checks (the `build` matrix) on the
+  # queue's temporary merge commit. Jobs gated on `push`/`pull_request`
+  # (runner image, deploys) skip here; deploys still run on the push to
+  # main that the queue makes.
+  merge_group:
   workflow_dispatch:
 
 permissions:
