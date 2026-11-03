@@ -808,8 +808,8 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
       if matches!(
         p.res,
         rustc_hir::def::Res::Def(
-          rustc_hir::def::DefKind::Const
-            | rustc_hir::def::DefKind::AssocConst
+          rustc_hir::def::DefKind::Const { .. }
+            | rustc_hir::def::DefKind::AssocConst { .. }
             | rustc_hir::def::DefKind::Static { .. },
           _
         )

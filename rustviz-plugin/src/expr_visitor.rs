@@ -849,8 +849,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       if matches!(
         p.res,
         Res::Def(
-          rustc_hir::def::DefKind::Const
-            | rustc_hir::def::DefKind::AssocConst
+          rustc_hir::def::DefKind::Const { .. }
+            | rustc_hir::def::DefKind::AssocConst { .. }
             | rustc_hir::def::DefKind::Static { .. },
           _
         )

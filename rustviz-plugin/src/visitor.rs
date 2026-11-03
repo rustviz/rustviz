@@ -403,6 +403,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         self.visit_expr(lhs_expr);
         self.visit_expr(rhs_expr);
 
+        // Writing to a `static mut` (`COUNTER += inc`): the static has no
+        // column (see the Path arm below), so there's no LHS resource to
+        // attribute the write to. Events inside the RHS were emitted by
+        // the visit above; a non-Copy value assigned in (`LOG = v;`) is
+        // moved out of its owner, so record that move (to no column).
+        if let ExprKind::Path(QPath::Resolved(_, p)) = lhs_expr.kind {
+          if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) {
+            let rhs_ty = self.tcx.typeck(rhs_expr.hir_id.owner).node_type(rhs_expr.hir_id);
+            let rhs_copy = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, rhs_expr.hir_id.owner), rhs_ty);
+            if matches!(expr.kind, ExprKind::Assign(..)) && !rhs_copy {
+              self.match_rhs(ResourceTy::Anonymous, rhs_expr, Evt::Move);
+            }
+            return;
+          }
+        }
+
         // typecheck to figure out what type of event is going to occur
         let line_num = expr_to_line(&lhs_expr, &self.tcx);
         let lhs_rty = self.resource_of_lhs(lhs_expr);
@@ -617,7 +633,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // resulting copy / static borrow; the const/static itself
           // doesn't need a column. Skip the path-expression event so
           // the lookup below doesn't trip on the missing RAP.
-          Res::Def(DefKind::Const | DefKind::AssocConst | DefKind::Static { .. }, _) => {
+          Res::Def(DefKind::Const { .. } | DefKind::AssocConst { .. } | DefKind::Static { .. }, _) => {
             return;
           }
           _ => ()

@@ -161,6 +161,7 @@ const EXPECTED_OK: &[&str] = &[
     "const_basic",
     "static_basic",
     "unsafe_raw_ptr",
+    "static_mut_write",     // `COUNTER += inc` / `LOG = v` (used to panic)
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1153,6 +1154,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*p is bound to a value",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "static_mut_write",
+        // `COUNTER += inc` and `LOG = v` write to `static mut`s. Both
+        // used to panic in resource_of_lhs. The statics get no column;
+        // `v` is moved into LOG, so it must not be shown as dropped at
+        // the end of main.
+        must_contain: &[
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v goes out of scope. Its resource is dropped.",
+            "COUNTER",
+            "LOG",
+        ],
     },
 ];
 
