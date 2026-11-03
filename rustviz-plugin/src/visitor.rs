@@ -404,6 +404,34 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           None => {}
         }
 
+        // `self` taken by value (`v.into_iter()`, `opt.expect(..)`,
+        // `fn into_name(self)`): the receiver is moved into the call
+        // (or copied, if its type is Copy). The autoref branch above
+        // only covers `&self` / `&mut self`; without this, a consumed
+        // receiver looked untouched and got a false "Its resource is
+        // dropped." at scope end (issue #172).
+        //
+        // The adjusted receiver type is exactly what the callee's
+        // `self` parameter receives (the method signature instantiated
+        // at this call), so it is a reference iff the method takes
+        // `&self` / `&mut self`, or `self` where Self is itself a
+        // reference (`(&v).into_iter()`); neither moves the receiver.
+        let typeck = self.tcx.typeck(expr.hir_id.owner);
+        let self_ty = typeck.expr_ty_adjusted(rcvr);
+        if !self_ty.is_ref() && !self_ty.is_raw_ptr() {
+          let is_copy = self.tcx.type_is_copy_modulo_regions(
+            rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner), self_ty);
+          // A Copy value reached through auto-deref (`r.by_value()`
+          // with `r: &T`, `T: Copy`) is a copy of `*r`, not of `r`.
+          let from = if typeck.expr_ty(rcvr).is_ref() {
+            ResourceTy::Deref(rcvr_rap.clone())
+          } else {
+            ResourceTy::Value(rcvr_rap.clone())
+          };
+          let evt = if is_copy { Evt::Copy } else { Evt::Move };
+          self.add_ev(line_num, evt, ResourceTy::Value(fn_rap.clone()), from, false);
+        }
+
         for arg in args.iter(){
           self.visit_expr(&arg);
           self.match_arg(&arg, fn_name.clone());
@@ -412,6 +440,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       ExprKind::Binary(_, expra, exprb) => {
         self.visit_expr(expra);
         self.visit_expr(exprb);
+        // An overloaded by-value operator is a call to the trait
+        // method (`s1 + &s2` is `Add::add(s1, &s2)`), so its operands
+        // are arguments: `s1` is moved, `&s2` is borrowed. Built-in
+        // operators on primitives aren't method calls and emit
+        // nothing, as before.
+        if let Some(op_name) = overloaded_by_value_binop(expr, &self.tcx) {
+          let fn_name = op_name.to_owned();
+          self.add_fn(fn_name.clone());
+          self.match_arg(expra, fn_name.clone());
+          self.match_arg(exprb, fn_name);
+        }
       }
 
       ExprKind::AddrOf(_, _, exp) => {

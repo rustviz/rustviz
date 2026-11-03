@@ -222,6 +222,13 @@ const EXPECTED_OK: &[&str] = &[
     "match_arm_macro_body",
     "copy_return_param",
     "return_shared_ref",
+    // Receivers consumed by a `self` method, and the left operand of
+    // `String + &str`, are moved into the call (#172).
+    "self_method_into_iter",
+    "self_method_option",
+    "self_method_user",
+    "self_method_ref_receiver",
+    "string_add_in_fn",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1801,6 +1808,112 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[],
+    },
+
+    // ─── Receivers consumed by `self` methods; `String +` (#172) ────
+    TooltipExpect {
+        name: "self_method_into_iter",
+        // `IntoIterator::into_iter` takes `self`, and `String + &str`
+        // is `Add::add(self, &str)`: `v` and `s1` are moved into the
+        // call, so nothing is left for them to drop at the end of
+        // `main` (the old output claimed both were dropped there, a
+        // double drop). `&s2` is only borrowed.
+        must_contain: &[
+            "Move from v to into_iter",
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+            "Move from s1 to +",
+            "s1's resource is moved",
+            "s1 goes out of scope. No resource is dropped.",
+            "+ reads from s2",
+            "s2 goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v goes out of scope. Its resource is dropped.",
+            "s1 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "self_method_option",
+        // `Option::expect` / `Result::unwrap_or_else` take `self`:
+        // moves. `Option<i32>::unwrap_or` takes `self` too, but the
+        // receiver is Copy, so it's a copy and `c` stays usable.
+        // `s.clone()` / `c.is_some()` take `&self`: borrows only.
+        must_contain: &[
+            "Move from maybe to expect",
+            "maybe goes out of scope. No resource is dropped.",
+            "Move from r to unwrap_or_else",
+            "r goes out of scope. No resource is dropped.",
+            "Copy from c to unwrap_or",
+            "c's resource is copied",
+            "clone reads from s",
+            "is_some reads from c",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "maybe goes out of scope. Its resource is dropped.",
+            "r goes out of scope. Its resource is dropped.",
+            "Move from c to unwrap_or",
+            "c's resource is moved",
+            "Move from s to clone",
+            "s's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "self_method_user",
+        // A user `fn into_name(self)` consumes `p`; UFCS
+        // `Vec::into_iter(v)` consumes `v` (that one already worked
+        // through the Call path). `p.name` is still shown as owning
+        // and dropped after the whole-struct move: that's #174.
+        must_contain: &[
+            "Move from p to into_name",
+            "p's resource is moved",
+            "p goes out of scope. No resource is dropped.",
+            "Move from v to Vec::into_iter",
+            "v goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "p goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "self_method_ref_receiver",
+        // `r.into_iter()` with `r: &Vec<i32>` is `<&Vec as
+        // IntoIterator>::into_iter(self)`: `self` is the reference,
+        // so nothing is moved out of `v`, which still owns (and
+        // drops) its vector. `v.len()` takes `&self`.
+        must_contain: &[
+            "into_iter reads from r",
+            "len reads from v",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from r to into_iter",
+            "Move from v to into_iter",
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "string_add_in_fn",
+        // `s + "!"` as a fn's tail expression moves the parameter `s`
+        // into `+` (the old output said `s` was dropped at the end of
+        // `shout`). `a == b` takes both operands by reference: no
+        // move, no drop change.
+        must_contain: &[
+            "Move from s to +",
+            "s goes out of scope. No resource is dropped.",
+            "Move from a to +",
+            "a goes out of scope. No resource is dropped.",
+            "+ reads from b",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "Move from b to +",
+            "b's resource is moved",
+            "b goes out of scope. No resource is dropped.",
+        ],
     },
 ];
 

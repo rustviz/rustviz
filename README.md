@@ -200,16 +200,17 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   &str`, `longest`, `largest`, `v.get(i)`, `v.iter()`): the result isn't
   linked to the borrow it came from, and the input's borrow is shown
   ending at the call even while the result is still in use.
-- Values consumed by a method that takes `self` (`v.into_iter()`,
-  `opt.unwrap_or_else(…)`, `opt.expect(…)`) or by `s1 + &s2` aren't shown
-  as moved, and are then wrongly shown as dropped at the end of scope.
+- A closure passed straight to a function (`thread::spawn(move || …)`,
+  `apply(|x| x + k)`) has no captures drawn, so a value it `move`s is
+  still shown as dropped at the end of scope.
 - Some wording on references is still off: moving a `&mut` (`let r2 =
   r;`) says "r's resource is moved" (it's the reference that moves), and
   a `&T` binding such as `let s: &str = "hi";` ends with "Return
   immutably borrowed resource from s to *s".
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
-- Struct fields after the whole struct is moved (`drop(c)`, `..user1`,
-  field-init shorthand) can still be shown as owning, or as dropped.
+- Struct fields after the whole struct is moved (`drop(c)`,
+  `p.into_name()`, `..user1`, field-init shorthand) can still be shown
+  as owning, or as dropped.
 - `Rc`: clones are shown as independent owners that each drop the value;
   reference counting isn't modelled.
 - Tuples: creating one (`let t = (1, String::new());`) and reading a

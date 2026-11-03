@@ -746,6 +746,21 @@ pub fn get_aliasing_data(r: &ResourceTy, borrow_map: &HashMap<String, RefData>) 
 // Gets the RAP associated with an expr where we expect expr to resolve to a singular RAP
 // For example, it will return the RAp/ResourceTy associated with a function/variable/etc
 // depending on how its used
+/// `a <op> b` where `<op>` is an overloaded operator whose trait method
+/// takes its operands by value (`String + &str` calls
+/// `<String as Add<&str>>::add(self, rhs)`). Returns the operator's
+/// source text, which is used as the callee's name. Comparisons
+/// (`==`, `<`, ...) take their operands by reference and built-in
+/// operators on primitives aren't method calls; both return `None`.
+pub fn overloaded_by_value_binop<'tcx>(expr: &Expr<'tcx>, tcx: &TyCtxt<'tcx>) -> Option<&'static str> {
+  match expr.kind {
+    ExprKind::Binary(op, ..)
+      if op.node.is_by_value() && tcx.typeck(expr.hir_id.owner).is_method_call(expr) =>
+        Some(op.node.as_str()),
+    _ => None,
+  }
+}
+
 pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> ResourceTy {
   match expr.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {

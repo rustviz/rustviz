@@ -5,7 +5,7 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{expr_to_rap_name, hirid_to_var_name, span_to_line}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{expr_to_rap_name, hirid_to_var_name, overloaded_by_value_binop, span_to_line}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
 use rustc_span::Span;
 
@@ -152,9 +152,17 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
     | ExprKind::Ret(Some(ex)) => {
       self.annotate_expr(ex);
     }
-    ExprKind::Binary(_, exp1, exp2) => {
+    ExprKind::Binary(op, exp1, exp2) => {
       self.annotate_expr(exp1);
       self.annotate_expr(exp2);
+      // Overloaded by-value operators get a function RAP named after
+      // the operator (see the visitor's Binary arm); highlight it.
+      if let Some(op_name) = overloaded_by_value_binop(expr, &self.tcx) {
+        if let Some(rd) = self.raps.get(op_name) {
+          let hash = *rd.rap.hash();
+          self.annotate_src(op_name.to_owned(), op.span, true, hash);
+        }
+      }
     }
     ExprKind::MethodCall(name_and_generic_args, rcvr, args, _) => {
       let fn_name = name_and_generic_args.ident.as_str().to_owned();
