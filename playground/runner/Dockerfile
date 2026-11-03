@@ -39,15 +39,13 @@ COPY rustviz-plugin/ ./rustviz-plugin/
 # other members not being present.
 RUN printf '[workspace]\nmembers = ["rustviz-plugin"]\nresolver = "2"\n' > Cargo.toml
 
-# Compile at opt-level 2 instead of cargo install's release default
-# (3). At -O3 on aarch64-unknown-linux-gnu, nightly-2025-08-20 LLVM
-# SIGTRAPs partway through codegen of rustviz-plugin (which links
-# rustc_private — i.e. lots of generic instantiations from rustc's
-# internal crates feeding into LLVM's optimizer all at once). -O2
-# completes cleanly; the runtime difference for the plugin's hot
-# paths is negligible since the heavy lifting is inside rustc
-# itself, which is precompiled.
-ENV CARGO_PROFILE_RELEASE_OPT_LEVEL=2
+# Built at cargo install's release default (-O3). Older pins needed
+# CARGO_PROFILE_RELEASE_OPT_LEVEL=2 here: at -O3 on
+# aarch64-unknown-linux-gnu, nightly-2025-08-20's LLVM SIGTRAPped during
+# codegen of rustviz-plugin (#182). If the arm64 runner-image CI leg
+# crashes in LLVM after a toolchain bump, setting that env var to 2 is
+# the known workaround; the plugin's runtime barely depends on it, since
+# the heavy lifting is in the precompiled rustc.
 RUN cargo install --locked --path rustviz-plugin --root /usr/local
 
 # ---------- runtime ----------

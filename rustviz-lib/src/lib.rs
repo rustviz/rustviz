@@ -67,7 +67,7 @@ use tempfile::tempdir;
 /// reads it for `cargo` invocations against the workspace) and inside
 /// this crate (so `cargo publish` can include it in the published
 /// tarball — `include_str!` paths can't reach above the crate root).
-/// `scripts/bump-version.sh` keeps the two in sync, and a unit test
+/// `scripts/bump-nightly.sh` keeps the two in sync, and a unit test
 /// below asserts they match when both exist.
 pub const TOOLCHAIN: &str = include_str!("../rust-toolchain.toml");
 
@@ -532,7 +532,7 @@ mod tests {
                 workspace.trim(),
                 TOOLCHAIN.trim(),
                 "rustviz-lib/rust-toolchain.toml is out of sync with the workspace copy at {}; \
-                 run scripts/bump-version.sh or copy the file manually",
+                 run scripts/bump-nightly.sh or copy the file manually",
                 workspace_copy.display()
             );
         }
