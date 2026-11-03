@@ -144,9 +144,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
       ExprKind::MethodCall(_, recv, args, _) => {
-        self.descend_through_expansion(recv);
+        // `write!(dst, …)` is `dst.write_fmt(format_args!(…))`, which
+        // borrows `dst` mutably for the call.
+        if !recv.span.from_expansion()
+          && matches!(innermost_macro(expr.span).as_deref(), Some("write" | "writeln"))
+        {
+          self.visit_expr(recv);
+          if let (Some(from), Some(name)) =
+            (place_rap(recv, &self.tcx, &self.raps), user_macro_name(expr.span))
+          {
+            self.add_fn(name.clone());
+            let to = ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
+            let line_num = expr_to_line(recv, &self.tcx);
+            self.add_ev(line_num, Evt::PassByMRef, to, from, false);
+          }
+        } else {
+          self.descend_through_expansion(recv);
+        }
         for a in args {
           self.descend_through_expansion(a);
+        }
+      }
+      // `format_args!` (behind `println!`, `format!`, `write!`,
+      // `panic!`, …) and `assert_eq!` / `assert_ne!` take each
+      // argument by shared reference: the expansion is
+      // `super let args = (&a, &b);` / `match (&left, &right)`, where
+      // the `&` is synthetic and `a` is the user's expression. Record
+      // that borrow as a read by the user-facing macro (#177).
+      ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, Mutability::Not, inner)
+        if !inner.span.from_expansion() && borrows_its_args(expr.span) =>
+      {
+        self.visit_expr(inner);
+        if let Some(name) = user_macro_name(expr.span) {
+          self.macro_reads_arg(inner, name);
         }
       }
       ExprKind::AddrOf(_, _, inner)
@@ -168,6 +198,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // their bodies are synthetic panics we don't want to surface
       // as user events.
       ExprKind::Match(scrutinee, _, _) => {
+        // `dbg!(a, b)` is `match (a, b,) { args => { …eprint…; (tmp_1, tmp_2) } }`:
+        // each argument is passed by value into the macro and handed
+        // back as its result. As a statement the result is then
+        // dropped, so this is exactly a call `dbg(a, b)`: `dbg!(&x)`
+        // lends x, `dbg!(x)` moves (or copies) x. (`let y = dbg!(e)`
+        // never gets here: process_let_binding unwraps it to
+        // `let y = e`.)
+        if let Some(args) = dbg_args(expr) {
+          let name = user_macro_name(expr.span).unwrap_or_else(|| String::from("dbg!"));
+          for arg in args {
+            self.visit_expr(arg);
+            if place_rap(arg, &self.tcx, &self.raps).is_some() {
+              self.match_arg(arg, name.clone());
+            }
+          }
+          return;
+        }
         self.descend_through_expansion(scrutinee);
       }
       // Symmetric for `if cond { … } else { … }` desugarings (older
@@ -178,6 +225,141 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       _ => {}
     }
+  }
+
+  /// Record that the user-facing macro `name` (e.g. `println!`)
+  /// reads `arg` through a shared borrow for the duration of the
+  /// call. Rendered like any `f(&x)` call: a function dot on `x`'s
+  /// timeline ("println! reads from x"), no arrow and no new column.
+  /// Only place expressions (`x`, `x.f`, `*r`, `v[i]`) get an
+  /// event; for `s.len()`, `x + 1`, etc. the visit of `arg` already
+  /// records what the expression itself does. Repeated arguments
+  /// (`println!("{} {}", x, x)`) collapse to one dot.
+  fn macro_reads_arg(&mut self, arg: &'tcx Expr<'tcx>, name: String) {
+    let Some(from) = place_rap(arg, &self.tcx, &self.raps) else { return };
+    self.add_fn(name.clone());
+    let line_num = expr_to_line(arg, &self.tcx);
+    if let ResourceTy::Value(rap) = &from {
+      self.update_rap(rap, line_num);
+    }
+    let to = ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
+    let already = self.preprocessed_events.iter().any(|(l, e)| {
+      *l == line_num
+        && matches!(e, ExternalEvent::PassByStaticReference { from: f, to: t, .. }
+          if *f == from && *t == to)
+    });
+    if !already {
+      self.add_ev(line_num, Evt::PassBySRef, to, from, false);
+    }
+  }
+}
+
+/// The name, with its `!`, of the outermost bang macro the user wrote
+/// that `span` was expanded from: `println!` for the `&x` that
+/// `format_args_nl!` builds inside `println!`, `show!` if the user's
+/// own `macro_rules! show` calls `println!`.
+fn user_macro_name(span: rustc_span::Span) -> Option<String> {
+  let mut span = span;
+  let mut name = None;
+  while span.from_expansion() {
+    let data = span.ctxt().outer_expn_data();
+    if let Some(n) = bang_macro_name(&data.kind) {
+      name = Some(format!("{}!", n));
+    }
+    span = data.call_site;
+  }
+  name
+}
+
+/// The bare name of a bang macro expansion. rustc records the path as
+/// written, so `std::println!` / `$crate::macros::dbg_internal!` come
+/// back qualified; keep the last segment.
+fn bang_macro_name(kind: &rustc_span::hygiene::ExpnKind) -> Option<String> {
+  use rustc_span::hygiene::{ExpnKind, MacroKind};
+  match kind {
+    ExpnKind::Macro(MacroKind::Bang, sym) => {
+      Some(sym.as_str().rsplit("::").next().unwrap_or("").to_owned())
+    }
+    _ => None,
+  }
+}
+
+/// The macro whose expansion directly produced `span`, if it is a bang
+/// macro.
+fn innermost_macro(span: rustc_span::Span) -> Option<String> {
+  bang_macro_name(&span.ctxt().outer_expn_data().kind)
+}
+
+/// True for a synthetic `&` built by a macro that borrows each of its
+/// arguments: `format_args!` and its variants (behind every formatting
+/// macro), `assert_eq!` / `assert_ne!` (`match (&left, &right)`), and
+/// the one-argument `panic!` shortcut.
+fn borrows_its_args(span: rustc_span::Span) -> bool {
+  use rustc_span::hygiene::{DesugaringKind, ExpnKind};
+  // `format_args!`'s lowering marks the `&arg` it builds with a
+  // `FormatLiteral` desugaring whose call site is the macro.
+  if let ExpnKind::Desugaring(DesugaringKind::FormatLiteral { .. }) = span.ctxt().outer_expn_data().kind {
+    return true;
+  }
+  matches!(
+    innermost_macro(span).as_deref(),
+    Some("format_args" | "format_args_nl" | "const_format_args" | "assert_eq" | "assert_ne"
+      // `panic!("{}", x)` / `unreachable!("{}", x)` skip format_args:
+      // `panic_display(&x)`.
+      | "panic_2021" | "unreachable_2021")
+  )
+}
+
+/// If `expr` is the expansion of `dbg!(a, b, …)`, return the user's
+/// argument expressions. On the pinned toolchain `dbg!` expands (via
+/// `dbg_internal!`) to `match (a, b,) { args => { … } }`.
+fn dbg_args<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>]> {
+  if !expr.span.from_expansion()
+    || !matches!(innermost_macro(expr.span).as_deref(), Some("dbg" | "dbg_internal"))
+  {
+    return None;
+  }
+  let ExprKind::Match(scrutinee, _, rustc_hir::MatchSource::Normal) = expr.kind else { return None };
+  match scrutinee.kind {
+    ExprKind::Tup(items) if scrutinee.span.from_expansion()
+      && items.iter().all(|e| !e.span.from_expansion()) => Some(items),
+    _ => None,
+  }
+}
+
+/// `dbg!(e)` with a single argument evaluates to `e`'s value.
+pub fn dbg_single_arg<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+  match dbg_args(expr) {
+    Some([e]) => Some(e),
+    _ => None,
+  }
+}
+
+/// The resource a place expression (`x`, `x.f`, `*r`, `v[i]`, or a
+/// borrow of one, `&x`) names, if it is a registered RAP. Calls,
+/// literals, arithmetic, etc. return None: they produce a temporary,
+/// not a read of a variable.
+fn place_rap(expr: &Expr, tcx: &rustc_middle::ty::TyCtxt, raps: &std::collections::HashMap<String, RapData>) -> Option<ResourceTy> {
+  fn is_place(e: &Expr) -> bool {
+    match e.kind {
+      ExprKind::Path(QPath::Resolved(_, p)) => matches!(p.res, Res::Local(_)),
+      ExprKind::Field(base, _) | ExprKind::Unary(UnOp::Deref, base)
+      | ExprKind::Index(base, _, _) | ExprKind::AddrOf(_, _, base) => is_place(base),
+      _ => false,
+    }
+  }
+  if !is_place(expr) { return None; }
+  match get_rap(expr, tcx, raps) {
+    r @ ResourceTy::Value(_) => Some(r),
+    // `*r`: reading the referent goes through r; name it "r" rather
+    // than "*r" ("*r's resource is immutably borrowed" reads oddly).
+    ResourceTy::Deref(rap) => Some(ResourceTy::Value(rap)),
+    // A field we don't track as its own column (`r.w` through a
+    // reference, `p.0` of a tuple): the read goes through the base.
+    _ => match expr.kind {
+      ExprKind::Field(base, _) | ExprKind::Index(base, _, _) => place_rap(base, tcx, raps),
+      _ => None,
+    },
   }
 }
 
@@ -1674,6 +1856,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     init: &'tcx Expr<'tcx>,
     is_skipped: bool,
   ) {
+    // `let y = dbg!(e);` binds y to e's value: dbg! takes e by value
+    // and returns it. Treat it as `let y = e;` so the move / copy /
+    // borrow (and, for `dbg!(&x)`, the lender) is e's.
+    let init = dbg_single_arg(init).unwrap_or(init);
     // For `let s = if … { … } else { … };` (and the match analog),
     // emit the Move-into-LHS events FIRST. Match_rhs's If/Match arms
     // recurse into each branch's trailing expression and emit a
