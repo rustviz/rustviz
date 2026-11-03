@@ -253,32 +253,57 @@ const Description: React.FC = () => (
       </li>
     </ul>
     <h3>Known limitations</h3>
-    <p>RustViz is a research tool. It supports a meaningful subset of Rust but not all of it — these features are unsupported or known to misbehave:</p>
+    {/* Mirrors the Limitations section of the top-level README.md (the
+        canonical list, which describes main exactly). Keep them in sync;
+        see CLAUDE.md. */}
+    <p>
+      RustViz is a research tool. It only visualizes programs that compile
+      (code with a borrow-checker error is rejected with rustc&apos;s message),
+      and it handles a subset of Rust. In particular:
+    </p>
+    <p><strong>Some of what&apos;s drawn is wrong</strong>, so don&apos;t rely on it for:</p>
     <ul>
       <li>
-        Smart-pointer wrappers (<code>Box</code>, <code>Rc</code>,{' '}
-        <code>Arc</code>, <code>RefCell</code>) and trait objects (
-        <code>Box&lt;dyn T&gt;</code>)
+        Functions that return a reference (e.g. <code>first_word</code>,{' '}
+        <code>longest</code>): the result isn&apos;t linked to what it borrows.
       </li>
       <li>
-        Indexing or slicing collections like <code>Vec</code> (string slices
-        like <code>&amp;s[..]</code> on a <code>String</code> do work)
+        Values consumed by a method taking <code>self</code> (
+        <code>v.into_iter()</code>, <code>unwrap_or_else</code>) or by{' '}
+        <code>s1 + &amp;s2</code>: shown as dropped at the end instead of moved.
       </li>
       <li>
-        The <code>?</code> operator (and other desugaring-heavy forms like{' '}
-        <code>async</code>/<code>await</code>)
+        Ownership wording on references: a <code>&amp;mut</code> may be called
+        &quot;the owner&quot;, and a string literal &quot;acquires ownership&quot;.
       </li>
       <li>
-        Some struct field access patterns: chaining a method onto a field (
-        <code>r.field.method()</code>), nested field access (<code>r.a.b</code>),
-        and field access through a reference (<code>(&amp;r).field</code>).
-        Plain <code>r.field</code> and <code>&amp;r.field</code> work.
+        Shadowed variables (<code>let x</code> twice) share one column;{' '}
+        <code>#[derive(Debug)]</code> adds extra timelines;{' '}
+        <code>Rc</code> clones each appear to drop the value.
+      </li>
+    </ul>
+    <p><strong>These crash the visualizer:</strong></p>
+    <ul>
+      <li>
+        Tuple fields (<code>t.0</code>) and tuple structs; <code>const</code>{' '}
+        and <code>static</code> items; unions.
       </li>
       <li>
-        Inherent methods (<code>impl S {'{ fn ... }'}</code>) are fragile —
-        the Rectangle/area pattern (<code>fn area(&amp;self) -&gt; u32 {'{'} self.width * self.height {'}'}</code>)
-        works, but minor variants (e.g. a one-field <code>fn get(&amp;self) -&gt; i32 {'{'} self.n {'}'}</code>)
-        crash
+        Assigning to a field through a reference (<code>self.n += 1</code> in a{' '}
+        <code>&amp;mut self</code> method), to <code>v[i]</code>, to{' '}
+        <code>o.inner.x</code>, or through <code>*cell.borrow_mut()</code>.
+      </li>
+    </ul>
+    <p><strong>Simplified or not shown:</strong></p>
+    <ul>
+      <li>
+        Loops show one iteration; closures show their captures but not their
+        bodies; method chains show only the first call; match guards and{' '}
+        <code>async</code>/<code>await</code> aren&apos;t visualized.
+      </li>
+      <li>
+        Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)
+        are drawn as a single owner.
       </li>
     </ul>
     <p>

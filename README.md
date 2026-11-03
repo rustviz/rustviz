@@ -183,25 +183,70 @@ top-level directory:
 
 ## Limitations
 
-RustViz 2 is a research tool. It supports a meaningful subset of Rust but
-not all of it. Currently unsupported (or known to misbehave):
+RustViz 2 is a research / teaching tool. It handles a meaningful subset
+of Rust, and some of what it draws is simplified or wrong. This list is
+checked against a corpus of Rust Book–style snippets; see the [issues
+tab](https://github.com/rustviz/rustviz/issues) for tracked work. It's
+mirrored in the playground's "Known limitations" panel
+(`playground/frontend/src/App.tsx`); keep the two in sync.
 
-- Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
-  objects (`Box<dyn T>`)
-- Indexing or slicing collections like `Vec` (string slices like
-  `&s[..]` on a `String` do work)
-- The `?` operator (and other desugaring-heavy forms like
-  `async`/`await`)
-- Some struct field access patterns: chaining a method onto a field
-  (`r.field.method()`), nested field access (`r.a.b`), and field
-  access through a reference (`(&r).field`). Plain `r.field` and
-  `&r.field` work.
-- Inherent methods (`impl S { fn ... }`) are fragile — the
-  Rectangle/area pattern (`fn area(&self) -> u32 { self.width *
-  self.height }`) works, but minor variants (e.g. a one-field
-  `fn get(&self) -> i32 { self.n }`) crash.
+**Only programs that compile.** RustViz visualizes programs that pass
+the borrow checker. Code with a borrow error (e.g. two simultaneous
+`&mut` borrows) is rejected with rustc's error rather than drawn.
 
-The plugin has a TODO list with more detail in
+**Renders, but some of what's shown is wrong:**
+
+- Functions that return a reference (`fn first_word(s: &String) ->
+  &str`, `longest`, `largest`, `v.get(i)`, `v.iter()`): the result isn't
+  linked to the borrow it came from, and the input's borrow is shown
+  ending at the call even while the result is still in use.
+- Values consumed by a method that takes `self` (`v.into_iter()`,
+  `opt.unwrap_or_else(…)`, `opt.expect(…)`) or by `s1 + &s2` aren't shown
+  as moved, and are then wrongly shown as dropped at the end of scope.
+- References are sometimes described in ownership terms: a `&mut`
+  variable is labelled "the owner of the resource", `*r += 1` reads
+  "*r acquires ownership", and a string literal (`let s = "hi";`)
+  "acquires ownership".
+- Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
+- Struct fields after the whole struct is moved (`drop(c)`, `..user1`,
+  field-init shorthand) can still be shown as owning, or as dropped.
+- `#[derive(Debug)]` (and other derives) add extra timelines from the
+  generated code.
+- `Rc`: clones are shown as independent owners that each drop the value;
+  reference counting isn't modelled.
+- Arrows for functions returning a `Copy` value say "moved to the
+  caller" rather than "copied".
+
+**Crashes the plugin:**
+
+- Tuple field access (`t.0`) and tuple structs (`struct Color(u8, u8,
+  u8)`).
+- Assigning to a field through a reference: `self.n += 1` in a `&mut
+  self` method, or `c.n = …` where `c: &mut T`.
+- Assigning to a chained field (`o.inner.x = …`), an index (`v[i] = …`),
+  or a tuple destructure (`(a, b) = …`).
+- `const` and `static` items.
+- Union types.
+- `*cell.borrow_mut() += 1` and other assignments through a method's
+  result; nested constructors like `Cons(1, Box::new(Cons(2, …)))`.
+
+**Simplified or not shown:**
+
+- Smart pointers (`Box`, `Rc`, `Arc`, `RefCell`, `Mutex`) and trait
+  objects render as a single owner column; `RefCell`'s runtime borrows
+  aren't shown.
+- Closures: captures are shown; events inside the closure body aren't.
+- Loops (`for`, `while`, `loop`) show a single iteration.
+- Method chains (`a.get_mut().push(x)`): only the first call renders.
+- Match guards (`pat if cond =>`): the guard expression produces no
+  events.
+- `let first = v[0];` (copying out of an index) shows nothing; reading
+  through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
+- `async` / `await`, and user-defined macros (only standard-library
+  macros like `println!`, `vec!`, `assert!` are unwrapped).
+- `unsafe` and raw pointers are untested.
+
+The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).
 
 ---
@@ -224,7 +269,7 @@ Issues and PRs welcome. Keep each PR focused on a single concern; for
 local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
 [`CLAUDE.md`](CLAUDE.md) has the project's ground rules (for human and AI
 contributors alike): tooltips must be semantically correct, tests must pin
-correct behaviour, and the three limitations lists stay in sync.
+correct behaviour, and the limitations lists stay in sync.
 
 ## Releasing
 

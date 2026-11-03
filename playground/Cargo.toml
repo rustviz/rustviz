@@ -11,7 +11,6 @@ actix-files = "0.6"
 actix-cors = "0.7"
 actix-governor = "0.5"
 env_logger = "0.9"
-log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rustviz-lib = { path = "../rustviz-lib" }

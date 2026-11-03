@@ -40,19 +40,10 @@ cargo install --path . --locked
 
 ## Limitations
 
-RustViz is a teaching tool — it supports a meaningful subset of Rust,
-not all of it. Currently unsupported (or known to misbehave):
-
-- Smart-pointer wrappers (`Box`, `Rc`, `Arc`, `RefCell`) and trait
-  objects (`Box<dyn T>`)
-- Indexing or slicing collections like `Vec` (string slices like
-  `&s[..]` on a `String` do work)
-- The `?` operator (and other desugaring-heavy forms like
-  `async`/`await`)
-- Some struct field access patterns: chaining a method onto a field
-  (`r.field.method()`), nested field access (`r.a.b`), and field
-  access through a reference (`(&r).field`). Plain `r.field` and
-  `&r.field` work.
+The authoritative list is in the top-level
+[`README.md`](../README.md#limitations) (mirrored in the playground's
+"Known limitations" panel). The checklist below is the plugin's
+implementation-level TODO list.
 
 ### To fix / implement
 

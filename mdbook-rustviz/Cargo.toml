@@ -23,7 +23,6 @@ toml = "0.5"
 # is now binary-only.
 mdbook-preprocessor = "0.5"
 mdbook-markdown = "0.5"
-anyhow = "1"
 
 log = "0.4"
 env_logger = "0.9"

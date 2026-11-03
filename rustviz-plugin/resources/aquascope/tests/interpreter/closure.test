@@ -1,5 +1,0 @@
-fn main() {
-  let x = 0;
-  let f = || x;
-  let y = f();  
-}

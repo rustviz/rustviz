@@ -1,5 +1,0 @@
-fn main() {
-  let mut x = Box::new(0);
-  *x += 1;
-  let y = x;
-}

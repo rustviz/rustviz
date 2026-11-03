@@ -23,14 +23,16 @@ writes through `&mut` mutate the referent, drops happen at scope end).
 
 ## Keep the limitations lists in sync
 
-What RustViz can't do is documented in three places. A PR that changes what
-the plugin supports (fixes a crash, adds a construct, or discovers a new
-gap) updates all three in the same PR:
+What RustViz can't do is documented in two places. A PR that changes what
+the plugin supports (fixes a crash, fixes wrong output, adds a construct,
+or discovers a new gap) updates both in the same PR:
 
-1. `README.md` → **Limitations**, the canonical list.
-2. `rustviz-plugin/README.md` → the plugin's TODO and limitations detail.
-3. `playground/frontend/src/App.tsx` → the **Known limitations** panel
-   students see in the playground.
+1. `README.md` → **Limitations**, the canonical list. It describes `main`
+   exactly, so each fix PR deletes or rewrites the bullets it fixes.
+2. `playground/frontend/src/App.tsx` → the **Known limitations** panel
+   students see in the playground (a shorter, student-facing version).
+
+`rustviz-plugin/README.md` only links to the README list.
 
 ## Practicalities
 

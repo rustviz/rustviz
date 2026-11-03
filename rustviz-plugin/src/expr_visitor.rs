@@ -98,9 +98,6 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // per-fn. Set once in visit_body.
   pub current_fn_start: usize,
 
-  // Vestigial code, look at aquascope permissions_boundary map to see more
-  pub analysis_result : HashMap<usize, Vec<String>>,
-
   // The event line map stores events that will
   // result in the generation of an arrow by the frontend 
   // Although it's somewhat redundant (events from the preprocessed events)
