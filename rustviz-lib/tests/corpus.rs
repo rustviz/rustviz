@@ -150,9 +150,8 @@ const EXPECTED_OK: &[&str] = &[
     "mv_back",              // shadow-after-move pattern
     "mutAssignOp",          // `x += 5` compound assignment
     "mutableReferences",    // `change(&mut s)` minimal mut-ref fn call
-    // `if let` guards on match arms (stable since 1.95). The guard isn't
-    // visualized, but the program must render (it used to crash on the
-    // guard-bound variable).
+    // `if let` guards on match arms (stable since 1.95). Used to crash on
+    // the guard-bound variable; tooltips pinned in EXPECTED_TOOLTIPS.
     "match_if_let_guard",
     // `:::` in a comment and a string literal (#181): used to be taken as
     // the plugin's panel separator, truncating the code panel mid-line.
@@ -243,6 +242,11 @@ const EXPECTED_OK: &[&str] = &[
     "struct_update_return",
     "struct_partial_move_two",
     "struct_literal_same_line_arrows",
+    // — Match guards (#176): reads/borrows in `pat if cond =>`, guard
+    //   reads of the arm's own bindings, `if let ... && cond` guards.
+    "match_guard_borrow",
+    "match_guard_reads_binding",
+    "match_guard_let_chain",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2117,6 +2121,71 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s.b goes out of scope. No resource is dropped.",
         ],
     },
+    // ─── Match guards (#176) ─────────────────────────────────────────
+    // A guard's events are drawn in its own arm's column: they run
+    // after the pattern matched and before the body, so "if this arm
+    // is taken, this happened" holds. (Guards that move or assign an
+    // outer variable are refused; see `guard_that_moves_is_refused`.)
+    TooltipExpect {
+        name: "match_guard_borrow",
+        // `Some(n) if check(&s) =>`: the guard lends `s` to `check`.
+        // Used to produce no event at all for the guard.
+        must_contain: &[
+            "check reads from s",
+            "n is initialized by copy from opt",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_reads_binding",
+        // `Some(t) if t.len() > 2 =>`: the guard reads the arm's own
+        // binding.
+        must_contain: &[
+            "len reads from t",
+            "Partial move from opt to t",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "t's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "match_if_let_guard",
+        // `Some(n) if let Some(m) = n.checked_mul(2) =>`: `m` is
+        // registered like an `if let` condition binding and scoped to
+        // the arm. Its uses used to be skipped (unregistered local).
+        must_contain: &[
+            "Copy from checked_mul to m",
+            "m is initialized by copy from checked_mul",
+            "m goes out of scope",
+            "describe reads from s",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_let_chain",
+        // `n if let Some(w) = words.last() && check(&s) =>`: both parts
+        // of the chain produce events; `w` is scoped to the arm.
+        must_contain: &[
+            "last reads from words",
+            "Copy from last to w",
+            "check reads from s",
+            "w goes out of scope",
+            "words goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "words's resource is moved",
+            "s's resource is moved",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -2470,4 +2539,27 @@ fn compile_errors_are_reported_not_swallowed() {
         .expect_err("a type error must not render");
     let msg = err.to_string();
     assert!(msg.contains("mismatched types"), "expected rustc's diagnostic, got:\n{}", msg);
+}
+
+/// A guard that moves an outer variable (`Some(_) if consume(s) =>`) moves
+/// it whenever the guard runs, even when the guard is false and a later
+/// arm is taken. Drawing the move in the guard's arm only would show the
+/// later arms still owning `s`, so the plugin refuses instead. (main used
+/// to render it with no move at all and `s` dropped at the end.)
+#[test]
+fn guard_that_moves_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    let src = "fn consume(s: String) -> bool { s.len() > 3 }\n\
+               fn main() {\n\
+               \x20   let s = String::from(\"hello\");\n\
+               \x20   let opt = Some(5);\n\
+               \x20   match opt {\n\
+               \x20       Some(_) if consume(s) => println!(\"yes\"),\n\
+               \x20       _ => println!(\"no\"),\n\
+               \x20   }\n\
+               }\n";
+    let err = Rustviz::new(src).expect_err("a guard that moves must not render");
+    let msg = err.to_string();
+    assert!(msg.contains("match guards that move or assign a variable declared outside the guard (`s`"),
+        "expected the guard-move refusal, got:\n{}", msg);
 }
