@@ -393,9 +393,12 @@ pub fn render_svg(
             // appended (again, if already done) and the arrow itself
             // was dropped. That lost e.g. `Move from String::from to
             // s.b` next to `Move from t to s.c`. A Move/Copy out of a
-            // function call or to the caller now gets appended on its
-            // own; other off-map arrows stay undrawn as before, just
-            // without the duplicate append.
+            // function call, to the caller, or into a place with no
+            // column (`v[i] = s`, `self.name = s`, `r.name = s`: `to` is
+            // Anonymous; otherwise s would later be shown dropping a
+            // resource it gave away) now gets appended on its own; other
+            // off-map arrows stay undrawn as before, just without the
+            // duplicate append.
             let id = event.get_id();
             let line_ev = visualization_data.event_line_map.get(&line_num);
             let in_map = line_ev.map_or(false, |ev| ev.iter().any(|x| x.get_id() == id));
@@ -403,7 +406,9 @@ pub fn render_svg(
                 let (from, to) = ResourceAccessPoint_extract(&event);
                 let is_transfer = matches!(event, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. });
                 let from_fn = from.extract_rap().map_or(false, |rap| rap.is_fn());
-                if is_transfer && (from_fn || matches!(to, ResourceTy::Caller)) {
+                let into_unmodelled_place = matches!(to, ResourceTy::Anonymous)
+                    && !matches!(from, ResourceTy::Anonymous);
+                if is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place) {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
                 }
                 i += 1;
@@ -412,23 +417,6 @@ pub fn render_svg(
             let res = line_ev.cloned();
             let ex = match res {
                 Some(ev) => { // if there are multiple arrow events on this line
-                    // A Move/Copy into a place with no column (`v[i] = s`,
-                    // `self.name = s`: `to` is Anonymous) is never put in
-                    // the line map, so the loop below wouldn't append it.
-                    // Append it here, or s's Move is lost whenever another
-                    // arrow (e.g. a borrow ending) shares its line and s
-                    // is later shown dropping a resource it gave away.
-                    // (mutate_branch_lines needs no such case: it updates
-                    // events in place instead of re-appending them.)
-                    // Other events missing from the line map (fn-sourced
-                    // moves, returns to the caller) are swallowed the same
-                    // way; that's tracked separately.
-                    let (from, to) = ResourceAccessPoint_extract(&event);
-                    if matches!(to, ResourceTy::Anonymous)
-                        && !matches!(from, ResourceTy::Anonymous)
-                        && !ev.iter().any(|e| e.get_id() == event.get_id()) {
-                        visualization_data.append_processed_external_event(event.clone(), final_line_num);
-                    }
                     for e in ev.clone() { // append all the events in the line map on the same line
                         visualization_data.append_processed_external_event(e.clone(), final_line_num);
                         skippable_ev.insert(e.get_id()); // they all become skippable
