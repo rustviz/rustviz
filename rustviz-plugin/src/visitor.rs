@@ -443,7 +443,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let lhs_is_union_field = matches!(lhs_expr.kind,
           ExprKind::Field(recv, _) if self.is_union_typed(recv));
         let lhs_rty = self.resource_of_lhs(lhs_expr);
-        let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
         let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
         let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner), lhs_ty);
         let e = if lhs_ty.is_ref() {
@@ -458,7 +457,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         };
         // if we are pointing at a new piece of data
-        if lhs_ty.is_ref() && !lhs_is_union_field {
+        //
+        // `resource_of_lhs` returns Anonymous when the LHS is a deref
+        // of a temporary rather than a named place:
+        // `*c.borrow_mut() += 1`, `*v.last_mut().unwrap() = 5`,
+        // `*map.entry(k).or_insert(0) += 1`. There is no RAP for the
+        // temporary, so there's no reference to re-point here. The
+        // method calls inside the LHS already produced their events
+        // (`visit_expr(lhs_expr)` above), and `match_rhs` below still
+        // records what happens to the RHS (e.g. `= v` moves v); the
+        // temporary itself gets no ownership event.
+        // (Union field writes are excluded too; see lhs_is_union_field.)
+        if lhs_ty.is_ref() && !lhs_is_union_field && lhs_rty.extract_rap().is_some() {
+          let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
           match lhs_rty {
             // ex:
             // let mut a = &b (where b is &&i32)

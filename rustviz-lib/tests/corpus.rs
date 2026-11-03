@@ -173,6 +173,19 @@ const EXPECTED_OK: &[&str] = &[
     //   annotated_source_gen; fixed alongside #131.
     "tuple_struct_field",
     "tuple_field_read",     // renders; the read itself isn't shown (known gap)
+    // — Assignment through a deref of a method-call temporary
+    //   (`*c.borrow_mut() += 1`, `*v.last_mut().unwrap() = 5`). Used
+    //   to panic looking up a RAP for the temporary.
+    "refcell_deref_assign_op",
+    "refcell_deref_assign_move",
+    "rc_refcell_deref_assign",
+    "deref_method_result_assign",
+    // — The same fn / tuple-variant constructor receiving more than one
+    //   value: nested `Cons(1, Box::new(Cons(2, ..)))`, or `id(s1)` then
+    //   `id(s2)`. Used to panic in calc_state on the shared Function RAP.
+    "cons_list_nested",
+    "cons_list_qualified_nested",
+    "fn_called_twice",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1255,6 +1268,108 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             // The read must not lose its source.
             "r is bound to a value",
+        ],
+    },
+    // ─── Assignment through a deref of a temporary ───────────────────
+    TooltipExpect {
+        name: "refcell_deref_assign_op",
+        // `*c.borrow_mut() += 1`: the method call still produces its
+        // normal event on `c`; the temporary `RefMut` gets nothing, and
+        // `c` keeps its resource.
+        must_contain: &[
+            "Move from RefCell::new to c",
+            "borrow_mut reads from c",
+            "c goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c's resource is moved",
+            "c goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "refcell_deref_assign_move",
+        // `*cell.borrow_mut() = v` moves `v` into the cell; `cell`
+        // itself is only borrowed by the call.
+        must_contain: &[
+            "borrow_mut reads from cell",
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+            "cell goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "cell's resource is moved",
+            "cell goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_refcell_deref_assign",
+        // Book ch15 Rc<RefCell<T>>: `*value.borrow_mut() += 10`.
+        must_contain: &[
+            "Rc::clone reads from value",
+            "Move from Rc::clone to a",
+            "borrow_mut reads from value",
+            "value goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "value's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "deref_method_result_assign",
+        // `*v.last_mut().unwrap() = 5` and `*map.entry(k).or_insert(0) += 1`:
+        // the base receiver's call is shown; `k` is moved into `entry`.
+        must_contain: &[
+            "last_mut reads from/writes to v",
+            "entry reads from/writes to map",
+            "Move from k to entry",
+            "v goes out of scope. Its resource is dropped.",
+            "map goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v's resource is moved",
+            "map's resource is moved",
+        ],
+    },
+    // ─── One Function RAP receiving several values ───────────────────
+    TooltipExpect {
+        name: "cons_list_nested",
+        // Book ch15 cons list. The outer constructor's value moves into
+        // `list`; the inner `Cons` / `Box::new` calls are fn-to-fn
+        // hand-offs, which (as for any nested call) draw no arrow.
+        must_contain: &[
+            "Move from Cons to list",
+            "Move from list to _l",
+            "list goes out of scope. No resource is dropped.",
+            "_l goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "list goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "cons_list_qualified_nested",
+        must_contain: &[
+            "Move from List::Cons to list",
+            "Move from list to _l",
+            "_l goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "list goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_called_twice",
+        must_contain: &[
+            "Move from s1 to id",
+            "Move from id to a",
+            "Move from s2 to id",
+            "Move from id to b",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s1 goes out of scope. Its resource is dropped.",
+            "s2 goes out of scope. Its resource is dropped.",
         ],
     },
 ];
