@@ -169,6 +169,10 @@ const EXPECTED_OK: &[&str] = &[
     // — Enum-typed fn parameter (#131): one opaque owner column, no
     //   phantom per-field (`s.0`) column.
     "enum_param",
+    // — Tuple-field projections (`x.0`) used to panic in
+    //   annotated_source_gen; fixed alongside #131.
+    "tuple_struct_field",
+    "tuple_field_read",     // renders; the read itself isn't shown (known gap)
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1235,6 +1239,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // got a phantom column for the first variant's field.
             "s.0, immutable",
             "s.0 goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_struct_field",
+        // `struct Color(u8, u8, u8)`: one column per field, so a read
+        // of `black.0` is a copy out of that field's column, and
+        // `black.1 = 10` lands on `black.1`. Pre-fix: panic.
+        must_contain: &[
+            "Move from Color to black",
+            "black acquires ownership of a resource",
+            "Copy from black.0 to r",
+            "r is initialized by copy from black.0",
+        ],
+        must_not_contain: &[
+            // The read must not lose its source.
+            "r is bound to a value",
         ],
     },
 ];
