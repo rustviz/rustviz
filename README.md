@@ -208,6 +208,9 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   a `&T` binding such as `let s: &str = "hi";` ends with "Return
   immutably borrowed resource from s to *s".
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
+- A variable assigned in only some branches (`let mut s; if c { s = …
+  }`) is drawn as owning a value after the `if`, and a later `s = …` as
+  dropping the old value; Rust drops it only on paths that assigned it.
 - After a partial move (`let n = p.name;`, or `..p` in struct update
   syntax), `p`'s own column still says "Its resource is dropped" at
   scope end; only its remaining fields are actually dropped (their

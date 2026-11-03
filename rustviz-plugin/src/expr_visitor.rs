@@ -70,6 +70,17 @@ pub struct RapData {
   pub fn_start_line: usize,
 }
 
+/// A `let` binding with no initializer (`let x;`), remembered until
+/// its first assignment so that assignment can register the RAP with
+/// the `let`'s scope and render as initialization (#234).
+#[derive(Debug, Clone, Copy)]
+pub struct DeferredLet {
+  pub annotation: rustc_hir::BindingMode,
+  pub scope: usize,
+  pub inside_branch: bool,
+  pub is_skipped: bool,
+}
+
 
 pub struct ExprVisitor<'a, 'tcx:'a> {
   pub tcx: TyCtxt<'tcx>, // type context
@@ -132,6 +143,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // it reaches the renderer — which is what gives the variable no
   // timeline column.
   pub skip_raps: std::collections::HashSet<String>,
+
+  // Locals declared without an initializer (`let x;`) that are still
+  // definitely uninitialized at this point of the walk, keyed by the
+  // binding's HirId (#234). An assignment to one of these initializes
+  // it: the RAP is registered there, and nothing is dropped. The If
+  // and Match arms start every branch from the same set and keep only
+  // what is still uninitialized at the end of each branch, so after
+  // `if c { s = a } else { s = b }` a later `s = …` is a reassignment.
+  pub uninit_locals: HashMap<rustc_hir::HirId, DeferredLet>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -554,37 +574,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Best-effort answer to "does this RAP currently own a resource?",
   // derived from the events emitted so far. Used to decide whether a
-  // reassignment should produce an OwnerDropAtReassign — `let mut y;
-  // y = x;` and `let mut y = a; let z = y; y = x;` both reach the
-  // same reassignment site but only the first has a prior resource
-  // to drop; for the second, y was moved out at the prior `let z = y`.
-  // Walks `preprocessed_events` newest → oldest, looking for the
-  // most recent ownership-affecting event involving the named RAP.
-  // Borrow/lend events don't transfer ownership and are ignored.
+  // reassignment should produce an OwnerDropAtReassign — `let mut y =
+  // a; y = x;` drops a, but `let mut y = a; let z = y; y = x;` has
+  // nothing to drop: y was moved out at the prior `let z = y`.
+  // See holds_resource_after.
   pub fn rap_holds_resource_now(&self, rap_name: &str) -> bool {
-    for (_, ev) in self.preprocessed_events.iter().rev() {
-      match ev {
-        ExternalEvent::Move { from, to, .. } => {
-          if to.extract_rap().map_or(false, |r| r.name() == rap_name) {
-            return true;
-          }
-          if from.extract_rap().map_or(false, |r| r.name() == rap_name) {
-            return false;
-          }
-        }
-        ExternalEvent::Copy { to, .. }
-        | ExternalEvent::Bind { to, .. } => {
-          if to.extract_rap().map_or(false, |r| r.name() == rap_name) {
-            return true;
-          }
-        }
-        _ => {}
-      }
-    }
-    // No prior ownership event — variable was declared but never
-    // initialized (`let mut y; y = x;` first iteration), so there's
-    // nothing to drop.
-    false
+    holds_resource_after(self.preprocessed_events, rap_name).unwrap_or(false)
   }
 
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
@@ -1716,4 +1711,49 @@ pub fn print_out_of_scope(&mut self){
       }
     }
   }
+}
+
+/// Whether `rap_name` owns a resource after `events`, judged from the
+/// newest ownership-affecting event (borrows and lends don't count);
+/// None if no event decides it. A finished if/else or match sits in
+/// the list as one Branch event, decided by its arms: the variable
+/// holds a resource if it does at the end of some arm, and doesn't if
+/// every arm gave it up; otherwise the state from before the branch
+/// stands. Without looking inside, a reassignment after
+/// `if c { s = a } else { s = b }` (#234) showed no drop, and one
+/// after `if c { take(s) } else { take(s) }` a drop of the
+/// already-moved value.
+fn holds_resource_after(events: &[(usize, ExternalEvent)], rap_name: &str) -> Option<bool> {
+  let is_rap = |r: &ResourceTy| r.extract_rap().map_or(false, |r| r.name() == rap_name);
+  for (_, ev) in events.iter().rev() {
+    match ev {
+      ExternalEvent::Move { from, to, .. } => {
+        if is_rap(to) {
+          return Some(true);
+        }
+        if is_rap(from) {
+          return Some(false);
+        }
+      }
+      ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } => {
+        if is_rap(to) {
+          return Some(true);
+        }
+      }
+      ExternalEvent::Branch { branches, .. } => {
+        let arms: Vec<Option<bool>> =
+          branches.iter().map(|b| holds_resource_after(&b.e_data, rap_name)).collect();
+        if arms.contains(&Some(true)) {
+          return Some(true);
+        }
+        if !arms.is_empty() && arms.iter().all(|a| *a == Some(false)) {
+          return Some(false);
+        }
+        // Otherwise (no arm decides, or it was moved out in some arms
+        // and untouched in the others) keep looking before the branch.
+      }
+      _ => {}
+    }
+  }
+  None
 }

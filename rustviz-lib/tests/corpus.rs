@@ -264,6 +264,14 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_struct_fields_unused",
     // Unit / empty structs get a label-only box each (#348).
     "unit_struct_box",
+    // Deferred initialization, `let x;` then `x = …` (#234). Used to
+    // panic in resource_of_lhs.
+    "deferred_init_copy",
+    "deferred_init_string",
+    "deferred_init_if_else",
+    "deferred_init_match",
+    "deferred_init_then_reassign",
+    "deferred_init_one_branch",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2292,6 +2300,89 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "assert_eq! reads from len through an implicit reference, so len isn't moved",
         ],
     },
+    // ─── Deferred initialization (#234) ─────────────────────────────
+    // `let x;` owns nothing; the first `x = …` initializes x with the
+    // same wording as `let x = …`, and nothing is dropped there.
+    TooltipExpect {
+        name: "deferred_init_copy",
+        must_contain: &[
+            "x is bound to a value",
+            "Copy from x to y",
+            "y is initialized by copy from x",
+        ],
+        must_not_contain: &[
+            "x's resource is moved",
+            "Move from x to y",
+        ],
+    },
+    TooltipExpect {
+        name: "deferred_init_string",
+        must_contain: &[
+            "Move from String::from to s",
+            "s acquires ownership of a resource",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "deferred_init_if_else",
+        // Each branch initializes s, so after the if s owns a String.
+        // Before its branch assigns it, s's column says it has no value.
+        must_contain: &[
+            "Move from String::from to s",
+            "s acquires ownership of a resource",
+            "s acquired ownership of a resource (in all branches above)",
+            "s has no value yet",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "s may have been moved (consumed in at least one branch above)",
+            "s was moved or dropped in every branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "deferred_init_match",
+        must_contain: &[
+            "Move from String::from to s",
+            "s acquires ownership of a resource",
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "s may have been moved (consumed in at least one branch above)",
+            "s was moved or dropped in every branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "deferred_init_then_reassign",
+        // The reassignments drop the old String: after straight-line
+        // init (s) and after init in both branches of an if/else (t).
+        // `deferred_init_drops_only_at_reassignment` checks the
+        // initializing assignments don't.
+        must_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "t acquired ownership of a resource (in all branches above)",
+            "t acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "deferred_init_one_branch",
+        // s is assigned in the if branch only. On the else path it has
+        // no value, so there is nothing to drop there and it wasn't
+        // moved. `unused` is never assigned and gets no column.
+        must_contain: &[
+            "Move from String::from to s",
+            "s acquires ownership of a resource",
+            "s has no value yet",
+        ],
+        must_not_contain: &[
+            "s was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            "s may have been moved (consumed in at least one branch above)",
+            "unused goes out of scope",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -2660,6 +2751,24 @@ fn compile_errors_are_reported_not_swallowed() {
         .expect_err("a type error must not render");
     let msg = err.to_string();
     assert!(msg.contains("mismatched types"), "expected rustc's diagnostic, got:\n{}", msg);
+}
+
+/// The initializing assignment of a `let s;` drops nothing; only the
+/// later reassignments do (#234). One drop each for s and t.
+#[test]
+fn deferred_init_drops_only_at_reassignment() {
+    let rv = run_with_local_backend("deferred_init_then_reassign");
+    let tooltips = timeline_tooltips(&rv.timeline_panel_string());
+    for name in ["s", "t"] {
+        let drop = format!("{} acquires ownership of a new resource; its previous resource is dropped", name);
+        assert_eq!(
+            tooltips.iter().filter(|t| **t == drop).count(),
+            1,
+            "expected {:?} exactly once, tooltips were:\n  {}",
+            drop,
+            tooltips.join("\n  ")
+        );
+    }
 }
 
 /// Numeric attribute `key` of an SVG start tag (the text after `<name `).

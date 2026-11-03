@@ -803,9 +803,29 @@ fn render_dot(
                 let all_moved = !any_alive
                     && !branch_history.is_empty()
                     && !has_implicit_untouched;
+                // `let s;` left unassigned on some path (#234): that
+                // branch ends with no value, not with a move, so
+                // nothing is dropped there. The dot gets no message:
+                // "initialized in only some branches" would mislead
+                // when the other branch diverges (`panic!()`,
+                // `unreachable!()`), which this layer can't see.
+                let partly_initialized = branch_history.iter().any(|b| {
+                    matches!(
+                        b.states.last().map(|s| &s.2),
+                        Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
+                    )
+                });
                 let cx = timeline_data.x_val;
                 let cy = get_y_axis_pos(*merge_point);
-                if mixed_moved {
+                if partly_initialized {
+                    let m_data = EventDotData {
+                        hash: *hash as u64,
+                        dot_x: cx,
+                        dot_y: cy,
+                        title: String::new(),
+                    };
+                    append_dot(&m_data, output, timeline_data, registry);
+                } else if mixed_moved {
                     // Mixed: at least one branch moved, at least
                     // one didn't (counting the implicit untouched
                     // else of an `if` without an else as a
@@ -1149,6 +1169,9 @@ fn timeline_segment_title(
     rap: &ResourceAccessPoint,
     visualization_data: &VisualizationData,
 ) -> String {
+    if let State::FullPrivilege { s: LineState::Uninit } = state {
+        return state.print_message_with_name(rap.name());
+    }
     if rap.is_closure() {
         if let State::FullPrivilege { .. } = state {
             let name = rap.name().to_owned();
@@ -1984,7 +2007,7 @@ fn create_owner_line_string(
     // independent lines instead of one continuous timeline. The
     // dash pattern is the only inactive cue now.
     match state {
-        State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
+        State::FullPrivilege { s: LineState::Gray | LineState::Uninit } | State::PartialPrivilege { s: LineState::Gray } => {
             data.dasharray = "4 4".to_owned();
         }
         _ => {}
@@ -2022,7 +2045,7 @@ fn create_reference_line_string(
     // independent lines instead of one continuous timeline. The
     // dash pattern is the only inactive cue now.
     match state {
-        State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray } => {
+        State::FullPrivilege { s: LineState::Gray | LineState::Uninit } | State::PartialPrivilege { s: LineState::Gray } => {
             data.dasharray = "4 4".to_owned();
         }
         _ => {}
@@ -2193,17 +2216,18 @@ fn render_branches(
         let column_top_y = get_y_axis_pos(*split_point + 1) as f64;
         let column_bot_y = get_y_axis_pos(merge_point.saturating_sub(1)) as f64;
 
-        // Parent's state at the split, with let-as-rhs synthesized
-        // to FullPrivilege::Full (the variable's about to be
-        // brought into scope by acquiring inside a branch). The
-        // active arm uses this directly; passive arms Gray-convert
-        // it so their leading reads as inactive.
+        // Parent's state at the split. The active arm uses this
+        // directly; passive arms Gray-convert it so their leading
+        // reads as inactive. A variable with no value yet (let-as-rhs,
+        // or `let s;` assigned inside the branches, #234) gets the
+        // dashed "has no value yet" leading on every arm: it owns
+        // nothing until the branch's acquire.
         let parent_pre = parent_states.iter()
             .find(|(s, e, _)| *s <= *split_point && *split_point <= *e)
             .map(|item| item.2.clone())
             .unwrap_or(State::OutOfScope);
         let parent_active = match parent_pre {
-            State::OutOfScope => State::FullPrivilege { s: LineState::Full },
+            State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
             ref s => convert_back(s),
         };
 
@@ -2324,7 +2348,7 @@ fn render_branch_run(
         let style = determine_owner_line_styles(rap, &seg.state);
         let dashed = matches!(
             seg.state,
-            State::FullPrivilege { s: LineState::Gray }
+            State::FullPrivilege { s: LineState::Gray | LineState::Uninit }
             | State::PartialPrivilege { s: LineState::Gray }
         );
         (style, dashed, *seg)
