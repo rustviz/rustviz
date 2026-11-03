@@ -285,8 +285,7 @@ const Description: React.FC = () => (
     <p><strong>These crash the visualizer:</strong></p>
     <ul>
       <li>
-        Tuple fields (<code>t.0</code>) and tuple structs; <code>const</code>{' '}
-        and <code>static</code> items; unions.
+        Tuple fields (<code>t.0</code>) and tuple structs; unions.
       </li>
       <li>
         Assigning to a field through a reference (<code>self.n += 1</code> in a{' '}
