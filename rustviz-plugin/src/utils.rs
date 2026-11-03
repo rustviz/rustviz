@@ -245,13 +245,12 @@ impl RV1Helper {
         File::create(timeline_panel_path.clone())?;
       }
   
-      fs::write(code_panel_path, rv.code_panel())?;
-      fs::write(timeline_panel_path, rv.timeline_panel())?;
+      fs::write(code_panel_path, &rv.code_panel)?;
+      fs::write(timeline_panel_path, &rv.timeline_panel)?;
     }
     else {
-      // write SVG files to stdio
-      let res = format!("{}:::{}", rv.code_panel(), rv.timeline_panel());
-      println!("{res}");
+      // One JSON object on stdout, read by rustviz-lib's `parse_output`.
+      println!("{}", serde_json::to_string(&rv)?);
     }
     Ok(())
   }

@@ -20,6 +20,7 @@ exclude = [
 [dependencies]
 clap = {version = "4.4", features = ["derive"]}
 serde = {version = "1", features = ["derive"]}
+serde_json = "1"
 anyhow = "1.0.0"
 log = "0.4"
 rustc_utils = {version = "0.15.2-nightly-2026-05-01"}

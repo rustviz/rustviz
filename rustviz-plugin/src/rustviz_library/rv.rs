@@ -3,11 +3,20 @@ use crate::svg_generator::{
   svg_frontend::svg_generation
 };
 use anyhow::Result;
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-pub struct Rustviz{
-  code_panel_svg : String,
-  timeline_panel_svg : String,
+/// The rendered visualization. This is also the plugin's output format:
+/// it is printed to stdout as one JSON object and read back by
+/// `rustviz-lib`'s `PluginOutput`, so the two structs must agree.
+#[derive(Serialize)]
+pub struct Rustviz {
+  /// SVG for the code panel (the annotated source listing).
+  pub code_panel: String,
+  /// SVG for the timeline panel.
+  pub timeline_panel: String,
+  /// Height in px shared by both panels.
+  pub height: i32,
 }
 
 impl Rustviz {
@@ -34,18 +43,8 @@ impl Rustviz {
     /* ******************************************
             --- Render SVG images ---
     ****************************************** */
-    let res = svg_generation::render_svg(a_src_str, src_str, &mut vd, &hidden_source_lines);
-    Ok(Rustviz {
-      code_panel_svg : res.0,
-      timeline_panel_svg: res.1
-    })
-  }
-
-  pub fn code_panel(&self) -> String {
-    self.code_panel_svg.clone()
-  }
-  
-  pub fn timeline_panel(&self) -> String {
-    self.timeline_panel_svg.clone()
+    let (code_panel, timeline_panel, height) =
+      svg_generation::render_svg(a_src_str, src_str, &mut vd, &hidden_source_lines);
+    Ok(Rustviz { code_panel, timeline_panel, height })
   }
 }

@@ -441,48 +441,61 @@ fn run_local(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(output.stdout)
 }
 
+/// The plugin's stdout: one JSON object, written by `rustviz-plugin`'s
+/// `Rustviz` (rustviz-plugin/src/rustviz_library/rv.rs). Keep the two in
+/// sync; the corpus tests run the real pair end to end.
+#[derive(serde::Deserialize)]
+struct PluginOutput {
+    code_panel: String,
+    timeline_panel: String,
+    height: i32,
+}
+
 fn parse_output(stdout: &[u8]) -> Result<Rustviz, Box<dyn Error>> {
-    let stdout = std::str::from_utf8(stdout)?;
-    let parts: Vec<&str> = stdout.splitn(2, ":::").collect();
-    if parts.len() != 2 {
-        return Err(Box::new(RvError::PluginError(format!(
-            "Unexpected output format {}",
-            stdout
-        ))));
-    }
-    let code_p = parts[0];
-    let time_p = parts[1];
-
-    let height = match time_p.find("height=") {
-        Some(index) => {
-            let start = index + "height=\"".len();
-            if let Some(end) = time_p[start..].find("px\"") {
-                time_p[start..start + end].parse::<i32>()?
-            } else {
-                return Err(Box::new(RvError::PluginError(format!(
-                    "couldn't find px height identifier {}",
-                    time_p
-                ))));
-            }
-        }
-        None => {
-            return Err(Box::new(RvError::PluginError(format!(
-                "couldn't find height identifier {}",
-                time_p
-            ))));
-        }
-    };
-
+    let out: PluginOutput = serde_json::from_slice(stdout).map_err(|e| {
+        RvError::PluginError(format!(
+            "couldn't read the plugin's output ({e}); the installed rustviz plugin \
+             probably doesn't match this rustviz-lib. Reinstall it (`rustviz init`, \
+             or `cargo install --locked --force --path rustviz-plugin`)"
+        ))
+    })?;
     Ok(Rustviz {
-        code_panel: code_p.to_string(),
-        timeline_panel: time_p.to_string(),
-        height,
+        code_panel: out.code_panel,
+        timeline_panel: out.timeline_panel,
+        height: out.height,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The panels are JSON string fields, so nothing the user writes (a
+    /// `:::` in a comment, say, which the old `<code>:::<timeline>` framing
+    /// split on: #181) can be mistaken for structure.
+    #[test]
+    fn parse_output_reads_plugin_json() {
+        let code = "<svg><text>// a ::: b \"x:::y\"</text></svg>";
+        let timeline = "<svg height=\"42px\"><g/></svg>";
+        let out = format!(
+            "{}\n",
+            serde_json::json!({ "code_panel": code, "timeline_panel": timeline, "height": 42 })
+        );
+        let rv = parse_output(out.as_bytes()).expect("parse");
+        assert_eq!(rv.code_panel, code);
+        assert_eq!(rv.timeline_panel, timeline);
+        assert_eq!(rv.height, 42);
+    }
+
+    /// Output from a plugin that predates the JSON format must be an error
+    /// that says to reinstall, not a half-parsed visualization.
+    #[test]
+    fn parse_output_rejects_old_plugin_output() {
+        let err = parse_output(b"<svg></svg>:::<svg height=\"42px\"></svg>\n")
+            .err()
+            .expect("must not parse");
+        assert!(err.to_string().contains("Reinstall"), "{err}");
+    }
 
     /// Pin: the channel from `rust-toolchain.toml` parses as a
     /// non-empty `nightly-…` string. Catches a future malformed
