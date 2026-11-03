@@ -153,6 +153,15 @@ const EXPECTED_OK: &[&str] = &[
     // `:::` in a comment and a string literal (#181): used to be taken as
     // the plugin's panel separator, truncating the code panel mid-line.
     "triple_colon_source",
+    // — Coverage gaps closed (#139): patterns the visitor has arms
+    //   for but which lacked corpus pinning, plus const/static and
+    //   unsafe blocks which were silently untested.
+    "match_range_pattern",
+    "match_with_guard",
+    "const_basic",
+    "static_basic",
+    "unsafe_raw_ptr",
+    "static_mut_write",     // `COUNTER += inc` / `LOG = v` (used to panic)
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1059,6 +1068,108 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from s to t",
         ],
         must_not_contain: &[],
+    },
+    // ─── Coverage gaps closed (#139) ───────────────────────────────
+    TooltipExpect {
+        name: "match_range_pattern",
+        // Range patterns in match arms (`0..=4`, `5..=9`, `_`).
+        // All three arms borrow `s`; merge classifies as Unchanged,
+        // so no merge wording. PatKind::Range is walked silently —
+        // no per-arm event from the range itself.
+        must_contain: &[
+            "Move from String::from to s",
+            "show reads from s",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "match_with_guard",
+        // Pattern guard (`x if x > 0`). The pattern `x` binds from
+        // the scrutinee (`n`, Copy) — that's the "Copy from n to x"
+        // event. The guard expression itself is never visited, so
+        // nothing is asserted about it. Both arms borrow `s`; merge
+        // is Unchanged.
+        must_contain: &[
+            "Move from String::from to s",
+            "Copy from n to x",
+            "show reads from s",
+        ],
+        must_not_contain: &[
+            "may have been moved",
+            "moved or dropped in every branch",
+        ],
+    },
+    TooltipExpect {
+        name: "const_basic",
+        // `let x = N;` where N is a const i32 → Copy treated as a
+        // Bind from Anonymous (the const has no column). Then
+        // `let y = x` is a regular Copy from x to y.
+        must_contain: &[
+            "x is bound to a value",
+            "y is initialized by copy from x",
+            "Copy from x to y",
+        ],
+        must_not_contain: &[
+            // The const itself shouldn't get a column or events.
+            "N is the owner",
+            "N holds a value",
+            "N goes out of scope",
+            // No Move from N — const reads aren't moves.
+            "Move from N to x",
+        ],
+    },
+    TooltipExpect {
+        name: "static_basic",
+        // `let s = GREETING;` where GREETING is a `&'static str`.
+        // The static itself isn't a function-local RAP; `s` borrows
+        // from an Anonymous source (external memory). show(s) reads
+        // through s.
+        must_contain: &[
+            "s holds a reference",
+            "show reads from s",
+        ],
+        must_not_contain: &[
+            // GREETING shouldn't get a column.
+            "GREETING is the owner",
+            "GREETING holds",
+            "GREETING goes out of scope",
+        ],
+    },
+    TooltipExpect {
+        name: "unsafe_raw_ptr",
+        // Raw-pointer code through an `unsafe` block. The plugin
+        // doesn't model raw pointers, so this pins current,
+        // known-imperfect output rather than correct semantics:
+        // the deref-write `*p = 2` surfaces as "*p is bound to a
+        // value" at the start of p's column (it's really a write to
+        // x), and the `let p = &mut x as *mut i32` line shows
+        // nothing (no borrow of x, no binding of p). Mainly guards
+        // against a future change panicking on raw pointers; update
+        // these strings if raw-pointer handling is ever fixed.
+        must_contain: &[
+            "x is bound to a value",
+            "*p is bound to a value",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "static_mut_write",
+        // `COUNTER += inc` and `LOG = v` write to `static mut`s. Both
+        // used to panic in resource_of_lhs. The statics get no column;
+        // `v` is moved into LOG, so it must not be shown as dropped at
+        // the end of main.
+        must_contain: &[
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v goes out of scope. Its resource is dropped.",
+            "COUNTER",
+            "LOG",
+        ],
     },
 ];
 

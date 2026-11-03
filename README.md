@@ -205,8 +205,8 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   as moved, and are then wrongly shown as dropped at the end of scope.
 - References are sometimes described in ownership terms: a `&mut`
   variable is labelled "the owner of the resource", `*r += 1` reads
-  "*r acquires ownership", and a string literal (`let s = "hi";`)
-  "acquires ownership".
+  "*r acquires ownership", and a string literal or a `&str` `const` /
+  `static` (`let s = "hi";`, `let g = GREETING;`) "acquires ownership".
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
 - Struct fields after the whole struct is moved (`drop(c)`, `..user1`,
   field-init shorthand) can still be shown as owning, or as dropped.
@@ -225,7 +225,6 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   self` method, or `c.n = …` where `c: &mut T`.
 - Assigning to a chained field (`o.inner.x = …`), an index (`v[i] = …`),
   or a tuple destructure (`(a, b) = …`).
-- `const` and `static` items.
 - Union types.
 - `*cell.borrow_mut() += 1` and other assignments through a method's
   result; nested constructors like `Cons(1, Box::new(Cons(2, …)))`.
@@ -244,7 +243,11 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library
   macros like `println!`, `vec!`, `assert!` are unwrapped).
-- `unsafe` and raw pointers are untested.
+- Raw pointers aren't modelled: `let p = &mut x as *mut i32;` shows no
+  borrow of `x`, and a write `*p = 2` is drawn as `*p` getting a value
+  rather than as a write to `x`.
+- `const` and `static` items get no column of their own; reading one
+  shows only the binding it's read into.
 
 The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).
