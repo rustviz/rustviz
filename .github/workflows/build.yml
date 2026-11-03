@@ -132,9 +132,12 @@ jobs:
   # tagless manifest by digest; the merge job below stitches them
   # into a multi-arch manifest under the user-facing tags.
   #
-  # Only runs on real pushes to main (PRs don't push to GHCR).
+  # Pushes only on real pushes to main. On PRs that touch the image's
+  # inputs it builds both arches without pushing, so arm64-only breakage
+  # (e.g. LLVM crashing at -O3 after a toolchain bump, #182) shows up
+  # before merge rather than on main.
   runner-image:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
       fail-fast: false
       matrix:
@@ -157,17 +160,52 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Detect image-affecting changes
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "affected=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            -q '.[].filename')
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+          if echo "$changed" | grep -qE '^(playground/runner/|rustviz-plugin/|rust-toolchain\.toml$|Cargo\.lock$|\.github/workflows/build\.yml$)'; then
+            echo "affected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "affected=false" >> "$GITHUB_OUTPUT"
+            echo "==> runner image inputs unchanged; skipping build"
+          fi
+
       - name: Set up Docker Buildx
+        if: steps.changes.outputs.affected == 'true'
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
+        if: steps.changes.outputs.affected == 'true'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build (PR, no push)
+        if: github.event_name == 'pull_request' && steps.changes.outputs.affected == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: playground/runner/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          # Read main's layer cache; never write it from a PR.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
+
       - name: Build and push by digest
+        if: github.event_name == 'push'
         id: build
         uses: docker/build-push-action@v7
         with:
@@ -184,6 +222,7 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }},mode=max
 
       - name: Export digest as workflow artifact
+        if: github.event_name == 'push'
         id: export-digest
         run: |
           mkdir -p /tmp/digests
@@ -195,6 +234,7 @@ jobs:
           echo "digest-${{ matrix.arch }}=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Upload digest
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v5
         with:
           name: runner-image-digest-${{ matrix.arch }}
