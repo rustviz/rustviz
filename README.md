@@ -216,6 +216,11 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   reference counting isn't modelled.
 - Arrows for functions returning a `Copy` value say "moved to the
   caller" rather than "copied".
+- Tuples: creating one (`let t = (1, String::new());`) and reading a
+  field (`let a = t.0;`) produce no events, so a tuple that holds a
+  `String`, or a `String` moved out of one, is shown as "No resource is
+  dropped". Tuple structs (`struct Color(u8, u8, u8)`) render with a
+  column per field.
 
 **Crashes the plugin:** some valid programs do. Known crashes are
 tracked as [issues labelled
@@ -224,9 +229,10 @@ rather than listed here.
 
 **Simplified or not shown:**
 
-- Smart pointers (`Box`, `Rc`, `Arc`, `RefCell`, `Mutex`) and trait
-  objects render as a single owner column; `RefCell`'s runtime borrows
-  aren't shown.
+- Smart pointers (`Box`, `Rc`, `Arc`, `RefCell`, `Mutex`), trait
+  objects and unions render as a single owner column (a union's field
+  reads, writes and borrows are drawn on the union's column);
+  `RefCell`'s runtime borrows aren't shown.
 - Closures: captures are shown; events inside the closure body aren't.
 - Loops (`for`, `while`, `loop`) show a single iteration.
 - Method chains (`a.get_mut().push(x)`): only the first call renders.

@@ -279,6 +279,7 @@ const Description: React.FC = () => (
       <li>
         Shadowed variables (<code>let x</code> twice) share one column;{' '}
         <code>#[derive(Debug)]</code> adds extra timelines;{' '}
+        tuples (<code>let t = (…)</code>, <code>t.0</code>) show no events;{' '}
         <code>Rc</code> clones each appear to drop the value.
       </li>
     </ul>
@@ -303,7 +304,7 @@ const Description: React.FC = () => (
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)
-        are drawn as a single owner.
+        and unions are drawn as a single owner.
       </li>
     </ul>
     <p>
