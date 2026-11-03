@@ -232,7 +232,9 @@ rather than listed here.
 - Smart pointers (`Box`, `Rc`, `Arc`, `RefCell`, `Mutex`), trait
   objects and unions render as a single owner column (a union's field
   reads, writes and borrows are drawn on the union's column);
-  `RefCell`'s runtime borrows aren't shown.
+  `RefCell`'s runtime borrows aren't shown, and a write through one
+  (`*cell.borrow_mut() += 1`) shows only the `borrow_mut` call, as a
+  read of `cell`.
 - Closures: captures are shown; events inside the closure body aren't.
 - Loops (`for`, `while`, `loop`) show a single iteration.
 - Method chains (`a.get_mut().push(x)`): only the first call renders.
