@@ -227,8 +227,7 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   or a tuple destructure (`(a, b) = …`).
 - `const` and `static` items.
 - Union types.
-- `*cell.borrow_mut() += 1` and other assignments through a method's
-  result; nested constructors like `Cons(1, Box::new(Cons(2, …)))`.
+- Nested constructors like `Cons(1, Box::new(Cons(2, …)))`.
 
 **Simplified or not shown:**
 

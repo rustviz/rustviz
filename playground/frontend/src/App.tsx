@@ -290,8 +290,8 @@ const Description: React.FC = () => (
       </li>
       <li>
         Assigning to a field through a reference (<code>self.n += 1</code> in a{' '}
-        <code>&amp;mut self</code> method), to <code>v[i]</code>, to{' '}
-        <code>o.inner.x</code>, or through <code>*cell.borrow_mut()</code>.
+        <code>&amp;mut self</code> method), to <code>v[i]</code>, or to{' '}
+        <code>o.inner.x</code>.
       </li>
     </ul>
     <p><strong>Simplified or not shown:</strong></p>

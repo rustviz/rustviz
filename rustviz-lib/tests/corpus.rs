@@ -150,6 +150,10 @@ const EXPECTED_OK: &[&str] = &[
     // visualized, but the program must render (it used to crash on the
     // guard-bound variable).
     "match_if_let_guard",
+    // — Assignment to a field of a method-call temporary
+    //   (`v.last_mut().unwrap().n = 5`, #175). Used to panic in
+    //   resource_of_lhs ("unexpected field expr").
+    "field_of_method_result_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1044,6 +1048,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "n is bound to a value",
+        ],
+    },
+    // ─── Assignment to a field of a method-call temporary (#175) ─────
+    TooltipExpect {
+        name: "field_of_method_result_assign",
+        // `v.last_mut().unwrap().n = 5` writes through the `&mut P` that
+        // `last_mut` returns. The call is the only interaction with `v`
+        // (a mutable borrow for the call); the temporary gets no
+        // ownership event, `v` still owns the vector at scope end, and
+        // `= t` moves `t` into the element.
+        must_contain: &[
+            "last_mut reads from/writes to v",
+            "first_mut reads from/writes to v",
+            "t's resource is moved",
+            "v goes out of scope. Its resource is dropped.",
+            "t goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
         ],
     },
 ];

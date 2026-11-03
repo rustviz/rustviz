@@ -450,6 +450,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             let total_name = format!("{}.{}", name, ident.as_str());
             ResourceTy::Value(self.raps.get(&total_name).unwrap().rap.to_owned())
           }
+          // A field of a temporary rather than of a named place:
+          // `v.last_mut().unwrap().n = 5`, `make().n = 5`. As for
+          // `*v.last_mut().unwrap() = 5` (Deref arm below), there is no
+          // RAP for the temporary, so the write gets no ownership event
+          // of its own; the method calls inside the LHS already
+          // produced their events on the receiver (`visit_expr(lhs)` in
+          // the Assign arm), and `match_rhs` still records what happens
+          // to the RHS (e.g. `= s` moves s).
+          _ if field_base_is_temporary(expr) => ResourceTy::Anonymous,
           _ => { panic!("unexpected field expr") }
         } 
       }
@@ -1368,5 +1377,17 @@ pub fn print_out_of_scope(&mut self){
         }
       }
     }
+  }
+}
+/// True when `expr` (the base of a field-assignment LHS `expr.f = ..`)
+/// denotes a temporary produced by a call, possibly behind further
+/// field projections or derefs: `v.last_mut().unwrap()`,
+/// `make().inner`, `*m.get_mut(&k).unwrap()`. Named places (`p`,
+/// `p.inner`, `v[0]`) return false.
+fn field_base_is_temporary(expr: &Expr) -> bool {
+  match expr.kind {
+    ExprKind::MethodCall(..) | ExprKind::Call(..) => true,
+    ExprKind::Field(base, _) | ExprKind::Unary(UnOp::Deref, base) => field_base_is_temporary(base),
+    _ => false,
   }
 }
