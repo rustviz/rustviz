@@ -268,9 +268,9 @@ const Description: React.FC = () => (
         <code>longest</code>): the result isn&apos;t linked to what it borrows.
       </li>
       <li>
-        Values consumed by a method taking <code>self</code> (
-        <code>v.into_iter()</code>, <code>unwrap_or_else</code>) or by{' '}
-        <code>s1 + &amp;s2</code>: shown as dropped at the end instead of moved.
+        A closure passed straight to a function (
+        <code>thread::spawn(move || …)</code>): its captures aren&apos;t
+        drawn, so a moved-in value is shown as dropped at the end.
       </li>
       <li>
         Moving a <code>&amp;mut</code> (<code>let r2 = r;</code>) is described as
