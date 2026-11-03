@@ -58,6 +58,7 @@ const EXPECTED_OK: &[&str] = &[
     "reborrow_kinds",
     "borrow_moved_on",
     "call_reborrow_kinds",
+    "interior_mut_lend",
     "nll_two_borrows",
     // — Reassignment / move-out / take-and-return.
     "reassign_with_drop",
@@ -586,6 +587,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first reads from/writes to y (mutable reborrow — y is frozen until first returns)",
             "take reads from/writes to y (mutable reborrow — y is frozen until take returns)",
             "show reads from x (immutable reborrow — x is read-only until show returns)",
+        ],
+    },
+    TooltipExpect {
+        name: "interior_mut_lend",
+        // `Cell::set`, `RefCell::borrow_mut`, `Mutex::lock` take
+        // `&self` and mutate through it, so the lend dot must not
+        // call the owner "read-only". A plain String still is.
+        must_contain: &[
+            "c's resource is immutably borrowed by set",
+            "r's resource is immutably borrowed by borrow_mut",
+            "shared's resource is immutably borrowed by borrow",
+            "m's resource is immutably borrowed by lock",
+            "s's resource is immutably borrowed by len; s is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            "c is read-only",
+            "r is read-only",
+            "shared is read-only",
+            "m is read-only",
         ],
     },
     TooltipExpect {

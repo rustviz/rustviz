@@ -202,7 +202,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             rustc_middle::ty::AdtKind::Struct => {
               let owner_hash = self.rap_hashes as u64;
               let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-              self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.current_scope, !self.inside_branch);
+              self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
               let generic_args = match ty.kind() {
                 rustc_middle::ty::TyKind::Adt(_, args) => *args,
                 _ => unreachable!("ty.is_adt() but kind is not Adt"),
@@ -211,18 +211,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let field_name = format!("{}.{}", name.clone(), field.name.as_str());
                 let field_ty = field.ty(self.tcx, generic_args);
                 let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
-                self.add_struct(field_name, owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.current_scope, !self.inside_branch);
+                self.add_struct(field_name, owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
               }
             }
             rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
               let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-              self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.current_scope, !self.inside_branch);
+              self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
             }
           }
         }
         else {
           let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-          self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.current_scope, !self.inside_branch);
+          self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
         }
         self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id });
         *self.unique_id += 1;
@@ -1404,7 +1404,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let is_copy = self.tcx.type_is_copy_modulo_regions(
                       rustc_middle::ty::TypingEnv::post_analysis(self.tcx, user_pat.hir_id.owner),
                       pat_ty);
-                    self.add_owner(pat_name.clone(), false, is_copy, self.current_scope, false);
+                    self.add_owner(pat_name.clone(), false, is_copy, self.ty_has_interior_mut(pat_ty, user_pat.hir_id.owner), self.current_scope, false);
                   }
                   self.annotate_src(pat_name.clone(), pat_ident.span, false,
                     *self.raps.get(&pat_name).unwrap().rap.hash());
@@ -1727,7 +1727,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             rustc_middle::ty::TypingEnv::post_analysis(self.tcx, hirid.owner),
             pat_ty,
           );
-          self.add_owner(name.clone(), false, is_copy, self.current_scope, false);
+          self.add_owner(name.clone(), false, is_copy, self.ty_has_interior_mut(pat_ty, hirid.owner), self.current_scope, false);
         }
         self.annotate_src(name.clone(), ident.span, false,
           *self.raps.get(&name).unwrap().rap.hash());

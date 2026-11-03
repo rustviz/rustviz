@@ -198,13 +198,17 @@ pub fn event_dot_copy_ref_to_caller(my_name: &String, _target_name: &String) -> 
 // use": the loan can outlive Y (`let z = y;` copies/moves it on, and
 // for a function Y a returned reference can carry it past the call).
 //
-// When X is itself a shared reference (`&*r`, `&r`, `show(r)` with
-// r: `&T`) the clause is omitted: X was already read-only, so the
-// borrow adds no restriction worth teaching.
-pub fn event_dot_static_lend(my_name: &String, target_name: &String, source_is_shared_ref: bool) -> String {
+// The clause is omitted (`omit_read_only`) when X is itself a shared
+// reference (`&*r`, `&r`, `show(r)` with r: `&T`): X was already
+// read-only, so the borrow adds no restriction worth teaching. It is
+// also omitted when X has interior mutability (`c.borrow_mut()` on a
+// `RefCell`, `cell.set(..)`, `m.lock()`): those methods take `&self`
+// and mutate X through the shared borrow, so "read-only" would be
+// false.
+pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_only: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
-    if source_is_shared_ref {
+    if omit_read_only {
         format!(
             "{0}'s resource is immutably borrowed by {1}",
             my_name_fmt, target_name_fmt

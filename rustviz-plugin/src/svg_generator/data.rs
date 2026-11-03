@@ -92,6 +92,11 @@ pub struct Owner {
     /// going out of scope reclaims storage but doesn't run any
     /// drop glue; we surface that distinction visually.
     pub is_copy: bool,
+    /// True iff this owner's type can be mutated through a shared
+    /// reference (`Cell`, `RefCell`, `Mutex`, `Rc<RefCell<T>>`, ...);
+    /// see `ExprVisitor::ty_has_interior_mut`. An immutable borrow of
+    /// such an owner doesn't make it read-only.
+    pub interior_mut: bool,
     /// True iff this owner binds a closure literal (`let f = || ...`
     /// or `let f = move || ...`). Routes capture-related events
     /// (Move/StaticBorrow/MutableBorrow into `f`) and `f`'s scope-end
@@ -110,6 +115,8 @@ pub struct Struct {
     /// Copy-ness of this struct (or member's type). Same role as
     /// Owner::is_copy.
     pub is_copy: bool,
+    /// Same as Owner::interior_mut.
+    pub interior_mut: bool,
 }
 
 // a reference of type &mut T
@@ -296,6 +303,11 @@ impl ResourceAccessPoint {
     /// "ownership" framing in tooltip text doesn't fit primitives —
     /// they're values, not heap resources — so this lets the tooltip
     /// dispatcher pick non-ownership wording where appropriate.
+    pub fn has_interior_mut(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { interior_mut: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { interior_mut: true, .. }))
+    }
+
     pub fn is_copy_owner(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { is_copy: true, .. }))
     }
@@ -1055,11 +1067,13 @@ impl Event {
                     safe_message(hover_messages::event_dot_capture_static_lend_to_closure, &self.deref_name(my_name), to)
                 } else {
                     // `is` is the lender. A `&T` lender was read-only
-                    // already; see event_dot_static_lend.
-                    let source_is_shared_ref = is.extract_rap()
-                        .map_or(false, |r| r.is_ref() && !r.is_mutref());
+                    // already, and a `RefCell` / `Cell` / `Mutex` lender
+                    // isn't read-only at all (it can be mutated through
+                    // the shared borrow); see event_dot_static_lend.
+                    let omit_read_only = is.extract_rap()
+                        .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
                     let target_name = safe_message(|_, t| t.clone(), my_name, to);
-                    hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, source_is_shared_ref)
+                    hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, omit_read_only)
                 }
             }
             Event::MutableLend{ to ,..} => {
