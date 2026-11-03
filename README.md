@@ -203,10 +203,10 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
 - Values consumed by a method that takes `self` (`v.into_iter()`,
   `opt.unwrap_or_else(…)`, `opt.expect(…)`) or by `s1 + &s2` aren't shown
   as moved, and are then wrongly shown as dropped at the end of scope.
-- References are sometimes described in ownership terms: a `&mut`
-  variable is labelled "the owner of the resource", `*r += 1` reads
-  "*r acquires ownership", and a string literal or a `&str` `const` /
-  `static` (`let s = "hi";`, `let g = GREETING;`) "acquires ownership".
+- Some wording on references is still off: moving a `&mut` (`let r2 =
+  r;`) says "r's resource is moved" (it's the reference that moves), and
+  a `&T` binding such as `let s: &str = "hi";` ends with "Return
+  immutably borrowed resource from s to *s".
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
 - Struct fields after the whole struct is moved (`drop(c)`, `..user1`,
   field-init shorthand) can still be shown as owning, or as dropped.
