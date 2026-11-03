@@ -740,16 +740,28 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
       // shape we can't name (call result, block, etc.) — or a name
       // we don't have a RAP for — falls back to Anonymous so the
       // surrounding event still records.
-      if let Some(base) = expr_to_rap_name(inner, tcx) {
-        let total_name = format!("{}.{}", base, ident.as_str());
-        if let Some(rd) = raps.get(&total_name) {
-          return ResourceTy::Value(rd.rap.to_owned());
-        }
+      if let Some(rap) = field_rap(inner, ident.as_str(), tcx, raps) {
+        return ResourceTy::Value(rap);
       }
       ResourceTy::Anonymous
     }
     _ => ResourceTy::Anonymous
   }
+}
+
+/// RAP for the field projection `inner.field`, if we have one. Struct
+/// fields have their own `base.field` RAP. Union fields don't: a union
+/// is rendered as one opaque owner column (#131), so reading or
+/// borrowing `u._a` is attributed to `u` itself.
+pub fn field_rap(inner: &Expr, field: &str, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Option<ResourceAccessPoint> {
+  let base = expr_to_rap_name(inner, tcx)?;
+  if let Some(rd) = raps.get(&format!("{}.{}", base, field)) {
+    return Some(rd.rap.to_owned());
+  }
+  if tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_union() {
+    return raps.get(&base).map(|rd| rd.rap.to_owned());
+  }
+  None
 }
 
 // Almost the same as get_rap but we don't care about any anonymous owners
@@ -779,13 +791,7 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
       // Same logic as get_rap's Field arm, but return None instead
       // of Anonymous since fetch_rap callers don't carry a separate
       // "anonymous" sentinel.
-      if let Some(base) = expr_to_rap_name(inner, tcx) {
-        let total_name = format!("{}.{}", base, ident.as_str());
-        if let Some(rd) = raps.get(&total_name) {
-          return Some(rd.rap.to_owned());
-        }
-      }
-      None
+      field_rap(inner, ident.as_str(), tcx, raps)
     }
     _ => None
   }
@@ -879,9 +885,10 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
         if let Some(rd) = borrow_map.get(&name) {
           return rd.to_owned().lender;
         }
-        if let Some(rd) = raps.get(&name) {
-          return ResourceTy::Value(rd.rap.to_owned());
-        }
+      }
+      // `base.field`'s own RAP, or the union itself for `&u._a`.
+      if let Some(rap) = field_rap(inner, ident.as_str(), tcx, raps) {
+        return ResourceTy::Value(rap);
       }
       ResourceTy::Anonymous
     }

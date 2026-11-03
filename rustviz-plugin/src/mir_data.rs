@@ -140,7 +140,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     info!("borrow_data for location {:#?} : {:#?}", location, b_data);
                     let b_place = b_data.borrowed_place().local_or_deref_local();
                     let a_place = b_data.assigned_place().local_or_deref_local();
-                    info!("borrowed_place: {:#?}, as local: {:#?}", b_data.borrowed_place().to_string(self.tcx, &body_with_facts.body), b_place);
+                    // Log places with their Debug form, not rustc_utils'
+                    // `PlaceExt::to_string`: that helper hits
+                    // `unimplemented!("Union")` on a union-field projection
+                    // (`&b.f` with `b: SomeUnion`), and because the logger
+                    // runs at Info this debug line would panic the plugin.
+                    info!("borrowed_place: {:?}, as local: {:#?}", b_data.borrowed_place(), b_place);
                     info!("is source visible? {}", b_data.borrowed_place().is_source_visible(self.tcx, &body_with_facts.body));
                     // RegionInferenceContext's per-region accessors are pub(crate) in 1.91;
                     // log just the region id here. If we need the NLL origin, we can lift
@@ -151,7 +156,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                         info!("local decl {:#?}", b_loc); 
                         //println!("span {}", b_loc.source_info.span.to_string(self.tcx));
                     }
-                    info!("assigned place {:#?}, as local {:#?}", b_data.assigned_place().to_string(self.tcx, &body_with_facts.body), a_place);
+                    info!("assigned place {:?}, as local {:#?}", b_data.assigned_place(), a_place);
                     info!("is source visible? {}", b_data.assigned_place().is_source_visible(self.tcx, &body_with_facts.body));
                     if a_place.is_some() { 
                         let a_loc =  body_with_facts.body.local_decls.get(a_place.unwrap()).unwrap();

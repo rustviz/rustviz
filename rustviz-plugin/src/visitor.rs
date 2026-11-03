@@ -192,18 +192,32 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
         else if ty.is_adt() && !is_special{ // kind of weird given we don't have a InitStructParam
-          let owner_hash = self.rap_hashes as u64;
-          let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-          self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.current_scope, !self.inside_branch);
-          let generic_args = match ty.kind() {
-            rustc_middle::ty::TyKind::Adt(_, args) => *args,
-            _ => unreachable!("ty.is_adt() but kind is not Adt"),
-          };
-          for field in ty.ty_adt_def().unwrap().all_fields() {
-            let field_name = format!("{}.{}", name.clone(), field.name.as_str());
-            let field_ty = field.ty(self.tcx, generic_args);
-            let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
-            self.add_struct(field_name, owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.current_scope, !self.inside_branch);
+          // Dispatch on the ADT kind so structs get per-field
+          // timelines while enums and unions stay opaque (same
+          // policy as the LHS-of-expr / pattern-binding sites in
+          // expr_visitor.rs). Without this branching, an enum or
+          // union parameter would silently get spurious field RAPs
+          // registered as if it were a struct.
+          match ty.ty_adt_def().unwrap().adt_kind() {
+            rustc_middle::ty::AdtKind::Struct => {
+              let owner_hash = self.rap_hashes as u64;
+              let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+              self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.current_scope, !self.inside_branch);
+              let generic_args = match ty.kind() {
+                rustc_middle::ty::TyKind::Adt(_, args) => *args,
+                _ => unreachable!("ty.is_adt() but kind is not Adt"),
+              };
+              for field in ty.ty_adt_def().unwrap().all_fields() {
+                let field_name = format!("{}.{}", name.clone(), field.name.as_str());
+                let field_ty = field.ty(self.tcx, generic_args);
+                let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
+                self.add_struct(field_name, owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.current_scope, !self.inside_branch);
+              }
+            }
+            rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
+              let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+              self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.current_scope, !self.inside_branch);
+            }
           }
         }
         else {
@@ -421,6 +435,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
         // typecheck to figure out what type of event is going to occur
         let line_num = expr_to_line(&lhs_expr, &self.tcx);
+        // `u._a = …` on a union: resource_of_lhs maps it to the
+        // union's own column. The field's type (possibly a ref, or
+        // a non-Copy ManuallyDrop<T>) says nothing about `u`, and a
+        // union field write never runs a destructor, so skip the
+        // ref-reassignment and drop-at-reassign handling below.
+        let lhs_is_union_field = matches!(lhs_expr.kind,
+          ExprKind::Field(recv, _) if self.is_union_typed(recv));
         let lhs_rty = self.resource_of_lhs(lhs_expr);
         let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
         let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
@@ -437,7 +458,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         };
         // if we are pointing at a new piece of data
-        if lhs_ty.is_ref() {
+        if lhs_ty.is_ref() && !lhs_is_union_field {
           match lhs_rty {
             // ex:
             // let mut a = &b (where b is &&i32)
@@ -559,7 +580,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // the white down-arrow triangle and the drop becomes
         // invisible.
         let drop_target: Option<ResourceAccessPoint> =
-          if !lhs_ty.is_ref() && !is_copyable {
+          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field {
             match &lhs_rty {
               ResourceTy::Value(rap) => {
                 // Plain reassign — only emit the drop if y currently
