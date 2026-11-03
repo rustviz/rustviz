@@ -12,6 +12,7 @@
 //     dropdown is unambiguous.
 
 import { exampleGroups } from './examples';
+import { setItemEvictingCache } from './svgCache';
 
 const STORAGE_KEY = 'rustviz.playground.userExamples';
 const SELECTED_KEY = 'rustviz.playground.selected';
@@ -65,15 +66,18 @@ export function loadUserExamples(): UserExample[] {
   }
 }
 
-export function saveUserExamples(examples: UserExample[]) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(examples));
-  } catch {
-    // Quota exceeded / storage unavailable. Silently degrade — the
-    // user's edits stay in the editor for this session, just not across
-    // refreshes. We could surface a warning, but losing one example to
-    // a quota cap shouldn't pop a modal.
-  }
+/**
+ * Persist the user's examples. Returns false if they could not be
+ * stored, so the UI can warn that edits won't survive a refresh.
+ *
+ * These are the only copy of the user's code, so they outrank the
+ * SVG render cache: on a quota error we evict cached renderings and
+ * retry. It can still fail if the rest of the origin's storage (on
+ * GitHub Pages, other rustviz.github.io pages share the quota) is
+ * full, or if storage is disabled.
+ */
+export function saveUserExamples(examples: UserExample[]): boolean {
+  return setItemEvictingCache(STORAGE_KEY, JSON.stringify(examples));
 }
 
 /**
@@ -105,11 +109,9 @@ export function loadSelection(userExamples: UserExample[]): Selection {
 }
 
 export function saveSelection(sel: Selection) {
-  try {
-    localStorage.setItem(SELECTED_KEY, JSON.stringify(sel));
-  } catch {
-    // see saveUserExamples
-  }
+  // Best effort: losing the selection only means the page reopens on
+  // the default example.
+  setItemEvictingCache(SELECTED_KEY, JSON.stringify(sel));
 }
 
 /**

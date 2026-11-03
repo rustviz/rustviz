@@ -10,8 +10,11 @@
 // for novel user code only.
 //
 // Build-time only. Not invoked at runtime. The output JSON is
-// gitignored — every clone regenerates it via the `prebuild` script
-// in package.json so stale entries can't sneak past code review.
+// gitignored (see the repo-root .gitignore) — every clone regenerates
+// it via the `prebuild` script in package.json so stale entries can't
+// sneak past code review. It records which plugin rendered it
+// (`pluginFingerprint`), and a rebuild only reuses it when that still
+// matches the installed plugin.
 //
 // Failures are fatal: if any curated example fails to render through
 // the plugin, the build aborts. Catches plugin regressions in CI;
@@ -26,8 +29,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { exampleGroups } from '../src/examples';
@@ -44,23 +47,83 @@ function sha256Hex(s: string): string {
   return createHash('sha256').update(s, 'utf-8').digest('hex');
 }
 
+const PATH_DIRS = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+const CARGO_BIN = join(process.env.CARGO_HOME ?? join(homedir(), '.cargo'), 'bin');
+/** Where `cargo rv-plugin` looks: `$CARGO_HOME/bin` first unless it's
+ *  already on PATH, then PATH in order (cargo's `search_directories`). */
+const CARGO_SUBCOMMAND_DIRS = PATH_DIRS.includes(CARGO_BIN) ? PATH_DIRS : [CARGO_BIN, ...PATH_DIRS];
+
+function findExecutable(name: string, dirs: string[]): string | null {
+  const exts = process.platform === 'win32' ? ['.exe', ''] : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const p = join(dir, name + ext);
+      if (existsSync(p)) return p;
+    }
+  }
+  return null;
+}
+
 /**
- * Content-addressable version: a hash of the rendered entry set.
+ * Identity of the plugin + renderer that the SVGs come from:
+ * `<plugin crate version>+<pinned toolchain>+<digest of the installed
+ * rustviz / cargo-rv-plugin / rv-plugin-driver binaries>`.
  *
- * This means re-running the build with the same plugin output
- * (unchanged examples + unchanged plugin behaviour) produces the
- * same version string and therefore the same `prerendered.json`
- * file bytes — so the file isn't "dirty" against git just from
- * running a build. A real change to the SVG output anywhere flips
- * the version and invalidates user-side localStorage entries.
+ * The crate version alone (2.0.0) doesn't move when plugin behaviour
+ * changes, so the binary digest is what actually catches "same
+ * examples, different plugin". It goes into the manifest's `version`
+ * (which invalidates users' localStorage render cache) and gates
+ * `tryReuseExisting`. A spurious change (e.g. a byte-different rebuild
+ * of the same source) only costs one re-render / cache flush.
+ */
+function pluginFingerprint(): string {
+  const read = (rel: string, re: RegExp) => {
+    try {
+      return re.exec(readFileSync(resolve(FRONTEND_ROOT, rel), 'utf-8'))?.[1] ?? 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+  const crateVersion = read('../../rustviz-plugin/Cargo.toml', /^version\s*=\s*"([^"]+)"/m);
+  const toolchain = read('../../rust-toolchain.toml', /channel\s*=\s*"([^"]+)"/);
+  const digest = createHash('sha256');
+  const cargoPlugin = findExecutable('cargo-rv-plugin', CARGO_SUBCOMMAND_DIRS);
+  // rustc_plugin looks for the driver next to cargo-rv-plugin.
+  const driver = findExecutable('rv-plugin-driver', [
+    ...(cargoPlugin ? [dirname(cargoPlugin)] : []),
+    ...CARGO_SUBCOMMAND_DIRS,
+  ]);
+  for (const [name, path] of [
+    ['rustviz', findExecutable('rustviz', PATH_DIRS)],
+    ['cargo-rv-plugin', cargoPlugin],
+    ['rv-plugin-driver', driver],
+  ] as const) {
+    digest.update(`${name}\0`);
+    digest.update(path ? readFileSync(path) : 'missing');
+    digest.update('\0');
+  }
+  return `${crateVersion}+${toolchain}+${digest.digest('hex').slice(0, 16)}`;
+}
+
+/**
+ * Content-addressable version: a hash of the rendered entry set and
+ * of the plugin fingerprint.
+ *
+ * Re-running the build with the same examples and the same installed
+ * plugin produces the same version string (and the same file bytes,
+ * so the write below is skipped). A change to the SVG output anywhere,
+ * or to the plugin even if no curated rendering changed, flips the
+ * version and invalidates user-side localStorage entries, which were
+ * rendered by the compile API's (equally updated) plugin.
  *
  * Stable serialisation: sorted hash keys so insertion order doesn't
  * leak into the version.
  */
-function versionFromEntries(entries: Record<string, Pair>): string {
+function versionFromEntries(entries: Record<string, Pair>, plugin: string): string {
   const sortedHashes = Object.keys(entries).sort();
   const stable = sortedHashes
     .map(h => `${h}:${entries[h].code_panel.length}:${entries[h].timeline_panel.length}:${sha256Hex(entries[h].code_panel)}:${sha256Hex(entries[h].timeline_panel)}`)
+    .concat(`plugin:${plugin}`)
     .join('\n');
   return sha256Hex(stable).slice(0, 16);
 }
@@ -111,31 +174,26 @@ function renderOne(code: string, label: string): Pair {
 }
 
 /**
- * Reuse path: if `prerendered.json` already covers every current
- * example's hash, skip the per-snippet rustviz invocation entirely.
+ * Reuse path: if `prerendered.json` was rendered by the same plugin
+ * (same `pluginFingerprint`) and already covers every current
+ * example's hash, skip the per-snippet rustviz invocation entirely,
+ * so repeat builds with no example or plugin changes complete in
+ * <100 ms instead of ~9 s.
  *
- * Two reasons this matters:
- *
- *   1. Repeat builds with no example changes complete in <100 ms
- *      instead of ~9 s — useful for `npm run build` in tight loops.
- *   2. Build environments that don't have the rustviz CLI installed
- *      can still pass through the prebuild step as long as a
- *      complete-enough `prerendered.json` is already on disk. This
- *      lets a Docker build whose layer cache hits the prerender stage
- *      but not the SPA stage skip re-rendering.
- *
- * Returns the inherited entries when all hashes are present, or
- * null if any are missing (in which case main() falls back to the
- * full render path).
+ * Returns the inherited entries when reusable, or null (in which
+ * case main() falls back to the full render path).
  */
-function tryReuseExisting(): Record<string, Pair> | null {
+function tryReuseExisting(plugin: string): Record<string, Pair> | null {
   if (!existsSync(OUTPUT_PATH)) return null;
-  let parsed: { entries?: Record<string, Pair> };
+  let parsed: { plugin?: string; entries?: Record<string, Pair> };
   try {
     parsed = JSON.parse(readFileSync(OUTPUT_PATH, 'utf-8'));
   } catch {
     return null;
   }
+  // A file from an older plugin (or one written before the
+  // fingerprint existed) would ship stale dropdown SVGs.
+  if (parsed.plugin !== plugin) return null;
   if (!parsed.entries || typeof parsed.entries !== 'object') return null;
 
   const reused: Record<string, Pair> = {};
@@ -162,7 +220,8 @@ function tryReuseExisting(): Record<string, Pair> | null {
 function main(): void {
   const start = Date.now();
 
-  const reused = tryReuseExisting();
+  const plugin = pluginFingerprint();
+  const reused = tryReuseExisting(plugin);
   if (reused) {
     console.log(
       `prerender: ${Object.keys(reused).length} snippets all covered by existing JSON; skipping (${Date.now() - start} ms)`,
@@ -199,15 +258,12 @@ function main(): void {
     }
   }
 
-  const out = { version: versionFromEntries(entries), entries };
+  const out = { version: versionFromEntries(entries, plugin), plugin, entries };
   const serialized = JSON.stringify(out);
 
   // Skip the write if the contents are byte-identical to what's
-  // already on disk. Keeps the working tree clean across no-op
-  // builds (and across `npm run build` re-runs that share the same
-  // plugin behaviour). The real signal a dev wants is "the file
-  // changed because some example's rendering changed" — that still
-  // shows up.
+  // already on disk, so a no-op rebuild doesn't touch the file's
+  // mtime (and retrigger Vite's watcher in dev).
   if (existsSync(OUTPUT_PATH)) {
     const existing = readFileSync(OUTPUT_PATH, 'utf-8').trimEnd();
     if (existing === serialized) {

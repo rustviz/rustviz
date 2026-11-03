@@ -31,9 +31,13 @@ on:
     branches: [main]
     paths:
       # The frontend, plus anything that changes the prerendered SVGs
-      # baked into the bundle (the plugin and its toolchain).
+      # baked into the bundle (the plugin, the CLI + rustviz-lib that
+      # drive it, and its toolchain). A rebuild also flips the bundle's
+      # cache version, which drops users' cached renderings.
       - 'playground/frontend/**'
       - 'rustviz-plugin/**'
+      - 'rustviz-lib/**'
+      - 'rustviz-cli/**'
       - 'rust-toolchain.toml'
       - 'Cargo.lock'
       - '.github/workflows/pages.yml'

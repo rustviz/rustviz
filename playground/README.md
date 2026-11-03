@@ -44,7 +44,8 @@ Production runs in two pieces:
 - **Static SPA on GitHub Pages**, at <https://rustviz.github.io/>.
   Built from `playground/frontend/` by `.github/workflows/pages.yml` and
   pushed to the `rustviz/rustviz.github.io` repo whenever the frontend or
-  the plugin changes (the bundle includes prerendered SVGs). Loads
+  the plugin, CLI or rustviz-lib changes (the bundle includes SVGs prerendered
+  at build time; `src/prerendered.json` is generated, not tracked). Loads
   instantly even when no one has visited recently.
 - **Compile API on Google Cloud Run**, at <https://rustviz-api-816769776225.us-central1.run.app/>.
   See below. Allowed origins for cross-origin requests are listed in

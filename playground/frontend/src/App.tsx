@@ -495,9 +495,17 @@ const App: React.FC = () => {
   }, [userExamples]);
 
   // Persist on every change. localStorage writes are cheap; no need
-  // to debounce.
+  // to debounce. A failed save (storage full even after evicting the
+  // render cache, or disabled) shows a dismissible warning above the
+  // editor instead of silently losing the edits on refresh. Dismissal
+  // lasts until a save succeeds again, so the banner doesn't reappear
+  // on every keystroke.
+  const [saveFailed, setSaveFailed] = useState(false);
+  const [saveWarningDismissed, setSaveWarningDismissed] = useState(false);
   useEffect(() => {
-    saveUserExamples(userExamples);
+    const ok = saveUserExamples(userExamples);
+    setSaveFailed(!ok);
+    if (ok) setSaveWarningDismissed(false);
   }, [userExamples]);
   useEffect(() => {
     saveSelection(selection);
@@ -925,6 +933,23 @@ const App: React.FC = () => {
                   {isLoading ? <>Generating<span className="ellipsis"></span></> : 'Generate Visualization'}
                 </button>
               </div>
+              {saveFailed && !saveWarningDismissed && (
+                <div className="storage-warning" role="alert">
+                  <span>
+                    Your edits aren't being saved: this browser's storage
+                    for this site is full or disabled, so they will be lost
+                    when you reload. Use the download button to save a copy.
+                  </span>
+                  <button
+                    className="storage-warning-dismiss"
+                    onClick={() => setSaveWarningDismissed(true)}
+                    aria-label="Dismiss warning"
+                    title="Dismiss"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div className="editor-host" ref={editorHostRef} />
             </Panel>
           </PanelGroup>

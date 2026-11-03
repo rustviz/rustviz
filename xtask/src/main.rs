@@ -286,11 +286,13 @@ fn uninstall(args: UninstallArgs) -> Result<()> {
         println!("  - docker not available; skipping");
     }
 
-    // 3. Frontend artifacts. dist/ + node_modules/ + *.tsbuildinfo are
-    //    all regenerable by `npm install && npm run build`.
+    // 3. Frontend artifacts. dist/ + node_modules/ + *.tsbuildinfo +
+    //    the prerendered dropdown SVGs are all regenerable by
+    //    `npm install && npm run build`.
     section("playground frontend artifacts");
     rm_rf_if_exists(dry, "playground/frontend/dist")?;
     rm_rf_if_exists(dry, "playground/frontend/node_modules")?;
+    rm_file_if_exists(dry, "playground/frontend/src/prerendered.json")?;
     if let Ok(entries) = std::fs::read_dir("playground/frontend") {
         for entry in entries.flatten() {
             let name = entry.file_name();
