@@ -1488,7 +1488,10 @@ fn render_arrow (
             // Returning a Copy value (i32, bool, ..) copies it out;
             // only non-Copy values are moved. Same wording as the
             // dot tooltip for this event (data.rs).
+            // A returned `&T` is a copy of the reference, not of the data.
             let message = match external_event {
+                ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::StaticRef(_)), .. } =>
+                    hover_messages::event_dot_copy_ref_to_caller,
                 ExternalEvent::Copy { .. } => hover_messages::event_dot_copy_to_caller,
                 _ => hover_messages::event_dot_move_to_caller,
             };

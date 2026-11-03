@@ -175,6 +175,16 @@ pub fn event_dot_copy_to_caller(my_name: &String, _target_name: &String) -> Stri
     )
 }
 
+/// Returning a shared reference (`&T` is Copy) copies the reference,
+/// never the data behind it, so don't say "s's resource is copied".
+pub fn event_dot_copy_ref_to_caller(my_name: &String, _target_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "a reference from {0} is returned to the caller; the data it points to is not copied",
+        my_name_fmt
+    )
+}
+
 // 1   0
 //     |
 // o<--*   the star event (&)

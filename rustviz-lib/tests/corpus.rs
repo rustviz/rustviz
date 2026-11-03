@@ -217,6 +217,7 @@ const EXPECTED_OK: &[&str] = &[
     "derive_debug",
     "match_arm_macro_body",
     "copy_return_param",
+    "return_shared_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -271,6 +272,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "x's resource is moved to the caller",
             "big's resource is moved to the caller",
+        ],
+    },
+    TooltipExpect {
+        name: "return_shared_ref",
+        // Returning a `&T` copies the reference (references are Copy),
+        // never the String behind it. A returned String is still moved.
+        must_contain: &[
+            "a reference from s is returned to the caller; the data it points to is not copied",
+            "a reference from r is returned to the caller; the data it points to is not copied",
+            "t's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            "s's resource is copied to the caller",
+            "s's resource is moved to the caller",
+            "r's resource is copied to the caller",
+            "r's resource is moved to the caller",
         ],
     },
     TooltipExpect {
