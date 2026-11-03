@@ -184,7 +184,7 @@ pub fn error_kind(err: &(dyn Error + 'static)) -> ErrorKind {
 /// First sentence of the [`RvError::DoesNotCompile`] message. Its
 /// `Display` is this sentence, a blank line, then rustc's diagnostics.
 pub const DOES_NOT_COMPILE_INTRO: &str = "This program doesn't compile, and RustViz only visualizes \
-programs that pass the borrow checker. Here is rustc's error:";
+programs that rustc accepts, including the borrow checker. Here is rustc's error:";
 
 /// Prefix of the line the plugin prints on stderr when it hits a construct
 /// it can't handle (see `catch_plugin_panic` in rustviz-plugin/src/lib.rs;
@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(e.kind(), ErrorKind::DoesNotCompile);
         let shown = e.to_string();
         assert!(shown.starts_with(DOES_NOT_COMPILE_INTRO));
-        assert!(shown.starts_with("This program doesn't compile, and RustViz only visualizes programs that pass the borrow checker."));
+        assert!(shown.starts_with("This program doesn't compile, and RustViz only visualizes programs that rustc accepts, including the borrow checker."));
         assert!(shown.contains(":\n\nerror[E0499]"));
         let boxed: Box<dyn Error> = Box::new(e);
         assert_eq!(error_kind(boxed.as_ref()), ErrorKind::DoesNotCompile);
