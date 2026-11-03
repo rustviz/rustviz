@@ -161,7 +161,7 @@ pub fn render_svg(
     source_rs_str: &str,
     visualization_data: &mut VisualizationData,
     hide_lines: &HashSet<usize>,
-) -> (String, String){
+) -> (String, String, i32){
     info!("preprocessed events : {:#?}", visualization_data.preprocess_external_events);
     info!("ev_line_map: {:#?}", visualization_data.event_line_map);
 
@@ -536,5 +536,5 @@ pub fn render_svg(
         .render("timeline_svg_template", &svg_data)
         .unwrap();
 
-    (final_code_svg_content, final_timeline_svg_content)
+    (final_code_svg_content, final_timeline_svg_content, svg_data.height)
 }

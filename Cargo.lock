@@ -1833,6 +1833,8 @@ name = "rustviz-lib"
 version = "2.0.0"
 dependencies = [
  "libc",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
@@ -1861,6 +1863,7 @@ dependencies = [
  "rustc_plugin",
  "rustc_utils",
  "serde",
+ "serde_json",
  "simplelog",
 ]
 

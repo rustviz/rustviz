@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runner entrypoint. Reads Rust source from stdin, runs the RustViz plugin
 # against a fresh single-file crate in $RV_WORKDIR (default /work), and
-# prints the plugin's stdout (which the host parses as
-# "<code-svg>:::<timeline-svg>").
+# prints the plugin's stdout (one JSON object holding both SVG panels,
+# parsed by rustviz-lib's `parse_output`).
 #
 # Isolation comes from whoever launches this script: `docker run
 # --network=none --read-only --tmpfs=/work …` (local docker) or Cloud Run's
@@ -34,7 +34,7 @@ TOML
 # Rust source from stdin → crate's lib.rs.
 cat > src/lib.rs
 
-# Plugin emits "<code-svg>:::<timeline-svg>" on stdout; the host parses it.
+# Plugin prints its JSON result on stdout; the host parses it.
 # Killed a little before the server's own 20 s deadline so the compile
 # can't outlive the request. Some launchers (Cloud Run's `sandbox do`)
 # don't pass the payload's exit status through, so a timeout is also

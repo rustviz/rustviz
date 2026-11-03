@@ -92,15 +92,25 @@ jobs:
           RV_RUNNER: local
         run: cargo test --workspace --locked
 
-      - name: Smoke test the playground end-to-end (sandboxed backend)
+      - name: Smoke test the playground end-to-end (production code path)
         if: runner.os == 'Linux'
+        # Production's path: RV_RUNNER=sandbox -> rv-runner.sh -> the
+        # plugin this run built (installed by xtask setup). Cloud Run's
+        # launcher is `sandbox do`; here plain `bash` stands in
+        # for it, since isolation isn't what's under test. (The docker
+        # backend would run main's runner image from GHCR, not this
+        # branch's plugin, so lib/plugin changes couldn't be tested
+        # together.)
         env:
-          RV_RUNNER: docker
+          RV_RUNNER: sandbox
+          RV_SANDBOX_CMD: bash
+          RV_RUNNER_SCRIPT: ${{ github.workspace }}/playground/runner/rv-runner.sh
+          RV_WORKDIR: ${{ runner.temp }}/rv-work
         run: |
           # Use --locked to surface lockfile drift; spawn playground in the
           # background and wait for /. Then POST a small program and confirm
           # we get back both SVGs.
-          (cd playground && RV_RUNNER=docker cargo run --release --locked &) &&
+          (cd playground && cargo run --release --locked &) &&
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:8080/ > /dev/null && break || sleep 1
           done

@@ -150,6 +150,9 @@ const EXPECTED_OK: &[&str] = &[
     // visualized, but the program must render (it used to crash on the
     // guard-bound variable).
     "match_if_let_guard",
+    // `:::` in a comment and a string literal (#181): used to be taken as
+    // the plugin's panel separator, truncating the code panel mid-line.
+    "triple_colon_source",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1046,6 +1049,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is bound to a value",
         ],
     },
+    TooltipExpect {
+        name: "triple_colon_source",
+        // The mis-split (#181) produced no false tooltip, only a truncated
+        // code panel and a timeline starting mid-`<text>`; the panel
+        // contents are pinned by `source_with_triple_colon_splits_correctly`.
+        must_contain: &[
+            "Move from String::from to s",
+            "Move from s to t",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -1282,6 +1296,34 @@ fn code_panel_shows_source_verbatim() {
         "marker code points leaked into output"
     );
     assert!(!code.contains("<b_]"), "user text became markup:\n{}", code);
+}
+
+/// `:::` in user source must not be taken as the plugin's panel separator
+/// (#181). On the old plugin the code panel stopped at the first `:::` (the
+/// comment) and the timeline panel began with the rest of that line.
+#[test]
+fn source_with_triple_colon_splits_correctly() {
+    let rv = run_with_local_backend("triple_colon_source");
+    let code = rv.code_panel_string();
+    let timeline = rv.timeline_panel_string();
+    assert!(
+        code.trim_end().ends_with("</svg>"),
+        "code panel truncated; ends with: {:?}",
+        &code[code.len().saturating_sub(120)..]
+    );
+    assert!(
+        timeline.trim_start().starts_with("<svg"),
+        "timeline panel starts mid-markup: {:?}",
+        timeline.chars().take(80).collect::<String>()
+    );
+    let text = svg_text(&code);
+    for want in [
+        "user's source (this comment ::: and the string below) must not be taken",
+        "let s = String::from(\"a:::b\");",
+        "println!(\"{}\", t);",
+    ] {
+        assert!(text.contains(want), "expected {:?} in code panel text:\n{}", want, text);
+    }
 }
 
 /// A failing compile must surface as an error carrying rustc's diagnostic,
