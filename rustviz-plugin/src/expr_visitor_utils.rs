@@ -1,5 +1,5 @@
 
-use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet, VecDeque}, ops::Bound};
+use std::{cmp::max, collections::{HashMap, HashSet, VecDeque}};
 use log::warn;
 use rustc_hir::Mutability;
 use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
@@ -637,60 +637,39 @@ pub fn fetch_mutability(expr: & Expr) -> Option<Mutability> {
 
 // Group loans for a certain lender into regions
 // A region is defined as an area where multiple loans on the same local are active at the same time
+//
+// Each loan is the line interval [assigned_at, lifetime]; a loan joins
+// the current region when it starts strictly before the region's end,
+// and extends that end. This is a sort-then-sweep merge: the loans are
+// visited by start line (then end line, then name). The previous
+// version merged them one at a time in `h`'s HashSet order, which is
+// random per process, so overlapping chains (a: 3-5, c: 4-7, b: 6-8)
+// came out as one region on some runs and two on others, and the
+// plugin drew or omitted the `c` -> lender return arrow at random
+// (#211). It also overwrote an existing region that started on the
+// same line as a new one that couldn't join it.
 pub fn get_regions(h: &HashSet<String>, borrow_map: &HashMap<String, RefData>) -> Vec<HashSet<String>> {
-  let mut res: BTreeMap<usize, (usize, HashSet<String>)>  = BTreeMap::new();
+  let mut loans: Vec<(usize, usize, &String)> = h
+    .iter()
+    .map(|borrower| {
+      let b_data = borrow_map.get(borrower).unwrap();
+      (b_data.assigned_at, b_data.lifetime, borrower)
+    })
+    .collect();
+  loans.sort();
 
-  for borrower in h {
-    let b_data = borrow_map.get(borrower).unwrap();
-    let a_place = b_data.assigned_at;
-    let k_place = b_data.lifetime;
-
-    let mut c = res.upper_bound_mut(Bound::Included(&a_place));
-    let mut to_replace: Option<(usize, (usize, HashSet<String>))> = None;
-    match c.peek_prev() { // look to our left
-      Some((_, (k, map))) => {
-        if a_place < *k { // if current borrower was assigned in the same region
-          *k = max(*k, k_place); // adjust region to encapsulate all lifetimes (extending the lifetime to the right)
-          map.insert(borrower.clone());
-        }
-        else { // borrower belongs to a different region
-          res.insert(a_place, (k_place, HashSet::from([borrower.clone()])));
-        }
+  // (region end, borrowers in the region)
+  let mut regions: Vec<(usize, HashSet<String>)> = Vec::new();
+  for (a_place, k_place, borrower) in loans {
+    match regions.last_mut() {
+      Some((k, members)) if a_place < *k => {
+        *k = max(*k, k_place);
+        members.insert(borrower.clone());
       }
-      None => {
-        match c.peek_next() { // look to our right
-          Some((a, (k, map))) => {
-            if *a < k_place { // need to do this because we can't mutate keys (would break BTreeMap invariants) 
-            // although in our case it wouldn't matter because you still wouldn't be able to change the relative ordering of regions (try a proof by contradiction)
-              map.insert(borrower.clone());
-              to_replace = Some((*a, (max(*k, k_place), map.clone()))); // extending the lifetime to the left
-            }
-            else {
-              res.insert(a_place, (k_place, HashSet::from([borrower.clone()])));
-            }
-          }
-          None => {
-            res.insert(a_place, (k_place, HashSet::from([borrower.clone()])));
-          }
-        }
-      }
-    }
-
-    // if we need to replace a key
-    match to_replace {
-      Some((key, (k, map))) => {
-        res.remove(&key);
-        res.insert(a_place, (k, map));
-      }
-      None => {}
+      _ => regions.push((k_place, HashSet::from([borrower.clone()]))),
     }
   }
-
-  let mut z: Vec<HashSet<String>> = Vec::new();
-  for (_, (_, map)) in res.into_iter() {
-    z.push(map);
-  }
-  z
+  regions.into_iter().map(|(_, members)| members).collect()
 }
 
 

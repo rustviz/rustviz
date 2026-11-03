@@ -1588,7 +1588,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
 
 // add GOS events for RAPs in the current scope  
 pub fn print_out_of_scope(&mut self){
-  for (_, rap) in self.raps.clone().iter() {
+  // Visit RAPs in declaration order, not `self.raps`' hash order, so
+  // the GoOutOfScope events (and their ids) come out the same on
+  // every run (#211).
+  let mut raps: Vec<RapData> = self.raps.values().cloned().collect();
+  raps.sort_by(|a, b| a.rap.hash().cmp(b.rap.hash()).then_with(|| a.rap.name().cmp(b.rap.name())));
+  for rap in raps.iter() {
     // need this to avoid duplicating out of scope events, this is due to the fact that RAPS is a map that lives over multiple fn ctxts
     // if a rap isn't global it means we annotated its GOS event inside its respective branch already
     if !rap.rap.is_fn() && rap.is_global {
@@ -1680,9 +1685,22 @@ pub fn print_out_of_scope(&mut self){
     }
     let b_map = self.borrow_map.clone();
 
-    // sort by number of aliases so events are ordered in a proper cascading fashion
+    // sort by number of aliases so events are ordered in a proper cascading fashion.
+    // `b_map` is a HashMap, so refs with the same alias count used to
+    // keep its per-process random order, and two return arrows on the
+    // same line (`let t = s; println!("{} {}", s, t);`) swapped places
+    // from run to run (#211). Break ties in source order: where the
+    // borrow was made, then declaration order of the ref, then name.
     let mut vec: Vec<(String, RefData)> = b_map.into_iter().collect();
-    vec.sort_by(|a, b| b.1.aliasing.len().cmp(&a.1.aliasing.len()));
+    vec.sort_by(|a, b| {
+      b.1.aliasing.len().cmp(&a.1.aliasing.len())
+        .then_with(|| a.1.assigned_at.cmp(&b.1.assigned_at))
+        .then_with(|| {
+          let hash_of = |k: &String| self.raps.get(k).map(|r| *r.rap.hash());
+          hash_of(&a.0).cmp(&hash_of(&b.0))
+        })
+        .then_with(|| a.0.cmp(&b.0))
+    });
 
     // Add events
     for (k, RefData {lender: r_ty, assigned_at: _, lifetime, ref_mutability: ref_mut, aliasing: _}) in &vec {

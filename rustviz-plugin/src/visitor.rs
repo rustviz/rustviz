@@ -1146,7 +1146,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // single-arm zigzag, which obscured the same flow with a
         // structural anomaly.
         if else_expr.is_none() {
-            for var in if_decl.iter() {
+            for var in in_decl_order(&if_decl) {
                 self.preprocessed_events.push((
                     if_end,
                     ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
@@ -1221,12 +1221,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         liveness = liveness.difference(&declared_in_branches).cloned().collect();
 
         // add gos events for variables declared in each block
-        for var in if_decl.iter() {
+        for var in in_decl_order(&if_decl) {
           if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
 
-        for var in else_decl.iter() {
+        for var in in_decl_order(&else_decl) {
           else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
@@ -1616,7 +1616,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
 
               // add gos events
-              for r in arm_decls.iter() {
+              for r in in_decl_order(&arm_decls) {
                 let id = *self.unique_id;
                 *self.unique_id += 1;
                 let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };

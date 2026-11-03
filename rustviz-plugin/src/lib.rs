@@ -3,7 +3,6 @@
   rustc_private,
   min_specialization,
   unboxed_closures,
-  btree_cursors,
 )]
 #![deny(
   clippy::all,
