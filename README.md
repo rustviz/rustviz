@@ -208,9 +208,10 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   a `&T` binding such as `let s: &str = "hi";` ends with "Return
   immutably borrowed resource from s to *s".
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
-- Struct fields after the whole struct is moved (`drop(c)`,
-  `p.into_name()`, `..user1`, field-init shorthand) can still be shown
-  as owning, or as dropped.
+- After a partial move (`let n = p.name;`, or `..p` in struct update
+  syntax), `p`'s own column still says "Its resource is dropped" at
+  scope end; only its remaining fields are actually dropped (their
+  columns are right).
 - `Rc`: clones are shown as independent owners that each drop the value;
   reference counting isn't modelled.
 - Tuples: creating one (`let t = (1, String::new());`) and reading a

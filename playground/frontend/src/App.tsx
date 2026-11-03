@@ -281,6 +281,11 @@ const Description: React.FC = () => (
         tuples (<code>let t = (…)</code>, <code>t.0</code>) show no events;{' '}
         <code>Rc</code> clones each appear to drop the value.
       </li>
+      <li>
+        After a partial move (<code>let n = p.name;</code> or{' '}
+        <code>..p</code>), <code>p</code> itself is still said to drop its
+        resource; only its remaining fields are dropped.
+      </li>
     </ul>
     <p>
       <strong>Some valid programs crash the visualizer.</strong> We track the

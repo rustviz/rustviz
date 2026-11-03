@@ -83,7 +83,14 @@ pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usi
             _ => {
                 // add extra lines if we need to
                 if e.is_arrow_ev() {
-                    let res = old_line_map.get(&line_num).cloned();
+                    // Only the line map's own members trigger the
+                    // stacking (once per line, like the top-level loop
+                    // below); an off-map arrow on the same line used
+                    // to trigger it again and double the extra rows.
+                    let id = e.get_id();
+                    let res = old_line_map.get(&line_num)
+                        .filter(|ev| ev.iter().any(|x| x.get_id() == id))
+                        .cloned();
                     let ex = match res {
                     Some(ev) => { // if there are multiple arrow events on this line
                         for e in ev.clone() {
@@ -380,7 +387,29 @@ pub fn render_svg(
         // append event
         // append any events that are on the same line in event line map to avoid double counting
         if event.is_arrow_ev() {
-            let res = visualization_data.event_line_map.get(&line_num).cloned();
+            // `event_line_map` only holds variable-to-variable arrows.
+            // An arrow that isn't in it but shares the line used to
+            // stand in for the whole line: the map's events were
+            // appended (again, if already done) and the arrow itself
+            // was dropped. That lost e.g. `Move from String::from to
+            // s.b` next to `Move from t to s.c`. A Move/Copy out of a
+            // function call or to the caller now gets appended on its
+            // own; other off-map arrows stay undrawn as before, just
+            // without the duplicate append.
+            let id = event.get_id();
+            let line_ev = visualization_data.event_line_map.get(&line_num);
+            let in_map = line_ev.map_or(false, |ev| ev.iter().any(|x| x.get_id() == id));
+            if line_ev.is_some() && !in_map {
+                let (from, to) = ResourceAccessPoint_extract(&event);
+                let is_transfer = matches!(event, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. });
+                let from_fn = from.extract_rap().map_or(false, |rap| rap.is_fn());
+                if is_transfer && (from_fn || matches!(to, ResourceTy::Caller)) {
+                    visualization_data.append_processed_external_event(event.clone(), final_line_num);
+                }
+                i += 1;
+                continue;
+            }
+            let res = line_ev.cloned();
             let ex = match res {
                 Some(ev) => { // if there are multiple arrow events on this line
                     // A Move/Copy into a place with no column (`v[i] = s`,

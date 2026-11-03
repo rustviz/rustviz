@@ -412,9 +412,143 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | (ResourceTy::Deref(_), ResourceTy::Deref(_), _) 
       | (ResourceTy::Value(_), ResourceTy::Deref(_), _)
       | (ResourceTy::Deref(_), ResourceTy::Value(_), _) => {
-        self.event_line_map.get_mut(&line_num).unwrap().push(event);
+        self.event_line_map.get_mut(&line_num).unwrap().push(event.clone());
       },
       _ => ()
+    }
+    self.propagate_struct_transfer(line_num, &event);
+  }
+
+  /// Registered member-field RAPs directly under `parent` (`parent.f`,
+  /// not `parent.f.g`), in registration (= declaration) order.
+  /// Reference-typed fields are left out: they're modelled as
+  /// StaticRef/MutRef members with their own loan bookkeeping.
+  pub fn struct_children(&self, parent: &str) -> Vec<ResourceAccessPoint> {
+    let prefix = format!("{}.", parent);
+    let mut v: Vec<ResourceAccessPoint> = self.raps.iter()
+      .filter(|(n, rd)| {
+        n.starts_with(&prefix)
+          && !n[prefix.len()..].contains('.')
+          && matches!(rd.rap, ResourceAccessPoint::Struct(Struct { is_member: true, .. }))
+      })
+      .map(|(_, rd)| rd.rap.clone())
+      .collect();
+    v.sort_by_key(|r| *r.hash());
+    v
+  }
+
+  /// Make a struct's field columns follow a whole-struct transfer.
+  ///
+  /// Each field of a struct value has its own timeline, but most
+  /// events name only the struct (`drop(c)`, `let d = c;`, `c`
+  /// returned to the caller, `let x = make();`). In Rust, moving the
+  /// struct moves every field with it, so after `drop(c)` nothing is
+  /// left for `c.data` to drop at scope end, and after
+  /// `let d = c;` it's `d.data` that owns (and later drops) the
+  /// String. This mirrors the struct-level event onto the fields:
+  ///
+  /// * struct → struct (`let d = c;`): `c.f` → `d.f` per field
+  ///   (Move, or Copy for a Copy struct), recursing into nested
+  ///   structs through the synthesized events themselves.
+  /// * struct → function / closure (`drop(c)`, `move || c`): each
+  ///   field is moved too, with no extra arrow (Anonymous target);
+  ///   the struct's own arrow already shows where the value went.
+  /// * struct → caller (`c` as the fn's result): each field is moved
+  ///   to the caller.
+  /// * non-struct source → struct (`let x = make();`): each field
+  ///   acquires its part of the new value.
+  ///
+  /// Partial transfers (`let n = p.name;`, pattern destructuring)
+  /// name the field itself and are left alone; so are struct → plain
+  /// owner/reference events, which only arise from the approximate
+  /// destructuring fallback (`let P { name, .. } = p;` binds `name`
+  /// "from p"), where marking every field moved would be wrong.
+  fn propagate_struct_transfer(&mut self, line_num: usize, event: &ExternalEvent) {
+    let (from, to, is_copy, id) = match event {
+      ExternalEvent::Move { from, to, id, is_partial: false } => (from, to, false, *id),
+      ExternalEvent::Copy { from, to, id, is_partial: false } => (from, to, true, *id),
+      _ => return,
+    };
+    let struct_name = |r: &ResourceTy| match r {
+      ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => Some(rap.name().clone()),
+      _ => None,
+    };
+    let from_struct = struct_name(from);
+    let to_struct = struct_name(to);
+    let from_children = from_struct.as_ref().map_or(Vec::new(), |n| self.struct_children(n));
+    // Keep ids unique: callers either bump unique_id before or after
+    // handing us the event, so start past the event's own id.
+    if *self.unique_id <= id {
+      *self.unique_id = id + 1;
+    }
+    if let Some(from_name) = from_struct.filter(|_| !from_children.is_empty()) {
+      let pass_through = match to {
+        ResourceTy::Caller => true,
+        ResourceTy::Value(r) => r.is_fn() || r.is_closure(),
+        _ => false,
+      };
+      if to_struct.is_none() && !pass_through {
+        return;
+      }
+      for child in from_children {
+        let field = &child.name()[from_name.len() + 1..];
+        let dest = match (&to_struct, to) {
+          (Some(to_name), _) => match self.raps.get(&format!("{}.{}", to_name, field)) {
+            Some(rd) => ResourceTy::Value(rd.rap.clone()),
+            None => ResourceTy::Anonymous,
+          },
+          (None, ResourceTy::Caller) => ResourceTy::Caller,
+          (None, _) => ResourceTy::Anonymous,
+        };
+        // Copying a Copy struct into a fn / to the caller leaves the
+        // source fields untouched; only a struct destination needs
+        // its fields initialized.
+        if is_copy && to_struct.is_none() {
+          continue;
+        }
+        let from_child = ResourceTy::Value(child);
+        let ev_id = *self.unique_id;
+        *self.unique_id += 1;
+        let ev = if is_copy {
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false }
+        } else {
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false }
+        };
+        self.add_external_event(line_num, ev);
+      }
+    } else if let Some(to_name) = to_struct {
+      self.bind_struct_fields(line_num, &to_name);
+    }
+  }
+
+  /// Non-Copy fields of `parent` (recursively) that currently own a
+  /// resource, i.e. what dropping `parent` right now would drop.
+  pub fn struct_fields_holding_resource(&self, parent: &str) -> Vec<ResourceAccessPoint> {
+    let mut out = Vec::new();
+    for child in self.struct_children(parent) {
+      let name = child.name().clone();
+      if !child.is_copy() && self.rap_holds_resource_now(&name) {
+        out.push(child);
+      }
+      out.extend(self.struct_fields_holding_resource(&name));
+    }
+    out
+  }
+
+  /// `to` just received a whole struct value from a source that has
+  /// no per-field columns of its own (a call result, the caller, a
+  /// dereference): every field now holds its part of that value.
+  pub fn bind_struct_fields(&mut self, line_num: usize, parent: &str) {
+    for child in self.struct_children(parent) {
+      let name = child.name().clone();
+      let ev_id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line_num, ExternalEvent::Bind {
+        from: ResourceTy::Anonymous,
+        to: ResourceTy::Value(child),
+        id: ev_id,
+      });
+      self.bind_struct_fields(line_num, &name);
     }
   }
 
@@ -821,7 +955,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                             TyKind::Adt(_, args) => *args,
                             _ => unreachable!("ty.is_adt() but kind is not Adt"),
                         };
-                        for field in ty.ty_adt_def().unwrap().all_fields() {
+                        // Like define_lhs: don't expose the internals of
+                        // `String` / `Vec` / `Box` / … (`n.vec` for a
+                        // `Some(n)` binding of a String).
+                        let fields = if ty_is_special_owner(&ty) { None } else { ty.ty_adt_def() };
+                        for field in fields.into_iter().flat_map(|d| d.all_fields()) {
                             let field_name = format!("{}.{}", name, field.name.as_str());
                             let field_ty = field.ty(self.tcx, generic_args);
                             let field_is_copy = self.ty_is_copy(field_ty, pat.hir_id.owner);
@@ -1136,10 +1274,24 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     }
     // Struct intializer list:
     // ex struct = {a: <expr>, b: <expr>, c: <expr>}
-    ExprKind::Struct(_qpath, expr_fields, _base) => {
+    ExprKind::Struct(_qpath, expr_fields, base) => {
       let line_num = span_to_line(&rhs.span, &self.tcx);
       self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
       for field in expr_fields.iter() {
+          // Struct literal that isn't bound to a struct RAP: the
+          // value is returned (`User { email, .. }` as a fn's tail
+          // expression). The field initialisers still move/copy
+          // their sources (field-init shorthand `email` moves the
+          // local `email`), into the value handed to the caller.
+          if matches!(lhs, ResourceTy::Caller) {
+            let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
+            let is_place = matches!(field.expr.kind, ExprKind::Path(_) | ExprKind::Field(..));
+            if is_place && !field_ty.is_ref() && !field.expr.span.from_expansion() {
+              let e = if self.ty_is_copy(field_ty, field.expr.hir_id.owner) { Evt::Copy } else { Evt::Move };
+              self.match_rhs(ResourceTy::Caller, field.expr, e);
+            }
+            continue;
+          }
           let new_lhs_name = format!("{}.{}", lhs.name(), field.ident.as_str());
           // Skip fields whose RAP we never registered. The most
           // common case is a struct field whose type is itself a
@@ -1179,6 +1331,64 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             }
           }
           self.match_rhs(ResourceTy::Value(field_rap), field.expr, e);
+      }
+      // Struct update syntax `S { a: e, ..base }`: every field not
+      // written explicitly comes from `base`, moved if its type isn't
+      // Copy and copied otherwise. That's a *partial* move of `base`:
+      // its explicitly-overridden fields stay put and are still
+      // dropped at its scope end.
+      if let rustc_hir::StructTailExpr::Base(base_expr) = base {
+        let base_line = span_to_line(&base_expr.span, &self.tcx);
+        let base_name = expr_to_rap_name(base_expr, &self.tcx)
+          .filter(|n| self.raps.contains_key(n));
+        let explicit: HashSet<String> = expr_fields.iter().map(|f| f.ident.as_str().to_owned()).collect();
+        // Field names come from whichever side has per-field RAPs:
+        // the new struct, or (when it's returned to the caller) the base.
+        let (field_names, dest_prefix): (Vec<(String, bool)>, Option<String>) = match &lhs {
+          ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => {
+            let prefix = rap.name().clone();
+            (self.struct_children(&prefix).iter()
+              .map(|c| (c.name()[prefix.len() + 1..].to_owned(), c.is_copy()))
+              .collect(), Some(prefix))
+          }
+          ResourceTy::Caller => match &base_name {
+            Some(b) => (self.struct_children(b).iter()
+              .map(|c| (c.name()[b.len() + 1..].to_owned(), c.is_copy()))
+              .collect(), None),
+            None => (Vec::new(), None),
+          },
+          _ => (Vec::new(), None),
+        };
+        for (field, field_is_copy) in field_names {
+          if explicit.contains(&field) {
+            continue;
+          }
+          let dest = match &dest_prefix {
+            Some(p) => match self.raps.get(&format!("{}.{}", p, field)) {
+              Some(rd) => ResourceTy::Value(rd.rap.clone()),
+              None => continue,
+            },
+            None => ResourceTy::Caller,
+          };
+          let src = base_name.as_ref()
+            .and_then(|b| self.raps.get(&format!("{}.{}", b, field)))
+            .map(|rd| rd.rap.clone());
+          match src {
+            Some(src_rap) => {
+              let e = if field_is_copy { Evt::Copy } else { Evt::Move };
+              self.add_ev(base_line, e, dest, ResourceTy::Value(src_rap), false);
+            }
+            // `..Default::default()` and other non-place bases: the
+            // field gets its value from a temporary.
+            None => {
+              if let ResourceTy::Value(d) = &dest {
+                let d_name = d.name().clone();
+                self.add_ev(base_line, Evt::Bind, dest.clone(), ResourceTy::Anonymous, false);
+                self.bind_struct_fields(base_line, &d_name);
+              }
+            }
+          }
+        }
       }
     },
 
