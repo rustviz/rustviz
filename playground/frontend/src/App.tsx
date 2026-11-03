@@ -286,10 +286,6 @@ const Description: React.FC = () => (
         <code>..p</code>), <code>p</code> itself is still said to drop its
         resource; only its remaining fields are dropped.
       </li>
-      <li>
-        A match guard that moves a variable from outside the{' '}
-        <code>match</code> (<code>Some(_) if consume(s) =&gt;</code>).
-      </li>
     </ul>
     <p>
       <strong>Some valid programs crash the visualizer.</strong> We track the
