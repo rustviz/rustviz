@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{ExtBranchData, ExternalEvent, ResourceAccessPoint_extract, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{ExtBranchData, ExternalEvent, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -383,6 +383,23 @@ pub fn render_svg(
             let res = visualization_data.event_line_map.get(&line_num).cloned();
             let ex = match res {
                 Some(ev) => { // if there are multiple arrow events on this line
+                    // A Move/Copy into a place with no column (`v[i] = s`,
+                    // `self.name = s`: `to` is Anonymous) is never put in
+                    // the line map, so the loop below wouldn't append it.
+                    // Append it here, or s's Move is lost whenever another
+                    // arrow (e.g. a borrow ending) shares its line and s
+                    // is later shown dropping a resource it gave away.
+                    // (mutate_branch_lines needs no such case: it updates
+                    // events in place instead of re-appending them.)
+                    // Other events missing from the line map (fn-sourced
+                    // moves, returns to the caller) are swallowed the same
+                    // way; that's tracked separately.
+                    let (from, to) = ResourceAccessPoint_extract(&event);
+                    if matches!(to, ResourceTy::Anonymous)
+                        && !matches!(from, ResourceTy::Anonymous)
+                        && !ev.iter().any(|e| e.get_id() == event.get_id()) {
+                        visualization_data.append_processed_external_event(event.clone(), final_line_num);
+                    }
                     for e in ev.clone() { // append all the events in the line map on the same line
                         visualization_data.append_processed_external_event(e.clone(), final_line_num);
                         skippable_ev.insert(e.get_id()); // they all become skippable

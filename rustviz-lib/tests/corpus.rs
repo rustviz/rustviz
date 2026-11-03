@@ -186,6 +186,16 @@ const EXPECTED_OK: &[&str] = &[
     "cons_list_nested",
     "cons_list_qualified_nested",
     "fn_called_twice",
+    // — Chained field assignment (#143). `o.inner.x = …` now
+    //   resolves through `expr_to_rap_name` to the nested field's
+    //   pre-registered RAP and emits an Acquire event on that column.
+    "chained_field_assign",
+    "chained_field_assign_move",
+    // — Assignment to a place with no column of its own (`self.f = …`,
+    //   `r.f = …` through a `&mut`, `v[i] = …`). The write isn't drawn;
+    //   these used to panic in `resource_of_lhs`.
+    "assign_unmodelled_place",
+    "assign_field_of_method_result",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -400,6 +410,60 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from len to n",
         ],
         must_not_contain: &[],
+    },
+
+    TooltipExpect {
+        name: "chained_field_assign",
+        // "acquires ownership" for an i32 field is the plugin's existing
+        // wording for every struct-field write (flat `o.x = 5` says the
+        // same on main); this entry pins that the chained write lands on
+        // `o.inner.x`'s column, not that wording.
+        must_contain: &[
+            "o.inner.x, mutable",
+            "o.inner.x acquires ownership of a resource",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "chained_field_assign_move",
+        must_contain: &[
+            "Move from s to p.name.first",
+            "p.name.first acquires ownership of a new resource; its previous resource is dropped",
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+            "p.name.first goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_field_of_method_result",
+        must_contain: &[
+            "last_mut reads from/writes to v",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "assign_unmodelled_place",
+        // `a`, `b`, `c` are each moved into a place that has no column
+        // (`self.name`, `r.name`, `v[0]`). `r.name = b` shares its line
+        // with the end of r's borrow, which used to swallow b's move.
+        must_contain: &[
+            "a's resource is moved",
+            "a goes out of scope. No resource is dropped.",
+            "b's resource is moved",
+            "b goes out of scope. No resource is dropped.",
+            "c's resource is moved",
+            "c goes out of scope. No resource is dropped.",
+            "rename reads from/writes to u",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+        ],
     },
 
     // ─── User-defined inherent methods ──────────────────────────────

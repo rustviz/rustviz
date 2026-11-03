@@ -444,29 +444,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_union()
   }
 
-  // Return the ResourceTy that corresponds to the LHS of a let stmt
-  pub fn resource_of_lhs(&mut self, expr: &'tcx Expr) -> ResourceTy {
+  // Return the ResourceTy that corresponds to the LHS of an assignment.
+  // `None` means the LHS is a shape the plugin doesn't model (e.g.
+  // `a[i] = …` index, `(a, b) = …` destructure — #144), or names a
+  // path the plugin never registered as a RAP (synthetic macro local,
+  // unregistered nested-field projection). The caller short-circuits
+  // the assignment instead of crashing.
+  pub fn resource_of_lhs(&mut self, expr: &'tcx Expr) -> Option<ResourceTy> {
     match expr.kind {
-      ExprKind::Path(QPath::Resolved(_, p)) => {
-        let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-        ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned())
-      }
-      ExprKind::Field(expr, ident) => {
-        match expr {
-          Expr{kind: ExprKind::Path(QPath::Resolved(_,p)), ..} => {
-            let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-            // `u._a = 5;` on a union-typed local: unions are one
-            // opaque owner column with no per-field RAPs (see the
-            // AdtKind::Union arms in define_lhs / the pat-binding
-            // site), so a field write is a write to the union itself.
-            if self.is_union_typed(expr) {
-              return ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
-            }
-            let total_name = format!("{}.{}", name, ident.as_str());
-            ResourceTy::Value(self.raps.get(&total_name).unwrap().rap.to_owned())
+      // Path / Field (including chained `a.b.c`): walk the projection
+      // chain via `expr_to_rap_name` to get the qualified name and
+      // look it up. `register_struct_members` recursively registers
+      // nested struct fields under qualified names like `r.a.b`, so
+      // for value-typed locals chained-field LHS resolves directly.
+      // For ref-to-struct params, #147 adds per-field registration so
+      // `self.field = …` and `r.field = …` also resolve.
+      ExprKind::Path(_) | ExprKind::Field(..) => {
+        // `u._a = 5;` on a union-typed local: unions are one opaque
+        // owner column with no per-field RAPs (see the AdtKind::Union
+        // arms in define_lhs / the pat-binding site), so a field write
+        // is a write to the union itself.
+        if let ExprKind::Field(recv, _) = expr.kind {
+          if self.is_union_typed(recv) {
+            let name = expr_to_rap_name(recv, &self.tcx)?;
+            return self.raps.get(&name).map(|rd| ResourceTy::Value(rd.rap.to_owned()));
           }
-          _ => { panic!("unexpected field expr") }
-        } 
+        }
+        let name = expr_to_rap_name(expr, &self.tcx)?;
+        self.raps.get(&name).map(|rd| ResourceTy::Value(rd.rap.to_owned()))
       }
       ExprKind::Unary(UnOp::Deref, exp) => {
         let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
@@ -474,12 +479,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         match rhs_rap {
           Some(x) => {
             self.update_rap(&x, line_num);
-            ResourceTy::Deref(x)
+            Some(ResourceTy::Deref(x))
           }
-          None => { ResourceTy::Anonymous }
+          None => Some(ResourceTy::Anonymous),
         }
       }
-      _ => panic!("invalid lhs")
+      // Index, tuple-destructure, etc. — see issue #144.
+      _ => {
+        warn!("unsupported assignment LHS shape (#144); skipping assignment at this location");
+        None
+      }
     }
   }
 

@@ -221,6 +221,8 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
   `String`, or a `String` moved out of one, is shown as "No resource is
   dropped". Tuple structs (`struct Color(u8, u8, u8)`) render with a
   column per field.
+- Tuple destructuring assignment (`(a, b) = (b, a);`) draws an extra
+  `lhs` column for the compiler's temporary.
 
 **Crashes the plugin:** some valid programs do. Known crashes are
 tracked as [issues labelled
@@ -240,6 +242,12 @@ rather than listed here.
 - Method chains (`a.get_mut().push(x)`): only the first call renders.
 - Match guards (`pat if cond =>`): the guard expression produces no
   events.
+- Assignments to a place that has no column of its own aren't drawn: a
+  field through a reference (`self.n += 1` in a `&mut self` method,
+  `c.n = …` where `c: &mut T`), an index (`v[i] = …`), or a field of a
+  method's result (`v.last_mut().unwrap().n = 5`). A value moved into
+  such a place is still shown as moved. Fields of a local struct,
+  including chained ones (`o.inner.x = …`), are drawn.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library

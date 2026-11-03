@@ -442,7 +442,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // ref-reassignment and drop-at-reassign handling below.
         let lhs_is_union_field = matches!(lhs_expr.kind,
           ExprKind::Field(recv, _) if self.is_union_typed(recv));
-        let lhs_rty = self.resource_of_lhs(lhs_expr);
         let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
         let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner), lhs_ty);
         let e = if lhs_ty.is_ref() {
@@ -454,6 +453,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           match is_copyable {
             true => Evt::Copy, 
             false => Evt::Move
+          }
+        };
+        // None means the LHS is a place the plugin doesn't model (an
+        // index `v[i]`, a field through a reference `self.n` / `r.x`
+        // before #147, `(*p).f`, …) or an unregistered name. The write
+        // itself isn't drawn, but for `=` the RHS still goes into that
+        // place: `v[i] = s` / `self.name = s` move `s`. Record that
+        // against an anonymous destination, otherwise `s` would later
+        // be shown dropping a resource it no longer owns. (For `op=`
+        // the RHS is an operand, not a value stored in the place.)
+        let lhs_rty = match self.resource_of_lhs(lhs_expr) {
+          Some(rty) => rty,
+          None => {
+            if let ExprKind::Assign(..) = expr.kind {
+              self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
+            }
+            return;
           }
         };
         // if we are pointing at a new piece of data
