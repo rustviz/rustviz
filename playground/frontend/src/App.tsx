@@ -278,7 +278,6 @@ const Description: React.FC = () => (
       </li>
       <li>
         Shadowed variables (<code>let x</code> twice) share one column;{' '}
-        <code>#[derive(Debug)]</code> adds extra timelines;{' '}
         tuples (<code>let t = (…)</code>, <code>t.0</code>) show no events;{' '}
         <code>Rc</code> clones each appear to drop the value.
       </li>

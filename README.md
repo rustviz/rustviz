@@ -210,12 +210,8 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
 - Struct fields after the whole struct is moved (`drop(c)`, `..user1`,
   field-init shorthand) can still be shown as owning, or as dropped.
-- `#[derive(Debug)]` (and other derives) add extra timelines from the
-  generated code.
 - `Rc`: clones are shown as independent owners that each drop the value;
   reference counting isn't modelled.
-- Arrows for functions returning a `Copy` value say "moved to the
-  caller" rather than "copied".
 - Tuples: creating one (`let t = (1, String::new());`) and reading a
   field (`let a = t.0;`) produce no events, so a tuple that holds a
   `String`, or a `String` moved out of one, is shown as "No resource is
