@@ -191,16 +191,51 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     )
   }
 
+  /// True iff a value of type `ty` can be mutated through a shared
+  /// reference: `Cell`, `RefCell`, `Mutex`, atomics, or a type that
+  /// contains one (`Rc<RefCell<T>>`, `Vec<Cell<T>>`, a local struct
+  /// with such a field). Populates `Owner::interior_mut` /
+  /// `Struct::interior_mut`, which keeps the lend-dot tooltip from
+  /// calling an immutably borrowed `RefCell` "read-only".
+  ///
+  /// Conservative in the direction that matters: it descends into
+  /// generic arguments of every ADT and into the fields of local
+  /// ADTs, but not into private fields of foreign types, so `Rc<T>`'s
+  /// own refcount cells don't count. A false `true` only drops the
+  /// "read-only" clause; a false `false` would state something
+  /// untrue, so foreign types that hide a cell behind a pointer are
+  /// the known gap.
+  pub fn ty_has_interior_mut(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
+    fn go<'tcx>(tcx: TyCtxt<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>, ty: Ty<'tcx>,
+                depth: usize, seen: &mut HashSet<Ty<'tcx>>) -> bool {
+      if depth > 8 || !seen.insert(ty) { return false; }
+      if !ty.is_freeze(tcx, env) { return true; }
+      match ty.kind() {
+        rustc_middle::ty::Adt(def, args) => {
+          args.types().any(|t| go(tcx, env, t, depth + 1, seen))
+            || (def.did().is_local()
+                && def.all_fields().any(|f| go(tcx, env, f.ty(tcx, args), depth + 1, seen)))
+        }
+        rustc_middle::ty::Ref(_, t, _) | rustc_middle::ty::Array(t, _)
+        | rustc_middle::ty::Slice(t) => go(tcx, env, *t, depth + 1, seen),
+        rustc_middle::ty::Tuple(ts) => ts.iter().any(|t| go(tcx, env, t, depth + 1, seen)),
+        _ => false,
+      }
+    }
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, owner);
+    go(self.tcx, env, ty, 0, &mut HashSet::new())
+  }
+
   // Adds an owner RAP
-  pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_closure: false}), scope, is_global);
+  pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false}), scope, is_global);
   }
 
   // Adds an owner RAP that binds a closure literal. Routed through
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_closure: true}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -274,14 +309,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // To be honest this struct logic is leftover from RV1 and should eventually be reworked
   // It doesn't make much sense that a struct should be represented any different than an owner
   // the reason for this is that in the frontend structs are visualized differently in the timeline header
-  pub fn add_struct(&mut self, name: String, owner: u64, mem: bool, mutability: bool, is_copy: bool, scope: usize, is_global: bool) {
+  pub fn add_struct(&mut self, name: String, owner: u64, mem: bool, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
     self.add_rap(ResourceAccessPoint::Struct(Struct {
       name: name,
       hash: self.rap_hashes as u64,
       owner: owner,
       is_mut: mutability,
       is_member: mem,
-      is_copy }),
+      is_copy,
+      interior_mut }),
       scope, is_global);
   }
 
@@ -422,10 +458,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
       Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial },
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial },
-      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial },
-      Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial },
+      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
+      Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id },
-      Evt::PassByMRef => ExternalEvent::PassByMutableReference { from: rhs, to: lhs, id },
+      Evt::PassByMRef => ExternalEvent::PassByMutableReference {
+        from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false,
+      },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id }
     }
@@ -442,6 +480,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// per-field RAP that was never registered.
   pub fn is_union_typed(&self, e: &Expr) -> bool {
     self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_union()
+  }
+
+  /// `add_ev` for an `SBorrow` / `MBorrow` whose reborrow-ness the
+  /// caller has decided (see `is_explicit_reborrow`).
+  pub fn add_borrow_ev(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, is_reborrow: bool) {
+    let mut ev = self.ext_ev_of_evt(evt, lhs, rhs, *self.unique_id, false);
+    if let ExternalEvent::StaticBorrow { is_reborrow: r, .. }
+         | ExternalEvent::MutableBorrow { is_reborrow: r, .. } = &mut ev {
+      *r = is_reborrow;
+    }
+    self.add_external_event(line_num, ev);
+    *self.unique_id += 1;
+  }
+
+  /// `add_ev` for a `PassByMRef`, tagged with whether the call
+  /// reborrows the `&mut` argument and whether the call's result
+  /// can carry that reborrow past the call.
+  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool) {
+    let id = *self.unique_id;
+    self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
+      from: arg, to: func, id, is_reborrow, result_has_lifetime,
+    });
+    *self.unique_id += 1;
   }
 
   // Return the ResourceTy that corresponds to the LHS of an assignment.
@@ -516,7 +577,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if arg_ty.is_ref() {
       match arg_ty.ref_mutability().unwrap() {
         Mutability::Not => self.add_ev(line_num, Evt::PassBySRef, to_ro, from_ro, false),
-        Mutability::Mut => self.add_ev(line_num, Evt::PassByMRef, to_ro, from_ro, false)
+        Mutability::Mut => {
+          // Reborrow if written `f(&mut *r)`, or if rustc inserted
+          // the reborrow for `f(r)` (param type `&mut T`). `take(r)`
+          // into a generic `T` has no such adjustment: r is moved.
+          let is_reborrow = match arg.kind {
+            ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, tycheck_results),
+            _ => is_implicit_mut_reborrow(arg, tycheck_results),
+          };
+          // Unknown parent → assume the result may hold the borrow;
+          // that only selects the weaker (always-true) wording.
+          let result_has_lifetime = match self.tcx.parent_hir_node(arg.hir_id) {
+            rustc_hir::Node::Expr(call) => call_result_has_lifetime(call, tycheck_results),
+            _ => true,
+          };
+          self.add_pass_by_mref_ev(line_num, to_ro, from_ro, is_reborrow, result_has_lifetime)
+        }
       }
     }
     else {
@@ -584,7 +660,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         AdtKind::Struct => {
           let owner_hash = self.rap_hashes as u64;
           let parent_is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
-          self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.current_scope,!self.inside_branch);
+          self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope,!self.inside_branch);
           self.register_struct_members(
             &name,
             ty,
@@ -601,7 +677,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // would be lying about which field is "the" field.
         AdtKind::Union | AdtKind::Enum => {
           let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
-          self.add_owner(name, mutability, is_copy, self.current_scope, !self.inside_branch);
+          self.add_owner(name, mutability, is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
         }
       }
     }
@@ -617,7 +693,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     else {
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
-      self.add_owner(name, mutability, is_copy, self.current_scope, !self.inside_branch);
+      self.add_owner(name, mutability, is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
     }
   }
 
@@ -676,7 +752,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         });
       } else {
         let field_is_copy = self.ty_is_copy(field_ty, owner_id);
-        self.add_struct(field_name.clone(), top_owner_hash, true, mutability, field_is_copy,
+        self.add_struct(field_name.clone(), top_owner_hash, true, mutability, field_is_copy, self.ty_has_interior_mut(field_ty, owner_id),
             self.current_scope, !self.inside_branch);
         // Recurse for nested struct fields. Skip enums / unions
         // (only struct ADTs are flattened today) and skip the
@@ -740,7 +816,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                     AdtKind::Struct => {
                         let owner_hash = self.rap_hashes as u64; // Assuming self.rap_hashes exists
                         let parent_is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
-                        self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, scope, false);
+                        self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
                         let generic_args = match ty.kind() {
                             TyKind::Adt(_, args) => *args,
                             _ => unreachable!("ty.is_adt() but kind is not Adt"),
@@ -749,19 +825,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                             let field_name = format!("{}.{}", name, field.name.as_str());
                             let field_ty = field.ty(self.tcx, generic_args);
                             let field_is_copy = self.ty_is_copy(field_ty, pat.hir_id.owner);
-                            self.add_struct(field_name, owner_hash, true, muta, field_is_copy, scope, false);
+                            self.add_struct(field_name, owner_hash, true, muta, field_is_copy, self.ty_has_interior_mut(field_ty, pat.hir_id.owner), scope, false);
                         }
                     },
                     // Unions render as opaque single-owner columns —
                     // see the matching note on the LHS-of-expr arm.
                     AdtKind::Union | AdtKind::Enum => {
                         let is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
-                        self.add_owner(name.clone(), muta, is_copy, scope, false);
+                        self.add_owner(name.clone(), muta, is_copy, self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
                     }
                 }
             } else {
                 let is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
-                self.add_owner(name.clone(), muta, is_copy, scope, false);
+                self.add_owner(name.clone(), muta, is_copy, self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
             }
 
             let evt = if parent_ty.is_ref() {
@@ -975,9 +1051,17 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         Some(x) => ResourceTy::Value(x),
         None => ResourceTy::Anonymous
       };
+      // `&*r` / `&mut *r` with r a reference borrows *through* r (a
+      // reborrow); `&r` / `&mut r` borrows the variable r itself.
+      // Both resolve to the same source RAP, so decide here from the
+      // syntax rather than from r's kind downstream.
+      let is_reborrow = is_explicit_reborrow(
+        innermost_addr_of_operand(rhs),
+        self.tcx.typeck(rhs.hir_id.owner),
+      );
       match fetch_mutability(&rhs) { // fetch last ref mutability in the chain -> &&&mut x
-        Some(Mutability::Not) => self.add_ev(line_num, Evt::SBorrow, lhs, res, false),
-        Some(Mutability::Mut) => self.add_ev(line_num, Evt::MBorrow, lhs, res, false),
+        Some(Mutability::Not) => self.add_borrow_ev(line_num, Evt::SBorrow, lhs, res, is_reborrow),
+        Some(Mutability::Mut) => self.add_borrow_ev(line_num, Evt::MBorrow, lhs, res, is_reborrow),
         None => panic!("Shouldn't have been able to get here")
       }
     }

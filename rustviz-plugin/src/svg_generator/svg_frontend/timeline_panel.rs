@@ -1617,11 +1617,34 @@ fn render_arrow (
                         ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
                         _ => unreachable!()
                     };
-                    
+
+                    // Reborrow note for the call-dot tooltip. `f(r)`
+                    // with r: `&mut T` and f taking `&mut T` is
+                    // compiler-rewritten to `f(&mut *r)`: r isn't
+                    // moved, it's unusable while the reborrow is live
+                    // and usable again afterwards. When f's result
+                    // can't carry a borrow, the reborrow ends when f
+                    // returns; otherwise (`let w = first(r);`) it can
+                    // last as long as the result, so don't promise
+                    // "until f returns". No note for `&T` arguments:
+                    // passing a shared reference copies it, and r is
+                    // read-only before, during and after the call.
+                    let reborrow_suffix: String = match external_event {
+                        ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: false, .. } => format!(
+                            " (mutable reborrow — {} can't be used until {} returns)",
+                            styled_from_name, styled_fn_name,
+                        ),
+                        ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: true, .. } => format!(
+                            " (mutable reborrow — {} can't be used while the reborrow is live)",
+                            styled_from_name,
+                        ),
+                        _ => String::new(),
+                    };
+
                     let function_dot_data = FunctionDotData {
                         x: from_timeline.x_val,
                         y: get_y_axis_pos(*line_number),
-                        title: styled_fn_name + title_fn + &styled_from_name,
+                        title: format!("{}{}{}{}", styled_fn_name, title_fn, styled_from_name, reborrow_suffix),
                         hash: from_variable.hash().to_owned() as u64,
                     };
 
