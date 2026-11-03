@@ -1485,7 +1485,14 @@ fn render_arrow (
             let head_v2 = (bend_x, head_end_y - arrow_tip_protrusion);
             let head_v3 = (bend_x + 6.0, head_end_y);
 
-            let title = hover_messages::event_dot_move_to_caller(
+            // Returning a Copy value (i32, bool, ..) copies it out;
+            // only non-Copy values are moved. Same wording as the
+            // dot tooltip for this event (data.rs).
+            let message = match external_event {
+                ExternalEvent::Copy { .. } => hover_messages::event_dot_copy_to_caller,
+                _ => hover_messages::event_dot_move_to_caller,
+            };
+            let title = message(
                 &rap.name().to_string(),
                 &"the caller".to_string(),
             );

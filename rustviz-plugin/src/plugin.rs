@@ -36,6 +36,14 @@ fn merge_visitor_raps(
   }
 }
 
+/// True for top-level items the user did not write: anything whose
+/// span comes from a macro expansion, e.g. the `impl Debug for T`
+/// that `#[derive(Debug)]` generates. A hand-written impl (even of
+/// the same trait) has a plain source span and is still visited.
+fn is_generated_item(item: &rustc_hir::Item<'_>) -> bool {
+  item.span.from_expansion()
+}
+
 // "The main function"
 pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
 
@@ -103,7 +111,18 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   
   // loop through top-level hir items
   for id in tcx.hir_free_items() {
-    match &tcx.hir_item(id).kind {
+    let item = tcx.hir_item(id);
+    // Compiler-generated items — chiefly the impls that
+    // `#[derive(Debug, Clone, PartialEq, ..)]` expands to — have
+    // macro-expansion spans that point at the `#[derive]` attribute.
+    // Visiting their bodies drew ghost timelines (`self`, `f` from
+    // `Debug::fmt`) on the attribute's line for code the student
+    // never wrote. Calls to these impls from user code still go
+    // through the normal call-site handling.
+    if is_generated_item(item) {
+      continue;
+    }
+    match &item.kind {
       ItemKind::Struct(_ident, _generics, vardata) => {
         match vardata {
           rustc_hir::VariantData::Struct{fields, ..} => {
@@ -259,7 +278,11 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
 
   // annotate items after visiting all function bodies since we can assign hashes to top-level structures in fn bodies
   for id in tcx.hir_free_items() {
-    match &tcx.hir_item(id).kind {
+    let item = tcx.hir_item(id);
+    if is_generated_item(item) {
+      continue;
+    }
+    match &item.kind {
       ItemKind::Fn { sig: fn_sig, ident: fn_ident, .. } => {
         let line = tcx.sess.source_map().lookup_char_pos(fn_sig.span.lo()).line;
         let line_str = &a_map[&line];

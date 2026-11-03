@@ -1049,7 +1049,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         };
         let typeck_res = self.tcx.typeck(guard_expr.hir_id.owner);
 
-        let split = self.tcx.sess.source_map().lookup_char_pos(guard_expr.span.hi()).line; // TODO: might need to alter this
+        let split = span_end_line(&guard_expr.span, &self.tcx); // TODO: might need to alter this
         let merge = self.tcx.sess.source_map().lookup_char_pos(expr.span.hi()).line;
 
         let mut b_ty_names: Vec<String> = Vec::new();
@@ -1085,8 +1085,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
 
               // get line info
-              let begin = self.tcx.sess.source_map().lookup_char_pos(arm.body.span.lo()).line;
-              let end = self.tcx.sess.source_map().lookup_char_pos(arm.body.span.hi()).line;
+              // An arm body can be a bare macro call
+              // (`Some(s) => println!("{s}"),`), whose span lies in
+              // the macro's expansion; span_to_line / span_end_line
+              // resolve it to the user's call site.
+              let begin = span_to_line(&arm.body.span, &self.tcx);
+              let end = span_end_line(&arm.body.span, &self.tcx);
               let pat_line = span_to_line(&arm.pat.span, &self.tcx);
               b_slices.push((begin, end));
               b_ty_names.push(get_name_of_pat(arm.pat, &self.tcx));
