@@ -828,7 +828,7 @@ fn render_dot(
                         hash: *hash as u64,
                         dot_x: cx,
                         dot_y: cy,
-                        title: branch_join_message(branch_history, ty, &is.real_name()),
+                        title: branch_join_message(branch_history, ty, is),
                     };
                     append_dot(&m_data, output, timeline_data, registry);
                 }
@@ -1055,10 +1055,17 @@ fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType) -> Branch
     }
 }
 
-fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, var_name: &String) -> String {
+fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &ResourceTy) -> String {
+    let var_name = &is.real_name();
     match compute_branch_join(branch_history, ty) {
         BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
-        BranchJoin::BoundHere => hover_messages::event_dot_branch_merge_bound(var_name),
+        // A reference bound in every arm (`let msg = match n { .. => "a", .. }`)
+        // holds a borrow, not ownership.
+        BranchJoin::BoundHere => match is.extract_rap() {
+            Some(rap) if rap.is_ref() =>
+                hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref()),
+            _ => hover_messages::event_dot_branch_merge_bound(var_name),
+        },
         BranchJoin::Unchanged => String::new(),
     }
 }
@@ -1145,6 +1152,18 @@ fn timeline_segment_title(
     if rap.is_copy_owner() {
         if let State::FullPrivilege { .. } = state {
             return hover_messages::state_full_privilege_copyable(rap.name());
+        }
+    }
+    // References (`&mut T` / `&T` bindings, `&mut self`, ref params,
+    // `for i in &mut v`) never own their referent, so the generic
+    // "is the owner of the resource" FullPrivilege text is false.
+    if let State::FullPrivilege { .. } = state {
+        match rap {
+            ResourceAccessPoint::MutRef(_) =>
+                return hover_messages::state_mut_ref_full_privilege(rap.name()),
+            ResourceAccessPoint::StaticRef(_) =>
+                return hover_messages::state_static_ref_full_privilege(rap.name()),
+            _ => {}
         }
     }
     state.print_message_with_name(rap.name())
