@@ -196,6 +196,21 @@ const EXPECTED_OK: &[&str] = &[
     //   these used to panic in `resource_of_lhs`.
     "assign_unmodelled_place",
     "assign_field_of_method_result",
+    // — References never own their referent: `&mut` / `&` lifelines,
+    //   writes through `*r`, and `&str` bindings use reference
+    //   wording rather than "owner" / "acquires ownership".
+    "mutref_param_push_str",
+    "mutref_after_shared_borrows",
+    "mutref_self_method",
+    "vec_for_mut_deref",
+    "hashmap_entry_count",
+    "iter_mut_deref",
+    "deref_assign_copy",
+    "move_mutref",
+    "box_deref_assign",
+    "str_literal_ref",
+    "match_str_literal_arms",
+    "cell_ref_return",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -256,11 +271,176 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "basic_mutref",
+        // `let y = &mut x; *y += 3;` — y's lifeline describes a
+        // reference (not an owner), and the write through `*y`
+        // modifies x's resource rather than acquiring one.
         must_contain: &[
             "Mutable borrow from x to y",
             "Return mutably borrowed resource from y to x",
+            "y holds a mutable reference; it can read and write the borrowed resource",
+            "the resource y points to is modified through *y",
         ],
-        must_not_contain: &[],
+        must_not_contain: &[
+            "y is the owner of the resource",
+            "*y acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "mutref_param_push_str",
+        // Rust Book 4.2 `fn change(some_string: &mut String)`.
+        must_contain: &[
+            "some_string is a mutable borrow from the caller",
+            "some_string holds a mutable reference; it can read and write the borrowed resource",
+            "push_str reads from/writes to some_string",
+        ],
+        must_not_contain: &[
+            "some_string is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "mutref_after_shared_borrows",
+        // Rust Book 4.2 NLL example: r1/r2 end, then `let r3 = &mut s`.
+        must_contain: &[
+            "Mutable borrow from s to r3",
+            "r3 holds a mutable reference; it can read and write the borrowed resource",
+        ],
+        must_not_contain: &[
+            "r3 is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "mutref_self_method",
+        // `fn push(&mut self, ..)` — self is a mutable borrow.
+        must_contain: &[
+            "self is a mutable borrow from the caller",
+            "self holds a mutable reference; it can read and write the borrowed resource",
+        ],
+        must_not_contain: &[
+            "self is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "vec_for_mut_deref",
+        // Rust Book 8.1 `for i in &mut v { *i += 50; }`.
+        must_contain: &[
+            "Mutable borrow from v to i",
+            "i holds a mutable reference; it can read and write the borrowed resource",
+            "the resource i points to is modified through *i",
+        ],
+        must_not_contain: &[
+            "i is the owner of the resource",
+            "*i acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "hashmap_entry_count",
+        // Rust Book 8.3 word count: `*count += 1` through the
+        // `&mut` returned by `or_insert`; `text` is a `&str`.
+        must_contain: &[
+            "Mutable borrow from map to count",
+            "the resource count points to is modified through *count",
+            "text is bound to an immutable reference",
+            "text holds an immutable reference; it can read the borrowed resource",
+        ],
+        must_not_contain: &[
+            "*count acquires ownership of a resource",
+            "text acquires ownership of a resource",
+            "text is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "iter_mut_deref",
+        // `for x in v.iter_mut() { *x *= 2; }`.
+        must_contain: &[
+            "iter_mut reads from/writes to v",
+            "the resource x points to is modified through *x",
+        ],
+        must_not_contain: &[
+            "*x acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "deref_assign_copy",
+        // `*r = y;` with y: i32 overwrites x through r; nothing is
+        // initialized.
+        must_contain: &[
+            "Copy from y to *r",
+            "the resource r points to is modified through *r (copied from y)",
+            "r holds a mutable reference; it can read and write the borrowed resource",
+        ],
+        must_not_contain: &[
+            "*r is initialized by copy from y",
+            "r is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "move_mutref",
+        // `let r2 = r;` moves the `&mut` itself; r2 holds the borrow,
+        // it doesn't own s's resource.
+        must_contain: &[
+            "Move from r to r2",
+            "r2 is bound to a mutable reference",
+            "r2 holds a mutable reference; it can read and write the borrowed resource",
+        ],
+        must_not_contain: &[
+            "r2 acquires ownership of a resource",
+            "r2 is the owner of the resource",
+            "r is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "box_deref_assign",
+        // `*b += 1` modifies the heap value b owns; *b doesn't
+        // acquire a new resource.
+        must_contain: &[
+            "b acquires ownership of a resource",
+            "the resource b points to is modified through *b",
+        ],
+        must_not_contain: &[
+            "*b acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "str_literal_ref",
+        // `let s: &str = "hello";` — s borrows static string data.
+        must_contain: &[
+            "s is bound to an immutable reference",
+            "s holds an immutable reference; it can read the borrowed resource",
+            "t is initialized by copy from s",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a resource",
+            "s is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "match_str_literal_arms",
+        // Every arm binds `msg: &'static str`; the join dot must not
+        // claim msg acquired ownership.
+        must_contain: &[
+            "msg is bound to an immutable reference",
+            "msg is bound to an immutable reference (in all branches above)",
+            "msg holds an immutable reference; it can read the borrowed resource",
+        ],
+        must_not_contain: &[
+            "msg acquired ownership of a resource (in all branches above)",
+            "msg acquires ownership of a resource",
+            "msg is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "cell_ref_return",
+        // `r: &Cell<i32>` (returned by a fn, so its lifeline is in
+        // FullPrivilege) is written through with `r.set(2)`. A shared
+        // reference to a Cell/RefCell/Mutex can modify the referent, so
+        // the lifeline must not claim r can't modify it, nor that r owns it.
+        must_contain: &[
+            "r holds an immutable reference; it can read the borrowed resource",
+        ],
+        must_not_contain: &[
+            "r holds an immutable reference; it can read but not modify the borrowed resource",
+            "r is the owner of the resource",
+        ],
     },
     TooltipExpect {
         name: "testStaticB",
@@ -1229,19 +1409,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "unsafe_raw_ptr",
         // Raw-pointer code through an `unsafe` block. The plugin
-        // doesn't model raw pointers, so this pins current,
-        // known-imperfect output rather than correct semantics:
-        // the deref-write `*p = 2` surfaces as "*p is bound to a
-        // value" at the start of p's column (it's really a write to
-        // x), and the `let p = &mut x as *mut i32` line shows
-        // nothing (no borrow of x, no binding of p). Mainly guards
-        // against a future change panicking on raw pointers; update
-        // these strings if raw-pointer handling is ever fixed.
+        // doesn't model raw pointers (#194): the `let p = &mut x as
+        // *mut i32` line shows no borrow of x, and p's lifeline isn't
+        // tied to x. The write `*p = 2` is described correctly, as a
+        // modification through *p (it used to read "*p is bound to a
+        // value", as if *p were a fresh binding; #167's wording fixed
+        // that). Mainly guards against a future change panicking on
+        // raw pointers; update these strings when #194 is fixed.
         must_contain: &[
             "x is bound to a value",
-            "*p is bound to a value",
+            "the resource p points to is modified through *p",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["*p is bound to a value"],
     },
     TooltipExpect {
         name: "static_mut_write",

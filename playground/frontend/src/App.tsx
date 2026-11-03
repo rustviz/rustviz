@@ -273,8 +273,8 @@ const Description: React.FC = () => (
         <code>s1 + &amp;s2</code>: shown as dropped at the end instead of moved.
       </li>
       <li>
-        Ownership wording on references: a <code>&amp;mut</code> may be called
-        &quot;the owner&quot;, and a string literal &quot;acquires ownership&quot;.
+        Moving a <code>&amp;mut</code> (<code>let r2 = r;</code>) is described as
+        moving the resource rather than the reference.
       </li>
       <li>
         Shadowed variables (<code>let x</code> twice) share one column;{' '}

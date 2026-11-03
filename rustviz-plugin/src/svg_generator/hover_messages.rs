@@ -266,6 +266,43 @@ pub fn event_dot_acquire_copyable(my_name: &String, _target_name: &String) -> St
     )
 }
 
+// Acquire whose destination column is a reference variable
+// (`let s: &str = "hi";`, `let r2 = r;` for r: &mut T). A
+// reference never owns what it points to, so "acquires ownership"
+// would be false; say what the variable is bound to instead.
+pub fn event_dot_ref_acquire(my_name: &String, is_mut: bool) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    if is_mut {
+        format!("{0} is bound to a mutable reference", my_name_fmt)
+    } else {
+        format!("{0} is bound to an immutable reference", my_name_fmt)
+    }
+}
+
+// Write through a dereference: `*r = v;`, `*r += 1;`. The place
+// `*r` is the resource r points to (owned by r's lender, or by the
+// Box), so nothing is acquired; the existing resource is modified.
+// `ref_name` is r, `deref_name` is *r.
+pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String) -> String {
+    format!(
+        "the resource {0} points to is modified through {1}",
+        fmt_style(ref_name),
+        fmt_style(deref_name)
+    )
+}
+
+// Copy-flavoured write through a dereference: `*r = y;` with y: Copy.
+// The place `*r` already exists, so it is not "initialized"; it is
+// overwritten with a copy of y.
+pub fn event_dot_copy_through_deref(ref_name: &String, deref_name: &String, from_name: &String) -> String {
+    format!(
+        "the resource {0} points to is modified through {1} (copied from {2})",
+        fmt_style(ref_name),
+        fmt_style(deref_name),
+        fmt_style(from_name)
+    )
+}
+
 // 1   0        1   0
 // |            |   
 // o-->*   or   o-->*     the star event
@@ -675,6 +712,25 @@ pub fn state_full_privilege_copyable(my_name: &String) -> String {
     )
 }
 
+// FullPrivilege on a reference's lifeline. A reference never owns
+// the resource it points to, so the owner wording above would be
+// false; describe what the reference permits instead.
+pub fn state_mut_ref_full_privilege(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} holds a mutable reference; it can read and write the borrowed resource",
+        my_name_fmt
+    )
+}
+
+pub fn state_static_ref_full_privilege(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} holds an immutable reference; it can read the borrowed resource",
+        my_name_fmt
+    )
+}
+
 // Closure binding's FullPrivilege state. Two flavours so the
 // timeline tooltip distinguishes a `move ||` (closure owns the
 // captured resources — drop runs at scope-end) from a borrow-only
@@ -781,6 +837,17 @@ pub fn event_dot_branch_merge_bound(my_name: &String) -> String {
     format!(
         "{0} acquired ownership of a resource (in all branches above)",
         my_name_fmt
+    )
+}
+
+/// `event_dot_branch_merge_bound` for a reference variable: every
+/// branch bound it to a reference, which never owns its referent.
+pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let kind = if is_mut { "a mutable" } else { "an immutable" };
+    format!(
+        "{0} is bound to {1} reference (in all branches above)",
+        my_name_fmt, kind
     )
 }
 

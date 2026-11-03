@@ -1062,6 +1062,15 @@ impl Event {
                     // generic message because there's no captured
                     // upvar to name on the closure side yet.
                     safe_message(hover_messages::event_dot_closure_capture_acquire, &self.deref_name(my_name), from)
+                } else if let ResourceTy::Deref(r) = is {
+                    // `*r = v;` / `*r += 1;` writes to the resource r
+                    // points to; *r doesn't acquire anything.
+                    hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name))
+                } else if let Some(rap) = is.extract_rap().filter(|rap| rap.is_ref()) {
+                    // `let s: &str = "hi";`, `let r2 = r;` — the
+                    // variable is bound to a reference, which never
+                    // owns its referent.
+                    hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref())
                 } else if matches!(from, ResourceTy::Anonymous)
                     && matches!(is.extract_rap(), Some(rap) if rap.is_copy_owner()) {
                     // i32 / bool / other primitive being assigned a
@@ -1073,6 +1082,12 @@ impl Event {
                 } else {
                     safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
                 }
+            }
+            Event::Copy{ from, is: ResourceTy::Deref(r), ..} => {
+                // `*r = y;` with y: Copy overwrites the resource r
+                // points to; it isn't an initialization of *r.
+                let deref = self.deref_name(my_name).clone();
+                hover_messages::event_dot_copy_through_deref(r.name(), &deref, &from.name())
             }
             Event::Copy{ from ,..} => {
                 safe_message(hover_messages::event_dot_copy_from, &self.deref_name(my_name), from)
