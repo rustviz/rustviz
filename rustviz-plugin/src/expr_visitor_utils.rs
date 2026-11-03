@@ -268,7 +268,7 @@ fn collect_pat_bindings(
         collect_pat_bindings(first, raps, out);
       }
     }
-    PatKind::Ref(inner, _)
+    PatKind::Ref(inner, _, _)
     | PatKind::Box(inner)
     | PatKind::Deref(inner)
     | PatKind::Guard(inner, _) => {

@@ -1499,7 +1499,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
       // `let &x = &y;` — recurse through the borrow on both sides.
-      (PatKind::Ref(inner_pat, _), ExprKind::AddrOf(_, _, inner_init)) => {
+      (PatKind::Ref(inner_pat, _, _), ExprKind::AddrOf(_, _, inner_init)) => {
         self.bind_pat(inner_pat, inner_init, is_skipped);
       }
       // `let [a, b] = [e1, e2];` — fixed-length slice destructure
@@ -1580,7 +1580,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.bind_walk(first, init, is_skipped);
         }
       }
-      PatKind::Ref(inner, _)
+      PatKind::Ref(inner, _, _)
       | PatKind::Box(inner)
       | PatKind::Deref(inner)
       | PatKind::Guard(inner, _) => {
@@ -1656,7 +1656,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // alternatives bind the same names — first is enough.
         if let Some(p) = ps.first() { self.register_pattern_bindings_anon(p, line); }
       }
-      PatKind::Ref(inner, _)
+      PatKind::Ref(inner, _, _)
       | PatKind::Box(inner)
       | PatKind::Deref(inner)
       | PatKind::Guard(inner, _) => {

@@ -1,15 +1,9 @@
 // This file is based on the rust plugin example.
 #![feature(
   rustc_private,
-  box_patterns,
-  associated_type_defaults,
   min_specialization,
-  type_alias_impl_trait,
-  trait_alias,
   unboxed_closures,
-  exact_size_is_empty,
   btree_cursors,
-  type_changing_struct_update,
 )]
 #![deny(
   clippy::all,
