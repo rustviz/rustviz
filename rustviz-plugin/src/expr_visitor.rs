@@ -343,7 +343,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   pub fn add_rap(&mut self, r: ResourceAccessPoint, scope: usize, is_global: bool) {
     let fn_start_line = self.current_fn_start;
-    self.raps.entry(r.name().to_string()).or_insert_with(|| {
+    // Functions are keyed in their own namespace (see `fn_key`), so a
+    // variable and a function with the same name get separate RAPs.
+    let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
+    self.raps.entry(key).or_insert_with(|| {
       self.rap_hashes += 1;
       RapData { rap: r, scope, is_global, fn_start_line }
     });
@@ -702,7 +705,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) = &from_ro {
       self.update_rap(rap, line_num);
     }
-    let to_ro = ResourceTy::Value(self.raps.get(&fn_name).unwrap().rap.to_owned());
+    let to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
     // type-check the arg and add event accordingly
     if arg_ty.is_ref() {
       match arg_ty.ref_mutability().unwrap() {
@@ -1127,7 +1130,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // the Match arm below now unwraps `?` to its operand before
       // we get this far. If this fires, some other desugaring is
       // leaking a synthetic local — worth a look, hence the warn.
-      match self.raps.get(&rhs_name) {
+      let rhs_key = if matches!(p.res, Res::Local(_)) { rhs_name.clone() } else { fn_key(&rhs_name) };
+      match self.raps.get(&rhs_key) {
         Some(rd) => {
           let rhs_rap = rd.rap.to_owned();
           self.update_rap(&rhs_rap, line_num);
@@ -1162,10 +1166,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // to Anonymous.
       let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
         Some(n) => {
-          if !self.raps.contains_key(&n) {
+          if !self.raps.contains_key(&fn_key(&n)) {
             self.add_fn(n.clone());
           }
-          self.raps.get(&n)
+          self.raps.get(&fn_key(&n))
             .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
             .unwrap_or(ResourceTy::Anonymous)
         }
@@ -1273,7 +1277,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Same Anonymous fallback as the Call arm — chained / macro /
       // desugared method calls may not have a registered name.
       let from = hirid_to_var_name(name_and_generic_args.hir_id, &self.tcx)
-        .and_then(|n| self.raps.get(&n).map(|rd| rd.rap.to_owned()))
+        .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned()))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value);
       self.add_ev(line_num, evt, lhs, from, false);
     }

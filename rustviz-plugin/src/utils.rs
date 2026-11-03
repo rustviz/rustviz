@@ -94,7 +94,7 @@ pub fn annotate_toplevel_fn (
   let line: usize = m.sess.source_map().lookup_char_pos(func_ident.span.lo()).line;
   let left: usize = m.sess.source_map().lookup_char_pos(func_ident.span.lo()).col_display;
   let right: usize = m.sess.source_map().lookup_char_pos(func_ident.span.hi()).col_display;
-  let hash = match raps.get(&func_name) {
+  let hash = match raps.get(&crate::expr_visitor_utils::fn_key(&func_name)) {
     Some(r) => { *r.rap.hash() }
     None => {
       // Count up, never wrap (see `annotate_struct_field`): a wrapped
@@ -124,7 +124,7 @@ pub fn annotate_enum_variant(
   a_map: & mut BTreeMap<usize, Vec<String>>,
   m: & TyCtxt
 ) {
-  let rap_name = format!("{}::{}", parent_name, ctor_name);
+  let rap_name = crate::expr_visitor_utils::fn_key(&format!("{}::{}", parent_name, ctor_name));
   if rap_map.contains_key(&rap_name) {
     let span = variant.ident.span;
     let hash = rap_map.get(&rap_name).unwrap().rap.hash();

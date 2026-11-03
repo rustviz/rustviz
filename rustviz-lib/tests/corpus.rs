@@ -2446,6 +2446,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. No resource is dropped.",
         ],
     },
+
+    // ─── Variable and function with the same name (#232) ────────────
+    TooltipExpect {
+        name: "var_named_like_fn",
+        // `let area = area(&rect);`: the variable has its own column
+        // and gets the fn's return value.
+        must_contain: &[
+            "area holds a value",
+            "area is initialized by copy from area",
+            "area goes out of scope",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "var_named_like_method",
+        // `let len = s.len();`: the variable has its own column.
+        must_contain: &[
+            "len holds a value",
+            "len goes out of scope",
+            "len reads from s",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "method_named_like_var",
+        // `let len = 3; let n = s.len();`: the call is `String::len`,
+        // not the i32 variable. Before #232 the variable was shown
+        // being lent s's resource and copied into n.
+        must_contain: &[
+            "len holds a value",
+            "len reads from s",
+            "n is initialized by copy from len",
+        ],
+        must_not_contain: &[
+            "Pass by immutable reference from s to len",
+            "len immutably borrows a resource",
+            "len's resource is copied",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

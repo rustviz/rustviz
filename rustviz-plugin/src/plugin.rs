@@ -16,8 +16,9 @@ use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint};
 /// Variable RAPs (Owner / Struct / MutRef / StaticRef) get a
 /// fully-qualified key `<fn_start_line>::<name>` so two fns with
 /// the same local name don't clobber each other. Function RAPs
-/// keep their bare name so `annotate_toplevel_fn`'s lookup works
-/// and recursive / cross-fn calls share a single Function entry.
+/// keep their per-fn key (`fn_key(name)`) so `annotate_toplevel_fn`'s
+/// lookup works and recursive / cross-fn calls share a single
+/// Function entry.
 fn merge_visitor_raps(
   global: &mut HashMap<String, RapData>,
   per_fn: HashMap<String, RapData>,

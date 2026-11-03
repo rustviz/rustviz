@@ -5,7 +5,7 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{expr_to_rap_name, hirid_to_var_name, overloaded_by_value_binop, span_to_line}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{expr_to_rap_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, span_to_line}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
 use rustc_span::Span;
 
@@ -92,7 +92,8 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         }
         _ => (self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned(), false)
       };
-      match self.raps.get(&name) {
+      let key = if matches!(p.res, rustc_hir::def::Res::Local(_)) { name.clone() } else { fn_key(&name) };
+      match self.raps.get(&key) {
         Some(r) => {
           self.annotate_src(name.clone(), p.span, is_func, *r.rap.hash());
         }
@@ -123,7 +124,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
                     // println!("here2");
                     // println!("args {:#?}", a);
                     // let fn_name: String = self.hirid_to_var_name(fn_expr.hir_id).unwrap();
-                    // self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_name).unwrap().rap.hash());
+                    // self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
                     // for arg in a.iter() {
                     //   self.annotate_expr(arg);
                     // }
@@ -132,7 +133,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
               }
               _ => {
                 let fn_name = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
-                self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_name).unwrap().rap.hash());
+                self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
                 for a in fn_args.iter() {
                   self.annotate_expr(a);
                 }
@@ -141,7 +142,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
           }
           _ => {
             let fn_name = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
-            self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_name).unwrap().rap.hash());
+            self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
             for a in fn_args.iter() {
               self.annotate_expr(a);
             }
@@ -166,7 +167,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
     }
     ExprKind::MethodCall(name_and_generic_args, rcvr, args, _) => {
       let fn_name = name_and_generic_args.ident.as_str().to_owned();
-      self.annotate_src(fn_name.clone(), name_and_generic_args.ident.span, true, *self.raps.get(&fn_name).unwrap().rap.hash());
+      self.annotate_src(fn_name.clone(), name_and_generic_args.ident.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
       for arg in args.iter() {
         self.annotate_expr(arg);
       }

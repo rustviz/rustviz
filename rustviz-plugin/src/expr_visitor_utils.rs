@@ -100,6 +100,24 @@ pub fn expr_to_rap_name(expr: &Expr, tcx: &TyCtxt) -> Option<String> {
   }
 }
 
+/// Key of a Function RAP in a `raps` map. Functions live in their own
+/// namespace, under a key no identifier can spell, so a variable named
+/// like a function or method called in the same fn (`let len =
+/// s.len();`, `let area = area(&rect);`) keeps its own RAP instead of
+/// being merged with the function's (#232).
+pub fn fn_key(name: &str) -> String {
+  format!("fn {}", name)
+}
+
+/// The `raps` key for a path expression: the name of its first segment,
+/// looked up among the variables if the path resolves to a local
+/// binding, and among the functions otherwise (fn items, tuple-struct
+/// and unit constructors such as `None`).
+pub fn path_key(p: &Path, tcx: &TyCtxt) -> String {
+  let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
+  if matches!(p.res, Res::Local(_)) { name } else { fn_key(&name) }
+}
+
 pub fn bool_of_mut (m: Mutability) -> bool {
   match m {
     Mutability::Not => {
@@ -362,11 +380,10 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
           HashSet::new()
         }
         _ => {
-          let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
           // Same fallback as the Path arm in get_rap: an unknown
           // name (macro-synthetic local, `self` in an impl method,
           // etc.) becomes an empty live set rather than a crash.
-          match raps.get(&name) {
+          match raps.get(&path_key(p, tcx)) {
             Some(rd) => HashSet::from([rd.rap.to_owned()]),
             None => HashSet::new(),
           }
@@ -746,7 +763,7 @@ pub fn overloaded_by_value_binop<'tcx>(expr: &Expr<'tcx>, tcx: &TyCtxt<'tcx>) ->
 pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> ResourceTy {
   match expr.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
-      let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
+      let name = path_key(p, tcx);
       // Fall back to Anonymous when the path resolves to a name we
       // didn't register as a RAP. The most common cause is a path
       // expression inside a macro expansion that references a
@@ -781,12 +798,12 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
     // rather than crash, mirroring the Path / Field arms above.
     ExprKind::Call(fn_expr, _) => {
       hirid_to_var_name(fn_expr.hir_id, tcx)
-        .and_then(|n| raps.get(&n).map(|rd| rd.rap.to_owned()))
+        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned()))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::MethodCall(name_and_generic_args, ..) => {
       hirid_to_var_name(name_and_generic_args.hir_id, &tcx)
-        .and_then(|n| raps.get(&n).map(|rd| rd.rap.to_owned()))
+        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned()))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::Block(b, _) => {
@@ -836,8 +853,7 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
       // most commonly a synthetic local from a macro expansion, or a
       // LangItem qualifier reached via desugaring. Return None rather
       // than crash; callers map None to "skip this event".
-      let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-      raps.get(&name).map(|rd| rd.rap.to_owned())
+      raps.get(&path_key(p, tcx)).map(|rd| rd.rap.to_owned())
     }
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => fetch_rap(expr, tcx, raps),
     // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
@@ -884,7 +900,7 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
       ) {
         return ResourceTy::Anonymous;
       }
-      let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
+      let name = path_key(p, tcx);
       if borrow_map.contains_key(&name) {
         borrow_map.get(&name).unwrap().to_owned().lender
       }
