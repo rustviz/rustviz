@@ -192,7 +192,11 @@ mirrored in the playground's "Known limitations" panel
 
 **Only programs that compile.** RustViz visualizes programs that pass
 the borrow checker. Code with a borrow error (e.g. two simultaneous
-`&mut` borrows) is rejected with rustc's error rather than drawn.
+`&mut` borrows) is rejected with rustc's error rather than drawn, under
+the heading "This program doesn't compile". A program that compiles but
+hits one of the crashes listed below is reported as "RustViz can't
+visualize this program yet", with a link to report it, instead of a raw
+panic.
 
 **Renders, but some of what's shown is wrong:**
 
@@ -225,8 +229,9 @@ the borrow checker. Code with a borrow error (e.g. two simultaneous
 - Tuple destructuring assignment (`(a, b) = (b, a);`) draws an extra
   `lhs` column for the compiler's temporary.
 
-**Crashes the plugin:** some valid programs do. Known crashes are
-tracked as [issues labelled
+**Crashes the plugin:** some valid programs do. The playground then shows
+"RustViz can't visualize this program yet" with a link to report it.
+Known crashes are tracked as [issues labelled
 `crash`](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash)
 rather than listed here.
 

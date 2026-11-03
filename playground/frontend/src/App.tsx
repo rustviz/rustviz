@@ -259,7 +259,9 @@ const Description: React.FC = () => (
     <p>
       RustViz is a research tool. It only visualizes programs that compile
       (code with a borrow-checker error is rejected with rustc&apos;s message),
-      and it handles a subset of Rust. In particular:
+      and it handles a subset of Rust. When your program compiles but uses
+      something RustViz can&apos;t handle, you&apos;ll see &quot;RustViz can&apos;t
+      visualize this program yet&quot; with a link to report it. In particular:
     </p>
     <p><strong>Some of what&apos;s drawn is wrong</strong>, so don&apos;t rely on it for:</p>
     <ul>
@@ -292,8 +294,9 @@ const Description: React.FC = () => (
       </li>
     </ul>
     <p>
-      <strong>Some valid programs crash the visualizer.</strong> We track the
-      ones we know about as{' '}
+      <strong>Some valid programs crash the visualizer</strong> (you&apos;ll
+      see &quot;RustViz can&apos;t visualize this program yet&quot;). We track
+      the ones we know about as{' '}
       <a
         href="https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash"
         target="_blank"
