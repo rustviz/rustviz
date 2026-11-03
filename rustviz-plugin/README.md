@@ -40,59 +40,10 @@ cargo install --path . --locked
 
 ## Limitations
 
-RustViz is a teaching tool — it supports a meaningful subset of Rust;
-some features render in a deliberately simplified form, others aren't
-yet handled.
-
-**Rendered as opaque single-owner columns** — the wrapper has a column,
-the wrapped value doesn't get a separate timeline:
-
-- Smart-pointer wrappers: `Box`, `Rc`, `Arc`, `RefCell`, `Mutex`, and
-  trait objects (`Box<dyn T>`). Shared-ownership semantics (refcount
-  sharing for `Rc` / `Arc`, runtime borrow tracking for `RefCell`)
-  aren't visualized.
-- Closures: capture events into the closure binding are visualized;
-  events inside the closure body aren't separately traced.
-
-**Rendered as a single iteration:**
-
-- `for` / `while` / `loop` bodies show one execution. Per-iteration
-  branching across iterations isn't visualized.
-
-**Not supported:**
-
-- Indexing into collections (`v[i]`). Slicing (`&v[..]` on a `Vec`,
-  `&s[..]` on a `String`) does work.
-- `async` / `await`, futures, and other heavily-desugared async
-  constructs.
-- The `?` operator. Programs that use it currently crash the plugin
-  (see the `question_mark*.rs` corpus fixtures).
-- Custom procedural or declarative macros — only standard-library
-  macros (`println!`, `vec!`, `assert!`) are unwrapped through their
-  desugaring; user-defined macros are invisible.
-- Some assignment targets on the left of `=`: writing to a chained
-  field (`o.inner.x = …`), an index (`v[i] = …`), or a tuple
-  destructure (`(a, b) = …`) crashes the plugin or isn't shown.
-  Assigning to a plain variable or a single-level field (`r.field = …`)
-  works, and *reading* chained fields (`r.a.b`) works.
-- Method chains where each call's return is itself the receiver of the
-  next call (`a.get_mut().push(x)`). The first call renders, the rest
-  of the chain doesn't yet.
-- `unsafe` blocks aren't tested; raw-pointer behavior is undefined for
-  the visualization.
-- Union types (`union U { … }`) panic the plugin.
-
-**Limited / fragile:**
-
-- Inherent methods on user structs work for the canonical
-  Rectangle/area shape but minor variants (e.g. `fn get(&self) -> i32
-  { self.n }` on a one-field struct) can crash.
-- Range patterns in match arms (`0..=9 => …`) are walked but not
-  extensively tested.
-- Match guards (`pat if cond => …`): the arm itself renders, but the
-  guard expression isn't visualized — borrows, moves, or reads inside
-  `cond` produce no events.
-- `const` and `static` items aren't tested.
+The authoritative list is in the top-level
+[`README.md`](../README.md#limitations) (mirrored in the playground's
+"Known limitations" panel). The checklist below is the plugin's
+implementation-level TODO list.
 
 ### To fix / implement
 

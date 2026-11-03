@@ -183,61 +183,68 @@ top-level directory:
 
 ## Limitations
 
-RustViz 2 is a research / teaching tool. It supports a meaningful subset
-of Rust; some features render in a deliberately simplified form, others
-aren't yet handled. See the [issues
-tab](https://github.com/rustviz/rustviz/issues) for tracked work.
+RustViz 2 is a research / teaching tool. It handles a meaningful subset
+of Rust, and some of what it draws is simplified or wrong. This list is
+checked against a corpus of Rust Book–style snippets; see the [issues
+tab](https://github.com/rustviz/rustviz/issues) for tracked work. It's
+mirrored in the playground's "Known limitations" panel
+(`playground/frontend/src/App.tsx`); keep the two in sync.
 
-**Rendered as opaque single-owner columns** — the wrapper has a column,
-the wrapped value doesn't get a separate timeline:
+**Only programs that compile.** RustViz visualizes programs that pass
+the borrow checker. Code with a borrow error (e.g. two simultaneous
+`&mut` borrows) is rejected with rustc's error rather than drawn.
 
-- Smart-pointer wrappers: `Box`, `Rc`, `Arc`, `RefCell`, `Mutex`, and
-  trait objects (`Box<dyn T>`). Shared-ownership semantics (refcount
-  sharing for `Rc` / `Arc`, runtime borrow tracking for `RefCell`)
-  aren't visualized.
-- Closures: capture events into the closure binding are visualized;
-  events inside the closure body aren't separately traced.
+**Renders, but some of what's shown is wrong:**
 
-**Rendered as a single iteration:**
+- Functions that return a reference (`fn first_word(s: &String) ->
+  &str`, `longest`, `largest`, `v.get(i)`, `v.iter()`): the result isn't
+  linked to the borrow it came from, and the input's borrow is shown
+  ending at the call even while the result is still in use.
+- Values consumed by a method that takes `self` (`v.into_iter()`,
+  `opt.unwrap_or_else(…)`, `opt.expect(…)`) or by `s1 + &s2` aren't shown
+  as moved, and are then wrongly shown as dropped at the end of scope.
+- References are sometimes described in ownership terms: a `&mut`
+  variable is labelled "the owner of the resource", `*r += 1` reads
+  "*r acquires ownership", and a string literal (`let s = "hi";`)
+  "acquires ownership".
+- Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
+- Struct fields after the whole struct is moved (`drop(c)`, `..user1`,
+  field-init shorthand) can still be shown as owning, or as dropped.
+- `#[derive(Debug)]` (and other derives) add extra timelines from the
+  generated code.
+- `Rc`: clones are shown as independent owners that each drop the value;
+  reference counting isn't modelled.
+- Arrows for functions returning a `Copy` value say "moved to the
+  caller" rather than "copied".
 
-- `for` / `while` / `loop` bodies show one execution. Per-iteration
-  branching across iterations isn't visualized.
+**Crashes the plugin:**
 
-**Not supported:**
+- Tuple field access (`t.0`) and tuple structs (`struct Color(u8, u8,
+  u8)`).
+- Assigning to a field through a reference: `self.n += 1` in a `&mut
+  self` method, or `c.n = …` where `c: &mut T`.
+- Assigning to a chained field (`o.inner.x = …`), an index (`v[i] = …`),
+  or a tuple destructure (`(a, b) = …`).
+- `const` and `static` items.
+- Union types.
+- `*cell.borrow_mut() += 1` and other assignments through a method's
+  result; nested constructors like `Cons(1, Box::new(Cons(2, …)))`.
 
-- Indexing into collections (`v[i]`). Slicing (`&v[..]` on a `Vec`,
-  `&s[..]` on a `String`) does work.
-- `async` / `await`, futures, and other heavily-desugared async
-  constructs.
-- The `?` operator. Programs that use it currently crash the plugin
-  (see the `question_mark*.rs` corpus fixtures).
-- Custom procedural or declarative macros — only standard-library
-  macros (`println!`, `vec!`, `assert!`) are unwrapped through their
-  desugaring; user-defined macros are invisible.
-- Some assignment targets on the left of `=`: writing to a chained
-  field (`o.inner.x = …`), an index (`v[i] = …`), or a tuple
-  destructure (`(a, b) = …`) crashes the plugin or isn't shown.
-  Assigning to a plain variable or a single-level field (`r.field = …`)
-  works, and *reading* chained fields (`r.a.b`) works.
-- Method chains where each call's return is itself the receiver of the
-  next call (`a.get_mut().push(x)`). The first call renders, the rest
-  of the chain doesn't yet.
-- `unsafe` blocks aren't tested; raw-pointer behavior is undefined for
-  the visualization.
-- Union types (`union U { … }`) panic the plugin.
+**Simplified or not shown:**
 
-**Limited / fragile:**
-
-- Inherent methods on user structs work for the canonical
-  Rectangle/area shape but minor variants (e.g. `fn get(&self) -> i32
-  { self.n }` on a one-field struct) can crash. File a bug if you hit
-  one.
-- Range patterns in match arms (`0..=9 => …`) are walked but not
-  extensively tested.
-- Match guards (`pat if cond => …`): the arm itself renders, but the
-  guard expression isn't visualized — borrows, moves, or reads inside
-  `cond` produce no events.
-- `const` and `static` items aren't tested.
+- Smart pointers (`Box`, `Rc`, `Arc`, `RefCell`, `Mutex`) and trait
+  objects render as a single owner column; `RefCell`'s runtime borrows
+  aren't shown.
+- Closures: captures are shown; events inside the closure body aren't.
+- Loops (`for`, `while`, `loop`) show a single iteration.
+- Method chains (`a.get_mut().push(x)`): only the first call renders.
+- Match guards (`pat if cond =>`): the guard expression produces no
+  events.
+- `let first = v[0];` (copying out of an index) shows nothing; reading
+  through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
+- `async` / `await`, and user-defined macros (only standard-library
+  macros like `println!`, `vec!`, `assert!` are unwrapped).
+- `unsafe` and raw pointers are untested.
 
 The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).
@@ -262,7 +269,7 @@ Issues and PRs welcome. Keep each PR focused on a single concern; for
 local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
 [`CLAUDE.md`](CLAUDE.md) has the project's ground rules (for human and AI
 contributors alike): tooltips must be semantically correct, tests must pin
-correct behaviour, and the three limitations lists stay in sync.
+correct behaviour, and the limitations lists stay in sync.
 
 ## Releasing
 
