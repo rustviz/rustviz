@@ -334,7 +334,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "some_string is a mutable borrow from the caller",
             "some_string holds a mutable reference; it can read and write the borrowed resource",
-            "push_str reads from/writes to some_string",
+            "push_str reads from/writes to some_string (mutable reborrow — some_string is frozen until push_str returns)",
         ],
         must_not_contain: &[
             "some_string is the owner of the resource",
