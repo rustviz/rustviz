@@ -15,14 +15,24 @@ use rustviz_lib::{error_kind, ErrorKind, Rustviz, DOES_NOT_COMPILE_INTRO, UNSUPP
 /// Snippets that panic the plugin on `main` at the time of writing. The
 /// tests only need *one* of them to still panic; when a plugin fix makes
 /// one visualize, it is skipped. If they all start working, add a new
-/// known-panicking snippet here.
+/// known-panicking snippet here. They are picked from different plugin
+/// code paths (assignment targets, closure-call arrows) so that a single
+/// fix doesn't retire them all at once.
 const KNOWN_PANICKING: &[(&str, &str)] = &[
+    // Calling a closure with a `&mut` argument (render_arrow).
     (
-        "try_operator",
-        "fn f() -> Option<i32> {\n    let x = Some(1)?;\n    Some(x)\n}\nfn main() {\n    let y = f();\n}\n",
+        "closure_mutref_arg",
+        "fn main() {\n    let mut s = String::from(\"a\");\n    let mut push = |q: &mut String| q.push('b');\n    push(&mut s);\n    println!(\"{}\", s);\n}\n",
     ),
-    ("const_item", "const N: i32 = 1;\nfn main() {\n    let x = N;\n}\n"),
-    ("static_item", "static G: i32 = 5;\nfn main() {\n    let x = G;\n}\n"),
+    // Assigning to an index (#144).
+    ("index_assign", "fn main() {\n    let mut v = vec![1, 2, 3];\n    v[0] = 10;\n    println!(\"{:?}\", v);\n}\n"),
+    // Assigning to a field of a method-call result (#175).
+    (
+        "temporary_field_assign",
+        "struct P {\n    n: i32,\n}\nfn main() {\n    let mut v = vec![P { n: 1 }];\n    v.last_mut().unwrap().n = 5;\n}\n",
+    ),
+    // Assigning to a tuple field.
+    ("tuple_field_assign", "fn main() {\n    let mut t = (1, 2);\n    t.0 = 5;\n    println!(\"{}\", t.0);\n}\n"),
 ];
 
 /// The Rust Book's "two mutable borrows" example (ch04-02).
