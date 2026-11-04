@@ -773,6 +773,14 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    // `if let` / `while let` chains (#198, #280). These need Rust 2024,
+    // so they live in tests/edition2024/: Cargo compiles each
+    // tests/*.rs as an integration test in the plugin crate's edition
+    // (2021), which rejects let-chains, but doesn't look in
+    // subdirectories. The plugin builds user code in edition 2024.
+    "edition2024/if_let_chain",
+    "edition2024/if_let_chain_move",
+    "edition2024/while_let_chain",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6585,6 +6593,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "match_arm_on_split_line",
         must_contain: &["Move from s to take", "s's resource is moved"],
         must_not_contain: &["Copy from s to take", "s's value is copied"],
+    // ─── `if let` / `while let` chains (#198, #280) ────────────────
+    // Before the fix the chain's bindings weren't registered: no
+    // columns for them, and their uses in the body were skipped.
+    TooltipExpect {
+        name: "edition2024/if_let_chain",
+        must_contain: &[
+            "Partial immutable borrow from x to a",
+            "Copy from y to b",
+            "show reads from a",
+            "Copy from b to take",
+            "a goes out of scope",
+            "b goes out of scope",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_move",
+        // `let Some(a) = x` moves the String out of `x` (into `a`, then
+        // into `consume`), so `x` has nothing to drop at the end.
+        must_contain: &[
+            "Move from x to a",
+            "Move from a to consume",
+            "x goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "x goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/while_let_chain",
+        must_contain: &[
+            "Copy from pop to t",
+            "Copy from t to take",
+            "t goes out of scope",
+        ],
+        must_not_contain: &[],
     },
     // #335: a reassignment after a conditional that moved the value on
     // some paths only drops the old value only on the others (drop
@@ -10165,6 +10210,30 @@ fn return_drops_what_the_branch_owns() {
             );
         }
     }
+/// The `if` counterpart of `guard_that_moves_is_refused` (#198, #281):
+/// `let Some(a) = x` moves out of `x` as soon as it matches, so when
+/// `a.len() > 5` is then false the `else` branch runs with `x` already
+/// partially moved (rustc rejects using `x` there). The chain's events
+/// are drawn in the if branch only, so the plugin refuses instead of
+/// showing the else branch still owning `x`. (main used to render it
+/// with no move at all and "x goes out of scope. Its resource is
+/// dropped.")
+#[test]
+fn if_let_chain_that_moves_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    let src = "fn consume(_o: String) {}\n\
+               fn main() {\n\
+               \x20   let x = Some(String::from(\"a\"));\n\
+               \x20   if let Some(a) = x && a.len() > 5 {\n\
+               \x20       consume(a);\n\
+               \x20   } else {\n\
+               \x20       println!(\"short\");\n\
+               \x20   }\n\
+               }\n";
+    let err = Rustviz::new(src).expect_err("a let-chain that moves, with an else, must not render");
+    let msg = err.to_string();
+    assert!(msg.contains("`if let` chains that move or assign a variable declared outside the condition (`x`"),
+        "expected the let-chain-move refusal, got:\n{}", msg);
 }
 
 /// Column header labels in one row as (x, visible text), left to right.

@@ -15,6 +15,23 @@ use rustc_middle::ty::adjustment::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 
+/// Which kind of condition `refuse_lasting_guard_effects` is checking,
+/// for its message.
+#[derive(Clone, Copy)]
+enum CondKind { MatchGuard, IfLetChain }
+
+/// True if `expr` is an `&&` chain with at least one `let` in it.
+fn is_let_chain(expr: &Expr) -> bool {
+  match expr.kind {
+    ExprKind::DropTemps(inner) => is_let_chain(inner),
+    ExprKind::Binary(op, lhs, rhs) if op.node == rustc_hir::BinOpKind::And => {
+      is_let_chain(lhs) || is_let_chain(rhs)
+    }
+    ExprKind::Let(_) => true,
+    _ => false,
+  }
+}
+
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `e` is the value the function returns (its tail expression, or
   /// the operand of a `return`): record it moving (or, for a Copy
@@ -91,18 +108,66 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Let(let_expr) => {
         let mark = self.preprocessed_events.len();
         self.visit_expr(let_expr.init);
-        self.refuse_lasting_guard_effects(mark, outer, expr);
+        self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::MatchGuard);
         let mark = self.preprocessed_events.len();
         let (bound, _) = self.register_iflet_let_bindings(let_expr, None);
         if !whole_guard {
-          self.refuse_lasting_guard_effects(mark, outer, expr);
+          self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::MatchGuard);
         }
         guard_decls.extend(bound);
       }
       _ => {
         let mark = self.preprocessed_events.len();
         self.visit_expr(expr);
-        self.refuse_lasting_guard_effects(mark, outer, expr);
+        self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::MatchGuard);
+      }
+    }
+  }
+
+  /// Visit an `if` condition that is a let-chain (`if let A = x && let
+  /// B = y && cond`, #198). Each `let` registers its bindings into
+  /// `decls` (the caller scopes them to the if-branch, like a lone `if
+  /// let`'s); other parts are visited as ordinary expressions.
+  ///
+  /// The chain's events are drawn in the if-branch. When the `if` has
+  /// an `else`, that's only accurate for effects that end inside the
+  /// condition: if a later part fails, the else branch runs in the
+  /// state the earlier parts left behind (rustc: "borrow of partially
+  /// moved value" after `if let Some(a) = x && a.len() > 5 … else
+  /// { x }`). So, as for match guards, a chain that moves out of or
+  /// assigns to a variable in `outer` is refused instead of drawn. The
+  /// exception is the bindings of the chain's last part: they happen
+  /// only when the whole chain succeeds. The caller passes an empty
+  /// `outer` when there's no `else`: then nothing runs on failure, and
+  /// the events are drawn like a lone `if let`'s.
+  fn visit_if_let_chain(
+    &mut self,
+    expr: &'tcx Expr<'tcx>,
+    is_last: bool,
+    outer: &HashSet<ResourceAccessPoint>,
+    decls: &mut HashSet<ResourceAccessPoint>,
+  ) {
+    match expr.kind {
+      ExprKind::DropTemps(inner) => self.visit_if_let_chain(inner, is_last, outer, decls),
+      ExprKind::Binary(op, lhs, rhs) if op.node == rustc_hir::BinOpKind::And => {
+        self.visit_if_let_chain(lhs, false, outer, decls);
+        self.visit_if_let_chain(rhs, is_last, outer, decls);
+      }
+      ExprKind::Let(let_expr) => {
+        let mark = self.preprocessed_events.len();
+        self.visit_expr(let_expr.init);
+        self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::IfLetChain);
+        let mark = self.preprocessed_events.len();
+        let bound = self.register_iflet_let_bindings(let_expr, None).0;
+        if !is_last {
+          self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::IfLetChain);
+        }
+        decls.extend(bound);
+      }
+      _ => {
+        let mark = self.preprocessed_events.len();
+        self.visit_expr(expr);
+        self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::IfLetChain);
       }
     }
   }
@@ -115,7 +180,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     mark: usize,
     outer: &HashSet<ResourceAccessPoint>,
     guard_part: &'tcx Expr<'tcx>,
+    kind: CondKind,
   ) {
+    let (what, cond, later) = match kind {
+      CondKind::MatchGuard => ("match guards", "the guard", "the guard is false and a later arm runs"),
+      CondKind::IfLetChain => ("`if let` chains", "the condition", "the condition is false and the else branch runs"),
+    };
     let is_outer = |r: &ResourceTy| r.extract_rap().is_some_and(|rap| outer.contains(rap));
     for (_, ev) in &self.preprocessed_events[mark..] {
       let culprit = match ev {
@@ -127,14 +197,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         | ExternalEvent::StaticBorrow { to, .. }
         | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) => to,
         ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) => {
-          panic!("match guards that assign to an outer variable (`{}`, line {}) aren't supported yet",
-            ro.name(), expr_to_line(guard_part, &self.tcx));
+          panic!("{} that assign to an outer variable (`{}`, line {}) aren't supported yet",
+            what, ro.name(), expr_to_line(guard_part, &self.tcx));
         }
         _ => continue,
       };
-      panic!("match guards that move or assign a variable declared outside the guard (`{}`, line {}) \
-              aren't supported yet: the effect lasts even when the guard is false and a later arm runs",
-        culprit.real_name(), expr_to_line(guard_part, &self.tcx));
+      panic!("{} that move or assign a variable declared outside {} (`{}`, line {}) \
+              aren't supported yet: the effect lasts even when {}",
+        what, cond, culprit.real_name(), expr_to_line(guard_part, &self.tcx), later);
     }
   }
 
@@ -1939,6 +2009,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // Copies out of the scrutinee stay before the split (#496).
             if_lo = first_in_branch;
             bound
+          } else if is_let_chain(guard_expr) {
+            // `if let A = x && let B = y && cond` (#198): see
+            // visit_if_let_chain. Without an else, nothing runs when
+            // the chain fails, so there's nothing to refuse.
+            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+            let outer: HashSet<ResourceAccessPoint> = if else_expr.is_some() {
+              self.raps.values().map(|rd| rd.rap.clone()).filter(|r| !r.is_fn()).collect()
+            } else {
+              HashSet::new()
+            };
+            if_lo = *self.unique_id;
+            if_hash_lo = self.rap_hashes;
+            let mut decls = HashSet::new();
+            self.visit_if_let_chain(guard_expr, true, &outer, &mut decls);
+            decls
           } else {
             self.visit_expr(&guard_expr);
             if_lo = *self.unique_id;
@@ -2215,6 +2300,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 if let ExprKind::Let(let_expr) = cond.kind {
                   self.visit_expr(let_expr.init);
                   bindings = self.register_iflet_let_bindings(let_expr, None).0;
+                } else if is_let_chain(cond) {
+                  // `while let A = x && cond` (#198): register each
+                  // `let`'s bindings like a lone while-let's. The loop
+                  // is drawn inline (no Branch), so the chain's events
+                  // are shown unconditionally; nothing to refuse. Their
+                  // scope ends are emitted after the body, below.
+                  self.visit_if_let_chain(cond, true, &HashSet::new(), &mut bindings);
                 } else {
                   self.visit_expr(cond);
                 }
