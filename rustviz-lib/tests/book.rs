@@ -856,8 +856,8 @@ const BOOK: &[Snippet] = &[
         status: Wrong,
         note: "calling add_one is shown as copying the closure into y (#179)",
         must_contain: &["Closure add_one is bound"],
+        must_not_contain: &["add_one's resource is copied"],
         known_wrong: &[
-            "add_one's resource is copied",
             "y is initialized by copy from add_one",
             "Copy from add_one to y",
         ],
@@ -896,7 +896,7 @@ const BOOK: &[Snippet] = &[
         status: Wrong,
         note: "closure passed as an argument: 'copy from Anonymous resource' at f(1); the capture of k is missing (#179)",
         must_contain: &["f acquires ownership from the caller", "Copy from apply to r"],
-        known_wrong: &["f is initialized by copy from Anonymous resource"],
+        must_not_contain: &["f is initialized by copy from Anonymous resource"],
         ..E
     },
     Snippet {
@@ -1524,7 +1524,13 @@ fn tooltips(code_svg: &str, timeline_svg: &str) -> Vec<(String, String)> {
                 .map_or("?".to_string(), |r| r.1.clone()),
             None => "?".to_string(),
         };
-        out.push((line, clean_tooltip(&timeline_svg[value_start..value_end])));
+        // Events on one line of a column share one dot (#309); its
+        // tooltip has one bulleted line per event. Match each separately.
+        for part in timeline_svg[value_start..value_end].split("&lt;br&gt;") {
+            let text = clean_tooltip(part);
+            let text = text.strip_prefix("• ").map(str::to_owned).unwrap_or(text);
+            out.push((line.clone(), text));
+        }
     }
     out
 }

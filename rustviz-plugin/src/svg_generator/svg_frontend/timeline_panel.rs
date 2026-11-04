@@ -14,6 +14,161 @@ static SPAN_END : &'static str = "&lt;/span&gt;";
 /// Centres `(x, y)` of the event dots drawn so far. Ordered, so the
 /// SVG doesn't depend on hash iteration order.
 type DotPositions = BTreeSet<(i64, i64)>;
+
+/// One dot on a variable's column: every event (and call) that lands on
+/// the same line of that column. Two events on one line used to get two
+/// dots at the same point, and only the top one could be hovered
+/// (#309). They now share one dot whose tooltip lists each event.
+struct PendingDot {
+    hash: u64,
+    x: i64,
+    y: i64,
+    /// `output` key (`-1` outside struct groups) and whether the column
+    /// is a struct member, the same routing `append_dot` used to do.
+    owner_key: i64,
+    is_member: bool,
+    /// Tooltip lines in the order the events were recorded. The id is
+    /// set for a lend to a function (`f(&s)`), so the call's own line
+    /// ("f reads from s") can go right after it.
+    lines: Vec<(Option<usize>, String)>,
+    /// Some event here drops a resource: draw the drop triangle.
+    drop: bool,
+    /// An event dot is drawn here (not just a function call).
+    event: bool,
+    /// A function-call icon (`f`) is drawn here.
+    call: bool,
+}
+
+/// Collects the dots of every column, merging events that share a
+/// point, then writes them out once the arrows (which add the call
+/// icons and need the dot positions) are done.
+#[derive(Default)]
+struct DotLayer {
+    dots: Vec<PendingDot>,
+    at: BTreeMap<(u64, i64, i64), usize>,
+    positions: DotPositions,
+}
+
+impl DotLayer {
+    fn entry(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData) -> &mut PendingDot {
+        let (owner_key, is_member) = if column.is_struct_group {
+            (column.owner as i64, column.is_member)
+        } else {
+            (-1, false)
+        };
+        let dots = &mut self.dots;
+        let i = *self.at.entry((hash, x, y)).or_insert_with(|| {
+            dots.push(PendingDot {
+                hash, x, y, owner_key, is_member,
+                lines: Vec::new(), drop: false, event: false, call: false,
+            });
+            dots.len() - 1
+        });
+        &mut self.dots[i]
+    }
+
+    /// An event dot (`drop`: one with the drop triangle).
+    fn add_event(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData,
+                 title: String, drop: bool, lend_id: Option<usize>) {
+        self.positions.insert((x, y));
+        let dot = self.entry(hash, x, y, column);
+        dot.event = true;
+        dot.drop |= drop;
+        dot.lines.push((lend_id, title));
+    }
+
+    /// The `f` icon of a call that borrows the variable (`f(&s)`), from
+    /// the external event `id`. Its line goes right after the lend that
+    /// event recorded, if that is drawn here: borrowed by f, f reads
+    /// from s, no longer borrowed.
+    fn add_call(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData,
+                title: String, id: usize) {
+        let dot = self.entry(hash, x, y, column);
+        dot.call = true;
+        let at = dot.lines.iter()
+            .position(|(lend, _)| *lend == Some(id))
+            .map_or(dot.lines.len(), |i| i + 1);
+        dot.lines.insert(at, (None, title));
+    }
+
+    fn flush(self, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, registry: &Handlebars) {
+        let mut rendered: BTreeMap<(i64, bool), String> = BTreeMap::new();
+        for dot in self.dots {
+            let svg = render_pending_dot(&dot, registry);
+            rendered.entry((dot.owner_key, dot.is_member)).or_default().push_str(&svg);
+        }
+        // Dots go before anything the arrow pass already put in the
+        // layer (function logos), as they did when drawn straight away.
+        for ((owner_key, is_member), svg) in rendered {
+            let entry = ensure_owner_entry(output, owner_key);
+            let panel = if is_member { &mut entry.1 } else { &mut entry.0 };
+            panel.dots.insert_str(0, &svg);
+        }
+    }
+}
+
+/// Tooltip for a dot: the one event's text, or one bulleted line per
+/// event, in order. Empty texts (the structural merge dot of an
+/// unchanged variable) are left out, and so is a line that repeats the
+/// one before it (two borrows of `s` ending on one line both say "s's
+/// resource is no longer immutably borrowed").
+fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
+    let mut texts: Vec<&str> = lines.iter()
+        .map(|(_, t)| t.as_str())
+        .filter(|t| !t.is_empty())
+        .collect();
+    texts.dedup();
+    if texts.len() <= 1 {
+        return texts.first().copied().unwrap_or("").to_owned();
+    }
+    texts.iter()
+        .map(|t| format!("• {}", t))
+        .collect::<Vec<_>>()
+        .join("&lt;br&gt;")
+}
+
+fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
+    let title = merged_dot_title(&dot.lines);
+    let (cx, cy) = (dot.x, dot.y);
+    if !dot.event {
+        let data = FunctionDotData { hash: dot.hash, x: cx, y: cy, title };
+        return registry.render("function_dot_template", &data).unwrap();
+    }
+    if !dot.call {
+        if dot.drop {
+            let data = DropDotData {
+                hash: dot.hash, dot_x: cx, dot_y: cy, title,
+                p1x: cx - 3, p1y: cy - 1,
+                p2x: cx + 3, p2y: cy - 1,
+                p3x: cx,     p3y: cy + 3,
+            };
+            return registry.render("drop_dot_template", &data).unwrap();
+        }
+        let data = EventDotData { hash: dot.hash, dot_x: cx, dot_y: cy, title };
+        return registry.render("dot_template", &data).unwrap();
+    }
+    // An event dot with a call icon on it: one hover target for both.
+    // The `f` glyph covers the dot, so a drop on this dot can't use the
+    // usual white triangle inside it (it would be hidden). Draw the drop
+    // mark just below the dot instead, in the column's colour: a
+    // downward triangle where the column ends.
+    let triangle = if dot.drop {
+        format!(
+            "            <polygon class=\"drop-mark\" data-hash=\"{}\" points=\"{},{} {},{} {},{}\"/>\n",
+            dot.hash, cx - 4, cy + 12, cx + 4, cy + 12, cx, cy + 17,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+         \x20           <circle cx=\"{cx}\" cy=\"{cy}\" r=\"5\" data-hash=\"{hash}\"/>\n\
+         {triangle}\
+         \x20           <use xlink:href=\"#functionDot\" data-hash=\"{hash}\" x=\"{cx}\" y=\"{cy}\"/>\n\
+         \x20       </g>\n",
+        title = title, cx = cx, cy = cy, hash = dot.hash, triangle = triangle,
+    )
+}
 static BRANCH_WEIGHT: i64 = 25;
 #[derive(Debug, Clone)]
 pub struct TimelineColumnData {
@@ -217,9 +372,12 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     // Dots are drawn before arrows, and the arrow pass needs to know
     // where they landed: a straight arrow hops over any dot between
     // its two ends (see `render_hopping_arrow`).
-    let dot_positions = render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry); // dot events
+    let mut dots = render_dots_string(visualization_data, &resource_owners_layout); // dot events
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry); // reference lines
-    render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &dot_positions, &registry); // arrows
+    render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
+    // Written last: a call icon (`f`) added by the arrow pass shares
+    // the dot of the borrow it makes.
+    dots.flush(&mut output, &registry);
     render_struct_box(&mut output, &structs_info, &visualization_data.fn_start_lines, &registry); // struct box
 
     let mut output_string : String = String::new();
@@ -681,36 +839,21 @@ fn render_labels_string(
 }
 
 fn append_dot(
-    dot_data: &EventDotData,
-    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    dot_data: EventDotData,
     timeline_data: &TimelineColumnData,
-    registry: &Handlebars,
-    dots: &mut DotPositions,
+    dots: &mut DotLayer,
+    lend_id: Option<usize>,
 ) {
-    dots.insert((dot_data.dot_x, dot_data.dot_y));
-    let column = timeline_data;
-    if column.is_struct_group {
-        let owner_entry = ensure_owner_entry(output, column.owner as i64);
-        if column.is_member {
-            owner_entry.1.dots.push_str(&registry.render("dot_template", &dot_data).unwrap());
-        } else {
-            owner_entry.0.dots.push_str(&registry.render("dot_template", &dot_data).unwrap());
-        }
-    }
-    else {
-        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("dot_template", &dot_data).unwrap());
-    }
+    dots.add_event(dot_data.hash, dot_data.dot_x, dot_data.dot_y, timeline_data, dot_data.title, false, lend_id);
 }
 
 fn render_dot(
     hash: &u64,
     history: &Vec<(usize, Event)>,
     timeline_data: &TimelineColumnData,
-    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
-    registry: &Handlebars,
     resource_hold: bool,
-    dots: &mut DotPositions,
+    dots: &mut DotLayer,
 ) {
     for (line_number, event) in history.iter() {
         // Closure-capture per-upvar dots on the closure's own
@@ -747,7 +890,7 @@ fn render_dot(
                     dot_y: get_y_axis_pos(*line_number),
                     title: event.print_message_with_name(& mut is.real_name())
                 };
-                append_dot(&b_data, output, timeline_data, registry, dots);
+                append_dot(b_data, timeline_data, dots, None);
 
                 // Each branch column gets its real events rendered.
                 // No "If"/"Else" bookend dots: the per-branch
@@ -760,7 +903,7 @@ fn render_dot(
                 // communicated by column position; the join dot
                 // below speaks for what happened.
                 for branch in branch_history.iter() {
-                    render_dot(hash, &branch.e_data, &branch.t_data, output, visualization_data, registry, false, dots);
+                    render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, false, dots);
                 }
 
                 // Per-variable merge dot, on the parent column at
@@ -833,7 +976,7 @@ fn render_dot(
                         dot_y: cy,
                         title: String::new(),
                     };
-                    append_dot(&m_data, output, timeline_data, registry, dots);
+                    append_dot(m_data, timeline_data, dots, None);
                 } else if mixed_moved {
                     // Mixed: at least one branch moved, at least
                     // one didn't (counting the implicit untouched
@@ -852,7 +995,7 @@ fn render_dot(
                         p2x: cx + 3, p2y: cy - 1,
                         p3x: cx,     p3y: cy + 3,
                     };
-                    append_drop_dot(&drop_data, output, timeline_data, registry, dots);
+                    append_drop_dot(drop_data, timeline_data, dots);
                 } else if all_moved {
                     // Every branch ends without the resource —
                     // either by a direct move or by an implicit
@@ -865,7 +1008,7 @@ fn render_dot(
                         dot_y: cy,
                         title,
                     };
-                    append_dot(&m_data, output, timeline_data, registry, dots);
+                    append_dot(m_data, timeline_data, dots, None);
                 } else {
                     let m_data = EventDotData {
                         hash: *hash as u64,
@@ -873,7 +1016,7 @@ fn render_dot(
                         dot_y: cy,
                         title: branch_join_message(branch_history, ty, is),
                     };
-                    append_dot(&m_data, output, timeline_data, registry, dots);
+                    append_dot(m_data, timeline_data, dots, None);
                 }
                 continue;
             }
@@ -917,7 +1060,7 @@ fn render_dot(
                                 p2x: cx + 3, p2y: cy - 1,
                                 p3x: cx,     p3y: cy + 3,
                             };
-                            append_drop_dot(&drop_data, output, timeline_data, registry, dots);
+                            append_drop_dot(drop_data, timeline_data, dots);
                             continue;
                         }
                         data.title = event.print_message_with_name(&mut name);
@@ -953,7 +1096,7 @@ fn render_dot(
                             p2x: cx + 3, p2y: cy - 1,
                             p3x: cx,     p3y: cy + 3,
                         };
-                        append_drop_dot(&drop_data, output, timeline_data, registry, dots);
+                        append_drop_dot(drop_data, timeline_data, dots);
                         continue;
                     }
                 },
@@ -974,7 +1117,7 @@ fn render_dot(
                         p2x: cx + 3, p2y: cy - 1,
                         p3x: cx,     p3y: cy + 3,
                     };
-                    append_drop_dot(&drop_data, output, timeline_data, registry, dots);
+                    append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
                 _ => {
@@ -998,7 +1141,11 @@ fn render_dot(
             }
         }
         // push to individual timelines
-        append_dot(&data, output, timeline_data, registry, dots);
+        let lend_id = match event {
+            Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => Some(*id),
+            _ => None,
+        };
+        append_dot(data, timeline_data, dots, lend_id);
     }
 }
 
@@ -1223,40 +1370,24 @@ fn upvar_name(rty: &ResourceTy) -> Option<String> {
     rty.extract_rap().map(|r| r.name().to_owned())
 }
 
-// Same routing logic as `append_dot` (struct-grouped vs flat
-// timelines), but emits the drop-dot SVG (circle + inner triangle)
-// instead of the plain circle.
+// Like `append_dot`, but the dot is drawn as a drop dot (circle +
+// inner triangle) instead of the plain circle.
 fn append_drop_dot(
-    drop_data: &DropDotData,
-    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    drop_data: DropDotData,
     timeline_data: &TimelineColumnData,
-    registry: &Handlebars,
-    dots: &mut DotPositions,
+    dots: &mut DotLayer,
 ) {
-    dots.insert((drop_data.dot_x, drop_data.dot_y));
-    let column = timeline_data;
-    let rendered = registry.render("drop_dot_template", drop_data).unwrap();
-    if column.is_struct_group {
-        let owner_entry = ensure_owner_entry(output, column.owner as i64);
-        if column.is_member {
-            owner_entry.1.dots.push_str(&rendered);
-        } else {
-            owner_entry.0.dots.push_str(&rendered);
-        }
-    } else {
-        output.get_mut(&-1).unwrap().0.dots.push_str(&rendered);
-    }
+    dots.add_event(drop_data.hash, drop_data.dot_x, drop_data.dot_y, timeline_data, drop_data.title, true, None);
 }
 
-/// Renders every event dot and returns where they were drawn, so the
-/// arrow pass can route arrows around them (see `render_hopping_arrow`).
+/// Collects every event dot. The arrow pass routes arrows around
+/// their positions (see `render_hopping_arrow`) and adds call icons;
+/// `DotLayer::flush` then draws them.
 fn render_dots_string(
-    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
-    registry: &Handlebars
-) -> DotPositions {
-    let mut dots = DotPositions::new();
+) -> DotLayer {
+    let mut dots = DotLayer::default();
     let timelines = &visualization_data.timelines;
     for (hash, timeline) in timelines {
         // render just the name of Owners and References
@@ -1290,7 +1421,7 @@ fn render_dots_string(
                         State::FullPrivilege { .. } | State::PartialPrivilege { .. }
                     )
                 } else { false };
-                render_dot(hash, &timeline.history, &resource_owners_layout[hash], output, visualization_data, registry, resource_hold, &mut dots);
+                render_dot(hash, &timeline.history, &resource_owners_layout[hash], visualization_data, resource_hold, &mut dots);
             },
         }
     }
@@ -1492,7 +1623,7 @@ fn render_arrow (
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
-    dot_positions: &DotPositions,
+    dots: &mut DotLayer,
     registry: &Handlebars
 ) {
     match external_event {
@@ -1505,7 +1636,7 @@ fn render_arrow (
                         ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..} | ExternalEvent::InitRefParam { .. }
                         | ExternalEvent::RefDie {..} => {}
                         _ => {
-                            render_arrow(l, e,  output, visualization_data, resource_owners_layout, dot_positions, registry);
+                            render_arrow(l, e,  output, visualization_data, resource_owners_layout, dots, registry);
                         }
                     }
                 }
@@ -1828,24 +1959,16 @@ fn render_arrow (
                         _ => String::new(),
                     };
 
-                    let function_dot_data = FunctionDotData {
-                        x: from_timeline.x_val,
-                        y: get_y_axis_pos(*line_number),
-                        title: format!("{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix),
-                        hash: from_variable.hash().to_owned() as u64,
-                    };
-
-                    if from_timeline.is_struct_group {
-                        let owner_entry = ensure_owner_entry(output, from_timeline.owner as i64);
-                        if from_timeline.is_member {
-                            owner_entry.1.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
-                        } else {
-                            owner_entry.0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
-                        }
-                    }
-                    else {
-                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_dot_template", &function_dot_data).unwrap());
-                    }
+                    // The call icon shares the dot of the borrow it makes
+                    // (see `DotLayer::add_call`).
+                    dots.add_call(
+                        from_variable.hash().to_owned() as u64,
+                        from_timeline.x_val,
+                        get_y_axis_pos(*line_number),
+                        from_timeline,
+                        format!("{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix),
+                        external_event.get_id(),
+                    );
                 }
                 (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(to_function)), _e) => { // (Some(variable), Some(function), _)
                     let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
@@ -1934,7 +2057,7 @@ fn render_arrow (
                         if let Some(rendered) = render_hopping_arrow(
                             x1, y1, x2,
                             &data.title,
-                            dot_positions,
+                            &dots.positions,
                         ) {
                             // Inline render done; push to the right
                             // output bucket and bypass the post-match
@@ -2001,7 +2124,7 @@ fn render_arrow (
                 // same dot) leaves the dot in the direction it points.
                 let n = data.coordinates.len();
                 data.coordinates[n - 1] =
-                    tail_off_dot(data.coordinates[n - 1], data.coordinates[n - 2], dot_positions);
+                    tail_off_dot(data.coordinates[n - 1], data.coordinates[n - 2], &dots.positions);
 
                 // Compute the inline arrow-head triangle, sized to
                 // match the previous SVG marker (viewBox 0 0 10 10,
@@ -2067,7 +2190,7 @@ fn render_arrows_string_external_events_version(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
-    dot_positions: &DotPositions,
+    dots: &mut DotLayer,
     registry: &Handlebars
 ){
     for (line_number, external_event) in &visualization_data.external_events {
@@ -2086,7 +2209,7 @@ fn render_arrows_string_external_events_version(
                 // render external event arrow
                 render_arrow(line_number,
                     external_event,
-                    output, visualization_data, resource_owners_layout, dot_positions, registry)
+                    output, visualization_data, resource_owners_layout, dots, registry)
             }
         }
     }
