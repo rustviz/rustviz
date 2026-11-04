@@ -881,7 +881,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
             self.mark_if_manually_drop(&name, ty);
           }
-          self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id, own_param });
+          self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id, own_param, in_pattern: None });
           *self.unique_id += 1;
           // A by-value struct parameter owns its fields' resources too
           // (and drops them at the end of the body unless moved on).
@@ -896,7 +896,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             .collect();
           ref_fields.sort_by_key(|r| *r.hash());
           for r in ref_fields {
-            self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id: *self.unique_id, own_param: None });
+            self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id: *self.unique_id, own_param: None, in_pattern: None });
             *self.unique_id += 1;
           }
           self.annotate_src(name.clone(), ident.span, false, *self.raps.get(&name).unwrap().rap.hash());

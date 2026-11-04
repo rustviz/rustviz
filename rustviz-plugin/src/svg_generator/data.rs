@@ -767,6 +767,12 @@ pub enum ExternalEvent {
         // (`fn f(ref s: String)`), so it borrows the value `f` owns,
         // not anything of the caller's (#377).
         own_param: Option<OwnParam>,
+        // `Some(x)`: `param` is a reference field of the struct bound
+        // to `x` by a pattern (`if let Some(x) = o`, `x.part: &str`).
+        // Its value came with what was matched, and what it borrows
+        // isn't tracked there, so it isn't "from the caller" (#352).
+        // Never set together with `own_param`.
+        in_pattern: Option<String>,
     },
     
     // Branches are the most interesting event
@@ -967,11 +973,12 @@ pub enum Event {
     ManuallyDropByHand,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
-    // (`own_param`: see ExternalEvent::InitRefParam)
+    // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
     InitRefParam {
         param: ResourceAccessPoint,
         id: usize,
         own_param: Option<OwnParam>,
+        in_pattern: Option<String>,
     },
 }
 
@@ -1333,6 +1340,9 @@ impl Event {
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
+            }
+            Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
+                hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -2244,8 +2254,8 @@ impl Visualizable for VisualizationData {
             (line_num,  Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
         },
-        ExternalEvent::InitRefParam{param: ro, id, own_param} => {
-          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone()})]
+        ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
+          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone()})]
         },
         ExternalEvent::GoOutOfScope{ro,..} => {
           match ro {
@@ -2323,6 +2333,15 @@ impl Visualizable for VisualizationData {
                 }
                 else if let Some(r) = event.is_gos_ev() {
                     if *r.name() == is.real_name() {
+                        b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                    }
+                }
+                // A reference field of a struct bound by a pattern
+                // (`if let Some(x) = o`, `x.part`) is initialized in
+                // the branch (#352); `ResourceAccessPoint_extract`
+                // doesn't name it.
+                else if let ExternalEvent::InitRefParam { param, .. } = event {
+                    if param == rap {
                         b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                     }
                 }
@@ -2495,8 +2514,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::InitRefParam{param: ro, id, own_param} => {
-                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param}, line_number);
+            ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
+                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern}, line_number);
             },
             ExternalEvent::GoOutOfScope{ro, ..} => {
                 match ro {
