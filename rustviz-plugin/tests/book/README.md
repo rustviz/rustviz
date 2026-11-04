@@ -17,7 +17,7 @@ breaks those references. Add a new file instead.
 | `Correct` | Renders, and every tooltip reviewed is true. |
 | `Wrong`   | Renders, but some tooltip is false. The false strings are in `known_wrong`. |
 | `Missing` | Renders and nothing shown is false, but an event is missing or drawn off-canvas (`off_canvas: true`). `note` says which. |
-| `Crash`   | The plugin panics today. `note` gives the panic site. |
+| `Crash`   | The plugin panics today. `note` gives the panic site. (None on main 4c8f552.) |
 
 Each entry also has
 
@@ -46,7 +46,8 @@ It **passes but prints a note** (on stderr, visible without
 - an `off_canvas` snippet is now fully on canvas.
 
 Every run ends with a summary like
-`book corpus: 115 render (55 correct, 49 known-wrong, 11 missing), 12 known crashes; 0 failure(s), 0 note(s)`.
+`book corpus: 127 render (74 correct, 39 known-wrong, 14 missing), 0 known crashes; 0 failure(s), 0 note(s)`
+(the counts on main 4c8f552).
 
 ## When a fix lands
 

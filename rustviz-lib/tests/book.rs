@@ -51,7 +51,9 @@ enum Status {
     /// Renders and nothing shown is false, but an event is missing or drawn
     /// off-canvas.
     Missing,
-    /// The plugin panics on this snippet today.
+    /// The plugin panics on this snippet today. (No snippet crashes on main
+    /// right now; the variant stays for the next one that does.)
+    #[allow(dead_code)]
     Crash,
 }
 use Status::*;
@@ -137,28 +139,28 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c4_06_nll_shared_then_mut",
-        status: Wrong,
-        note: "r3 = &mut s is called an owner (PR #167)",
         must_contain: &[
             "Immutable borrow from s to r1",
             "Immutable borrow from s to r2",
             "Mutable borrow from s to r3",
+            "r3 holds a mutable reference; it can read and write the borrowed resource",
             "Return mutably borrowed resource from r3 to s",
             "s goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["r3 is the owner of the resource"],
+        must_not_contain: &["r3 is the owner of the resource"],
         ..E
     },
     Snippet {
         id: "c4_07_first_word_loop",
         status: Wrong,
-        note: "bytes = s.as_bytes() is shown as an owner copied from as_bytes, and s's borrow ends at L2 although bytes borrows *s until L3 (#171)",
-        must_contain: &["s is an immutable borrow from the caller", "Copy from first_word to word"],
-        known_wrong: &[
-            "bytes is the owner of the resource",
-            "Copy from as_bytes to bytes",
-            "L2 s's resource is no longer immutably borrowed",
+        note: "bytes = s.as_bytes() is shown as copied from as_bytes, and s's borrow ends at L2 although bytes borrows *s until L3 (#171)",
+        must_contain: &[
+            "s is an immutable borrow from the caller",
+            "bytes holds an immutable reference; it can read the borrowed resource",
+            "Copy from first_word to word",
         ],
+        must_not_contain: &["bytes is the owner of the resource"],
+        known_wrong: &["Copy from as_bytes to bytes", "L2 s's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
@@ -175,16 +177,20 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c4_09_first_word_str",
         status: Wrong,
-        note: "returned &str: word called an owner, its borrow 'returned to *word', my_string's borrow ends at L13 though word borrows it until L14, `return &s[0..i]` has no event (#171, #178)",
+        note: "returned &str: word's borrow is 'returned to *word', my_string's borrow ends at L13 though word borrows it until L14, `return &s[0..i]` has no event (#171, #178)",
         must_contain: &[
             "s is an immutable borrow from the caller",
+            "a reference from s is returned to the caller; the data it points to is not copied",
+            "word holds an immutable reference; it can read the borrowed resource",
             "my_string goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &[
+        must_not_contain: &[
             "bytes is the owner of the resource",
             "word is the owner of the resource",
-            "Return immutably borrowed resource from word to *word",
             "s's resource is moved to the caller",
+        ],
+        known_wrong: &[
+            "Return immutably borrowed resource from word to *word",
             "L13 my_string's resource is no longer immutably borrowed",
         ],
         ..E
@@ -192,11 +198,10 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c4_10_str_literal_copy",
         status: Wrong,
-        note: "`let s: &str = \"hello\"` is shown acquiring ownership; borrows 'returned' to themselves (#178)",
-        must_contain: &["Copy from s to t", "t is initialized by copy from s"],
+        note: "`let s: &str = \"hello\"`: borrows 'returned' to themselves (#178)",
+        must_contain: &["s is bound to an immutable reference", "Copy from s to t", "t is initialized by copy from s"],
+        must_not_contain: &["s is the owner of the resource", "s acquires ownership of a resource"],
         known_wrong: &[
-            "s is the owner of the resource",
-            "s acquires ownership of a resource",
             "Return immutably borrowed resource from s to *s",
             "Return immutably borrowed resource from t to *t",
         ],
@@ -225,15 +230,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c4_13_change_then_use",
-        status: Wrong,
-        note: "&mut String parameter called an owner (PR #167)",
         must_contain: &[
             "some_string is a mutable borrow from the caller",
-            "push_str reads from/writes to some_string",
+            "some_string holds a mutable reference; it can read and write the borrowed resource",
+            "push_str reads from/writes to some_string (mutable reborrow — some_string can't be used until push_str returns)",
             "change reads from/writes to s",
             "s goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["some_string is the owner of the resource"],
+        must_not_contain: &["some_string is the owner of the resource"],
         ..E
     },
     Snippet {
@@ -248,14 +252,12 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c4_15_mutate_copy_int",
-        status: Wrong,
-        note: "returning an i32 says both 'copied' and 'moved' to the caller (PR #166)",
         must_contain: &[
             "x's resource is copied to the caller",
             "Copy from a to add_one",
             "Copy from add_one to b",
         ],
-        known_wrong: &["x's resource is moved to the caller"],
+        must_not_contain: &["x's resource is moved to the caller"],
         ..E
     },
     // ─── Chapter 5: structs and methods ───────────────────────────────
@@ -281,10 +283,17 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c5_03_build_user_shorthand",
-        status: Wrong,
-        note: "field-init shorthand: email/username are moved into the User, but shown dropped in build_user; u's fields are shown not dropped (#174)",
-        must_contain: &["email acquires ownership from the caller", "Move from build_user to u"],
-        known_wrong: &[
+        must_contain: &[
+            "email acquires ownership from the caller",
+            "username's resource is moved to the caller",
+            "email's resource is moved to the caller",
+            "email goes out of scope. No resource is dropped.",
+            "username goes out of scope. No resource is dropped.",
+            "Move from build_user to u",
+            "u.username goes out of scope. Its resource is dropped.",
+            "u.email goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
             "email goes out of scope. Its resource is dropped.",
             "username goes out of scope. Its resource is dropped.",
             "u.username goes out of scope. No resource is dropped.",
@@ -295,44 +304,63 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c5_04_struct_update",
         status: Wrong,
-        note: "`..user1` moves user1.username into user2; not shown, and the two drops are swapped (#174)",
+        note: "`..user1` partially moves user1 (user1.username goes to user2), but user1's own column still says its resource is dropped; only user1.email is (#207)",
         must_contain: &[
             "Move from String::from to user2.email",
+            "Move from user1.username to user2.username",
+            "user1.username goes out of scope. No resource is dropped.",
+            "user2.username goes out of scope. Its resource is dropped.",
             "user1.email goes out of scope. Its resource is dropped.",
             "user2.email goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &[
+        must_not_contain: &[
             "user1.username goes out of scope. Its resource is dropped.",
             "user2.username goes out of scope. No resource is dropped.",
         ],
+        known_wrong: &["user1 goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
         id: "c5_05_tuple_struct",
-        status: Crash,
-        note: "`black.0`: annotated_source_gen.rs:212 unwrap on None",
+        note: "was a crash at c2037dd (`black.0`)",
+        must_contain: &[
+            "Move from Color to black",
+            "Copy from black.0 to r",
+            "println! reads from black.2 through an implicit reference, so black.2 isn't moved",
+            "black goes out of scope. Its resource is dropped.",
+        ],
         ..E
     },
     Snippet {
         id: "c5_06_method_mut_self",
-        status: Crash,
-        note: "`self.n += 1` in a &mut self method: expr_visitor.rs:451 unwrap on None",
+        status: Missing,
+        note: "was a crash at c2037dd. `self.n += 1` through &mut self isn't drawn: c.n's column shows no write (#147)",
+        must_contain: &[
+            "self is a mutable borrow from the caller",
+            "self holds a mutable reference; it can read and write the borrowed resource",
+            "inc reads from/writes to c",
+            "c goes out of scope. Its resource is dropped.",
+        ],
         ..E
     },
     Snippet {
         id: "c5_07_method_self_consume",
         status: Wrong,
-        note: "p.into_name() consumes p, but no move is shown and p is shown dropped (#172)",
+        note: "into_name moves self.name out, so nothing of self is left to drop at L8, but self's column says its resource is dropped (#207)",
         must_contain: &[
             "self acquires ownership from the caller",
             "self.name's resource is moved to the caller",
             "self.name goes out of scope. No resource is dropped.",
+            "Move from p to into_name",
             "Move from into_name to n",
+            "p goes out of scope. No resource is dropped.",
+            "p.name goes out of scope. No resource is dropped.",
         ],
-        known_wrong: &[
+        must_not_contain: &[
             "p goes out of scope. Its resource is dropped.",
             "p.name goes out of scope. Its resource is dropped.",
         ],
+        known_wrong: &["self goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -363,13 +391,12 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c5_11_derive_debug",
-        status: Wrong,
-        note: "phantom self/f timelines from the derived Debug::fmt (PR #166); the println! borrow is not shown (#177)",
         must_contain: &[
             "rect1 acquires ownership of a resource",
+            "println! reads from rect1 through an implicit reference, so rect1 isn't moved",
             "rect1 goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &[
+        must_not_contain: &[
             "self is an immutable borrow from the caller",
             "f holds a mutable reference",
             "f is a mutable borrow from the caller",
@@ -378,13 +405,12 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c5_12_dbg_macro",
-        status: Wrong,
-        note: "phantom self/f from derived Debug (PR #166); dbg!(&rect1) borrow not shown (#177)",
         must_contain: &[
             "scale is bound to a value",
+            "dbg! reads from rect1",
             "rect1 goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &[
+        must_not_contain: &[
             "self is an immutable borrow from the caller",
             "f holds a mutable reference",
             "f is a mutable borrow from the caller",
@@ -421,22 +447,21 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_04_match_moves_string",
         status: Wrong,
-        note: "bare println! arm body: s's drop drawn at y=4375, off-canvas (PR #166); branch-merge wording (#179)",
+        note: "branch-merge wording (#179)",
         must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped."],
         known_wrong: &[JOIN_OPT],
-        off_canvas: true,
         ..E
     },
     Snippet {
         id: "c6_05_match_on_ref",
-        status: Missing,
-        note: "bare println! arm body: s's borrow end and return arrow drawn off-canvas (PR #166)",
+        status: Wrong,
+        note: "bare println! arm body: s's borrow end and opt's 'no longer borrowed' are drawn on L4, above the println! that reads s on the row below (#371)",
         must_contain: &[
             "Partial immutable borrow from opt to s",
             "Return immutably borrowed resource from s to opt",
             "opt goes out of scope. Its resource is dropped.",
         ],
-        off_canvas: true,
+        known_wrong: &["L4 s's immutable borrow ends", "L4 opt's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
@@ -474,26 +499,30 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_10_match_guard",
         status: Wrong,
-        note: "msg: &'static str is shown acquiring ownership in every arm, and 'returning' its borrow to itself (#178); the guard isn't shown (#176)",
-        must_contain: &["Copy from n to x"],
-        known_wrong: &[
+        note: "msg: &'static str 'returns' its borrow to itself (#178)",
+        must_contain: &["Copy from n to x", "msg is bound to an immutable reference (in all branches above)"],
+        must_not_contain: &[
             "msg is the owner of the resource",
             "msg acquires ownership of a resource",
             "msg acquired ownership of a resource (in all branches above)",
-            "Return immutably borrowed resource from msg to *msg",
         ],
+        known_wrong: &["Return immutably borrowed resource from msg to *msg"],
         ..E
     },
     Snippet {
         id: "c6_11_enum_method",
-        status: Missing,
-        note: "bare println! arm body: s/self borrow-end events off-canvas (PR #166)",
+        status: Wrong,
+        note: "bare println! arm body: s's borrow end and self's 'no longer borrowed' are drawn on L10, above the println! that reads s (#371); self's own borrow ends at L9, before s reborrows through it at L10 (#372)",
         must_contain: &[
             "Partial immutable borrow from self to s",
             "call reads from m",
             "m goes out of scope. Its resource is dropped.",
         ],
-        off_canvas: true,
+        known_wrong: &[
+            "L10 s's immutable borrow ends",
+            "L10 self's resource is no longer immutably borrowed",
+            "L9 self's immutable borrow ends",
+        ],
         ..E
     },
     // ─── Chapter 8: collections ───────────────────────────────────────
@@ -518,13 +547,12 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_03_vec_get_match",
         status: Wrong,
-        note: "third: Option<&i32> borrows v until L5, but v's borrow ends at L3; borrow 'returned' from third to third (#171); bare println! arm body draws events off-canvas (PR #166)",
+        note: "third: Option<&i32> borrows v until L5, but v's borrow ends at L3; borrow 'returned' from third to third (#171)",
         must_contain: &["get reads from v", "v goes out of scope. Its resource is dropped."],
         known_wrong: &[
             "L3 v's resource is no longer immutably borrowed",
             "Return immutably borrowed resource from third to third",
         ],
-        off_canvas: true,
         ..E
     },
     Snippet {
@@ -539,10 +567,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_05_vec_for_mut",
-        status: Wrong,
-        note: "i: &mut i32 called an owner; `*i += 50` shown as acquiring ownership (PR #167)",
-        must_contain: &["Mutable borrow from v to i", "Return mutably borrowed resource from i to v"],
-        known_wrong: &["i is the owner of the resource", "*i acquires ownership of a resource"],
+        must_contain: &[
+            "Mutable borrow from v to i",
+            "i holds a mutable reference; it can read and write the borrowed resource",
+            "the resource i points to is modified through *i",
+            "Return mutably borrowed resource from i to v",
+        ],
+        must_not_contain: &["i is the owner of the resource", "*i acquires ownership of a resource"],
         ..E
     },
     Snippet {
@@ -569,13 +600,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_09_string_add",
-        status: Wrong,
-        note: "`s1 + &s2` moves s1 and borrows s2; neither shown, s1 shown dropped (#172)",
         must_contain: &[
+            "Move from s1 to +",
+            "+ reads from s2",
+            "s1 goes out of scope. No resource is dropped.",
             "s2 goes out of scope. Its resource is dropped.",
             "s3 goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["s1 goes out of scope. Its resource is dropped."],
+        must_not_contain: &["s1 goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -615,19 +647,22 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_14_hashmap_entry",
         status: Wrong,
-        note: "text: &str shown acquiring ownership; `*count += 1` shown as acquiring ownership; map (a HashMap) shown not dropped (#178, PR #167)",
+        note: "text: &str 'returns' its borrow to *text (#178)",
         must_contain: &[
+            "text is bound to an immutable reference",
             "split_whitespace reads from text",
             "Mutable borrow from map to count",
+            "the resource count points to is modified through *count",
             "Return mutably borrowed resource from count to map",
+            "map goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &[
+        must_not_contain: &[
             "text is the owner of the resource",
             "text acquires ownership of a resource",
-            "Return immutably borrowed resource from text to *text",
             "*count acquires ownership of a resource",
             "map goes out of scope. No resource is dropped.",
         ],
+        known_wrong: &["Return immutably borrowed resource from text to *text"],
         ..E
     },
     Snippet {
@@ -649,12 +684,11 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c9_01_result_match",
         status: Wrong,
-        note: "bare println! arm bodies: n/e drops off-canvas (PR #166); branch-merge wording (#179)",
+        note: "branch-merge wording (#179)",
         must_contain: &["Partial copy from r to n", "Partial move from r to e", "e goes out of scope. Its resource is dropped."],
         known_wrong: &[
             "r was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
         ],
-        off_canvas: true,
         ..E
     },
     Snippet {
@@ -664,25 +698,30 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c9_03_expect_string",
-        status: Wrong,
-        note: "maybe.expect(..) consumes maybe; not shown, and maybe shown dropped (#172)",
-        must_contain: &["Move from expect to s", "s goes out of scope. Its resource is dropped."],
-        known_wrong: &["maybe goes out of scope. Its resource is dropped."],
+        must_contain: &[
+            "Move from maybe to expect",
+            "Move from expect to s",
+            "maybe goes out of scope. No resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["maybe goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
         id: "c9_04_question_option",
         status: Wrong,
-        note: "renders since #155 (was a crash in the probe). x: &i32 from v.first()? is called an owner, and Some(*x + 1) is shown returning a borrow to *x (#171)",
+        note: "renders since #155 (was a crash in the probe). x (from v.first()?) borrows *v until L3, but v's borrow ends at L2, and Some(*x + 1) is shown returning x's borrow to *x (#171, #178)",
         must_contain: &[
             "v is an immutable borrow from the caller",
             "first reads from v",
+            "x holds an immutable reference; it can read the borrowed resource",
             "first_plus_one reads from v",
             "v goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["x is the owner of the resource"],
         known_wrong: &[
-            "x is the owner of the resource",
             "Return immutably borrowed resource from x to *x",
+            "L2 v's resource is no longer immutably borrowed",
         ],
         ..E
     },
@@ -712,25 +751,30 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c9_08_unwrap_or_else",
-        status: Wrong,
-        note: "r.unwrap_or_else(..) consumes r; r shown dropped (#172)",
-        must_contain: &["Move from Err to r", "Copy from unwrap_or_else to n"],
-        known_wrong: &["r goes out of scope. Its resource is dropped."],
+        must_contain: &[
+            "Move from Err to r",
+            "Move from r to unwrap_or_else",
+            "Copy from unwrap_or_else to n",
+            "r goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &["r goes out of scope. Its resource is dropped."],
         ..E
     },
     // ─── Chapter 10: generics, traits, lifetimes ──────────────────────
     Snippet {
         id: "c10_01_largest_generic",
         status: Wrong,
-        note: "result: &i32 called an owner; number_list's borrow ends at L13 though result borrows it until L14 (#171)",
+        note: "result's borrow is 'returned' to *result; number_list's borrow ends at L13 though result borrows it until L14 (#171)",
         must_contain: &[
             "list is an immutable borrow from the caller",
             "Immutable borrow from list to largest",
+            "a reference from largest is returned to the caller; the data it points to is not copied",
             "largest reads from number_list",
+            "result holds an immutable reference; it can read the borrowed resource",
             "number_list goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["result is the owner of the resource"],
         known_wrong: &[
-            "result is the owner of the resource",
             "Return immutably borrowed resource from result to *result",
             "L13 number_list's resource is no longer immutably borrowed",
         ],
@@ -764,11 +808,14 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_06_longest",
         status: Wrong,
-        note: "string2: &str shown acquiring ownership; result isn't linked to string1/string2, so string1's borrow ends at L8 (#171, #178)",
-        must_contain: &["x is an immutable borrow from the caller", "as_str reads from string1"],
+        note: "result isn't linked to string1/string2, so string1's borrow ends at L8; string2 and result 'return' their borrows to themselves (#171, #178)",
+        must_contain: &[
+            "x is an immutable borrow from the caller",
+            "string2 is bound to an immutable reference",
+            "as_str reads from string1",
+        ],
+        must_not_contain: &["string2 is the owner of the resource", "string2 acquires ownership of a resource"],
         known_wrong: &[
-            "string2 is the owner of the resource",
-            "string2 acquires ownership of a resource",
             "Return immutably borrowed resource from string2 to *string2",
             "Return immutably borrowed resource from result to *result",
             "L8 string1's resource is no longer immutably borrowed",
@@ -778,14 +825,15 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_07_longest_inner_scope",
         status: Wrong,
-        note: "Listing 10-23's point: result borrows string1/string2 until L10, but both borrows end at L9; result called an owner (#171)",
+        note: "Listing 10-23's point: result borrows string1/string2 until L10, but both borrows end at L9; result 'returns' its borrow to *result (#171)",
         must_contain: &[
             "longest reads from string1",
             "longest reads from string2",
+            "result holds an immutable reference; it can read the borrowed resource",
             "L11 string2 goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["result is the owner of the resource"],
         known_wrong: &[
-            "result is the owner of the resource",
             "Return immutably borrowed resource from result to *result",
             "L9 string1's resource is no longer immutably borrowed",
             "L9 string2's resource is no longer immutably borrowed",
@@ -858,25 +906,27 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_07_into_iter_filter",
-        status: Wrong,
-        note: "shoes.into_iter() consumes the parameter; shown dropped at the end of shoes_in_size (#172)",
         must_contain: &[
             "Move from shoes to shoes_in_size",
+            "Move from shoes to into_iter",
+            "L7 shoes goes out of scope. No resource is dropped.",
             "Move from shoes_in_size to mine",
             "shoes goes out of scope. No resource is dropped.",
         ],
-        known_wrong: &["L7 shoes goes out of scope. Its resource is dropped."],
+        must_not_contain: &["L7 shoes goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
         id: "c13_08_iter_mut",
         status: Wrong,
-        note: "`*x *= 2` shown as acquiring ownership; x's borrow 'returned' to iter_mut (PR #167, #171)",
-        must_contain: &["iter_mut reads from/writes to v", "v goes out of scope. Its resource is dropped."],
-        known_wrong: &[
-            "*x acquires ownership of a resource",
-            "Return mutably borrowed resource from x to iter_mut",
+        note: "x's borrow 'returned' to iter_mut (#171)",
+        must_contain: &[
+            "iter_mut reads from/writes to v",
+            "the resource x points to is modified through *x",
+            "v goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["*x acquires ownership of a resource"],
+        known_wrong: &["Return mutably borrowed resource from x to iter_mut"],
         ..E
     },
     Snippet {
@@ -916,8 +966,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c15_02_cons_list",
-        status: Crash,
-        note: "nested Cons constructor: svg_generator/data.rs:1329 (PR #165)",
+        note: "was a crash at c2037dd (nested Cons constructor)",
+        must_contain: &[
+            "Move from Cons to list",
+            "Move from list to _l",
+            "_l goes out of scope. Its resource is dropped.",
+            "list goes out of scope. No resource is dropped.",
+        ],
         ..E
     },
     Snippet {
@@ -928,14 +983,20 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c15_04_mybox_deref_coercion",
-        status: Crash,
-        note: "`&self.0` in a Deref impl: annotated_source_gen.rs:212 unwrap on None",
+        status: Missing,
+        note: "was a crash at c2037dd. Returning `&self.0` from deref has no event (#266)",
+        must_contain: &[
+            "self is an immutable borrow from the caller",
+            "name is an immutable borrow from the caller",
+            "hello reads from m",
+            "m.0 goes out of scope. Its resource is dropped.",
+        ],
         ..E
     },
     Snippet {
         id: "c15_05_rc_strong_count",
         status: Wrong,
-        note: "Rc: b's drop only decrements the count; the value is freed when a drops (README Limitations)",
+        note: "Rc: b's drop only decrements the count; the value is freed when a drops (#373)",
         must_contain: &["Rc::clone reads from a", "Move from Rc::new to a"],
         known_wrong: &["b goes out of scope. Its resource is dropped."],
         ..E
@@ -943,33 +1004,43 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c15_06_rc_method_clone",
         status: Wrong,
-        note: "Rc: same as c15_05 (README Limitations)",
+        note: "Rc: same as c15_05 (#373)",
         must_contain: &["clone reads from a", "Move from Rc::new to a"],
         known_wrong: &["b goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
         id: "c15_07_refcell_borrow_mut",
-        status: Missing,
-        note: "RefCell's runtime &mut borrow is invisible (README Limitations)",
-        must_contain: &["borrow_mut reads from c", "borrow reads from c", "c goes out of scope. Its resource is dropped."],
+        status: Wrong,
+        note: "borrow_mut is shown as only reading c, though `.push(2)` writes c's Vec through the guard (#203); RefCell's runtime &mut borrow isn't shown (README Limitations)",
+        must_contain: &["borrow reads from c", "c goes out of scope. Its resource is dropped."],
+        known_wrong: &["borrow_mut reads from c"],
         ..E
     },
     Snippet {
         id: "c15_08_rc_refcell",
-        status: Crash,
-        note: "`*value.borrow_mut() += 10`: visitor.rs:409 (PR #165)",
+        status: Wrong,
+        note: "was a crash at c2037dd. a drops first and only decrements the Rc count; value's drop frees the RefCell (#373). borrow_mut is shown as only reading value, though `+= 10` writes through the guard (#203)",
+        must_contain: &[
+            "Move from Rc::new to value",
+            "Rc::clone reads from value",
+            "Move from Rc::clone to a",
+            "println! reads from a through an implicit reference, so a isn't moved",
+            "value goes out of scope. Its resource is dropped.",
+        ],
+        known_wrong: &["a goes out of scope. Its resource is dropped.", "borrow_mut reads from value"],
         ..E
     },
     Snippet {
         id: "c15_09_drop_early",
-        status: Wrong,
-        note: "c.data is shown dropped at L15 after drop(c) at L13 (#174); &mut self in Drop::drop called an owner (PR #167)",
-        must_contain: &["Move from c to drop", "c goes out of scope. No resource is dropped."],
-        known_wrong: &[
-            "c.data goes out of scope. Its resource is dropped.",
-            "self is the owner of the resource",
+        must_contain: &[
+            "self is a mutable borrow from the caller",
+            "self holds a mutable reference; it can read and write the borrowed resource",
+            "Move from c to drop",
+            "c goes out of scope. No resource is dropped.",
+            "c.data goes out of scope. No resource is dropped.",
         ],
+        must_not_contain: &["c.data goes out of scope. Its resource is dropped.", "self is the owner of the resource"],
         ..E
     },
     Snippet {
@@ -985,13 +1056,10 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "m_01_shadow_type_change",
         status: Wrong,
-        note: "both `spaces` share one column (#173); the &str literal is shown acquiring ownership (#178)",
-        must_contain: &["len reads from spaces"],
-        known_wrong: &[
-            "spaces is the owner of the resource",
-            "spaces acquires ownership of a resource",
-            "Return immutably borrowed resource from spaces to *spaces",
-        ],
+        note: "both `spaces` share one column (#173); the &str literal 'returns' its borrow to *spaces (#178)",
+        must_contain: &["spaces is bound to an immutable reference", "len reads from spaces"],
+        must_not_contain: &["spaces is the owner of the resource", "spaces acquires ownership of a resource"],
+        known_wrong: &["Return immutably borrowed resource from spaces to *spaces"],
         ..E
     },
     Snippet {
@@ -1026,8 +1094,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_06_tuple_index",
-        status: Crash,
-        note: "`tup.0`: annotated_source_gen.rs:212 unwrap on None",
+        status: Missing,
+        note: "was a crash at c2037dd. `let tup = (..)` and `let five_hundred = tup.0` have no events (#189)",
+        must_contain: &[
+            "Copy from tup to x",
+            "z is initialized by copy from tup",
+            "println! reads from five_hundred through an implicit reference, so five_hundred isn't moved",
+        ],
         ..E
     },
     Snippet {
@@ -1075,13 +1148,16 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "m_13_return_ref_from_vec",
         status: Wrong,
-        note: "returning &v[0] from v: &Vec is shown as a move to the caller; f: &String called an owner (#171, #178)",
-        must_contain: &["v is an immutable borrow from the caller", "first reads from v", "v goes out of scope. Its resource is dropped."],
-        known_wrong: &[
-            "v's resource is moved to the caller",
-            "f is the owner of the resource",
-            "Return immutably borrowed resource from f to *f",
+        note: "f's borrow is 'returned' to *f (#171, #178)",
+        must_contain: &[
+            "v is an immutable borrow from the caller",
+            "a reference from v is returned to the caller; the data it points to is not copied",
+            "first reads from v",
+            "f holds an immutable reference; it can read the borrowed resource",
+            "v goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["v's resource is moved to the caller", "f is the owner of the resource"],
+        known_wrong: &["Return immutably borrowed resource from f to *f"],
         ..E
     },
     Snippet {
@@ -1091,15 +1167,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_15_struct_vec_field_method",
-        status: Wrong,
-        note: "&mut self called an owner (PR #167); otherwise correct",
         must_contain: &[
             "self is a mutable borrow from the caller",
+            "self holds a mutable reference; it can read and write the borrowed resource",
             "push reads from/writes to s",
             "len reads from s.items",
             "s.items goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["self is the owner of the resource"],
+        must_not_contain: &["self is the owner of the resource"],
         ..E
     },
     Snippet {
@@ -1109,10 +1184,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_17_borrow_mut_then_read",
-        status: Wrong,
-        note: "r: &mut i32 called an owner; `*r += 1` shown as acquiring ownership (PR #167)",
-        must_contain: &["Mutable borrow from x to r", "Return mutably borrowed resource from r to x", "Copy from x to y"],
-        known_wrong: &["r is the owner of the resource", "*r acquires ownership of a resource"],
+        must_contain: &[
+            "Mutable borrow from x to r",
+            "r holds a mutable reference; it can read and write the borrowed resource",
+            "the resource r points to is modified through *r",
+            "Return mutably borrowed resource from r to x",
+            "Copy from x to y",
+        ],
+        must_not_contain: &["r is the owner of the resource", "*r acquires ownership of a resource"],
         ..E
     },
     Snippet {
@@ -1132,26 +1211,43 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x02_mut_self_field_assign_plain",
-        status: Crash,
-        note: "`self.n = 0` in a &mut self method: expr_visitor.rs:451",
+        status: Missing,
+        note: "was a crash at c2037dd. `self.n = 0` through &mut self isn't drawn: c.n's column shows no write (#147)",
+        must_contain: &[
+            "self is a mutable borrow from the caller",
+            "reset reads from/writes to c",
+            "println! reads from c.n through an implicit reference, so c.n isn't moved",
+        ],
         ..E
     },
     Snippet {
         id: "x03_free_fn_mut_ref_field_compound",
-        status: Crash,
-        note: "`c.n += 1` with c: &mut Counter: expr_visitor.rs:451",
+        status: Missing,
+        note: "was a crash at c2037dd. `c.n += 1` through c: &mut Counter isn't drawn: main's c.n shows no write (#147)",
+        must_contain: &[
+            "c is a mutable borrow from the caller",
+            "inc reads from/writes to c",
+            "c goes out of scope. Its resource is dropped.",
+        ],
         ..E
     },
     Snippet {
         id: "x04_tuple_field_simple",
-        status: Crash,
-        note: "`t.0`: annotated_source_gen.rs:212",
+        status: Missing,
+        note: "was a crash at c2037dd. `let t = (1, 2)` and `let a = t.0` have no events (#189)",
+        must_contain: &["println! reads from a through an implicit reference, so a isn't moved"],
         ..E
     },
     Snippet {
         id: "x05_refcell_deref_assign",
-        status: Crash,
-        note: "`*c.borrow_mut() += 1`: visitor.rs:409 (PR #165)",
+        status: Wrong,
+        note: "was a crash at c2037dd. borrow_mut is shown as only reading c, though `+= 1` writes c's value through the guard (#203)",
+        must_contain: &[
+            "Move from RefCell::new to c",
+            "println! reads from c through an implicit reference, so c isn't moved",
+            "c goes out of scope. Its resource is dropped.",
+        ],
+        known_wrong: &["borrow_mut reads from c"],
         ..E
     },
     Snippet {
@@ -1168,16 +1264,24 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x08_mut_ref_deref_compound_main",
-        status: Wrong,
-        note: "`*r += 1` shown as acquiring ownership; r: &mut i32 called an owner (PR #167)",
-        must_contain: &["Mutable borrow from n to r", "Return mutably borrowed resource from r to n"],
-        known_wrong: &["*r acquires ownership of a resource", "r is the owner of the resource"],
+        must_contain: &[
+            "Mutable borrow from n to r",
+            "r holds a mutable reference; it can read and write the borrowed resource",
+            "the resource r points to is modified through *r",
+            "Return mutably borrowed resource from r to n",
+        ],
+        must_not_contain: &["*r acquires ownership of a resource", "r is the owner of the resource"],
         ..E
     },
     Snippet {
         id: "x09_static_item",
-        status: Crash,
-        note: "use of a `static` item: expr_visitor_utils.rs:806",
+        status: Wrong,
+        note: "was a crash at c2037dd. g: &str 'returns' its borrow to *g (#178); the static has no column (README Limitations)",
+        must_contain: &[
+            "g is bound to an immutable reference",
+            "println! reads from g through an implicit reference, so g isn't moved",
+        ],
+        known_wrong: &["Return immutably borrowed resource from g to *g"],
         ..E
     },
     Snippet {
@@ -1196,8 +1300,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x12_cons_qualified_nested",
-        status: Crash,
-        note: "nested List::Cons: svg_generator/data.rs:1329 (PR #165)",
+        note: "was a crash at c2037dd (nested List::Cons)",
+        must_contain: &[
+            "Move from List::Cons to list",
+            "Move from list to _l",
+            "_l goes out of scope. Its resource is dropped.",
+            "list goes out of scope. No resource is dropped.",
+        ],
         ..E
     },
     Snippet {
@@ -1207,10 +1316,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x14_nested_string_fn",
-        status: Wrong,
-        note: "`s + \"!\"` moves s into the result; s shown dropped at the end of shout (#172)",
-        must_contain: &["s acquires ownership from the caller", "Move from shout to s", "L8 s goes out of scope. Its resource is dropped."],
-        known_wrong: &["L3 s goes out of scope. Its resource is dropped."],
+        must_contain: &[
+            "s acquires ownership from the caller",
+            "Move from s to +",
+            "L3 s goes out of scope. No resource is dropped.",
+            "Move from shout to s",
+            "L8 s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["L3 s goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
