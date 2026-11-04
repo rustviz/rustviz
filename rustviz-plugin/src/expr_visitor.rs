@@ -1800,6 +1800,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let aliasing = get_aliasing_data(&lender, &self.borrow_map);
       return (lender, aliasing, lenders);
     }
+    // `if c { first_word(&t) } else { "none" }` / a `match`: the
+    // reference may come from any branch, so (as rustc sees it) it
+    // borrows from every branch's lender until its last use (#337).
+    // Each branch draws its own borrow (`match_rhs`'s If / Match
+    // arms); this records the union, so all of them are given back.
+    if let Some(tails) = branch_tails(expr) {
+      let mut lenders: Vec<ResourceTy> = Vec::new();
+      for tail in tails {
+        let (l, _, co) = self.get_ref_data_co(tail);
+        for x in std::iter::once(l).chain(co) {
+          if matches!(x, ResourceTy::Value(_) | ResourceTy::Deref(_)) && !lenders.contains(&x) {
+            lenders.push(x);
+          }
+        }
+      }
+      if !lenders.is_empty() {
+        let lender = lenders.remove(0);
+        let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+        return (lender, aliasing, lenders);
+      }
+    }
     let (lender, aliasing) = self.get_ref_data_single(expr);
     // A copy of a reference that borrows from several variables
     // (`let r2 = r;` after `let r = longest(&a, &b);`) borrows from
@@ -2432,9 +2453,13 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   if !lhs_rap.is_ref() {
     return false;
   }
+  // Draw only this call's own lenders: when the call is one branch of
+  // an `if` / `match` initializer, `borrow_map` holds the union over
+  // all branches (#337).
+  let own = self.call_lenders(call);
   let lenders: Vec<ResourceTy> = match self.borrow_map.get(lhs_rap.name()) {
     Some(rd) => rd.all_lenders().into_iter()
-      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && own.contains(l))
       .collect(),
     None => return false,
   };
@@ -2468,33 +2493,61 @@ fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[Reso
   let lo = span_to_line(&call.span, &self.tcx);
   let hi = span_end_line(&call.span, &self.tcx);
   let hashes: Vec<u64> = lenders.iter().filter_map(|l| l.extract_rap().map(|r| *r.hash())).collect();
-  let keeps = |ev: &ExternalEvent| -> bool {
-    match ev {
-      ExternalEvent::PassByStaticReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(_)), .. }
-      | ExternalEvent::PassByMutableReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(_)), .. } =>
-        matches!(from, ResourceTy::Value(r) if hashes.contains(r.hash())),
-      _ => false,
-    }
-  };
-  let set = |ev: &mut ExternalEvent| {
-    if let ExternalEvent::PassByStaticReference { result_keeps_borrow, .. }
-         | ExternalEvent::PassByMutableReference { result_keeps_borrow, .. } = ev {
-      *result_keeps_borrow = true;
-    }
-  };
+  // Only the calls inside `call` (`first` and `unwrap` in
+  // `v.first().unwrap()`), not another call on the same line
+  // (`t.len()` in `if t.len() > 1 { first_word(&t) } ..`; #337).
+  let mut fns: Vec<String> = Vec::new();
+  self.call_names(call, &mut fns);
   let mut ids: Vec<usize> = Vec::new();
-  for (line, ev) in self.preprocessed_events.iter_mut() {
-    if *line >= lo && *line <= hi && keeps(ev) {
-      ids.push(ev.get_id());
-      set(ev);
-    }
-  }
+  mark_kept_in(&mut self.preprocessed_events, lo, hi, &hashes, &fns, &mut ids);
   for line in lo..=hi {
     if let Some(evs) = self.event_line_map.get_mut(&line) {
       for ev in evs.iter_mut() {
         if ids.contains(&ev.get_id()) {
-          set(ev);
+          set_kept(ev);
         }
+      }
+    }
+  }
+}
+
+/// The names of the calls in `e` (the Function RAPs their arguments
+/// are passed to).
+fn call_names(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
+  match e.kind {
+    ExprKind::Call(f, args) => {
+      if let Some(n) = hirid_to_var_name(f.hir_id, &self.tcx) {
+        out.push(n);
+      }
+      for a in args.iter() { self.call_names(a, out); }
+    }
+    ExprKind::MethodCall(seg, rcvr, args, _) => {
+      out.push(seg.ident.as_str().to_owned());
+      self.call_names(rcvr, out);
+      for a in args.iter() { self.call_names(a, out); }
+    }
+    ExprKind::AddrOf(_, _, inner) | ExprKind::Unary(_, inner) | ExprKind::Field(inner, _)
+    | ExprKind::DropTemps(inner) | ExprKind::Cast(inner, _) | ExprKind::Index(inner, _, _) => self.call_names(inner, out),
+    _ => {}
+  }
+}
+
+/// After `let x = if c { first_word(&t) } else { .. };` has been
+/// visited: mark the argument-passing events of each branch's call as
+/// kept by `x` (#337). `match_rhs` runs before the branches are
+/// visited for such an initializer (see `process_let_binding`), so
+/// `emit_call_result_borrows` can't mark them itself.
+pub fn mark_branch_results_kept(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
+  let Some(tails) = branch_tails(init) else { return };
+  let Some(lenders) = self.borrow_map.get(name).map(|rd| rd.all_lenders()) else { return };
+  if !self.raps.get(name).is_some_and(|rd| rd.rap.is_ref()) {
+    return;
+  }
+  for tail in tails {
+    if matches!(tail.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+      let own: Vec<ResourceTy> = self.call_lenders(tail).into_iter().filter(|l| lenders.contains(l)).collect();
+      if !own.is_empty() {
+        self.mark_borrow_kept_by_result(tail, &own);
       }
     }
   }
@@ -3274,14 +3327,25 @@ pub fn print_out_of_scope(&mut self){
       if data.borrow_span.is_some_and(|sp| mir_b_data.iter().any(|m| m.span == sp)) {
         continue; // refined above
       }
-      for m_data in mir_b_data.iter().filter(|m| !by_span.contains(&m.borrow_idx)) {
-        match ExprVisitor::borrow_match(data, m_data) {
-          Some(kill) => {
-            data.lifetime = kill;
-            break;
-          }
-          None => {}
-        }
+      // Several loans of the same lender can be issued on the
+      // reference's line (`if t.len() > 1 { first_word(&t) } else
+      // { .. }` borrows `t` twice). When more than one matches, take
+      // the first one still live at the reference's last use seen in
+      // the source (`data.lifetime`), not one that ended before it:
+      // the borrow can't end before a use (#337). With a single match
+      // this is the old behaviour.
+      let kills: Vec<usize> = mir_b_data.iter()
+        .filter(|m| !by_span.contains(&m.borrow_idx))
+        .filter_map(|m_data| ExprVisitor::borrow_match(data, m_data))
+        .collect();
+      let chosen = match kills.len() {
+        0 => None,
+        1 => Some(kills[0]),
+        _ => kills.iter().copied().find(|k| *k >= data.lifetime)
+          .or_else(|| kills.iter().copied().max()),
+      };
+      if let Some(kill) = chosen {
+        data.lifetime = kill;
       }
     }
     // A reference that borrows through another one (`let r = &v[0]` with
@@ -3707,4 +3771,79 @@ fn insert_in_arm(
     arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
   }
   arm.e_data.insert(at, ev);
+}
+
+/// The expressions an `if` / `match` (or a block ending in one)
+/// evaluates to, one per branch; `None` for anything else. A branch
+/// that diverges (`panic!()`, `return`) has no value and is left out.
+pub fn branch_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
+  fn push<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+    match e.kind {
+      ExprKind::Block(b, _) => { if let Some(t) = b.expr { push(t, out) } }
+      ExprKind::DropTemps(inner) => push(inner, out),
+      ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal) => {
+        if let Some(ts) = branch_tails(e) { out.extend(ts) }
+      }
+      _ => out.push(e),
+    }
+  }
+  let mut out = Vec::new();
+  match e.kind {
+    ExprKind::If(_, then, Some(els)) => { push(then, &mut out); push(els, &mut out); }
+    ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) => {
+      for arm in arms.iter() { push(arm.body, &mut out); }
+    }
+    ExprKind::Block(b, _) => match b.expr {
+      Some(t) if matches!(t.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) => return branch_tails(t),
+      _ => return None,
+    },
+    ExprKind::DropTemps(inner) => return branch_tails(inner),
+    _ => return None,
+  }
+  Some(out)
+}
+
+fn set_kept(ev: &mut ExternalEvent) {
+  if let ExternalEvent::PassByStaticReference { result_keeps_borrow, .. }
+       | ExternalEvent::PassByMutableReference { result_keeps_borrow, .. } = ev {
+    *result_keeps_borrow = true;
+  }
+}
+
+/// Set `result_keeps_borrow` on the pass-by-reference events from one
+/// of `hashes` into a function on lines `lo..=hi`, including those
+/// already folded into a branch (recording their ids in `ids`).
+fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, hashes: &[u64], fns: &[String], ids: &mut Vec<usize>) {
+  for (line, ev) in events.iter_mut() {
+    let pass_from_lender = match &*ev {
+      ExternalEvent::PassByStaticReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
+      | ExternalEvent::PassByMutableReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. } =>
+        fns.contains(&f.name) && matches!(from, ResourceTy::Value(r) if hashes.contains(r.hash())),
+      _ => false,
+    };
+    if pass_from_lender {
+      if *line >= lo && *line <= hi {
+        ids.push(ev.get_id());
+        set_kept(ev);
+      }
+      continue;
+    }
+    match ev {
+      ExternalEvent::Branch { branches, .. } => {
+        for b in branches.iter_mut() {
+          let mut inner: Vec<usize> = Vec::new();
+          mark_kept_in(&mut b.e_data, lo, hi, hashes, fns, &mut inner);
+          for evs in b.line_map.values_mut() {
+            for e in evs.iter_mut() {
+              if inner.contains(&e.get_id()) {
+                set_kept(e);
+              }
+            }
+          }
+          ids.extend(inner);
+        }
+      }
+      _ => {}
+    }
+  }
 }

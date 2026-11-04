@@ -2971,6 +2971,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if init_is_branching {
       self.bind_pat(pat, init, is_skipped);
       self.visit_expr(init);
+      // A reference returned by a call in a branch keeps that call's
+      // borrow (#337).
+      if let PatKind::Binding(_, _, ident, None) = pat.kind {
+        self.mark_branch_results_kept(ident.as_str(), init);
+      }
     } else {
       if !is_skipped {
         self.visit_expr(init);
