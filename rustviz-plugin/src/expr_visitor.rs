@@ -508,6 +508,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // (Some(variable), Some(function), _)
       },
       (ResourceTy::Anonymous, ResourceTy::Anonymous, _) | (_, ResourceTy::Caller, _) => {},
+      // A borrow stored in an element (`v[0] = &u`, #282) is drawn on
+      // the lender's column only: v's column doesn't model it.
+      (_, ResourceTy::Index(..), ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => {},
       (ResourceTy::Value(_), ResourceTy::Value(_), _) // maybe change later
       | (ResourceTy::Deref(_), ResourceTy::Deref(_), _) 
       | (ResourceTy::Value(_), ResourceTy::Deref(_), _)
@@ -1081,6 +1084,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       PlaceWrite::AssignOwned
     };
     Some(ResourceTy::Index(rap, place, write))
+  }
+
+  /// `place = &x` / `place = &mut x` where `place` has no column of its
+  /// own: an element that is a reference (`v[0] = &u`), or a field
+  /// through a reference (`self.r = &x`). The borrow of `x` is drawn on
+  /// x's column only, naming the element as the borrower when it's an
+  /// index (`borrowed by v[0]`; otherwise no borrower is named), and it
+  /// ends where the MIR loan does: the last use of whatever holds the
+  /// reference (#282). It used to say "borrowed by Anonymous resource"
+  /// and never end.
+  pub fn store_borrow_in_unmodelled_place(&mut self, lhs: &'tcx Expr<'tcx>, rhs: &'tcx Expr<'tcx>, evt: Evt) {
+    let dest = match lhs.kind {
+      ExprKind::Index(..) => expr_to_rap_name(lhs, &self.tcx)
+        .and_then(|name| {
+          let rap = self.raps.get(&name)?.rap.to_owned();
+          (!rap.is_fn()).then(|| ResourceTy::Index(rap, self.place_label(lhs, &name), PlaceWrite::Update))
+        })
+        .unwrap_or(ResourceTy::Anonymous),
+      _ => ResourceTy::Anonymous,
+    };
+    let n_events = self.preprocessed_events.len();
+    self.match_rhs(dest.clone(), rhs, evt);
+    // The borrow match_rhs just recorded, if any (a borrow of a
+    // temporary, `v[0] = &String::new()`, has no lender column).
+    let borrow = self.preprocessed_events[n_events..].iter().find_map(|(line, ev)| match ev {
+      ExternalEvent::StaticBorrow { from: from @ ResourceTy::Value(lender), to, .. } if *to == dest =>
+        Some((*line, from.clone(), lender.name().to_owned(), Evt::SDie)),
+      ExternalEvent::MutableBorrow { from: from @ ResourceTy::Value(lender), to, .. } if *to == dest =>
+        Some((*line, from.clone(), lender.name().to_owned(), Evt::MDie)),
+      _ => None,
+    });
+    let Some((line, lender, lender_name, die)) = borrow else { return };
+    // MIR names the borrowed local (`p` for `&p.x`).
+    let root = lender_name.split('.').next().unwrap_or(&lender_name).to_owned();
+    let kill_line = self.gather_borrow_data(self.bwf).iter().find_map(|b| {
+      (b.region.0 == line && b.borrowed_place.as_deref() == Some(root.as_str())).then_some(b.region.1)
+    });
+    if let Some(kill_line) = kill_line {
+      // StaticDie/MutableDie { from: dest, to: lender }.
+      self.add_ev(kill_line, die, lender, dest, false);
+    }
   }
 
   /// How an element place (`v[i]`) is named in tooltips: its source

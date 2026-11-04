@@ -1183,7 +1183,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           Some(rty) => rty,
           None => {
             if let ExprKind::Assign(..) = expr.kind {
-              self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
+              if let ExprKind::AddrOf(..) = rhs_expr.kind {
+                // `v[0] = &u` / `self.r = &x`: a borrow stored in a
+                // place with no column (#282).
+                self.store_borrow_in_unmodelled_place(lhs_expr, rhs_expr, e);
+              } else {
+                self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
+              }
             }
             return;
           }

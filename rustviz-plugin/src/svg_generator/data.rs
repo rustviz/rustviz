@@ -1362,6 +1362,17 @@ impl Event {
                     _ => hover_messages::event_dot_init_param(my_name),
                 }
             }
+            // A borrow whose borrower isn't drawn and can't be named
+            // (stored through a reference, `self.r = &x`): don't call
+            // it "Anonymous resource" (#282).
+            Event::StaticLend{ to: ResourceTy::Anonymous, is, ..} => {
+                let omit_read_only = is.extract_rap()
+                    .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
+                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), false, omit_read_only)
+            }
+            Event::MutableLend{ to: ResourceTy::Anonymous, ..} => {
+                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), true, false)
+            }
             // arrow going out
             Event::Duplicate{ to, into_closure: true, ..} => {
                 hover_messages::event_dot_copy_into_closure_arg(&self.deref_name(my_name), &to.name())
@@ -2324,7 +2335,10 @@ impl Visualizable for VisualizationData {
                 let could_be = ResourceTy::Deref(rap.clone());
                 let (from, to) = ResourceAccessPoint_extract(event);
                 // An element write (`v[i] = x`) lands on v's column.
-                let to_elem = matches!(to, ResourceTy::Index(r, _, _) if r == rap);
+                // (A borrow stored in an element, `v[0] = &u`, stays
+                // off v's column: #282.)
+                let to_elem = matches!(to, ResourceTy::Index(r, _, _) if r == rap)
+                    && !matches!(event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
                 if *from == *is || *from == could_be {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, false));
                 }
@@ -2459,9 +2473,14 @@ impl Visualizable for VisualizationData {
                     self.append_decl_branch_events(&branch.e_data);
                 }
             }
+            // A borrow stored in an element (`v[0] = &u`) has the
+            // element as borrower: only the lender's column shows it
+            // (#282), so the `Index` side gets no event.
             ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &to_ro.clone(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
+                if !matches!(to_ro, ResourceTy::Index(..)) {
+                    maybe_append_event(self, &to_ro.clone(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
+                }
 
             },
             ExternalEvent::StaticDie{from: from_ro, to: to_ro, id, ..} => {
@@ -2469,11 +2488,15 @@ impl Visualizable for VisualizationData {
                 if !from_ro.is_same_underlying(&to_ro) {
                   maybe_append_event(self, &to_ro.clone(), Event::StaticReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
                 }
-                maybe_append_event(self, &from_ro.clone(), Event::StaticDie{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
+                if !matches!(from_ro, ResourceTy::Index(..)) {
+                    maybe_append_event(self, &from_ro.clone(), Event::StaticDie{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
+                }
             },
             ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
+                if !matches!(to_ro, ResourceTy::Index(..)) {
+                    maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
+                }
 
             },
             ExternalEvent::MutableDie{from: from_ro, to: to_ro, id, ..} => {
@@ -2481,7 +2504,9 @@ impl Visualizable for VisualizationData {
                 if !from_ro.is_same_underlying(&to_ro) {
                   maybe_append_event(self, &to_ro.clone(), Event::MutableReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
                 }
-                maybe_append_event(self, &from_ro.clone(), Event::MutableDie{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
+                if !matches!(from_ro, ResourceTy::Index(..)) {
+                    maybe_append_event(self, &from_ro.clone(), Event::MutableDie{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
+                }
             },
             // don't need to append an event to the to resource since a RefDie doesn't change the state of the to ro
             ExternalEvent::RefDie { from: from_ro, to: _, id, ..} => { // need Ref Event to avoid drawing redundant arrows when rendering timelines

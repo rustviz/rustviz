@@ -488,6 +488,26 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
     }
 }
 
+// Source-side dot of a borrow stored somewhere RustViz draws no column
+// for and can't name (`self.r = &x` through a reference; #282). The
+// restriction on X is the same as for event_dot_static_lend /
+// event_dot_mut_lend.
+pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read_only: bool) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let kind = if is_mut { "mutably" } else { "immutably" };
+    let base = format!(
+        "{0}'s resource is {1} borrowed, and the reference is stored in a place that isn't drawn",
+        my_name_fmt, kind
+    );
+    if is_mut {
+        format!("{0}; {1} can't be used while the borrow is live", base, my_name_fmt)
+    } else if omit_read_only {
+        base
+    } else {
+        format!("{0}; {1} is read-only while the borrow is live", base, my_name_fmt)
+    }
+}
+
 // 0   1
 //     |
 // o<--o

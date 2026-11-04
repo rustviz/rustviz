@@ -470,6 +470,9 @@ const EXPECTED_OK: &[&str] = &[
     "tuple_destructure_var",
     "tuple_field_write",
     "tuple_through_calls",
+    // A borrow stored in an element or other column-less place names
+    // its borrower and ends (#282).
+    "borrow_into_element",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4769,6 +4772,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "Partial move from pair to x",
             "Partial move from pair to y",
+        ],
+    },
+    // ─── A borrow stored in a column-less place (#282) ───────────────
+    TooltipExpect {
+        name: "borrow_into_element",
+        // `v[0] = &u` / `w[0] = &mut c`: the element is the borrower,
+        // and the borrow ends at v's / w's last use, after which `c`
+        // owns (and drops) its String again. `h.r = &y` through a
+        // reference has no nameable column.
+        must_contain: &[
+            "u's resource is immutably borrowed by v[0]; u is read-only while the borrow is live",
+            "u's resource is no longer immutably borrowed",
+            "c's resource is mutably borrowed by w[0]; c can't be used while the borrow is live",
+            "c's resource is no longer mutably borrowed",
+            "c goes out of scope. Its resource is dropped.",
+            "y's resource is immutably borrowed, and the reference is stored in a place that isn't drawn",
+        ],
+        must_not_contain: &[
+            "u's resource is immutably borrowed by Anonymous resource; u is read-only while the borrow is live",
+            "c's resource is mutably borrowed by Anonymous resource; c can't be used while the borrow is live",
+            "y's resource is immutably borrowed by Anonymous resource",
+            "c goes out of scope. No resource is dropped.",
         ],
     },
 ];

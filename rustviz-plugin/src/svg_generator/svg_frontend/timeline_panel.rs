@@ -2218,6 +2218,11 @@ fn render_arrow (
             match (from, to) { // don't render arrow for anything to caller or anonymous or fn -> fn
                 (ResourceTy::Anonymous, _) | (_, ResourceTy::Caller) | (_, ResourceTy::Anonymous)
                 | (ResourceTy::Value(ResourceAccessPoint::Function(_)), ResourceTy::Value(ResourceAccessPoint::Function(_))) => return,
+                // A borrow stored in an element (`v[0] = &u`) and its
+                // end are drawn on the lender's column only (#282).
+                (ResourceTy::Index(..), _) => return,
+                (_, ResourceTy::Index(..))
+                    if matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => return,
                 _ => {}
             }
             let mut title = string_of_external_event(external_event);
