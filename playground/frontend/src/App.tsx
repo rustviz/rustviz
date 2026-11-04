@@ -348,7 +348,9 @@ const Description: React.FC = () => (
         write replaces is dropped only in the tooltip&apos;s words, not on a
         column. So is a write through a reference stored in an element (
         <code>*slots[0] += 10</code>), without showing which variable it
-        changes.
+        changes;
+        a read through one (<code>let n = *slots[0];</code>) is an arrow out of
+        <code>slots</code>&apos;s column, likewise without naming the variable.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

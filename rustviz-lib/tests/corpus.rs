@@ -630,6 +630,8 @@ const EXPECTED_OK: &[&str] = &[
     "branch_ref_if_addr",
     // By-reference captures of a closure passed straight to a call (#298).
     "closure_arg_ref_captures",
+    // A read through a reference / Box stored in an element (#438).
+    "read_through_element_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6030,6 +6032,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a to h.r",
             "a's resource is moved",
             "Return mutably borrowed resource from h.r to t",
+    // ─── Reads through a reference stored in an element (#438) ──────
+    TooltipExpect {
+        name: "read_through_element_ref",
+        // `let n = *slots[0];` copies the i32 the reference in slots[0]
+        // points to; slots is a Vec, not a reference, so "Copy from
+        // *slots to n" was false.
+        must_contain: &[
+            "Copy from *slots[0] to n",
+            "n is initialized by copy from *slots[0]",
+            "the resource slots[0] points to is copied",
+            "Copy from *hs[0].r to m",
+            "the resource hs[0].r points to is copied",
+            "Copy from *boxes[0] to k",
+            "the resource boxes[0] points to is copied",
+            "Copy from *grid[0][0] to total",
+            "the resource grid[0][0] points to is copied",
+        ],
+        must_not_contain: &[
+            "Copy from *slots to n",
+            "*slots's resource is copied",
+            "m is initialized by copy from Anonymous resource",
+            "Copy from *boxes to k",
+            "*boxes's resource is copied",
+            "Copy from *grid to total",
+            "*grid's resource is copied",
         ],
     },
     TooltipExpect {
