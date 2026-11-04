@@ -845,6 +845,11 @@ const EXPECTED_OK: &[&str] = &[
     // ... and at a `break` / `continue` or a panic (#553 with #410).
     "let_temp_dropped_at_break",
     "let_temp_dropped_at_panic",
+    // `if let` with a tuple pattern binds its names; a tuple-literal
+    // scrutinee moves its variables whatever the pattern does (#327,
+    // #390).
+    "iflet_tuple_pattern",
+    "match_tuple_literal_moves",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9158,6 +9163,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              lived past its statement. Its resource is dropped.",
         ],
         must_not_contain: &["goes out of scope at the end of the block"],
+    },
+    // ─── Tuple patterns in `if let`; tuple-literal scrutinees (#327) ─
+    TooltipExpect {
+        name: "iflet_tuple_pattern",
+        // `if let (Some(a), Some(b)) = (x, y)` binds `a` / `b` from the
+        // tuple's elements. Building the tuple moves `x` and `y` into
+        // it, so they own nothing afterwards, even when the pattern
+        // doesn't bind from them (`Some(_)`) or doesn't match (the else
+        // branch). `Some((key, n))` on an `Option<(String, i32)>` binds
+        // both names.
+        must_contain: &[
+            "Move from x to a",
+            "Move from y to b",
+            "x goes out of scope. No resource is dropped.",
+            "y goes out of scope. No resource is dropped.",
+            "Move from q to r",
+            "p's resource is moved",
+            "p was moved or dropped in every branch above",
+            "q was moved or dropped in every branch above",
+            "p goes out of scope. No resource is dropped.",
+            "Move from entry to key",
+            "Copy from entry to n",
+            "key goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=x goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+            "=q goes out of scope. Its resource is dropped.",
+            "=entry goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_tuple_literal_moves",
+        // `match (x, y)` moves both into the tuple, whatever arm runs:
+        // the `_` arm shows them moved too (#390). A nested tuple
+        // pattern (`(first, (n, second))`) on a tuple variable binds
+        // every name from its own element.
+        must_contain: &[
+            "Move from x to a",
+            "x was moved or dropped in every branch above",
+            "y was moved or dropped in every branch above",
+            "Move from t.0 to first",
+            "Copy from t.1.0 to n",
+            "Move from t.1.1 to second",
+            "second goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "x was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            "y was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            "Partial move from t to first",
+        ],
     },
 ];
 

@@ -292,9 +292,6 @@ const Description: React.FC = () => (
         is drawn as if its body always ran; spread it over several lines to see
         the move as conditional.
       </li>
-      <li>
-        An <code>if let</code> with a tuple pattern shows no bindings.
-      </li>
     </ul>
     <p>
       <strong>Some valid programs crash the visualizer</strong> (you&apos;ll

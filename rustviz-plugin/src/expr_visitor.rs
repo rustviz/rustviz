@@ -3006,7 +3006,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     res: &'t mut Vec<(ResourceAccessPoint, Evt, Ty<'tcx>)>,
 ) {
     match pat.kind {
-        PatKind::TupleStruct(_p, tuple_members, _) => {
+        // `Ok(x)`, and a tuple sub-pattern (`(a, (n, b))` in a match
+        // arm, `if let (Some(a), _) = …`; #327): every binding inside
+        // destructures out of the same parent.
+        PatKind::TupleStruct(_, tuple_members, _) | PatKind::Tuple(tuple_members, _) => {
             for p in tuple_members.iter() {
                 self.get_dec_of_pat2(p, ty_results, parent, parent_ty, scope, res);
             }
@@ -3245,8 +3248,38 @@ pub fn register_iflet_let_bindings(
     // the binding's own RAP since is_global=false).
     let scope = emit_gos_at.unwrap_or(let_line);
 
+    // `if let (Some(a), Some(b)) = (x, y)`: like `match (x, y)`, each
+    // sub-pattern destructures its own element of the tuple literal
+    // (#327). Otherwise the whole pattern matches the scrutinee.
+    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (let_expr.pat.kind, scrutinee.kind) {
+        (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(elems)) if !scrutinee.span.from_expansion() => {
+            let gap = elems.len().saturating_sub(sub_pats.len());
+            sub_pats.iter().enumerate().map(|(k, sp)| {
+                let i = match ddpos.as_opt_usize() {
+                    Some(d) if k >= d => k + gap,
+                    _ => k,
+                };
+                let elem = &elems[i];
+                (sp, crate::expr_visitor_utils::get_rap(elem, &self.tcx, &self.raps), typeck_res.node_type(elem.hir_id))
+            }).collect()
+        }
+        _ => vec![(let_expr.pat, parent.clone(), scrutinee_ty)],
+    };
     let mut decls = Vec::new();
-    self.get_dec_of_pat_parts(let_expr.pat, typeck_res, &parent, scrutinee_ty, scope, &mut decls);
+    for (sp, sp_parent, sp_parent_ty) in pairs {
+        let mut sub = Vec::new();
+        self.get_dec_of_pat_parts(sp, typeck_res, &sp_parent, sp_parent_ty, scope, &mut sub);
+        let sp_ty = typeck_res.node_type(sp.hir_id);
+        decls.extend(sub.into_iter().map(|(r, e, from, partial)| {
+            (r, e, from, partial.unwrap_or(sp_parent_ty != sp_ty))
+        }));
+    }
+
+    let moved_into_scrutinee = self.tuple_scrutinee_moves(scrutinee);
+    let moved_by_pattern: Vec<ResourceTy> = decls.iter()
+        .filter(|(_, e, _, _)| matches!(e, Evt::Move))
+        .map(|(_, _, from, _)| from.clone())
+        .collect();
 
     // Copies first (stable, so each group keeps pattern order).
     let (copies, others): (Vec<_>, Vec<_>) =
@@ -3254,11 +3287,10 @@ pub fn register_iflet_let_bindings(
     let n_copies = copies.len();
     let mut first_other = None;
     let mut registered: HashSet<ResourceAccessPoint> = HashSet::new();
-    for (i, (binding_rap, evt, from, partial)) in copies.into_iter().chain(others).enumerate() {
+    for (i, (binding_rap, evt, from, is_partial)) in copies.into_iter().chain(others).enumerate() {
         if i == n_copies {
             first_other = Some(*self.unique_id);
         }
-        let is_partial = partial.unwrap_or(scrutinee_ty != typeck_res.node_type(let_expr.pat.hir_id));
         let evt_kind = evt.clone();
         let event = self.ext_ev_of_evt(
             evt,
@@ -3292,7 +3324,18 @@ pub fn register_iflet_let_bindings(
             registered.insert(r);
         }
     }
-    (registered, first_other.unwrap_or(*self.unique_id))
+    // A tuple-literal scrutinee moves its variables into the tuple
+    // whether or not the pattern matches: show the ones the pattern
+    // didn't move out itself (`Some(_)`, `_`) as moved too.
+    let end_of_bindings = first_other.unwrap_or(*self.unique_id);
+    for r in moved_into_scrutinee {
+        if !moved_by_pattern.contains(&ResourceTy::Value(r.clone())) {
+            let event = self.ext_ev_of_evt(Evt::Move, ResourceTy::Anonymous, ResourceTy::Value(r), *self.unique_id, false);
+            *self.unique_id += 1;
+            self.add_external_event(let_line, event);
+        }
+    }
+    (registered, end_of_bindings)
 }
 
 /// A by-value pattern binding of reference type out of a value that
@@ -3534,6 +3577,36 @@ pub fn mark_branch_results_kept(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
       }
     }
   }
+}
+
+/// The variables a tuple-literal scrutinee (`if let … = (x, y)`,
+/// `match (x, y) { … }`) moves into the tuple it builds: each element
+/// that names a variable of a non-Copy, non-reference type. They are
+/// moved whether or not the pattern then matches, and whether or not it
+/// binds anything from them, so `x` can't be used afterwards (#327).
+/// Variables whose parts have columns of their own (a struct or tuple
+/// variable) are left out: marking only the whole as moved would leave
+/// their part columns claiming a drop.
+pub fn tuple_scrutinee_moves(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<ResourceAccessPoint> {
+    let ExprKind::Tup(elems) = scrutinee.kind else { return Vec::new() };
+    if scrutinee.span.from_expansion() {
+        return Vec::new();
+    }
+    let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
+    elems.iter().filter_map(|e| {
+        let ExprKind::Path(QPath::Resolved(_, path)) = e.kind else { return None };
+        if !matches!(path.res, Res::Local(_)) {
+            return None;
+        }
+        let ty = typeck.node_type(e.hir_id);
+        if ty.is_ref() || self.ty_is_copy(ty, e.hir_id.owner) {
+            return None;
+        }
+        match crate::expr_visitor_utils::get_rap(e, &self.tcx, &self.raps) {
+            ResourceTy::Value(rap @ ResourceAccessPoint::Owner(_)) => Some(rap),
+            _ => None,
+        }
+    }).collect()
 }
 
 // This function does the work of adding an event for let stmts

@@ -248,6 +248,7 @@ panic.
   struct, a tuple, a `Result`) don't say it.
 - `if let` with a tuple pattern (`if let (Some(a), Some(b)) = (x, y)`)
   shows no bindings, and `x` / `y` as still owning their values.
+  impl, or mixes `Rc` and `Arc` keeps the plain wording.
 - A closure that uses one field or element (`move || p.name.len()`,
   `move || t.0.len()`) is drawn as capturing the whole variable, so its
   other fields are shown as moved.
