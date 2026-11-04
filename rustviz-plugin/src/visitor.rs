@@ -2205,6 +2205,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   _ => None,
                 };
                 let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
+                // `for x in it` where `it` is already an iterator
+                // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
+                // returns its argument unchanged, so the loop *moves*
+                // `it` into itself and each `x` is something `next()`
+                // hands out, not something `it` owns or lends (#417).
+                // Compare the head's type with the type of the
+                // `into_iter(head)` call: they are equal only for an
+                // iterator.
+                let head_is_iterator = matches!(head_arg.kind, ExprKind::Path(_))
+                  && matches!(iterand_evt, Some(Evt::Move))
+                  && {
+                    let typeck = self.tcx.typeck(head_arg.hir_id.owner);
+                    let head_ty = typeck.node_type(head_arg.hir_id);
+                    !head_ty.is_ref()
+                      && head_ty == typeck.node_type(guard_expr.hir_id)
+                  };
 
                 // Register the user pattern binding(s) as branch-scoped
                 // RAPs so events inside the body referencing them
@@ -2237,8 +2253,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   let pat_name = pat_ident.to_string();
                   let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
                     .pat_ty(user_pat);
-                  if pat_ty.is_ref() {
                     let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
+                  if pat_ty.is_ref() && head_is_iterator {
+                    // A reference an iterator hands out: its lender isn't
+                    // known here, and nothing is "returned" to the
+                    // iterator (or to anything) when it ends.
+                    self.add_ref(
+                      pat_name.clone(),
+                      bool_of_mut(pat_ty.ref_mutability().unwrap()),
+                      false,
+                      for_line,
+                      ResourceTy::Anonymous,
+                      std::collections::VecDeque::new(),
+                      self.current_scope,
+                      false,
+                      pointee_copy,
+                    );
+                    self.unlent_refs.insert(pat_name.clone());
+                  } else if pat_ty.is_ref() {
                     self.add_ref(
                       pat_name.clone(),
                       bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -2261,7 +2293,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     *self.raps.get(&pat_name).unwrap().rap.hash());
 
                   // Emit the iterand event into the user's pattern binding.
-                  if let Some(e) = iterand_evt {
+                  if head_is_iterator {
+                    // The iterator is moved into the loop; nothing is
+                    // moved into (or borrowed by) the loop variable.
+                    self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+                    let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
+                    self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+                  } else if let Some(e) = iterand_evt {
                     let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
                     self.add_ev(for_line, e, to_rty, head_rty, false);
                   }

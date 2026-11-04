@@ -192,6 +192,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // doesn't), and are kept only in a branch that diverges: see
   // `keep_exit_drops`.
   pub exit_drops: std::collections::HashSet<usize>,
+  /// References that point into something the plugin can't name (the
+  /// loop variable of `for x in it`, #417): they get no lender, so no
+  /// borrow is "returned" when they end.
+  pub unlent_refs: HashSet<String>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -2402,7 +2406,7 @@ pub fn print_out_of_scope(&mut self){
     #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
     for (name, ref_data) in self.borrow_map.iter() {
       match ref_data.lender {
-        ResourceTy::Anonymous => {
+        ResourceTy::Anonymous if !self.unlent_refs.contains(name) => {
           ultimate_refs.insert(name.to_owned());
         }
         _ => {}
