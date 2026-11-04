@@ -281,6 +281,9 @@ const EXPECTED_OK: &[&str] = &[
     // Assigning to a plain tuple's field (`t.0 = 5`) used to panic in
     // resource_of_lhs (#235). Renders; the write isn't drawn (#189).
     "tuple_field_assign",
+    // A Copy result of a method chain on a reference is a plain Copy
+    // binding, also on the line where the reference's borrow ends (#190).
+    "method_chain_ref_copy_result",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1935,17 +1938,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `r.into_iter()` with `r: &Vec<i32>` is `<&Vec as
         // IntoIterator>::into_iter(self)`: `self` is the reference,
         // so nothing is moved out of `v`, which still owns (and
-        // drops) its vector. `v.len()` takes `&self`.
+        // drops) its vector. `v.len()` takes `&self`. `n` (a usize)
+        // is initialized by copy from `count`, on the line where r's
+        // borrow ends (#190).
         must_contain: &[
             "into_iter reads from r",
             "len reads from v",
             "v goes out of scope. Its resource is dropped.",
+            "n is initialized by copy from count",
+            "Copy from count to n",
         ],
         must_not_contain: &[
             "Move from r to into_iter",
             "Move from v to into_iter",
             "v's resource is moved",
             "v goes out of scope. No resource is dropped.",
+            "n goes out of scope. No resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -2500,6 +2508,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "method_chain_ref_copy_result",
+        // `k` and `w` are `i32` / `usize` results of chains on a
+        // reference, on the line of that reference's last use (where
+        // its borrow ends). They're initialized by copy like `m`, and
+        // end with the plain Copy-value scope end. Before #208 the
+        // renderer dropped the "Copy from sum/count" arrow whenever a
+        // borrow ended on the same line, leaving no creation event and
+        // "No resource is dropped." (the moved-out owner wording).
+        must_contain: &[
+            "n is initialized by copy from count",
+            "k is initialized by copy from sum",
+            "w is initialized by copy from count",
+            "Copy from sum to k",
+            "Copy from count to w",
+            "k goes out of scope",
+            "w goes out of scope",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "n goes out of scope. No resource is dropped.",
+            "k goes out of scope. No resource is dropped.",
+            "w goes out of scope. No resource is dropped.",
         ],
     },
 ];
