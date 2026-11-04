@@ -1,0 +1,30 @@
+# Iteration order of std HashMap/HashSet is randomized per process, and
+# letting it reach the output made diagrams differ between runs (#211).
+# Iterating one is denied in CI (see .github/workflows/build.yml); where
+# the order provably can't matter, opt out locally with
+# `#[expect(clippy::..., reason = "...")]`.
+#
+# `for x in &map` is caught by clippy::iter_over_hash_type (denied in
+# rustviz-plugin/src/lib.rs). Not caught: an explicit `map.into_iter()`
+# and `v.extend(map)` / `Vec::from_iter(map)`, which go through the
+# IntoIterator trait; clippy can't ban those for hash types only.
+# FxHashMap / FxHashSet are std types with a fixed hasher, so they are
+# covered too (their order is the same every run but still arbitrary).
+disallowed-methods = [
+  { path = "std::collections::HashMap::iter", reason = "random order (#211): sort, or use a BTreeMap / Vec" },
+  { path = "std::collections::HashMap::iter_mut", reason = "random order (#211)" },
+  { path = "std::collections::HashMap::keys", reason = "random order (#211)" },
+  { path = "std::collections::HashMap::values", reason = "random order (#211)" },
+  { path = "std::collections::HashMap::values_mut", reason = "random order (#211)" },
+  { path = "std::collections::HashMap::into_keys", reason = "random order (#211)" },
+  { path = "std::collections::HashMap::into_values", reason = "random order (#211)" },
+  { path = "std::collections::HashMap::drain", reason = "random order (#211)" },
+  { path = "std::collections::HashMap::extract_if", reason = "random order (#211)" },
+  { path = "std::collections::HashSet::iter", reason = "random order (#211)" },
+  { path = "std::collections::HashSet::drain", reason = "random order (#211)" },
+  { path = "std::collections::HashSet::extract_if", reason = "random order (#211)" },
+  { path = "std::collections::HashSet::union", reason = "random order (#211); for a set use `&a | &b`, `&a - &b`, `&a & &b`" },
+  { path = "std::collections::HashSet::difference", reason = "random order (#211); for a set use `&a | &b`, `&a - &b`, `&a & &b`" },
+  { path = "std::collections::HashSet::intersection", reason = "random order (#211); for a set use `&a | &b`, `&a - &b`, `&a & &b`" },
+  { path = "std::collections::HashSet::symmetric_difference", reason = "random order (#211); for a set use `&a | &b`, `&a - &b`, `&a & &b`" },
+]

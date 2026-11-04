@@ -296,6 +296,18 @@ local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
 contributors alike): tooltips must be semantically correct, tests must pin
 correct behaviour, and the limitations lists stay in sync.
 
+CI also lints the plugin for iteration over a `HashMap` / `HashSet`, whose
+order changes from run to run (#211). To run that lint locally:
+
+```sh
+rustup component add clippy
+cargo clippy -p rustviz-plugin --locked -- -A clippy::all -D clippy::disallowed_methods -D clippy::iter_over_hash_type -D unfulfilled_lint_expectations
+```
+
+If the order can't reach the output (a sum, a set union, a lookup), mark
+the statement with `#[expect(clippy::..., reason = "...")]`; otherwise sort
+first or use a `BTreeMap` / `BTreeSet`.
+
 ## Releasing
 
 Four crates are published to crates.io in lockstep, all sharing the

@@ -1127,7 +1127,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // branch's decl set (they live for the body block, same as a
         // top-level `let` inside it).
         let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
-        if_decl.extend(iflet_bindings.iter().cloned());
+        if_decl = &if_decl | &iflet_bindings;
 
         // Single-arm `if cond { … }` and `if let pat = expr { … }`
         // (both no-else): inline. Body events are already in
@@ -1216,9 +1216,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // body, plus if-let pattern bindings) live only for that
         // branch — they're not pre-existing variables that need a
         // branched timeline. Subtract them out.
-        let declared_in_branches: HashSet<ResourceAccessPoint> =
-          if_decl.union(&else_decl).cloned().collect();
-        liveness = liveness.difference(&declared_in_branches).cloned().collect();
+        let declared_in_branches: HashSet<ResourceAccessPoint> = &if_decl | &else_decl;
+        liveness = &liveness - &declared_in_branches;
 
         // add gos events for variables declared in each block
         for var in in_decl_order(&if_decl) {
@@ -1555,6 +1554,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // like `if let` condition bindings and live until the
               // end of the arm, like the pattern's own bindings.
               if let Some(guard) = arm.guard {
+                #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
                 let outer: HashSet<ResourceAccessPoint> = self.raps.values()
                   .map(|rd| rd.rap.clone())
                   .filter(|r| !r.is_fn() && !pat_decls.contains(r))
@@ -1575,8 +1575,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
               self.inside_branch = false;
 
-              all_pat_decls.extend(pat_decls.iter().cloned());
-              let arm_decls: HashSet<ResourceAccessPoint> = pat_decls.union(&get_decl_of_expr(arm.body, &self.tcx, &self.raps)).cloned().collect();
+              all_pat_decls = &all_pat_decls | &pat_decls;
+              let arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
 
 
               // get events that occured in the arm
@@ -1643,7 +1643,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // Variables introduced by an arm's pattern only exist
             // inside that arm — strip them out so they don't get a
             // branched timeline of their own.
-            liveness = liveness.difference(&all_pat_decls).cloned().collect();
+            liveness = &liveness - &all_pat_decls;
             // add branch event. merge_point is the closing-brace
             // line of the match — same convention as If, where
             // merge_point is the line of the else-block's closing

@@ -445,6 +445,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// StaticRef/MutRef members with their own loan bookkeeping.
   pub fn struct_children(&self, parent: &str) -> Vec<ResourceAccessPoint> {
     let prefix = format!("{}.", parent);
+    #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) below")]
     let mut v: Vec<ResourceAccessPoint> = self.raps.iter()
       .filter(|(n, rd)| {
         n.starts_with(&prefix)
@@ -453,7 +454,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       })
       .map(|(_, rd)| rd.rap.clone())
       .collect();
-    v.sort_by_key(|r| *r.hash());
+    v.sort_by(|a, b| a.hash().cmp(b.hash()).then_with(|| a.name().cmp(b.name())));
     v
   }
 
@@ -1591,6 +1592,7 @@ pub fn print_out_of_scope(&mut self){
   // Visit RAPs in declaration order, not `self.raps`' hash order, so
   // the GoOutOfScope events (and their ids) come out the same on
   // every run (#211).
+  #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) on the next line")]
   let mut raps: Vec<RapData> = self.raps.values().cloned().collect();
   raps.sort_by(|a, b| a.rap.hash().cmp(b.rap.hash()).then_with(|| a.rap.name().cmp(b.rap.name())));
   for rap in raps.iter() {
@@ -1624,6 +1626,7 @@ pub fn print_out_of_scope(&mut self){
     // this is necessary for some cases where we can't know where a lifetime actually ends
     // see tests/basic_if7.rs for an example
     let mir_b_data = self.gather_borrow_data(&self.bwf);
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each entry is refined on its own from the mir_b_data Vec")]
     for (_name, data) in self.borrow_map.iter_mut() {
       for m_data in mir_b_data.iter() {
         match ExprVisitor::borrow_match(data, m_data) {
@@ -1656,16 +1659,19 @@ pub fn print_out_of_scope(&mut self){
     // that die strictly earlier than the region's max stay
     // non-ultimate and remain RefDie (correct: they don't
     // visually represent the lender's borrow being given back).
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
     for (_, refs) in lender_to_refs.iter() {
       let regions = get_regions(refs, &self.borrow_map);
       for region in regions.iter() {
         let mut max_lifetime: usize = 0;
+        #[expect(clippy::iter_over_hash_type, reason = "computes a max")]
         for r in region {
           let lifetime = self.borrow_map.get(r).unwrap().lifetime;
           if lifetime > max_lifetime {
             max_lifetime = lifetime;
           }
         }
+        #[expect(clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
         for r in region {
           if self.borrow_map.get(r).unwrap().lifetime == max_lifetime {
             ultimate_refs.insert(r.to_owned());
@@ -1675,6 +1681,7 @@ pub fn print_out_of_scope(&mut self){
     }
 
     // if a reference borrowed from an anonymous owner then it must be an ultimate ref
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
     for (name, ref_data) in self.borrow_map.iter() {
       match ref_data.lender {
         ResourceTy::Anonymous => {

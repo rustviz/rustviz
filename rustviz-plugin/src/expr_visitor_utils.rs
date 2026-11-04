@@ -304,7 +304,7 @@ fn collect_pat_bindings(
 pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint>{
   let mut res:HashSet<ResourceAccessPoint> = HashSet::new();
   for stmt in block.stmts.iter() {
-    res = res.union(&get_decl_of_stmt(&stmt, tcx, raps)).cloned().collect();
+    res.extend(get_decl_of_stmt(&stmt, tcx, raps));
   }
   res
 }
@@ -401,8 +401,7 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
     ExprKind::Binary(_, lhs_expr, rhs_expr) | ExprKind::Assign(lhs_expr, rhs_expr, _) | ExprKind::AssignOp(_, lhs_expr, rhs_expr) => {
       let lhs = get_live_of_expr(&lhs_expr, tcx, raps);
       let rhs = get_live_of_expr(&rhs_expr, tcx, raps);
-      let res = lhs.union(&rhs).cloned().collect();
-      res
+      &lhs | &rhs
     }
     ExprKind::Call(fn_expr, args) => {
       let mut res = HashSet::new();
@@ -419,7 +418,7 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
                       match exp {
                         Expr{kind: ExprKind::Call(_, format_args), ..} => {
                           for a_expr in format_args.iter() {
-                            res = res.union(&get_live_of_expr(&a_expr, tcx, raps)).cloned().collect();
+                            res.extend(get_live_of_expr(&a_expr, tcx, raps));
                           }
                         }
                         _ => {
@@ -435,14 +434,14 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
             }
             _ => {
               for a_expr in args.iter() {
-                res = res.union(&get_live_of_expr(&a_expr, tcx, raps)).cloned().collect();
+                res.extend(get_live_of_expr(&a_expr, tcx, raps));
               }
             }
           }
         }
         _ => {
           for a_expr in args.iter() {
-            res = res.union(&get_live_of_expr(&a_expr, tcx, raps)).cloned().collect();
+            res.extend(get_live_of_expr(&a_expr, tcx, raps));
           }
         }
       }
@@ -462,7 +461,7 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
         }
       }
       for a_expr in args.iter() {
-        res = res.union(&get_live_of_expr(&a_expr, tcx, raps)).cloned().collect();
+        res.extend(get_live_of_expr(&a_expr, tcx, raps));
       }
       res
     }
@@ -472,23 +471,23 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
     ExprKind::Block(b, _) => {
       let mut res: HashSet<ResourceAccessPoint> = HashSet::new();
       for stmt in b.stmts.iter() {
-        res = res.union(&get_live_of_stmt(&stmt, tcx, raps)).cloned().collect();
+        res.extend(get_live_of_stmt(&stmt, tcx, raps));
       }
       match b.expr {
         Some(exp) => {
-          res = res.union(&get_live_of_expr(exp, tcx, raps)).cloned().collect();
+          res.extend(get_live_of_expr(exp, tcx, raps));
         }
         None => {}
       }
-      res.difference(&get_decl_of_block(b, tcx, raps)).cloned().collect() // need to remove the variables that were declared in the current block 
+      &res - &get_decl_of_block(b, tcx, raps) // need to remove the variables that were declared in the current block 
     }
     ExprKind::If(guard_expr, if_expr, else_expr) => {
       let mut res: HashSet<ResourceAccessPoint> = HashSet::new();
-      res = res.union(&get_live_of_expr(&guard_expr, tcx, raps)).cloned().collect();
-      res = res.union(&get_live_of_expr(&if_expr, tcx, raps)).cloned().collect();
+      res.extend(get_live_of_expr(&guard_expr, tcx, raps));
+      res.extend(get_live_of_expr(&if_expr, tcx, raps));
       match else_expr {
         Some(e) => {
-          res = res.union(&get_live_of_expr(&e, tcx, raps)).cloned().collect();
+          res.extend(get_live_of_expr(&e, tcx, raps));
         }
         None => {}
       }
@@ -497,7 +496,7 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
     ExprKind::Tup(expr_list) => {
       let mut res: HashSet<ResourceAccessPoint> = HashSet::new();
       for e in expr_list.iter() {
-        res = res.union(&get_live_of_expr(e, tcx, raps)).cloned().collect();
+        res.extend(get_live_of_expr(e, tcx, raps));
       }
       res
     }
@@ -523,6 +522,7 @@ pub fn collect_event_live_vars(
     for (_, ev) in events {
         match ev {
             ExternalEvent::Branch { live_vars, .. } => {
+                #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
                 out.extend(live_vars.iter().cloned());
             }
             // Synthesized cleanup events (added after filtering) and
@@ -649,6 +649,7 @@ pub fn fetch_mutability(expr: & Expr) -> Option<Mutability> {
 // (#211). It also overwrote an existing region that started on the
 // same line as a new one that couldn't join it.
 pub fn get_regions(h: &HashSet<String>, borrow_map: &HashMap<String, RefData>) -> Vec<HashSet<String>> {
+  #[expect(clippy::disallowed_methods, reason = "sorted on a total key (names are unique) below")]
   let mut loans: Vec<(usize, usize, &String)> = h
     .iter()
     .map(|borrower| {
@@ -676,6 +677,7 @@ pub fn get_regions(h: &HashSet<String>, borrow_map: &HashMap<String, RefData>) -
 // get the non anonymous lenders and their respective 'active' borrowers
 pub fn get_non_anon_lenders(b_map: &HashMap<String, RefData>) -> HashMap<String, HashSet<String>> {
   let mut res: HashMap<String, HashSet<String>> = HashMap::new();
+  #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "builds a map of sets; order is lost")]
   for (k, v) in b_map.iter() {
     match v.lender {
       ResourceTy::Anonymous => {},
@@ -697,6 +699,7 @@ pub fn get_borrowers(borrower: &String, borrow_map: &HashMap<String, RefData>) -
     ResourceTy::Anonymous | ResourceTy::Caller => HashSet::from([borrower.to_owned()]),
     _ => {
       let mut res:HashSet<String> = HashSet::new();
+      #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "builds a set; order is lost")]
       for (k, v) in borrow_map.iter() {
         if v.lender == lender {
           res.insert(k.to_string());
