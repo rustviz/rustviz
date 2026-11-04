@@ -655,6 +655,12 @@ const EXPECTED_OK: &[&str] = &[
     // An `else if` chain / `else { match .. }` whose branches all
     // return diverges as a whole (#491).
     "else_if_chain_diverges",
+    // — Collections of references (`vec![&s]`, `[&a, &b]`) and
+    //   references copied out of them (`refs[0]`; #349).
+    "refs_vec_literal",
+    "refs_array_literal",
+    "refs_vec_mut",
+    "refs_index_untracked",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6711,6 +6717,73 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "Its resource is dropped here only if no branch above moved it",
             "s was moved in at least one branch above, so it can't be used after the branches",
+        ],
+    },
+    // ─── Collections of references (#349) ────────────────────────────
+    TooltipExpect {
+        name: "refs_vec_literal",
+        // #349's repro. `refs` holds a borrow of `s`; `r` is a copy of
+        // that reference, so it borrows `s`, not `refs`.
+        must_contain: &[
+            "Immutable borrow from s to refs",
+            "refs holds a value that immutably borrows s's resource (refs isn't a reference itself)",
+            "Immutable borrow from s to r: r is a reference copied out of refs",
+            "Return immutably borrowed resource from r to s",
+            "Return immutably borrowed resource from refs to s",
+        ],
+        must_not_contain: &[
+            ", through the reference copied out of",
+            "Return immutably borrowed resource from r to refs",
+            "refs's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "refs_array_literal",
+        // `pair[0]` may be either element as far as rustc is concerned,
+        // so `first` keeps both `a` and `b` borrowed. `pair` (a Copy
+        // array of `&String`) is copied into `drop`, not dropped.
+        must_contain: &[
+            "Immutable borrow from a to pair",
+            "Immutable borrow from b to pair",
+            "Immutable borrow from a to first: first is a reference copied out of pair, which holds references to a and b, so it may point into either, and both stay borrowed while first is in use",
+            "Return immutably borrowed resource from first to a",
+            "Return immutably borrowed resource from first to b",
+        ],
+        must_not_contain: &[
+            ", through the reference copied out of",
+            "Return immutably borrowed resource from first to pair",
+            "pair's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "refs_vec_mut",
+        // `vec![&mut x, &mut y]` holds two mutable borrows until line 5;
+        // `x += 1` on line 6 is fine.
+        must_contain: &[
+            "Mutable borrow from x to slots",
+            "Mutable borrow from y to slots",
+            "Return mutably borrowed value from slots to x",
+            "Return mutably borrowed value from slots to y",
+        ],
+        must_not_contain: &[
+            "slots goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "refs_index_untracked",
+        // `collect()` / `push` don't make a holder (#392), so what
+        // `first` / `last` borrow isn't named. They still don't borrow
+        // the collection they were copied out of.
+        must_contain: &[
+            "first's immutable borrow ends (what it borrows from isn't shown)",
+            "last's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from first to *first",
+            "Return immutably borrowed resource from last to *last",
+            "Return immutably borrowed resource from first to words",
+            "Return immutably borrowed resource from last to refs",
+            "words's resource is no longer immutably borrowed",
         ],
     },
 ];

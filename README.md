@@ -206,11 +206,14 @@ panic.
   borrowing what the callee's signature ties it to: `first_word(&s)`,
   `longest(&a, &b)`, `let it = v.iter();`, `let third = v.get(2);`,
   `it.next().unwrap()`, `Excerpt::new(&novel)`.)
-- A value built by `collect()` (`let words: Vec<&str> =
-  s.split(' ').collect();`) isn't drawn as borrowing `s`: `collect`'s
-  signature ties its result to its input only through a trait bound,
-  which RustViz doesn't read. Neither is a value whose borrow comes
-  from a reference parameter (`v.iter()` with `v: &Vec<i32>`).
+- A collection built by `collect()` (`let words: Vec<&str> =
+  s.split(' ').collect();`) or filled by `push(&s)` isn't drawn as
+  borrowing `s`: `collect`'s signature ties its result to its input
+  only through a trait bound, and `push` stores into its receiver,
+  neither of which RustViz reads. So `let w = words[0];` isn't linked
+  to `s` either. (`vec![&s]`, `[&a, &b]` and a reference copied out of
+  them, `refs[0]`, are.) Neither is a value whose borrow comes from a
+  reference parameter (`v.iter()` with `v: &Vec<i32>`).
 - A reference returned by a call in one branch of an `if` / `match`
   that initializes a variable (`let w = if c { first_word(&s) } else {
   "none" };`) isn't linked to `s`.

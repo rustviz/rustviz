@@ -253,6 +253,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::AddrOf(_, m, _) => m.is_mut(),
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_borrow_is_mut(e),
       ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).iter().any(|(_, m)| *m),
+      ExprKind::Array(elems) => elems.iter().any(|x| self.value_borrow_is_mut(x)),
+      ExprKind::Repeat(x, _) => self.value_borrow_is_mut(x),
       ExprKind::Block(b, _) => b.expr.is_some_and(|x| self.value_borrow_is_mut(x)),
       ExprKind::DropTemps(inner) => self.value_borrow_is_mut(inner),
       _ => false,
@@ -270,6 +272,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     match init.kind {
       ExprKind::Call(..) | ExprKind::MethodCall(..) => (self.call_lenders(init), self.call_borrow_is_mut(init)),
+      // `let refs = [&a, &b];` (`vec![&a, &b]` is a call; #349).
+      ExprKind::Array(..) | ExprKind::Repeat(..) => (self.value_lenders(init), self.value_borrow_is_mut(init)),
       // `let it2 = it;` / `let t2 = third;`: the new variable holds
       // the same borrow.
       ExprKind::Path(QPath::Resolved(..)) => match expr_to_rap_name(init, &self.tcx)
@@ -281,6 +285,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       },
       _ => (Vec::new(), false),
     }
+  }
+
+  /// `let r = refs[0];`: `r` is a copy of a reference stored in the
+  /// collection, so it borrows what that reference borrows, never the
+  /// collection itself (#349). `Some` when `e` is such a read: the
+  /// lenders of a collection that holds a borrow we track (empty when
+  /// it isn't tracked, e.g. a `Vec` filled by `push`).
+  pub fn stored_ref_lenders(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
+    let ExprKind::Index(base, _, _) = e.kind else { return None };
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    if !typeck.expr_ty(e).is_ref() {
+      return None;
+    }
+    let held = expr_to_rap_name(base, &self.tcx)
+      .filter(|n| self.raps.get(n).is_some_and(|rd| rd.rap.holds_borrow()))
+      .and_then(|n| self.borrow_map.get(&n))
+      .map(|rd| rd.all_lenders())
+      .unwrap_or_default();
+    Some(held)
   }
 
   /// Lenders reachable through one argument, after rustc's adjustments
@@ -352,6 +375,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_lenders(e),
       ExprKind::Block(b, _) => b.expr.map(|x| self.value_lenders(x)).unwrap_or_default(),
       ExprKind::DropTemps(inner) => self.value_lenders(inner),
+      // An array of references (`[&a, &b]`, `[&s; 3]`, and what
+      // `vec![&s]` expands to) holds every element's borrow (#349).
+      ExprKind::Array(elems) => {
+        let mut out: Vec<ResourceTy> = Vec::new();
+        for e in elems.iter() {
+          for l in self.value_lenders(e) {
+            if !out.contains(&l) {
+              out.push(l);
+            }
+          }
+        }
+        out
+      }
+      ExprKind::Repeat(e, _) => self.value_lenders(e),
       // A closure value holds a borrow of each variable it captures
       // by reference (the `match_rhs` closure arm draws the same).
       ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).into_iter().map(|(l, _)| l).collect(),

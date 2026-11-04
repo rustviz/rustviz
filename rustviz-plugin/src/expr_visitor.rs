@@ -1892,6 +1892,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         return (lender, aliasing, lenders);
       }
     }
+    // `let r = refs[0];` copies a reference out of a collection.
+    if let Some(mut lenders) = self.stored_ref_lenders(expr) {
+      lenders.retain(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
+      if lenders.is_empty() {
+        return (ResourceTy::Anonymous, VecDeque::new(), Vec::new());
+      }
+      let lender = lenders.remove(0);
+      let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+      return (lender, aliasing, lenders);
+    }
     let (lender, aliasing) = self.get_ref_data_single(expr);
     // A copy of a reference that borrows from several variables
     // (`let r2 = r;` after `let r = longest(&a, &b);`) borrows from
@@ -2141,6 +2151,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       borrow_span: None,
       co_lenders: lenders,
     });
+  }
+
+  /// After `let h = init;` was drawn: a holder whose initializer
+  /// isn't a call (`[&a, &b]`, `vec![&s]`, which `match_rhs` draws
+  /// as a plain bind) gets a borrow arrow from each lender (#349).
+  /// Calls draw theirs in `match_rhs` (`emit_call_result_borrows`).
+  pub fn emit_holder_literal_borrows(&mut self, name: &String, init: &'tcx Expr<'tcx>) {
+    let built = init.span.from_expansion() || matches!(init.kind, ExprKind::Array(..) | ExprKind::Repeat(..));
+    if !built {
+      return;
+    }
+    let Some(rap) = self.raps.get(name).map(|rd| rd.rap.to_owned()) else { return };
+    if !rap.holds_borrow() {
+      return;
+    }
+    let Some(rd) = self.borrow_map.get(name).cloned() else { return };
+    let line = expr_to_line(&init, &self.tcx);
+    let to = ResourceTy::Value(rap);
+    for l in rd.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
+      let evt = if rd.ref_mutability { Evt::MBorrow } else { Evt::SBorrow };
+      self.add_ev(line, evt, to.clone(), l, false);
+    }
   }
 
   /// `name` was just registered as an owner bound to `init`. If its
@@ -3472,6 +3504,36 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             self.add_ev(die_line, die_evt, from, lhs.clone(), false);
           }
         }
+      }
+    }
+    // `let r = refs[0];`: a copy of a reference stored in a collection
+    // that holds borrows we track borrows what it borrows (#349).
+    ExprKind::Index(base, _, _) if lhs.is_ref() && !lhs.is_mutref() => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      let ResourceTy::Value(lhs_rap) = &lhs else { return };
+      if self.stored_ref_lenders(rhs).is_none() {
+        return;
+      }
+      let lenders: Vec<ResourceTy> = match self.borrow_map.get(lhs_rap.name()) {
+        Some(rd) => rd.all_lenders().into_iter()
+          .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+          .collect(),
+        None => return,
+      };
+      let Some(coll) = expr_to_rap_name(base, &self.tcx) else { return };
+      let via = BorrowVia {
+        func: coll,
+        lenders: lenders.iter().map(|l| l.name()).collect(),
+        also_unnamed: false,
+        tie: ArgTie::default(),
+        carrier: ViaCarrier::Element,
+      };
+      for lender in lenders {
+        let id = *self.unique_id;
+        self.add_external_event(line_num, ExternalEvent::StaticBorrow {
+          from: lender, to: lhs.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id,
+        });
+        *self.unique_id += 1;
       }
     }
     _ => {
