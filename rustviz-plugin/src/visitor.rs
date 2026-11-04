@@ -1885,6 +1885,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // add/fetch raps that are initialized in arm expr
               // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
               let mut pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
+              // Struct bindings whose field columns still need their
+              // "acquires its part" events (see below).
+              let mut member_binds: Vec<ResourceAccessPoint> = Vec::new();
+              // Events the pattern adds to the global list (a struct
+              // binding's reference fields, its fields' binds) belong
+              // to this arm; see the drain below.
+              let first_pat_ev = self.preprocessed_events.len();
               // println!("arm pat {:#?}", arm.pat);
               // Route pattern-destructure events into either
               // `branch_e_data` (multi-arm: events live inside the
@@ -1922,6 +1929,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let id = *self.unique_id;
                       *self.unique_id += 1;
                       let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[parent_idx].clone(), id, is_partial);
+                      // add_external_event gives a struct's fields their
+                      // part of a whole (non-partial) move; otherwise
+                      // that's done below.
+                      if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
+                        member_binds.push(to_ro.clone());
+                      }
                       if inline {
                         self.add_external_event(pat_line, ext_ev);
                       } else {
@@ -1951,6 +1964,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let id = *self.unique_id;
                       *self.unique_id += 1;
                       let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[i].clone(), id, false);
+                      if matches!(e, Evt::Move | Evt::Copy) && !inline {
+                        member_binds.push(to_ro.clone());
+                      }
                       if inline {
                         self.add_external_event(pat_line, ext_ev);
                       } else {
@@ -1968,6 +1984,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     }
                   }
                 }
+              }
+
+              // A struct bound by the pattern (`Some(y) =>` with `y: P`)
+              // gets field columns (`y.name`, `y.n`). They receive their
+              // part of the value with `y`, go out of scope with it,
+              // and only exist in this arm (#405).
+              member_binds.sort_by_key(|r| *r.hash());
+              member_binds.dedup();
+              for r in member_binds {
+                if matches!(r, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
+                  self.bind_struct_fields(pat_line, r.name());
+                }
+              }
+              pat_decls = self.with_struct_members(&pat_decls);
+              if !inline {
+                branch_e_data.extend(self.preprocessed_events.drain(first_pat_ev..));
               }
 
               // Match guard: `pat if cond =>` / `pat if let p = e =>`.

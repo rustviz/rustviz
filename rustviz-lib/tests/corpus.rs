@@ -459,6 +459,9 @@ const EXPECTED_OK: &[&str] = &[
     "match_arm_with_let",
     // A pattern-bound struct's reference fields are references (#352).
     "pattern_struct_ref_fields",
+    // A pattern-bound struct's fields live and die with it, inside its
+    // `if let` / match arm / `while let` (#405).
+    "pattern_struct_fields_scope",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4568,6 +4571,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y.e.part acquires ownership of a resource",
             "y.m acquires ownership of a resource",
             "y.m is the owner of the resource",
+        ],
+    },
+    // ─── Fields of a pattern-bound struct (#405) ────────────────────
+    TooltipExpect {
+        name: "pattern_struct_fields_scope",
+        // `x` (if let), `y` / `z` (match arms) and `w` (while let) are
+        // structs bound by a pattern. Each field holds its part of the
+        // value from the pattern line and goes out of scope with the
+        // struct at the end of the arm; a String field is dropped
+        // there. In a match arm the fields used to be drawn as
+        // variables that existed before the match ("live in a
+        // conditional expression" on the match's split dot, "has no
+        // value yet"), losing the pattern line's events, among them
+        // z.part's "holds an immutable reference" dot (#352).
+        must_contain: &[
+            "x.name goes out of scope. Its resource is dropped.",
+            "x.n goes out of scope",
+            "y.name acquires ownership of a resource",
+            "y.name goes out of scope. Its resource is dropped.",
+            "y.n goes out of scope",
+            "z.part holds an immutable reference (it came with the value matched into z)",
+            "z.part goes out of scope",
+            "z.k goes out of scope",
+            "w.name goes out of scope. Its resource is dropped.",
+            "w.n goes out of scope",
+        ],
+        must_not_contain: &[
+            "y.n has no value yet",
+            "z.part has no value yet",
+            "z.k has no value yet",
         ],
     },
 ];
