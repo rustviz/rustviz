@@ -14,6 +14,7 @@
 
 // Need to include rustc crates like this
 // Haven't figured out how to ignore the red lines in rust-analyzer
+extern crate rustc_ast;
 extern crate rustc_driver;
 extern crate rustc_hir;
 extern crate rustc_interface;

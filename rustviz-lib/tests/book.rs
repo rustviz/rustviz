@@ -177,31 +177,41 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c4_09_first_word_str",
         status: Wrong,
-        note: "returned &str: word's borrow is 'returned to *word', my_string's borrow ends at L13 though word borrows it until L14, `return &s[0..i]` has no event (#171, #178)",
+        note: "returned &str: word isn't linked to my_string, so my_string's borrow ends at L13 though word borrows it until L14, `return &s[0..i]` has no event (#171)",
         must_contain: &[
             "s is an immutable borrow from the caller",
             "a reference from s is returned to the caller; the data it points to is not copied",
             "word holds an immutable reference; it can read the borrowed resource",
+            "L14 word's immutable borrow ends (what it borrows from isn't shown)",
             "my_string goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "bytes is the owner of the resource",
             "word is the owner of the resource",
             "s's resource is moved to the caller",
+            "Return immutably borrowed resource from word to *word",
         ],
         known_wrong: &[
-            "Return immutably borrowed resource from word to *word",
             "L13 my_string's resource is no longer immutably borrowed",
         ],
         ..E
     },
     Snippet {
         id: "c4_10_str_literal_copy",
-        status: Wrong,
-        note: "`let s: &str = \"hello\"`: borrows 'returned' to themselves (#178)",
-        must_contain: &["s is bound to an immutable reference", "Copy from s to t", "t is initialized by copy from s"],
-        must_not_contain: &["s is the owner of the resource", "s acquires ownership of a resource"],
-        known_wrong: &[
+        must_contain: &[
+            "s is bound to an immutable reference",
+            "Copy from s to t",
+            "t is initialized by copy from s",
+            "s's reference is copied (not the resource it points to)",
+            "s's borrow of the string literal ends (string literals live for the whole program)",
+            "t's borrow of the string literal ends (string literals live for the whole program)",
+        ],
+        must_not_contain: &[
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "s is the owner of the resource",
+            "s acquires ownership of a resource",
+            "s's resource is copied",
             "Return immutably borrowed resource from s to *s",
             "Return immutably borrowed resource from t to *t",
         ],
@@ -404,7 +414,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c5_12_dbg_macro",
         must_contain: &[
-            "scale is bound to a value",
+            "scale is bound to a copyable value",
             "dbg! reads from rect1",
             "rect1 goes out of scope. Its resource is dropped.",
         ],
@@ -496,15 +506,17 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_10_match_guard",
-        status: Wrong,
-        note: "msg: &'static str 'returns' its borrow to itself (#178)",
-        must_contain: &["Copy from n to x", "msg is bound to an immutable reference (in all branches above)"],
+        must_contain: &[
+            "Copy from n to x",
+            "msg is bound to an immutable reference (in all branches above)",
+            "L8 msg's immutable borrow ends (what it borrows from isn't shown)",
+        ],
         must_not_contain: &[
             "msg is the owner of the resource",
             "msg acquires ownership of a resource",
             "msg acquired ownership of a resource (in all branches above)",
+            "Return immutably borrowed resource from msg to *msg",
         ],
-        known_wrong: &["Return immutably borrowed resource from msg to *msg"],
         ..E
     },
     Snippet {
@@ -545,12 +557,14 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_03_vec_get_match",
         status: Wrong,
-        note: "third: Option<&i32> borrows v until L5, but v's borrow ends at L3; borrow 'returned' from third to third (#171)",
-        must_contain: &["get reads from v", "v goes out of scope. Its resource is dropped."],
-        known_wrong: &[
-            "L3 v's resource is no longer immutably borrowed",
-            "Return immutably borrowed resource from third to third",
+        note: "third: Option<&i32> borrows v until L5, but v's borrow ends at L3 (#171, #336)",
+        must_contain: &[
+            "get reads from v",
+            "L5 third's immutable borrow ends (what it borrows from isn't shown)",
+            "v goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["Return immutably borrowed resource from third to third"],
+        known_wrong: &["L3 v's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
@@ -644,11 +658,10 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_14_hashmap_entry",
-        status: Wrong,
-        note: "text: &str 'returns' its borrow to *text (#178)",
         must_contain: &[
             "text is bound to an immutable reference",
             "split_whitespace reads from text",
+            "L6 text's borrow of the string literal ends (string literals live for the whole program)",
             "Mutable borrow from map to count",
             "the resource count points to is modified through *count",
             "Return mutably borrowed resource from count to map",
@@ -659,8 +672,9 @@ const BOOK: &[Snippet] = &[
             "text acquires ownership of a resource",
             "*count acquires ownership of a resource",
             "map goes out of scope. No resource is dropped.",
+            "Return immutably borrowed resource from text to *text",
+            "text's immutable borrow ends (what it borrows from isn't shown)",
         ],
-        known_wrong: &["Return immutably borrowed resource from text to *text"],
         ..E
     },
     Snippet {
@@ -708,19 +722,17 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c9_04_question_option",
         status: Wrong,
-        note: "renders since #155 (was a crash in the probe). x (from v.first()?) borrows *v until L3, but v's borrow ends at L2, and Some(*x + 1) is shown returning x's borrow to *x (#171, #178)",
+        note: "renders since #155 (was a crash in the probe). x (from v.first()?) borrows *v until L3, but v's borrow ends at L2 (#171)",
         must_contain: &[
             "v is an immutable borrow from the caller",
             "first reads from v",
             "x holds an immutable reference; it can read the borrowed resource",
+            "L3 x's immutable borrow ends (what it borrows from isn't shown)",
             "first_plus_one reads from v",
             "v goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["x is the owner of the resource"],
-        known_wrong: &[
-            "Return immutably borrowed resource from x to *x",
-            "L2 v's resource is no longer immutably borrowed",
-        ],
+        must_not_contain: &["x is the owner of the resource", "Return immutably borrowed resource from x to *x"],
+        known_wrong: &["L2 v's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
@@ -762,19 +774,25 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_01_largest_generic",
         status: Wrong,
-        note: "result's borrow is 'returned' to *result; number_list's borrow ends at L13 though result borrows it until L14 (#171)",
+        note: "result isn't linked to number_list, so number_list's borrow ends at L13 though result borrows it until L14 (#171); `largest = item` reassigns a reference but reads \"initialized by copy\" (#414)",
         must_contain: &[
             "list is an immutable borrow from the caller",
             "Immutable borrow from list to largest",
             "a reference from largest is returned to the caller; the data it points to is not copied",
             "largest reads from number_list",
+            "item's reference is copied (not the resource it points to)",
             "result holds an immutable reference; it can read the borrowed resource",
+            "L14 result's immutable borrow ends (what it borrows from isn't shown)",
             "number_list goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["result is the owner of the resource"],
-        known_wrong: &[
+        must_not_contain: &[
+            "result is the owner of the resource",
+            "item's resource is copied",
             "Return immutably borrowed resource from result to *result",
+        ],
+        known_wrong: &[
             "L13 number_list's resource is no longer immutably borrowed",
+            "L5 largest is initialized by copy from item",
         ],
         ..E
     },
@@ -806,33 +824,37 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_06_longest",
         status: Wrong,
-        note: "result isn't linked to string1/string2, so string1's borrow ends at L8; string2 and result 'return' their borrows to themselves (#171, #178)",
+        note: "result isn't linked to string1/string2, so string1's borrow ends at L8 (#171)",
         must_contain: &[
             "x is an immutable borrow from the caller",
             "string2 is bound to an immutable reference",
             "as_str reads from string1",
+            "L8 string2's borrow of the string literal ends (string literals live for the whole program)",
+            "L9 result's immutable borrow ends (what it borrows from isn't shown)",
         ],
-        must_not_contain: &["string2 is the owner of the resource", "string2 acquires ownership of a resource"],
-        known_wrong: &[
+        must_not_contain: &[
+            "string2 is the owner of the resource",
+            "string2 acquires ownership of a resource",
             "Return immutably borrowed resource from string2 to *string2",
             "Return immutably borrowed resource from result to *result",
-            "L8 string1's resource is no longer immutably borrowed",
+            "string2's immutable borrow ends (what it borrows from isn't shown)",
         ],
+        known_wrong: &["L8 string1's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
         id: "c10_07_longest_inner_scope",
         status: Wrong,
-        note: "Listing 10-23's point: result borrows string1/string2 until L10, but both borrows end at L9; result 'returns' its borrow to *result (#171)",
+        note: "Listing 10-23's point: result borrows string1/string2 until L10, but both borrows end at L9 (#171)",
         must_contain: &[
             "longest reads from string1",
             "longest reads from string2",
             "result holds an immutable reference; it can read the borrowed resource",
+            "L10 result's immutable borrow ends (what it borrows from isn't shown)",
             "L11 string2 goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["result is the owner of the resource"],
+        must_not_contain: &["result is the owner of the resource", "Return immutably borrowed resource from result to *result"],
         known_wrong: &[
-            "Return immutably borrowed resource from result to *result",
             "L9 string1's resource is no longer immutably borrowed",
             "L9 string2's resource is no longer immutably borrowed",
         ],
@@ -1058,10 +1080,17 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "m_01_shadow_type_change",
         status: Wrong,
-        note: "both `spaces` share one column (#173); the &str literal 'returns' its borrow to *spaces (#178)",
+        note: "both `spaces` share one column (#173), so the &str's borrow is shown ending at L4, where `spaces` is the usize",
         must_contain: &["spaces is bound to an immutable reference", "len reads from spaces"],
-        must_not_contain: &["spaces is the owner of the resource", "spaces acquires ownership of a resource"],
-        known_wrong: &["Return immutably borrowed resource from spaces to *spaces"],
+        must_not_contain: &[
+            "spaces is the owner of the resource",
+            "spaces acquires ownership of a resource",
+            "Return immutably borrowed resource from spaces to *spaces",
+        ],
+        known_wrong: &[
+            "L4 spaces's borrow of the string literal ends (string literals live for the whole program)",
+            "L4 spaces's immutable borrow ends",
+        ],
         ..E
     },
     Snippet {
@@ -1085,7 +1114,7 @@ const BOOK: &[Snippet] = &[
         id: "m_04_loop_break_string",
         status: Wrong,
         note: "`break String::from(..)` gives s a String; never shown, and s shown not dropped",
-        must_contain: &["counter is bound to a value"],
+        must_contain: &["counter is bound to a copyable value"],
         known_wrong: &["s goes out of scope. No resource is dropped."],
         ..E
     },
@@ -1150,21 +1179,26 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "m_13_return_ref_from_vec",
         status: Wrong,
-        note: "f's borrow is 'returned' to *f (#171, #178)",
+        note: "f isn't linked to v, so v's borrow ends at L7 though f borrows it until L8 (#171)",
         must_contain: &[
             "v is an immutable borrow from the caller",
             "a reference from v is returned to the caller; the data it points to is not copied",
             "first reads from v",
             "f holds an immutable reference; it can read the borrowed resource",
+            "L8 f's immutable borrow ends (what it borrows from isn't shown)",
             "v goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["v's resource is moved to the caller", "f is the owner of the resource"],
-        known_wrong: &["Return immutably borrowed resource from f to *f"],
+        must_not_contain: &[
+            "v's resource is moved to the caller",
+            "f is the owner of the resource",
+            "Return immutably borrowed resource from f to *f",
+        ],
+        known_wrong: &["L7 v's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
         id: "m_14_while_counter",
-        must_contain: &["number is bound to a value"],
+        must_contain: &["number is bound to a copyable value"],
         ..E
     },
     Snippet {
@@ -1181,7 +1215,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_16_match_range",
-        must_contain: &["n is bound to a value"],
+        must_contain: &["n is bound to a copyable value"],
         ..E
     },
     Snippet {
@@ -1199,16 +1233,18 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "m_18_const",
         note: "renders since #155 (was a crash in the probe)",
-        must_contain: &["x is bound to a value"],
+        must_contain: &["x is bound to a copyable value"],
         ..E
     },
     // ─── Extras: crash minimizations and controls ─────────────────────
     Snippet {
         id: "x01_field_compound_assign_main",
-        status: Wrong,
-        note: "`c.n += 1` shown as acquiring ownership (#178)",
-        must_contain: &["c goes out of scope. Its resource is dropped."],
-        known_wrong: &["L7 c.n acquires ownership of a resource"],
+        must_contain: &[
+            "L6 c.n is bound to a copyable value",
+            "L7 c.n is assigned a new value",
+            "c goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["c.n acquires ownership of a resource"],
         ..E
     },
     Snippet {
@@ -1255,7 +1291,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x06_const_in_expr",
         note: "renders since #155 (was a crash in the probe)",
-        must_contain: &["x is bound to a value"],
+        must_contain: &["x is bound to a copyable value"],
         ..E
     },
     Snippet {
@@ -1277,13 +1313,17 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x09_static_item",
-        status: Wrong,
-        note: "was a crash at c2037dd. g: &str 'returns' its borrow to *g (#178); the static has no column (README Limitations)",
+        status: Missing,
+        note: "was a crash at c2037dd. The static has no column (README Limitations); only the borrow-end arrow names it",
         must_contain: &[
             "g is bound to an immutable reference",
             "println! reads from g through an implicit reference, so g isn't moved",
+            "L5 g's borrow of what the static GREETING points to ends (it lives for the whole program)",
         ],
-        known_wrong: &["Return immutably borrowed resource from g to *g"],
+        must_not_contain: &[
+            "Return immutably borrowed resource from g to *g",
+            "g's immutable borrow ends (what it borrows from isn't shown)",
+        ],
         ..E
     },
     Snippet {

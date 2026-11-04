@@ -316,7 +316,10 @@ impl ResourceAccessPoint {
     }
 
     pub fn is_copy_owner(&self) -> bool {
-        matches!(self, ResourceAccessPoint::Owner(Owner { is_copy: true, .. }))
+        // A Copy struct or Copy field (`p.x: i32`) holds a value like a
+        // Copy owner does (#178).
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_copy: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_copy: true, .. }))
     }
 
     /// True if this RAP is part of a struct grouping — either the
@@ -449,6 +452,30 @@ pub fn create_line_map(v: &Vec<(usize, ExternalEvent)>) -> BTreeMap<usize, Vec<E
     res
 }
 
+/// What a reference borrows when its lender has no column but the
+/// visitor can still name it, because it is data that lives for the
+/// whole program. Decided from the reference's initializer (an
+/// `ExprKind::Lit`, or a path resolving to a `static` / `const` item)
+/// and carried on the StaticDie / MutableDie that ends the borrow, so
+/// the arrow can say what the borrow was of instead of "what it borrows
+/// from isn't shown".
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum StaticLender {
+    /// `"hi"`, `b"hi"`, `c"hi"`. `noun` names the kind of literal
+    /// ("string literal", "byte string literal", "C string literal").
+    Literal { noun: &'static str },
+    /// `&GREETING` for a `static GREETING`: a borrow of the static item.
+    Static(String),
+    /// `GREETING` for a `static GREETING: &T`: a copy of the static's
+    /// reference, so it borrows what the static points to, not the
+    /// static itself.
+    PointeeOfStatic(String),
+    /// `C` for a `const C: &T`: same, for a constant. A constant has
+    /// no address of its own; the data its reference points to is
+    /// `'static`.
+    PointeeOfConst(String),
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -488,17 +515,22 @@ pub enum ExternalEvent {
         is_reborrow: bool,
         id: usize
     },
+    // `static_lender`: what the reference borrowed, when that has no
+    // column but is known to be data that lives for the whole program
+    // (see StaticLender). Only the arrow's tooltip uses it.
     StaticDie {
         // return the resource to "to"
         from: ResourceTy,
         to: ResourceTy,
-        id: usize
+        id: usize,
+        static_lender: Option<StaticLender>,
     },
     MutableDie {
         // return the resource to "to"
         from: ResourceTy,
         to: ResourceTy,
-        id: usize
+        id: usize,
+        static_lender: Option<StaticLender>,
     },
 
     RefDie {
@@ -1076,8 +1108,14 @@ impl Event {
                     ResourceTy::Caller if matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
                         safe_message(hover_messages::event_dot_copy_ref_to_caller, &self.deref_name(my_name), to),
                     ResourceTy::Caller => safe_message(hover_messages::event_dot_copy_to_caller, &self.deref_name(my_name), to),
+                    _ if !to.is_closure() && matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
+                        hover_messages::event_dot_ref_copied(my_name),
                     _ => safe_message(hover_messages::event_dot_copy_to, &self.deref_name(my_name), to)
                 }
+            }
+            // Moving a `&mut` moves the reference, not its referent.
+            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), ..} if !to.is_closure() => {
+                hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller))
             }
             Event::Move{ to ,..} => {
                 match to {
@@ -1796,7 +1834,7 @@ impl Visualizable for VisualizationData {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
           else { vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
         },
-        ExternalEvent::StaticDie{from: from_ro, to: to_ro, id} => {
+        ExternalEvent::StaticDie{from: from_ro, to: to_ro, id, ..} => {
           if to_o && !from_ro.is_same_underlying(&to_ro){ 
             vec![(line_num,  Event::StaticReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
           }
@@ -1806,7 +1844,7 @@ impl Visualizable for VisualizationData {
           if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
           else { vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
         },
-        ExternalEvent::MutableDie{from: from_ro, to: to_ro, id} => {
+        ExternalEvent::MutableDie{from: from_ro, to: to_ro, id, ..} => {
           if to_o && !from_ro.is_same_underlying(&to_ro){ 
             vec![(line_num,  Event::MutableReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
           }
@@ -2042,7 +2080,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
 
             },
-            ExternalEvent::StaticDie{from: from_ro, to: to_ro, id} => {
+            ExternalEvent::StaticDie{from: from_ro, to: to_ro, id, ..} => {
               // this catches when StaticDie(s to s*) to avoid duplicate events
                 if !from_ro.is_same_underlying(&to_ro) {
                   maybe_append_event(self, &to_ro.clone(), Event::StaticReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
@@ -2054,7 +2092,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id}, line_number);
 
             },
-            ExternalEvent::MutableDie{from: from_ro, to: to_ro, id} => {
+            ExternalEvent::MutableDie{from: from_ro, to: to_ro, id, ..} => {
                 // this catches when MutableDie(s to s*) to avoid duplicate events
                 if !from_ro.is_same_underlying(&to_ro) {
                   maybe_append_event(self, &to_ro.clone(), Event::MutableReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);

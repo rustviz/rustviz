@@ -854,8 +854,16 @@ fn render_dot(
     visualization_data: &VisualizationData,
     resource_hold: bool,
     dots: &mut DotLayer,
+    held_before: bool,
 ) {
+    // Whether this column already holds a value before the current
+    // event: an Acquire / Copy into a Copy-typed column that already
+    // holds one is an assignment (`n += 1`, `p.x = 5`), not an
+    // initialization (#178).
+    let mut held = held_before;
     for (line_number, event) in history.iter() {
+        let held_at_event = held;
+        held = holds_value_after(held, event);
         // Closure-capture per-upvar dots on the closure's own
         // timeline are suppressed here: the closure's Bind-Acquire
         // dot at the same line carries a combined tooltip listing
@@ -903,7 +911,7 @@ fn render_dot(
                 // communicated by column position; the join dot
                 // below speaks for what happened.
                 for branch in branch_history.iter() {
-                    render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, false, dots);
+                    render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, false, dots, held_at_event);
                 }
 
                 // Per-variable merge dot, on the parent column at
@@ -1152,8 +1160,13 @@ fn render_dot(
                     // (they'd stack on this one and the topmost
                     // tooltip would mask the rest).
                     let rap = &visualization_data.timelines[hash].resource_access_point;
+                    let copyable_assign = held_at_event && rap.is_copy_owner() && !rap.is_closure();
                     if let Some(title) = union_write_title(event, rap, &name, visualization_data, *hash) {
                         data.title = title;
+                    } else if let (true, Event::Acquire { is: ResourceTy::Value(_), .. }) = (copyable_assign, event) {
+                        data.title = hover_messages::event_dot_copyable_assign(&name);
+                    } else if let (true, Event::Copy { from, is: ResourceTy::Value(_), .. }) = (copyable_assign, event) {
+                        data.title = hover_messages::event_dot_copyable_assign_copy(&name, &from.name());
                     } else if let Event::Acquire { from: ResourceTy::Anonymous, is, .. } = event {
                         if is.is_closure() {
                             let captures = collect_closure_captures(visualization_data, *hash, *line_number);
@@ -1439,7 +1452,7 @@ fn render_dots_string(
                     // RAPs in the data model).
                     holds_resource_at_scope_end(timeline)
                 } else { false };
-                render_dot(hash, &timeline.history, &resource_owners_layout[hash], visualization_data, resource_hold, &mut dots);
+                render_dot(hash, &timeline.history, &resource_owners_layout[hash], visualization_data, resource_hold, &mut dots, false);
             },
         }
     }
@@ -1545,6 +1558,23 @@ fn union_write_title(
         _ => None,
     };
     Some(hover_messages::event_dot_union_write(name, source))
+}
+
+// Whether a column holds a value after `event`, given whether it held
+// one before. Only used to tell a Copy-typed column's assignment from
+// its initialization, so moves out (which Copy columns don't have) are
+// tracked only roughly.
+fn holds_value_after(held: bool, event: &Event) -> bool {
+    match event {
+        Event::Acquire { is: ResourceTy::Value(_), .. }
+        | Event::Copy { is: ResourceTy::Value(_), .. }
+        | Event::InitRefParam { .. } => true,
+        Event::Move { .. } => false,
+        Event::Branch { branch_history, .. } => {
+            held || branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| holds_value_after(false, e)))
+        }
+        _ => held,
+    }
 }
 
 fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, Event)>, id: usize) -> Option<& 'a TimelineColumnData> {
@@ -1916,10 +1946,13 @@ fn render_arrow (
             // only non-Copy values are moved. Same wording as the
             // dot tooltip for this event (data.rs).
             // A returned `&T` is a copy of the reference, not of the data.
+            // A returned `&mut T` moves the reference, not the data.
             let message = match external_event {
                 ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::StaticRef(_)), .. } =>
                     hover_messages::event_dot_copy_ref_to_caller,
                 ExternalEvent::Copy { .. } => hover_messages::event_dot_copy_to_caller,
+                ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), .. } =>
+                    |name: &String, _: &String| hover_messages::event_dot_ref_moved(name, true),
                 _ => hover_messages::event_dot_move_to_caller,
             };
             let title = message(
@@ -1962,6 +1995,19 @@ fn render_arrow (
             title = format!("{} from {}", title, styled_from_string);
             let styled_to_string = SPAN_BEGIN.to_string() + &to.name() + SPAN_END;
             title = format!("{} to {}", title, styled_to_string);
+            // A borrow "returned" from `s` to `*s`: the lender has no
+            // column, so don't describe it as returned to itself.
+            // When the visitor knows it borrowed 'static data (a string
+            // literal, a static), name that instead.
+            if let ExternalEvent::StaticDie { static_lender, .. } | ExternalEvent::MutableDie { static_lender, .. } = external_event {
+                if from.is_same_underlying(to) {
+                    let is_mut = matches!(external_event, ExternalEvent::MutableDie { .. });
+                    title = match static_lender {
+                        Some(lender) => hover_messages::arrow_borrow_of_static_ends(&from.name(), is_mut, lender),
+                        None => hover_messages::arrow_borrow_ends_lender_not_drawn(&from.name(), is_mut),
+                    };
+                }
+            }
 
             // order of points is to -> from
             let mut data = ArrowData {

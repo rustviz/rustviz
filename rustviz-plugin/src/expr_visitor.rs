@@ -55,7 +55,11 @@ pub struct RefData {
   pub assigned_at: usize, // gen point
   pub lifetime: usize, // kill point
   pub ref_mutability: bool, // type
-  pub aliasing: VecDeque<String> // aliasing other references
+  pub aliasing: VecDeque<String>, // aliasing other references
+  // Set when `lender` is Anonymous but the reference is known to
+  // borrow data that lives for the whole program (a string literal,
+  // a static); the borrow-end arrow then names it.
+  pub static_lender: Option<StaticLender>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,7 +278,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_static_ref(name.clone(), lhs_mut, scope, is_global);
       }
     }
-    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia });
+    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None });
   }
   
   pub fn add_static_ref(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
@@ -603,14 +607,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: false,
       },
-      Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id },
-      Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id }
+      Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None },
+      Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None }
     }
   }
 
   pub fn add_ev(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, is_partial: bool) {
     self.add_external_event(line_num, self.ext_ev_of_evt(evt, lhs, rhs, *self.unique_id, is_partial));
     *self.unique_id += 1;
+  }
+
+  /// The end of reference `from`'s borrow (StaticDie / MutableDie),
+  /// returning to `to`; `ref_data` is `from`'s loan, and names the
+  /// 'static data it borrowed when the lender has no column.
+  pub fn add_borrow_end_ev(&mut self, line_num: usize, to: ResourceTy, from: ResourceTy, ref_data: &RefData) {
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    let static_lender = match ref_data.lender {
+      ResourceTy::Anonymous => ref_data.static_lender.clone(),
+      _ => None,
+    };
+    let ev = if ref_data.ref_mutability {
+      ExternalEvent::MutableDie { from, to, id, static_lender }
+    } else {
+      ExternalEvent::StaticDie { from, to, id, static_lender }
+    };
+    self.add_external_event(line_num, ev);
   }
 
   /// True when `e`'s own type (no auto-deref) is a `union`. Used to
@@ -750,6 +772,66 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// `get_ref_data` plus, when the lender has no column, the
+  /// 'static data the reference is known to borrow (see
+  /// `static_lender_of`). Every site that (re)sets a RefData's lender
+  /// from an initializer goes through here.
+  pub fn get_ref_data_full(&self, expr: &'tcx Expr) -> (ResourceTy, VecDeque<String>, Option<StaticLender>) {
+    let (lender, aliasing) = self.get_ref_data(expr);
+    let static_lender = match lender {
+      ResourceTy::Anonymous => self.static_lender_of(expr),
+      _ => None,
+    };
+    (lender, aliasing, static_lender)
+  }
+
+  /// What a reference initialized from `expr` borrows, when that is
+  /// data living for the whole program that the diagram has no column
+  /// for: a string literal, a `static` item (`&GREETING`), or what a
+  /// `static` / `const` of reference type points to (`GREETING`).
+  /// Copying a reference (`let t = s;`) carries over `s`'s answer.
+  /// Decided from the HIR, never from source text. None when unknown
+  /// (a call result, `&5`, a match on literals, ...).
+  pub fn static_lender_of(&self, expr: &'tcx Expr) -> Option<StaticLender> {
+    let item_name = |p: &rustc_hir::Path| match p.res {
+      Res::Def(_, def_id) => Some(self.tcx.item_name(def_id).as_str().to_owned()),
+      _ => None,
+    };
+    match expr.kind {
+      ExprKind::Lit(lit) => match lit.node {
+        rustc_ast::LitKind::Str(..) => Some(StaticLender::Literal { noun: "string literal" }),
+        rustc_ast::LitKind::ByteStr(..) => Some(StaticLender::Literal { noun: "byte string literal" }),
+        rustc_ast::LitKind::CStr(..) => Some(StaticLender::Literal { noun: "C string literal" }),
+        _ => None,
+      },
+      // `&GREETING` / `&mut COUNTER`: a borrow of the static itself.
+      // (`&CONST` borrows a fresh copy of the constant's value, which
+      // may or may not be promoted to a static; not named.)
+      ExprKind::AddrOf(_, _, inner) => match inner.kind {
+        ExprKind::Path(QPath::Resolved(_, p))
+          if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) =>
+            item_name(p).map(StaticLender::Static),
+        _ => None,
+      },
+      ExprKind::Path(QPath::Resolved(_, p)) => match p.res {
+        // The binding is a reference, so the item's value is one: the
+        // binding gets a copy of it and borrows what it points to.
+        Res::Def(DefKind::Static { .. }, _) => item_name(p).map(StaticLender::PointeeOfStatic),
+        Res::Def(DefKind::Const { .. } | DefKind::AssocConst { .. }, _) =>
+          item_name(p).map(StaticLender::PointeeOfConst),
+        Res::Local(_) => self.borrow_map.get(&path_key(p, &self.tcx))
+          .and_then(|rd| match rd.lender {
+            ResourceTy::Anonymous => rd.static_lender.clone(),
+            _ => None,
+          }),
+        _ => None,
+      },
+      // `unsafe { &mut COUNTER }`, `{ "hi" }`
+      ExprKind::Block(b, _) => b.expr.and_then(|e| self.static_lender_of(e)),
+      _ => None,
+    }
+  }
+
   // 
   pub fn get_ref_data(&self, expr: &'tcx Expr) -> (ResourceTy, VecDeque<String>){
     // ex:
@@ -785,7 +867,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn define_lhs(&mut self, name: String, mutability: bool, expr: &'tcx Expr, ty: Ty <'tcx>) {
     let is_special = ty_is_special_owner(&ty);
     if ty.is_ref() {
-      let (lender, aliasing) = self.get_ref_data(&expr);
+      let (lender, aliasing, static_lender) = self.get_ref_data_full(&expr);
       self.add_ref(name.clone(), 
       bool_of_mut(ty.ref_mutability().unwrap()), 
       mutability, 
@@ -793,6 +875,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       lender,
       aliasing,
       self.current_scope, !self.inside_branch);
+      if let Some(rd) = self.borrow_map.get_mut(&name) {
+        rd.static_lender = static_lender;
+      }
     }
     else if ty.is_adt() && !is_special {
       match ty.ty_adt_def().unwrap().adt_kind() {
@@ -893,6 +978,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           lifetime: self.current_scope,
           ref_mutability,
           aliasing: VecDeque::new(),
+          static_lender: None,
         });
       } else {
         let field_is_copy = self.ty_is_copy(field_ty, owner_id);
@@ -1349,10 +1435,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           // borrow with its return-of-borrow at end-of-loan and
           // the ref-line trapezoid covers the right range.
           if field_ty.is_ref() {
-            let (lender, aliasing) = self.get_ref_data(&field.expr);
+            let (lender, aliasing, static_lender) = self.get_ref_data_full(&field.expr);
             if let Some(rd) = self.borrow_map.get_mut(&new_lhs_name) {
               rd.lender = lender;
               rd.aliasing = aliasing;
+              rd.static_lender = static_lender;
             }
           }
           self.match_rhs(ResourceTy::Value(field_rap), field.expr, e);
@@ -1730,7 +1817,8 @@ pub fn print_out_of_scope(&mut self){
     });
 
     // Add events
-    for (k, RefData {lender: r_ty, assigned_at: _, lifetime, ref_mutability: ref_mut, aliasing: _}) in &vec {
+    for (k, ref_data) in &vec {
+      let RefData { lender: r_ty, lifetime, .. } = ref_data;
       let from_ro = self.raps.get(k).unwrap().rap.to_owned();
       let to_ro = match r_ty {
         ResourceTy::Anonymous => ResourceTy::Deref(from_ro.clone()),
@@ -1745,14 +1833,7 @@ pub fn print_out_of_scope(&mut self){
       }
       else {
         // otherwise it does return a resource
-        match ref_mut {
-          true => {
-            self.add_ev(*lifetime, Evt::MDie, to_ro, ResourceTy::Value(from_ro), false);
-          }
-          false => {
-            self.add_ev(*lifetime, Evt::SDie, to_ro, ResourceTy::Value(from_ro), false);
-          }
-        }
+        self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data);
       }
     }
   }

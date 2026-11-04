@@ -312,6 +312,12 @@ const EXPECTED_OK: &[&str] = &[
     // Union writes and scope end don't drop fields (#191).
     "union_manually_drop",
     "union_whole_assign",
+    // Reference moves/copies and Copy assignments are worded as such (#178).
+    "ref_move_copy_wording",
+    "copy_field_assign",
+    // A borrow of a string literal or a static names it when it ends.
+    "ref_static_lender",
+    "ref_static_lender_mut",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -825,15 +831,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
 
     TooltipExpect {
         name: "chained_field_assign",
-        // "acquires ownership" for an i32 field is the plugin's existing
-        // wording for every struct-field write (flat `o.x = 5` says the
-        // same on main); this entry pins that the chained write lands on
-        // `o.inner.x`'s column, not that wording.
+        // The chained write lands on `o.inner.x`'s column. Writing to
+        // an i32 field is an assignment, not an acquisition (#178).
         must_contain: &[
             "o.inner.x, mutable",
+            "o.inner.x is assigned a new value",
+        ],
+        must_not_contain: &[
             "o.inner.x acquires ownership of a resource",
         ],
-        must_not_contain: &[],
     },
     TooltipExpect {
         name: "chained_field_assign_move",
@@ -1555,7 +1561,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from n to Ok",
         ],
         must_not_contain: &[
-            "n is bound to a value",
+            "n is bound to a copyable value",
         ],
     },
     TooltipExpect {
@@ -1568,7 +1574,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is initialized by copy from map",
         ],
         must_not_contain: &[
-            "n is bound to a value",
+            "n is bound to a copyable value",
         ],
     },
     TooltipExpect {
@@ -1621,14 +1627,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Bind from Anonymous (the const has no column). Then
         // `let y = x` is a regular Copy from x to y.
         must_contain: &[
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "y is initialized by copy from x",
             "Copy from x to y",
         ],
         must_not_contain: &[
             // The const itself shouldn't get a column or events.
             "N is the owner",
-            "N holds a value",
+            "N holds a copyable value",
             "N goes out of scope",
             // No Move from N — const reads aren't moves.
             "Move from N to x",
@@ -1662,10 +1668,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // that). Mainly guards against a future change panicking on
         // raw pointers; update these strings when #194 is fixed.
         must_contain: &[
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "the resource p points to is modified through *p",
         ],
-        must_not_contain: &["*p is bound to a value"],
+        must_not_contain: &["*p is bound to a copyable value"],
     },
     TooltipExpect {
         name: "static_mut_write",
@@ -1721,7 +1727,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u._a, mutable",
             "u._b, mutable",
             // The read / borrow must not lose their source.
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "u is initialized by copy from y",
             "Return immutably borrowed resource from r to *r",
         ],
@@ -1757,7 +1763,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             // The read must not lose its source.
-            "r is bound to a value",
+            "r is bound to a copyable value",
         ],
     },
     // ─── Assignment through a deref of a temporary ───────────────────
@@ -2353,7 +2359,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "deferred_init_copy",
         must_contain: &[
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "Copy from x to y",
             "y is initialized by copy from x",
         ],
@@ -2494,7 +2500,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let area = area(&rect);`: the variable has its own column
         // and gets the fn's return value.
         must_contain: &[
-            "area holds a value",
+            "area holds a copyable value",
             "area is initialized by copy from area",
             "area goes out of scope",
         ],
@@ -2504,7 +2510,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "var_named_like_method",
         // `let len = s.len();`: the variable has its own column.
         must_contain: &[
-            "len holds a value",
+            "len holds a copyable value",
             "len goes out of scope",
             "len reads from s",
         ],
@@ -2516,7 +2522,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // not the i32 variable. Before #232 the variable was shown
         // being lent s's resource and copied into n.
         must_contain: &[
-            "len holds a value",
+            "len holds a copyable value",
             "len reads from s",
             "n is initialized by copy from len",
         ],
@@ -2708,6 +2714,116 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u is initialized by copy from y",
             "u acquires ownership of a new resource; its previous resource is dropped",
             "u goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // ─── Wording on references and Copy assignments (#178) ──────────
+    TooltipExpect {
+        name: "ref_move_copy_wording",
+        // Moving / returning a `&mut` and copying a `&T` move or copy
+        // the reference; `s` and `x` keep their resources.
+        must_contain: &[
+            "r's mutable reference is moved (not the resource it points to)",
+            "r's mutable reference is moved to the caller (not the resource it points to)",
+            "a's reference is copied (not the resource it points to)",
+            "Move from r to r2",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "r's resource is moved",
+            "r's resource is moved to the caller",
+            "a's resource is copied",
+        ],
+    },
+    TooltipExpect {
+        name: "str_literal_ref",
+        // The string literal has no column: the borrow isn't
+        // "returned" from s to *s, and the arrow says what s (and t, a
+        // copy of s) borrowed.
+        must_contain: &[
+            "s's borrow of the string literal ends (string literals live for the whole program)",
+            "t's borrow of the string literal ends (string literals live for the whole program)",
+            "s's reference is copied (not the resource it points to)",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from s to *s",
+            "Return immutably borrowed resource from t to *t",
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "s's resource is copied",
+        ],
+    },
+    TooltipExpect {
+        name: "hashmap_entry_count",
+        // `map` owns its HashMap to the end (already right on main;
+        // pinned because #178 reported "No resource is dropped").
+        must_contain: &[
+            "map goes out of scope. Its resource is dropped.",
+            "text's borrow of the string literal ends (string literals live for the whole program)",
+        ],
+        must_not_contain: &[
+            "map goes out of scope. No resource is dropped.",
+            "Return immutably borrowed resource from text to *text",
+            "text's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "copy_field_assign",
+        // Copy fields hold values, not resources; writing to a Copy
+        // place that already holds a value is an assignment.
+        must_contain: &[
+            "p.x holds a copyable value",
+            "p.x is bound to a copyable value",
+            "p.x is assigned a new value",
+            "p.y is assigned a copy of z",
+            "Copy from z to p.y",
+            "n is assigned a new value",
+            "n is assigned a copy of m",
+            "b is written to; writing to a union never drops its old contents",
+        ],
+        must_not_contain: &[
+            "p.x acquires ownership of a resource",
+            "p.x is the owner of the resource",
+            "p.y is initialized by copy from z",
+            "n is initialized by copy from m",
+            "b acquires ownership of a resource",
+            "b is assigned a new value",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_static_lender",
+        // The lender has no column but is 'static data: a literal, the
+        // static COUNT (`&COUNT`), or what a static / const of reference
+        // type points to (`GREETING`, `NAME` are copied, not borrowed).
+        // A call result (`w`) still gets the generic text.
+        must_contain: &[
+            "s's borrow of the string literal ends (string literals live for the whole program)",
+            "t's borrow of the string literal ends (string literals live for the whole program)",
+            "b's borrow of the byte string literal ends (byte string literals live for the whole program)",
+            "g's borrow of the static COUNT ends (statics live for the whole program)",
+            "h's borrow of what the static GREETING points to ends (it lives for the whole program)",
+            "c's borrow of what the constant NAME points to ends (it lives for the whole program)",
+            "w's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "b's immutable borrow ends (what it borrows from isn't shown)",
+            "g's immutable borrow ends (what it borrows from isn't shown)",
+            "h's immutable borrow ends (what it borrows from isn't shown)",
+            "c's immutable borrow ends (what it borrows from isn't shown)",
+            "Return immutably borrowed resource from s to *s",
+            "Return immutably borrowed resource from g to *g",
+            "Return immutably borrowed resource from h to *h",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_static_lender_mut",
+        must_contain: &[
+            "r's mutable borrow of the static COUNTER ends (statics live for the whole program)",
+        ],
+        must_not_contain: &[
+            "r's mutable borrow ends (what it borrows from isn't shown)",
+            "Return mutably borrowed resource from r to *r",
         ],
     },
 ];

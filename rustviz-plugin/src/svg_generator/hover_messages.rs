@@ -1,5 +1,7 @@
 /* Event Dot messages: shows up when someone hovers over a dot */
 
+use crate::svg_generator::data::StaticLender;
+
 // Add styling to string name with <span>
 fn fmt_style(plain: &String) -> String {
     let span_begin = String::from(
@@ -249,6 +251,25 @@ pub fn event_dot_copy_ref_to_caller(my_name: &String, _target_name: &String) -> 
     )
 }
 
+// A reference variable is itself moved (`let r2 = r;` with r: `&mut T`,
+// or returned) or copied (`&T` is Copy). Only the reference moves or is
+// copied; the resource it points to stays where it is, still owned by
+// its lender (#178).
+pub fn event_dot_ref_moved(my_name: &String, to_caller: bool) -> String {
+    format!(
+        "{0}'s mutable reference is moved{1} (not the resource it points to)",
+        fmt_style(my_name),
+        if to_caller { " to the caller" } else { "" }
+    )
+}
+
+pub fn event_dot_ref_copied(my_name: &String) -> String {
+    format!(
+        "{0}'s reference is copied (not the resource it points to)",
+        fmt_style(my_name)
+    )
+}
+
 // 1   0
 //     |
 // o<--*   the star event (&)
@@ -363,8 +384,23 @@ pub fn event_dot_acquire_copyable(my_name: &String, _target_name: &String) -> St
     let my_name_fmt = fmt_style(my_name);
 
     format!(
-        "{0} is bound to a value",
+        "{0} is bound to a copyable value",
         my_name_fmt
+    )
+}
+
+// A Copy-typed place that already holds a value is assigned again
+// (`n += 1;`, `p.x = 5;`, `n = m;`). Nothing is acquired or
+// initialized: the old value is overwritten in place (#178).
+pub fn event_dot_copyable_assign(my_name: &String) -> String {
+    format!("{0} is assigned a new value", fmt_style(my_name))
+}
+
+pub fn event_dot_copyable_assign_copy(my_name: &String, from_name: &String) -> String {
+    format!(
+        "{0} is assigned a copy of {1}",
+        fmt_style(my_name),
+        fmt_style(from_name)
     )
 }
 
@@ -753,6 +789,43 @@ pub fn arrow_mut_return(from_name: &String, to_name: &String) -> String {
 
 
 
+// The end of a borrow whose lender has no column (a string literal
+// `let s: &str = "hi";`, or a reference returned by a function call
+// that isn't linked to its argument). The arrow used to read "Return
+// immutably borrowed resource from s to *s", a borrow returned to
+// itself (#178).
+pub fn arrow_borrow_ends_lender_not_drawn(from_name: &String, is_mut: bool) -> String {
+    format!(
+        "{0}'s {1} borrow ends (what it borrows from isn't shown)",
+        fmt_style(from_name),
+        if is_mut { "mutable" } else { "immutable" }
+    )
+}
+
+// The end of a borrow whose lender has no column but is known to be
+// data that lives for the whole program: a string literal (`let s:
+// &str = "hi";`), a static (`let g = &GREETING;`), or what a static /
+// const of reference type points to (`let g = GREETING;`). The mutable
+// form arises for `&mut` to a `static mut`.
+pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &StaticLender) -> String {
+    let what = match lender {
+        StaticLender::Literal { noun } =>
+            format!("the {0} ends ({0}s live for the whole program)", noun),
+        StaticLender::Static(name) =>
+            format!("the static {} ends (statics live for the whole program)", fmt_style(name)),
+        StaticLender::PointeeOfStatic(name) =>
+            format!("what the static {} points to ends (it lives for the whole program)", fmt_style(name)),
+        StaticLender::PointeeOfConst(name) =>
+            format!("what the constant {} points to ends (it lives for the whole program)", fmt_style(name)),
+    };
+    format!(
+        "{0}'s {1}borrow of {2}",
+        fmt_style(from_name),
+        if is_mut { "mutable " } else { "" },
+        what
+    )
+}
+
 /* State messages: shows up on the vertical lines for every value/reference */
 
 // The viable is no longer in the scope after this line.
@@ -821,7 +894,7 @@ pub fn state_full_privilege_copyable(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
 
     format!(
-        "{0} holds a value",
+        "{0} holds a copyable value",
         my_name_fmt
     )
 }
