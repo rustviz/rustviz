@@ -438,6 +438,11 @@ const EXPECTED_OK: &[&str] = &[
     "let_ref_binding_borrows",
     // `let ref d = *r;` used to panic in find_lender (#422).
     "let_ref_deref_reborrow",
+    // A match arm of type `!` (`_ => unreachable!()`, `panic!()`)
+    // binds nothing and doesn't reach the merge (#296).
+    "match_diverging_arm",
+    // An arm that calls a `-> !` function diverges too (#296).
+    "diverging_call_arm",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4322,6 +4327,37 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from r to s",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_diverging_arm",
+        // #296: `_ => unreachable!()` never produces a value, so it
+        // doesn't bind `s` (was "s acquires ownership of a resource"
+        // on that arm's line), and the merge speaks of the arms that
+        // reach it. `t` is moved in the only arm that reaches the
+        // merge; the `panic!` arm never gets there, so this isn't the
+        // "moved in some branches, dropped in the others" case.
+        must_contain: &[
+            "s acquired ownership of a resource (in all branches above that reach this point)",
+            "t was moved or dropped in every branch above that reaches this point",
+            "t goes out of scope. No resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquired ownership of a resource (in all branches above)",
+            "t was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            "m is bound to a value",
+        ],
+    },
+    TooltipExpect {
+        name: "diverging_call_arm",
+        // `fail()` has type `!` (a call to a `-> !` function), so like
+        // `panic!()` that arm binds nothing and doesn't reach the merge.
+        must_contain: &[
+            "s acquired ownership of a resource (in all branches above that reach this point)",
+        ],
+        must_not_contain: &[
+            "s acquired ownership of a resource (in all branches above)",
+        ],
     },
 ];
 

@@ -1569,6 +1569,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           _ if collapsed => (if_end, merge),
           _ => (if_end, merge_minus_one),
         };
+        // A branch of type `!` (`return`, `panic!()`) never reaches
+        // the merge (#296).
+        let typeck = self.tcx.typeck(expr.hir_id.owner);
+        let if_diverges = typeck.expr_ty(if_expr).is_never();
+        let else_diverges = else_expr.is_some_and(|e| typeck.expr_ty(e).is_never());
         let (b_labels, b_slices, b_branches) = match else_expr {
           Some(_) => {
             let else_map = create_line_map(&else_ev);
@@ -1576,8 +1581,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               vec!["If".to_owned(), "Else".to_owned()],
               vec![if_slice, else_slice],
               vec![
-                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl   },
-                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl },
+                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges   },
+                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges },
               ],
             )
           }
@@ -1588,8 +1593,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             vec!["If".to_owned(), "Else".to_owned()],
             vec![if_slice, else_slice],
             vec![
-              ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl },
-              ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new() },
+              ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges },
+              ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(), diverges: false },
             ],
           ),
         };
@@ -1943,7 +1948,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
               if !inline {
                 let branch_line_map = create_line_map(&branch_e_data);
-                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls });
+                // An arm of type `!` (`_ => unreachable!()`) never
+                // reaches the merge (#296).
+                let diverges = self.tcx.typeck(arm.body.hir_id.owner).expr_ty(arm.body).is_never();
+                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges });
               }
             }
             self.join_uninit_locals(uninit_ends);
