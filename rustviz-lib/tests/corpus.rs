@@ -315,6 +315,9 @@ const EXPECTED_OK: &[&str] = &[
     // Reference moves/copies and Copy assignments are worded as such (#178).
     "ref_move_copy_wording",
     "copy_field_assign",
+    // A borrow of a string literal or a static names it when it ends.
+    "ref_static_lender",
+    "ref_static_lender_mut",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2738,15 +2741,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "str_literal_ref",
         // The string literal has no column: the borrow isn't
-        // "returned" from s to *s.
+        // "returned" from s to *s, and the arrow says what s (and t, a
+        // copy of s) borrowed.
         must_contain: &[
-            "s's immutable borrow ends (what it borrows from isn't shown)",
-            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "s's borrow of the string literal ends (string literals live for the whole program)",
+            "t's borrow of the string literal ends (string literals live for the whole program)",
             "s's reference is copied (not the resource it points to)",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from s to *s",
             "Return immutably borrowed resource from t to *t",
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
             "s's resource is copied",
         ],
     },
@@ -2756,11 +2762,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // pinned because #178 reported "No resource is dropped").
         must_contain: &[
             "map goes out of scope. Its resource is dropped.",
-            "text's immutable borrow ends (what it borrows from isn't shown)",
+            "text's borrow of the string literal ends (string literals live for the whole program)",
         ],
         must_not_contain: &[
             "map goes out of scope. No resource is dropped.",
             "Return immutably borrowed resource from text to *text",
+            "text's immutable borrow ends (what it borrows from isn't shown)",
         ],
     },
     TooltipExpect {
@@ -2783,6 +2790,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.y is initialized by copy from z",
             "n is initialized by copy from m",
             "b acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_static_lender",
+        // The lender has no column but is 'static data: a literal, the
+        // static COUNT (`&COUNT`), or what a static / const of reference
+        // type points to (`GREETING`, `NAME` are copied, not borrowed).
+        // A call result (`w`) still gets the generic text.
+        must_contain: &[
+            "s's borrow of the string literal ends (string literals live for the whole program)",
+            "t's borrow of the string literal ends (string literals live for the whole program)",
+            "b's borrow of the byte string literal ends (byte string literals live for the whole program)",
+            "g's borrow of the static COUNT ends (statics live for the whole program)",
+            "h's borrow of what the static GREETING points to ends (it lives for the whole program)",
+            "c's borrow of what the constant NAME points to ends (it lives for the whole program)",
+            "w's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "b's immutable borrow ends (what it borrows from isn't shown)",
+            "g's immutable borrow ends (what it borrows from isn't shown)",
+            "h's immutable borrow ends (what it borrows from isn't shown)",
+            "c's immutable borrow ends (what it borrows from isn't shown)",
+            "Return immutably borrowed resource from s to *s",
+            "Return immutably borrowed resource from g to *g",
+            "Return immutably borrowed resource from h to *h",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_static_lender_mut",
+        must_contain: &[
+            "r's mutable borrow of the static COUNTER ends (statics live for the whole program)",
+        ],
+        must_not_contain: &[
+            "r's mutable borrow ends (what it borrows from isn't shown)",
+            "Return mutably borrowed resource from r to *r",
         ],
     },
 ];

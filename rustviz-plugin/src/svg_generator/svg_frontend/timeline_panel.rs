@@ -1997,10 +1997,15 @@ fn render_arrow (
             title = format!("{} to {}", title, styled_to_string);
             // A borrow "returned" from `s` to `*s`: the lender has no
             // column, so don't describe it as returned to itself.
-            if let ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. } = external_event {
+            // When the visitor knows it borrowed 'static data (a string
+            // literal, a static), name that instead.
+            if let ExternalEvent::StaticDie { static_lender, .. } | ExternalEvent::MutableDie { static_lender, .. } = external_event {
                 if from.is_same_underlying(to) {
                     let is_mut = matches!(external_event, ExternalEvent::MutableDie { .. });
-                    title = hover_messages::arrow_borrow_ends_lender_not_drawn(&from.name(), is_mut);
+                    title = match static_lender {
+                        Some(lender) => hover_messages::arrow_borrow_of_static_ends(&from.name(), is_mut, lender),
+                        None => hover_messages::arrow_borrow_ends_lender_not_drawn(&from.name(), is_mut),
+                    };
                 }
             }
 

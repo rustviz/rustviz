@@ -840,10 +840,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 *self.unique_id += 1;
               }
               else {
-                match ref_data.ref_mutability {
-                  true => self.add_ev(line_num, Evt::MDie, to_ro, lhs_rty.clone(), false),
-                  false => self.add_ev(line_num, Evt::SDie, to_ro, lhs_rty.clone(), false)
-                }
+                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &ref_data);
               }
 
               // Add event for possible lender if necessary
@@ -864,11 +861,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // }
 
               // update lhs_rty with new lender information
-              let (new_lender, new_aliasing) = self.get_ref_data(&rhs_expr);
+              let (new_lender, new_aliasing, new_static_lender) = self.get_ref_data_full(&rhs_expr);
               let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
               r.assigned_at = line_num;
               r.aliasing = new_aliasing;
               r.lender = new_lender;
+              r.static_lender = new_static_lender;
             }
 
             // ex:
@@ -888,18 +886,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 *self.unique_id += 1;
               }
               else {
-                match modified_ref_data.ref_mutability {
-                  true => self.add_ev(line_num, Evt::MDie, to_ro, lhs_rty.clone(), false),
-                  false => self.add_ev(line_num, Evt::SDie, to_ro, lhs_rty.clone(), false)
-                }
+                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &modified_ref_data);
               }
 
               // update modified (derefed) reference's lender and aliasing data
-              let (new_lender, new_aliasing) = self.get_ref_data(&rhs_expr);
+              let (new_lender, new_aliasing, new_static_lender) = self.get_ref_data_full(&rhs_expr);
               let r = self.borrow_map.get_mut(modified_ref_name).unwrap();
               r.assigned_at = line_num;
               r.aliasing = new_aliasing.clone();
               r.lender = new_lender;
+              r.static_lender = new_static_lender;
 
               let old_aliasing_data = self.borrow_map.get(&lhs_rty.real_name()).unwrap().aliasing.clone();
               // update other aliases' aliasing data 

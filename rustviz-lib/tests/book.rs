@@ -203,10 +203,12 @@ const BOOK: &[Snippet] = &[
             "Copy from s to t",
             "t is initialized by copy from s",
             "s's reference is copied (not the resource it points to)",
-            "s's immutable borrow ends (what it borrows from isn't shown)",
-            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "s's borrow of the string literal ends (string literals live for the whole program)",
+            "t's borrow of the string literal ends (string literals live for the whole program)",
         ],
         must_not_contain: &[
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
             "s is the owner of the resource",
             "s acquires ownership of a resource",
             "s's resource is copied",
@@ -659,7 +661,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "text is bound to an immutable reference",
             "split_whitespace reads from text",
-            "L6 text's immutable borrow ends (what it borrows from isn't shown)",
+            "L6 text's borrow of the string literal ends (string literals live for the whole program)",
             "Mutable borrow from map to count",
             "the resource count points to is modified through *count",
             "Return mutably borrowed resource from count to map",
@@ -671,6 +673,7 @@ const BOOK: &[Snippet] = &[
             "*count acquires ownership of a resource",
             "map goes out of scope. No resource is dropped.",
             "Return immutably borrowed resource from text to *text",
+            "text's immutable borrow ends (what it borrows from isn't shown)",
         ],
         ..E
     },
@@ -826,7 +829,7 @@ const BOOK: &[Snippet] = &[
             "x is an immutable borrow from the caller",
             "string2 is bound to an immutable reference",
             "as_str reads from string1",
-            "L8 string2's immutable borrow ends (what it borrows from isn't shown)",
+            "L8 string2's borrow of the string literal ends (string literals live for the whole program)",
             "L9 result's immutable borrow ends (what it borrows from isn't shown)",
         ],
         must_not_contain: &[
@@ -834,6 +837,7 @@ const BOOK: &[Snippet] = &[
             "string2 acquires ownership of a resource",
             "Return immutably borrowed resource from string2 to *string2",
             "Return immutably borrowed resource from result to *result",
+            "string2's immutable borrow ends (what it borrows from isn't shown)",
         ],
         known_wrong: &["L8 string1's resource is no longer immutably borrowed"],
         ..E
@@ -1084,7 +1088,7 @@ const BOOK: &[Snippet] = &[
             "Return immutably borrowed resource from spaces to *spaces",
         ],
         known_wrong: &[
-            "L4 spaces's immutable borrow ends (what it borrows from isn't shown)",
+            "L4 spaces's borrow of the string literal ends (string literals live for the whole program)",
             "L4 spaces's immutable borrow ends",
         ],
         ..E
@@ -1310,13 +1314,16 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x09_static_item",
         status: Missing,
-        note: "was a crash at c2037dd. The static has no column, so g's borrow has no lender (README Limitations)",
+        note: "was a crash at c2037dd. The static has no column (README Limitations); only the borrow-end arrow names it",
         must_contain: &[
             "g is bound to an immutable reference",
             "println! reads from g through an implicit reference, so g isn't moved",
-            "L5 g's immutable borrow ends (what it borrows from isn't shown)",
+            "L5 g's borrow of what the static GREETING points to ends (it lives for the whole program)",
         ],
-        must_not_contain: &["Return immutably borrowed resource from g to *g"],
+        must_not_contain: &[
+            "Return immutably borrowed resource from g to *g",
+            "g's immutable borrow ends (what it borrows from isn't shown)",
+        ],
         ..E
     },
     Snippet {

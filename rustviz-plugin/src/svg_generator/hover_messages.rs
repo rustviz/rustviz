@@ -1,5 +1,7 @@
 /* Event Dot messages: shows up when someone hovers over a dot */
 
+use crate::svg_generator::data::StaticLender;
+
 // Add styling to string name with <span>
 fn fmt_style(plain: &String) -> String {
     let span_begin = String::from(
@@ -797,6 +799,30 @@ pub fn arrow_borrow_ends_lender_not_drawn(from_name: &String, is_mut: bool) -> S
         "{0}'s {1} borrow ends (what it borrows from isn't shown)",
         fmt_style(from_name),
         if is_mut { "mutable" } else { "immutable" }
+    )
+}
+
+// The end of a borrow whose lender has no column but is known to be
+// data that lives for the whole program: a string literal (`let s:
+// &str = "hi";`), a static (`let g = &GREETING;`), or what a static /
+// const of reference type points to (`let g = GREETING;`). The mutable
+// form arises for `&mut` to a `static mut`.
+pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &StaticLender) -> String {
+    let what = match lender {
+        StaticLender::Literal { noun } =>
+            format!("the {0} ends ({0}s live for the whole program)", noun),
+        StaticLender::Static(name) =>
+            format!("the static {} ends (statics live for the whole program)", fmt_style(name)),
+        StaticLender::PointeeOfStatic(name) =>
+            format!("what the static {} points to ends (it lives for the whole program)", fmt_style(name)),
+        StaticLender::PointeeOfConst(name) =>
+            format!("what the constant {} points to ends (it lives for the whole program)", fmt_style(name)),
+    };
+    format!(
+        "{0}'s {1}borrow of {2}",
+        fmt_style(from_name),
+        if is_mut { "mutable " } else { "" },
+        what
     )
 }
 
