@@ -2763,6 +2763,47 @@ pub fn print_out_of_scope(&mut self){
   }
 }
   
+  /// A borrow held by a reference declared inside an `if` / `match`
+  /// arm ends inside that arm (#389). `print_lifetimes` runs after the
+  /// whole body is visited, when each arm's events are already inside
+  /// its Branch event, so the borrow-end events it adds land on the
+  /// fn's top level: the lender got its value back on its parent
+  /// column, beside the arm's code, as if that happened whichever arm
+  /// ran (and its arm column stayed borrowed, or stopped at a `&mut`
+  /// borrow, down to the join). Move each one into the arm that
+  /// declares its reference; that reference doesn't exist outside it.
+  fn nest_borrow_ends_in_arms(&mut self) {
+    let mut i = 0;
+    while i < self.preprocessed_events.len() {
+      let (line, ev) = &self.preprocessed_events[i];
+      let path = match ev {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
+        | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } =>
+          to.extract_rap().and_then(|lender| arm_declaring(self.preprocessed_events, r, lender, *line)),
+        _ => None,
+      };
+      match path {
+        Some(mut path) => {
+          let ev = self.preprocessed_events.remove(i);
+          if path[0].0 > i { path[0].0 -= 1; }
+          // Arrows listed together on a line are drawn one below the
+          // other, with a blank row added per extra arrow. At the top
+          // level that count comes from `event_line_map`, which holds
+          // arrows between two variables only. An arm's `line_map`
+          // holds every arrow, a call's borrow of the reference too
+          // (`r.push(…)`; #419), so listing the event there would add
+          // a blank row the top level didn't. List it only when it was
+          // stacked with other arrows at the top level; otherwise it's
+          // drawn as the first arrow on its line, as it was.
+          let stacked = self.event_line_map.get(&ev.0).is_some_and(|evs| evs.len() > 1);
+          insert_in_arm(self.preprocessed_events, &path, ev, stacked);
+        }
+        None => i += 1,
+      }
+    }
+  }
+
   // This is where we annotate all RefDie events that were not handled by the assignment operator
   pub fn print_lifetimes(&mut self){
 
@@ -2915,6 +2956,7 @@ pub fn print_out_of_scope(&mut self){
         self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data);
       }
     }
+    self.nest_borrow_ends_in_arms();
   }
 }
 
@@ -2964,4 +3006,56 @@ fn holds_resource_after(events: &[(usize, ExternalEvent)], rap_name: &str) -> Op
     }
   }
   None
+}
+
+/// The arm whose own `let`s or pattern declare `r`, if its conditional
+/// spans `line` and `lender` has a column in it (is live in it, or is
+/// declared in that arm too): the path of (event index, arm index)
+/// pairs from `events` down through nested Branch events. Otherwise
+/// the lender is drawn on one column throughout the conditional, and
+/// its borrow's end stays where it is.
+fn arm_declaring(
+  events: &[(usize, ExternalEvent)],
+  r: &ResourceAccessPoint,
+  lender: &ResourceAccessPoint,
+  line: usize,
+) -> Option<Vec<(usize, usize)>> {
+  for (k, (_, ev)) in events.iter().enumerate() {
+    let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, .. } = ev else { continue };
+    if line < *split_point || line > *merge_point { continue; }
+    for (a, b) in branches.iter().enumerate() {
+      if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line) {
+        path.insert(0, (k, a));
+        return Some(path);
+      }
+      if b.decl_vars.contains(r) && (live_vars.contains(lender) || b.decl_vars.contains(lender)) {
+        return Some(vec![(k, a)]);
+      }
+    }
+  }
+  None
+}
+
+/// Insert `ev` into the arm `path` leads to (see `arm_declaring`),
+/// after that arm's events on its line or earlier, and into its line
+/// map if `in_line_map` (see `create_line_map`).
+fn insert_in_arm(
+  events: &mut [(usize, ExternalEvent)],
+  path: &[(usize, usize)],
+  ev: (usize, ExternalEvent),
+  in_line_map: bool,
+) {
+  let Some(((k, a), rest)) = path.split_first() else { return };
+  let ExternalEvent::Branch { branches, .. } = &mut events[*k].1 else {
+    unreachable!("arm_declaring's path leads through Branch events")
+  };
+  let arm = &mut branches[*a];
+  if !rest.is_empty() {
+    return insert_in_arm(&mut arm.e_data, rest, ev, in_line_map);
+  }
+  let at = arm.e_data.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
+  if in_line_map && ev.1.is_arrow_ev() {
+    arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
+  }
+  arm.e_data.insert(at, ev);
 }
