@@ -1036,24 +1036,30 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c15_07_refcell_borrow_mut",
-        status: Wrong,
-        note: "borrow_mut is shown as only reading c, though `.push(2)` writes c's Vec through the guard (#203); RefCell's runtime &mut borrow isn't shown (README Limitations)",
-        must_contain: &["borrow reads from c", "c goes out of scope. Its resource is dropped."],
-        known_wrong: &["borrow_mut reads from c"],
+        status: Missing,
+        note: "the `.push(2)` write through the borrow_mut guard has no event of its own, and RefCell's runtime &mut borrow isn't drawn (README Limitations)",
+        must_contain: &[
+            "borrow borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
+            "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
+            "c goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["borrow_mut reads from c", "borrow reads from c"],
         ..E
     },
     Snippet {
         id: "c15_08_rc_refcell",
         status: Wrong,
-        note: "was a crash at c2037dd. a drops first and only decrements the Rc count; value's drop frees the RefCell (#373). borrow_mut is shown as only reading value, though `+= 10` writes through the guard (#203)",
+        note: "was a crash at c2037dd. a drops first and only decrements the Rc count; value's drop frees the RefCell (#373). The `+= 10` write through the borrow_mut guard has no event of its own (README Limitations)",
         must_contain: &[
             "Move from Rc::new to value",
-            "Rc::clone reads from value",
+            "Rc::clone borrows value immutably (a shared borrow); value has interior mutability, so its contents can change even through a shared borrow",
+            "borrow_mut borrows value immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "Move from Rc::clone to a",
             "println! reads from a through an implicit reference, so a isn't moved",
             "value goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["a goes out of scope. Its resource is dropped.", "borrow_mut reads from value"],
+        must_not_contain: &["borrow_mut reads from value", "Rc::clone reads from value"],
+        known_wrong: &["a goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -1279,14 +1285,15 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x05_refcell_deref_assign",
-        status: Wrong,
-        note: "was a crash at c2037dd. borrow_mut is shown as only reading c, though `+= 1` writes c's value through the guard (#203)",
+        status: Missing,
+        note: "was a crash at c2037dd. The `+= 1` write through the borrow_mut guard has no event of its own (README Limitations)",
         must_contain: &[
+            "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "Move from RefCell::new to c",
             "println! reads from c through an implicit reference, so c isn't moved",
             "c goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["borrow_mut reads from c"],
+        must_not_contain: &["borrow_mut reads from c"],
         ..E
     },
     Snippet {
