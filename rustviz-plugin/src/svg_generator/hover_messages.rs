@@ -1045,11 +1045,34 @@ pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool) -> Strin
 /// variable wasn't moved — this keeps the merged state consistent
 /// across branches. The drop dot at the join makes that semantics
 /// visible; the tooltip names it.
+//
+// Rust doesn't drop the value at the end of the non-moving branches: it
+// keeps a runtime "drop flag" and, at the end of the variable's scope,
+// drops the value only if it wasn't moved (#179). The scope-end dot
+// says that (`event_dot_go_out_of_scope_maybe_moved`).
 pub fn event_dot_branch_merge_moved_with_drop(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} was moved in at least one branch above; \
-         in branches where it was not, its resource is dropped at the branch's end.",
+        "{0} was moved in at least one branch above, so it can't be used after the branches \
+         (until it's assigned again). If the branch that ran didn't move it, its resource is \
+         dropped when {0} goes out of scope.",
         my_name_fmt
     )
+}
+
+// Scope end of a variable that was moved on some paths of a conditional
+// and not on others: whether anything is dropped is decided at runtime
+// by a drop flag (#179).
+pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. Its resource is dropped here only if no branch above moved it \
+         (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name)
+    )
+}
+
+// Merge dot for a variable that no branch above moved (#179; this used
+// to be an empty tooltip).
+pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
+    format!("{0} isn't moved in any of the branches above", fmt_style(my_name))
 }
