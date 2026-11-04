@@ -270,11 +270,6 @@ const Description: React.FC = () => (
         <code>longest</code>): the result isn&apos;t linked to what it borrows.
       </li>
       <li>
-        A closure passed straight to a function (
-        <code>thread::spawn(move || …)</code>): its captures aren&apos;t
-        drawn, so a moved-in value is shown as dropped at the end.
-      </li>
-      <li>
         A variable assigned in only some branches of an <code>if</code> is drawn
         as owning a value afterwards; Rust treats it as possibly uninitialized.
       </li>
@@ -302,10 +297,11 @@ const Description: React.FC = () => (
       <li>
         Loops show one iteration (and a loop variable like{' '}
         <code>for c in s.chars()</code> has no start or end); closures show
-        their captures but not their bodies; method chains show only the first
-        call; a match guard&apos;s events appear only in its own arm;{' '}
-        <code>async</code>/<code>await</code> and your own macros aren&apos;t
-        visualized.
+        their captures but not their bodies (for a closure passed straight to
+        a function, only what it moves or copies in); method chains show only
+        the first call; a match guard&apos;s events appear only in its own
+        arm; <code>async</code>/<code>await</code> and your own macros
+        aren&apos;t visualized.
       </li>
       <li>
         Writes to a field through a reference (<code>self.n += 1</code> in a{' '}

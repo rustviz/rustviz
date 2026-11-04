@@ -342,6 +342,8 @@ const EXPECTED_OK: &[&str] = &[
     // Operands of `-x` / `!b` are copied in, or moved for an
     // overloaded `Neg` on a non-Copy type (#262).
     "unary_operand_copies",
+    // By-value captures of a closure passed straight to a call (#230).
+    "closure_arg_move_captures",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3119,6 +3121,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from x to -",
             "Move from b to !",
             "wave goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_arg_move_captures",
+        // The closures own what they capture by value, and are handed
+        // to thread::spawn: v, s and p.name are moved into the call and
+        // dropped by the spawned thread, not at the end of main. n is
+        // Copy (copied in); p.age isn't captured and stays with p.
+        must_contain: &[
+            "Move from v to thread::spawn",
+            "v goes out of scope. No resource is dropped.",
+            "Copy from n to thread::spawn",
+            "Move from s to thread::spawn",
+            "s goes out of scope. No resource is dropped.",
+            "Move from p.name to thread::spawn",
+            "p.name goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+            "p.name goes out of scope. Its resource is dropped.",
+            "n's resource is moved",
+            "Move from p to thread::spawn",
+            "p.age's resource is moved",
         ],
     },
 ];
