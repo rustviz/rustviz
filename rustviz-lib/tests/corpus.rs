@@ -278,6 +278,9 @@ const EXPECTED_OK: &[&str] = &[
     // A struct item between two fns (#231): main's variables used to
     // reuse helper's RAP hashes, and here the renderer panicked.
     "struct_after_fn_panic",
+    // Assigning to a plain tuple's field (`t.0 = 5`) used to panic in
+    // resource_of_lhs (#235). Renders; the write isn't drawn (#189).
+    "tuple_field_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2483,6 +2486,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Pass by immutable reference from s to len",
             "len immutably borrows a resource",
             "len's resource is copied",
+        ],
+    },
+    // ─── Tuple field assignment (#235) ──────────────────────────────
+    TooltipExpect {
+        name: "tuple_field_assign",
+        // `t.0 = s;` moves `s` into the tuple. The write to `t.0` has
+        // no column to land on (#189), but `s` must still be shown as
+        // moved, not as dropping a String it no longer owns.
+        must_contain: &[
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
         ],
     },
 ];
