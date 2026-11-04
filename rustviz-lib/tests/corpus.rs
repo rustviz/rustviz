@@ -449,6 +449,10 @@ const EXPECTED_OK: &[&str] = &[
     //   modification of v's resource, directly or through a reference.
     "index_assign",
     "index_assign_through_ref",
+    // Nested struct fields of fn params and pattern bindings get
+    // columns (#239); a struct param's reference field borrows from
+    // the caller (#351).
+    "nested_fields_params_patterns",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4488,6 +4492,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource dst points to is modified through dst[0]",
             "the resource r points to is modified through r[0]",
             "the value previously in",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_fields_params_patterns",
+        // Reading `r.tl.x` of a struct that came from a fn parameter or
+        // a pattern binding copies out of its own column, like a
+        // `let`-bound struct's. Before #239 these reads drew nothing
+        // and the target was only "a goes out of scope. No resource is
+        // dropped." `e.part` (a `&str` field of a parameter) used to
+        // "acquire ownership" (#351).
+        must_contain: &[
+            "Copy from r.tl.x to a",
+            "a is initialized by copy from r.tl.x",
+            "r.tl.x holds a copyable value",
+            "Copy from m.tl.y to b",
+            "b is initialized by copy from m.tl.y",
+            "Copy from n.tl.x to c",
+            "Copy from t.tl.y to d",
+            "e.part is an immutable borrow from the caller",
+            "e.part's immutable borrow ends",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "e.part acquires ownership of a resource",
+            "e.part is the owner of the resource",
         ],
     },
 ];

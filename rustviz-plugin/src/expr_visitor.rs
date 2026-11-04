@@ -49,6 +49,21 @@ pub enum Evt {
 // at any time in the program lifetime. Ideally we should use the MIR and just grab 
 // the list of borrows that occurs and append events accordingly, implementing our own
 // logic is more difficult and not sufficient for complex borrowing scenarios.
+/// Where a struct's member columns are being registered (see
+/// `register_struct_members`): the HIR owner used for type queries, the
+/// line the value is bound on, the scope and globalness the members
+/// share with their struct, and the lender recorded for its
+/// reference-typed fields (`None`: no lender is known, see the
+/// pattern-binding site in `get_dec_of_pat2`).
+#[derive(Clone)]
+pub struct MemberSite {
+  pub owner_id: rustc_hir::OwnerId,
+  pub assigned_at: usize,
+  pub scope: usize,
+  pub is_global: bool,
+  pub ref_lender: Option<ResourceTy>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RefData {
   pub lender: ResourceTy, // who this reference borrowed from
@@ -1226,7 +1241,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             ty,
             owner_hash,
             mutability,
-            expr,
+            MemberSite {
+              owner_id: expr.hir_id.owner,
+              assigned_at: expr_to_line(&expr, &self.tcx),
+              scope: self.current_scope,
+              is_global: !self.inside_branch,
+              ref_lender: Some(ResourceTy::Anonymous),
+            },
           );
         },
         // Unions and enums both render as opaque single-owner columns:
@@ -1274,48 +1295,51 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// struct members already share their parent's group today.
   ///
   /// Reference fields (e.g. `Excerpt<'a> { p: &'a str }`) get the
-  /// same StaticRef/MutRef-member treatment as before, with a
-  /// placeholder Anonymous lender that the Struct arm of `match_rhs`
-  /// overwrites once it sees the construction-site initializer.
+  /// same StaticRef/MutRef-member treatment as before, with the lender
+  /// `site.ref_lender`: a placeholder Anonymous for a `let` that the
+  /// Struct arm of `match_rhs` overwrites once it sees the
+  /// construction-site initializer, or the caller for a parameter.
   /// Owned struct fields recurse so `r.a.b.c` etc. land in `raps`
   /// under their qualified names; Field-arm lookups in
   /// `expr_visitor_utils` then find them and emit events instead of
   /// silently giving up.
-  fn register_struct_members(
+  ///
+  /// Used for `let` bindings, fn parameters and pattern bindings, so
+  /// all three get nested field columns (#239).
+  pub fn register_struct_members(
     &mut self,
     prefix: &str,
     ty: Ty<'tcx>,
     top_owner_hash: u64,
     mutability: bool,
-    construction_expr: &'tcx Expr<'tcx>,
+    site: MemberSite,
   ) {
     let generic_args = match ty.kind() {
       TyKind::Adt(_, args) => *args,
       _ => unreachable!("register_struct_members called with non-Adt ty"),
     };
-    let owner_id = construction_expr.hir_id.owner;
-    let assigned_at = expr_to_line(&construction_expr, &self.tcx);
+    let owner_id = site.owner_id;
     for field in ty.ty_adt_def().unwrap().all_fields() {
       let field_name = format!("{}.{}", prefix, field.name.as_str());
       let field_ty = field.ty(self.tcx, generic_args);
-      if field_ty.is_ref() {
+      if let (true, Some(ref_lender)) = (field_ty.is_ref(), &site.ref_lender) {
         let ref_mutability = bool_of_mut(field_ty.ref_mutability().unwrap());
         let pointee_copy = self.ref_pointee_is_copy(field_ty, owner_id);
         if ref_mutability {
           self.add_mut_ref_member(field_name.clone(), mutability,
-              self.current_scope, !self.inside_branch, Some(top_owner_hash), pointee_copy);
+              site.scope, site.is_global, Some(top_owner_hash), pointee_copy);
         } else {
           self.add_static_ref_member(field_name.clone(), mutability,
-              self.current_scope, !self.inside_branch, Some(top_owner_hash), pointee_copy);
+              site.scope, site.is_global, Some(top_owner_hash), pointee_copy);
         }
         // Same lender-placeholder rationale as the flat case before
         // the refactor: borrow stored in this field outlives the
         // statement, so stretch the loan to the enclosing scope so
         // the ref-line trapezoid actually has a non-degenerate range.
         self.borrow_map.insert(field_name, RefData {
-          lender: ResourceTy::Anonymous,
-          assigned_at,
-          lifetime: self.current_scope,
+          lender: ref_lender.clone(),
+          assigned_at: site.assigned_at,
+          lifetime: site.scope,
           ref_mutability,
           aliasing: VecDeque::new(),
           static_lender: None,
@@ -1324,7 +1348,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       } else {
         let field_is_copy = self.ty_is_copy(field_ty, owner_id);
         self.add_struct(field_name.clone(), top_owner_hash, true, mutability, field_is_copy, self.ty_has_interior_mut(field_ty, owner_id),
-            self.current_scope, !self.inside_branch);
+            site.scope, site.is_global);
         self.mark_if_manually_drop(&field_name, field_ty);
         // Recurse for nested struct fields. Skip enums / unions
         // (only struct ADTs are flattened today) and skip the
@@ -1338,7 +1362,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 field_ty,
                 top_owner_hash,
                 mutability,
-                construction_expr,
+                site.clone(),
               );
             }
           }
@@ -1414,20 +1438,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                         let owner_hash = self.rap_hashes as u64; // Assuming self.rap_hashes exists
                         let parent_is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                         self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
-                        let generic_args = match ty.kind() {
-                            TyKind::Adt(_, args) => *args,
-                            _ => unreachable!("ty.is_adt() but kind is not Adt"),
-                        };
                         // Like define_lhs: don't expose the internals of
                         // `String` / `Vec` / `Box` / … (`n.vec` for a
-                        // `Some(n)` binding of a String).
-                        let fields = if ty_is_special_owner(&ty) { None } else { ty.ty_adt_def() };
-                        for field in fields.into_iter().flat_map(|d| d.all_fields()) {
-                            let field_name = format!("{}.{}", name, field.name.as_str());
-                            let field_ty = field.ty(self.tcx, generic_args);
-                            let field_is_copy = self.ty_is_copy(field_ty, pat.hir_id.owner);
-                            self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_has_interior_mut(field_ty, pat.hir_id.owner), scope, false);
-                            self.mark_if_manually_drop(&field_name, field_ty);
+                        // `Some(n)` binding of a String). Nested struct
+                        // fields get columns too (`r.tl.x`, #239).
+                        // A reference field's lender isn't known here
+                        // (it's whatever the matched value's field
+                        // borrowed), so reference fields keep the plain
+                        // column they had before (#352).
+                        if !ty_is_special_owner(&ty) {
+                            self.register_struct_members(&name, ty, owner_hash, muta, MemberSite {
+                                owner_id: pat.hir_id.owner,
+                                assigned_at: line_num,
+                                scope,
+                                is_global: false,
+                                ref_lender: None,
+                            });
                         }
                     },
                     // Unions render as opaque single-owner columns —

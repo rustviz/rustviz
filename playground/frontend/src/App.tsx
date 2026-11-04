@@ -274,6 +274,9 @@ const Description: React.FC = () => (
         as owning a value afterwards; Rust treats it as possibly uninitialized.
       </li>
       <li>
+        A reference field of a struct bound by <code>if let</code>/<code>match</code> is drawn as an owner.
+      </li>
+      <li>
         Shadowed variables (<code>let x</code> twice) share one column;{' '}
         tuples (<code>let t = (…)</code>, <code>t.0</code>) show no events;{' '}
         <code>Rc</code> clones each appear to drop the value.
