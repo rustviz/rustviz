@@ -316,8 +316,13 @@ const Description: React.FC = () => (
         a function, only what it moves or copies in); in a method chain only
         the first call is drawn on the variable (later calls work on temporary
         results); a match guard&apos;s events appear only in its own arm;{' '}
-        <code>async</code>/<code>await</code> and your own macros aren&apos;t
-        visualized.
+        <code>async</code>/<code>await</code> aren&apos;t visualized.
+      </li>
+      <li>
+        Your own <code>macro_rules!</code> macros that use a variable aren&apos;t
+        visualized yet: the program is refused rather than drawn wrongly. A
+        macro that only forwards a variable to <code>println!</code> and
+        friends is shown as that read.
       </li>
       <li>
         Values dropped when a function leaves early are drawn for a{' '}
