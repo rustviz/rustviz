@@ -1243,6 +1243,17 @@ pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool) -> Strin
     )
 }
 
+/// `event_dot_branch_merge_bound` for a Copy variable (`let n = match x
+/// { 0 => 1, _ => 2 };`): an `i32` holds a value, not a resource it
+/// owns (#316). Matches the per-arm `event_dot_acquire_copyable`.
+pub fn event_dot_branch_merge_bound_copy(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} is bound to a value (in all branches above)",
+        my_name_fmt
+    )
+}
+
 /// Some-moved-some-alive case: at least one branch consumed the
 /// variable, at least one didn't. Rust treats the variable as
 /// possibly-moved after the conditional (so it can't be used) and
