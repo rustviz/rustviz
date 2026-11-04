@@ -400,9 +400,22 @@ pub fn render_svg(
             // function call, to the caller, or into a place with no
             // column (`v[i] = s`, `self.name = s`, `r.name = s`: `to` is
             // Anonymous; otherwise s would later be shown dropping a
-            // resource it gave away) now gets appended on its own; other
-            // off-map arrows stay undrawn as before, just without the
-            // duplicate append.
+            // resource it gave away) now gets appended on its own, as
+            // does a borrow of a temporary (`let r = &{};`, `let r =
+            // &S { a: 4 };`: `from` is Anonymous), which otherwise loses
+            // r's "immutably borrows a resource" start whenever r's
+            // borrow also ends on that line (#204).
+            //
+            // The off-map arrows still left out are ones whose endpoints
+            // are wrong upstream, so drawing them would add a false
+            // tooltip: a reference's borrow "returned" to a function it
+            // never borrowed from (`for word in s.split_whitespace()`:
+            // "Return immutably borrowed resource from word to
+            // split_whitespace"), and calling a closure read as
+            // initialising it ("add_one is initialized by copy from
+            // Anonymous resource"). A Copy from a temporary into a
+            // function's argument (`Some(*x + 1)`) draws nothing either
+            // way.
             let id = event.get_id();
             let line_ev = visualization_data.event_line_map.get(&line_num);
             let in_map = line_ev.map_or(false, |ev| ev.iter().any(|x| x.get_id() == id));
@@ -412,7 +425,12 @@ pub fn render_svg(
                 let from_fn = from.extract_rap().map_or(false, |rap| rap.is_fn());
                 let into_unmodelled_place = matches!(to, ResourceTy::Anonymous)
                     && !matches!(from, ResourceTy::Anonymous);
-                if is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place) {
+                let is_borrow = matches!(event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
+                let borrow_of_temporary = is_borrow
+                    && matches!(from, ResourceTy::Anonymous)
+                    && matches!(to, ResourceTy::Value(_) | ResourceTy::Deref(_));
+                if (is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
+                    || borrow_of_temporary {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
                 }
                 i += 1;
