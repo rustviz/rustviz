@@ -49,9 +49,18 @@ pub fn annotate_struct_field (
   m: & TyCtxt
 ) {
   let name:String = field.ident.as_str().to_owned();
+  // `hashes` is the plugin-wide RAP hash counter (`rap_hash_num` in
+  // plugin.rs), and struct items are annotated in the same pass that
+  // visits fn bodies. It must only ever count up: it used to wrap
+  // with `% 10`, so a fn visited after a struct item reused hashes
+  // that an earlier fn's variables already had. Timelines are keyed
+  // by hash, so those variables were drawn in one column (or the
+  // renderer panicked), and `fn_start_lines` got two lines for one
+  // hash and kept whichever the HashMap visited last, a different one
+  // on each run.
   let hash = *hash_map.entry(name.clone()).or_insert_with(|| {
     let current_hash = *hashes;
-    *hashes = (*hashes + 1) % 10;
+    *hashes += 1;
     current_hash
   });
 
@@ -88,8 +97,11 @@ pub fn annotate_toplevel_fn (
   let hash = match raps.get(&func_name) {
     Some(r) => { *r.rap.hash() }
     None => {
+      // Count up, never wrap (see `annotate_struct_field`): a wrapped
+      // value would reuse a variable's hash, and hovering that
+      // variable would also highlight this fn's name.
       let current_hash = *hashes;
-      *hashes = (*hashes + 1) % 10;
+      *hashes += 1;
       current_hash as u64
     }
   };

@@ -23,6 +23,7 @@ fn merge_visitor_raps(
   per_fn: HashMap<String, RapData>,
   fn_start_line: usize,
 ) {
+  #[expect(clippy::iter_over_hash_type, reason = "per_fn's keys are distinct, so each goes to its own global entry")]
   for (name, data) in per_fn {
     match data.rap {
       ResourceAccessPoint::Function(_) => {
@@ -321,11 +322,16 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // Functions are excluded — they don't get columns and span the
   // whole file, so giving them a single fn_start would mis-locate
   // their (non-existent) labels.
-  let fn_start_lines: HashMap<u64, usize> = rap_map
+  // RAP hashes are unique (#231); sorting first means that if two ever
+  // collided again, the same entry would win on every run.
+  #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
+  let mut fn_starts: Vec<(u64, usize)> = rap_map
     .values()
     .filter(|d| !matches!(d.rap, ResourceAccessPoint::Function(_)))
     .map(|d| (*d.rap.hash(), d.fn_start_line))
     .collect();
+  fn_starts.sort();
+  let fn_start_lines: HashMap<u64, usize> = fn_starts.into_iter().collect();
 
   // Pass information to svg-generator
   match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, hidden_source_lines, args.write_to_cwd) {

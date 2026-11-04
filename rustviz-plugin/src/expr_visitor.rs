@@ -445,6 +445,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// StaticRef/MutRef members with their own loan bookkeeping.
   pub fn struct_children(&self, parent: &str) -> Vec<ResourceAccessPoint> {
     let prefix = format!("{}.", parent);
+    #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) below")]
     let mut v: Vec<ResourceAccessPoint> = self.raps.iter()
       .filter(|(n, rd)| {
         n.starts_with(&prefix)
@@ -453,7 +454,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       })
       .map(|(_, rd)| rd.rap.clone())
       .collect();
-    v.sort_by_key(|r| *r.hash());
+    v.sort_by(|a, b| a.hash().cmp(b.hash()).then_with(|| a.name().cmp(b.name())));
     v
   }
 
@@ -1588,7 +1589,13 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
 
 // add GOS events for RAPs in the current scope  
 pub fn print_out_of_scope(&mut self){
-  for (_, rap) in self.raps.clone().iter() {
+  // Visit RAPs in declaration order, not `self.raps`' hash order, so
+  // the GoOutOfScope events (and their ids) come out the same on
+  // every run (#211).
+  #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) on the next line")]
+  let mut raps: Vec<RapData> = self.raps.values().cloned().collect();
+  raps.sort_by(|a, b| a.rap.hash().cmp(b.rap.hash()).then_with(|| a.rap.name().cmp(b.rap.name())));
+  for rap in raps.iter() {
     // need this to avoid duplicating out of scope events, this is due to the fact that RAPS is a map that lives over multiple fn ctxts
     // if a rap isn't global it means we annotated its GOS event inside its respective branch already
     if !rap.rap.is_fn() && rap.is_global {
@@ -1619,6 +1626,7 @@ pub fn print_out_of_scope(&mut self){
     // this is necessary for some cases where we can't know where a lifetime actually ends
     // see tests/basic_if7.rs for an example
     let mir_b_data = self.gather_borrow_data(&self.bwf);
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each entry is refined on its own from the mir_b_data Vec")]
     for (_name, data) in self.borrow_map.iter_mut() {
       for m_data in mir_b_data.iter() {
         match ExprVisitor::borrow_match(data, m_data) {
@@ -1651,16 +1659,19 @@ pub fn print_out_of_scope(&mut self){
     // that die strictly earlier than the region's max stay
     // non-ultimate and remain RefDie (correct: they don't
     // visually represent the lender's borrow being given back).
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
     for (_, refs) in lender_to_refs.iter() {
       let regions = get_regions(refs, &self.borrow_map);
       for region in regions.iter() {
         let mut max_lifetime: usize = 0;
+        #[expect(clippy::iter_over_hash_type, reason = "computes a max")]
         for r in region {
           let lifetime = self.borrow_map.get(r).unwrap().lifetime;
           if lifetime > max_lifetime {
             max_lifetime = lifetime;
           }
         }
+        #[expect(clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
         for r in region {
           if self.borrow_map.get(r).unwrap().lifetime == max_lifetime {
             ultimate_refs.insert(r.to_owned());
@@ -1670,6 +1681,7 @@ pub fn print_out_of_scope(&mut self){
     }
 
     // if a reference borrowed from an anonymous owner then it must be an ultimate ref
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
     for (name, ref_data) in self.borrow_map.iter() {
       match ref_data.lender {
         ResourceTy::Anonymous => {
@@ -1680,9 +1692,22 @@ pub fn print_out_of_scope(&mut self){
     }
     let b_map = self.borrow_map.clone();
 
-    // sort by number of aliases so events are ordered in a proper cascading fashion
+    // sort by number of aliases so events are ordered in a proper cascading fashion.
+    // `b_map` is a HashMap, so refs with the same alias count used to
+    // keep its per-process random order, and two return arrows on the
+    // same line (`let t = s; println!("{} {}", s, t);`) swapped places
+    // from run to run (#211). Break ties in source order: where the
+    // borrow was made, then declaration order of the ref, then name.
     let mut vec: Vec<(String, RefData)> = b_map.into_iter().collect();
-    vec.sort_by(|a, b| b.1.aliasing.len().cmp(&a.1.aliasing.len()));
+    vec.sort_by(|a, b| {
+      b.1.aliasing.len().cmp(&a.1.aliasing.len())
+        .then_with(|| a.1.assigned_at.cmp(&b.1.assigned_at))
+        .then_with(|| {
+          let hash_of = |k: &String| self.raps.get(k).map(|r| *r.rap.hash());
+          hash_of(&a.0).cmp(&hash_of(&b.0))
+        })
+        .then_with(|| a.0.cmp(&b.0))
+    });
 
     // Add events
     for (k, RefData {lender: r_ty, assigned_at: _, lifetime, ref_mutability: ref_mut, aliasing: _}) in &vec {

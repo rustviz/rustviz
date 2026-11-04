@@ -275,6 +275,9 @@ const EXPECTED_OK: &[&str] = &[
     // A String moved into a field of a method call's result, and a
     // nested field write through one (from closed PR #186).
     "field_of_method_result_assign",
+    // A struct item between two fns (#231): main's variables used to
+    // reuse helper's RAP hashes, and here the renderer panicked.
+    "struct_after_fn_panic",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2402,6 +2405,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. Its resource is dropped.",
         ],
     },
+
+    // ─── Overlapping borrows (#211) ─────────────────────────────────
+    TooltipExpect {
+        name: "overlapping_borrow_regions",
+        // a, c and b borrow x with chained live ranges (a ends while c
+        // is live, b starts before c ends), so x is borrowed without a
+        // break until b's last use, and only b gives the borrow back.
+        // Before #211 the borrows were grouped in HashSet order: on
+        // some runs c "returned" the borrow while b still held it, and
+        // x read as "no longer immutably borrowed" one line early.
+        must_contain: &[
+            "Return immutably borrowed resource from b to x",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from c to x",
+            "Return immutably borrowed resource from a to x",
+        ],
+    },
+
+    // ─── Struct item between fns (#231) ─────────────────────────────
+    TooltipExpect {
+        name: "struct_after_fn_hashes",
+        // main's s and t have their own columns. Before #231 they
+        // shared helper's b and c columns (helper's ninth binding
+        // pushed the RAP hash counter past 9, and the struct's field
+        // wrapped it back), so main read as b and c, including a
+        // borrow by helper's i32 `a` that the program never makes.
+        must_contain: &[
+            "s is the owner of the resource",
+            "t is the owner of the resource",
+            "Move from s to t",
+            "t goes out of scope. Its resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a immutably borrows a resource",
+            "b's resource is moved",
+            "c acquires ownership of a resource",
+            "b goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -2655,6 +2699,75 @@ fn corpus_expected_tooltips_present() {
         failures.len(),
         EXPECTED_TOOLTIPS.len(),
         failures.join("\n  ")
+    );
+}
+
+/// Snippets whose output used to depend on HashMap/HashSet iteration
+/// order (#211). std's hash collections are seeded per process, so
+/// each `cargo rv-plugin` run could pick a different order.
+///
+///   * `str_literal_copy`, `basic_deref3`, `multiple_imm_borrows`:
+///     several borrows end on the same line and their return arrows
+///     were drawn in a different order (and at different rows) per run.
+///   * `overlapping_borrow_regions`: grouping chained borrows into
+///     regions depended on set order, which changed which return
+///     arrows were drawn at all.
+///   * `struct_after_fn_hashes` (#231): two RAPs shared a hash, and
+///     the fn line kept for that hash (which places the column labels)
+///     was whichever one the HashMap visited last.
+const DETERMINISM_CASES: &[&str] = &[
+    "str_literal_copy",
+    "basic_deref3",
+    "multiple_imm_borrows",
+    "overlapping_borrow_regions",
+    "struct_after_fn_hashes",
+];
+const DETERMINISM_RUNS: usize = 6;
+
+/// Rendering the same program twice must give the same bytes: the
+/// playground and Pages caches key on the source, and byte-level
+/// regression diffs need a stable baseline (#211).
+#[test]
+fn plugin_output_is_deterministic() {
+    let mut failures = Vec::new();
+    for name in DETERMINISM_CASES {
+        let first = run_with_local_backend(name);
+        assert_well_formed(name, &first);
+        for run in 2..=DETERMINISM_RUNS {
+            let again = run_with_local_backend(name);
+            if again.code_panel_string() != first.code_panel_string()
+                || again.timeline_panel_string() != first.timeline_panel_string()
+            {
+                failures.push(format!("{}: run {} differs from run 1", name, run));
+                break;
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "plugin output changed between identical runs:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// Return arrows that end on the same line are drawn in source order:
+/// the ref borrowed first returns first (top row), then the next.
+/// `basic_deref3`: `y = &x` (line 3), `z = y` (4), `a = z` (5), all
+/// last used on line 6.
+#[test]
+fn same_line_return_arrows_follow_source_order() {
+    let rv = run_with_local_backend("basic_deref3");
+    let returns: Vec<String> = timeline_tooltips(&rv.timeline_panel_string())
+        .into_iter()
+        .filter(|t| t.starts_with("Return immutably borrowed resource from"))
+        .collect();
+    assert_eq!(
+        returns,
+        [
+            "Return immutably borrowed resource from y to x",
+            "Return immutably borrowed resource from z to x",
+            "Return immutably borrowed resource from a to x",
+        ],
     );
 }
 

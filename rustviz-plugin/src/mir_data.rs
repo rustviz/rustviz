@@ -10,7 +10,7 @@
 use crate::{expr_visitor::*, expr_visitor_utils::span_to_line};
 use log::info;
 use rustc_middle::mir::{Location, Local};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
 use rustc_utils::SpanExt;
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, RustcFacts};
@@ -18,6 +18,14 @@ use rustc_span::Span;
 use polonius_engine::{Algorithm, Output, FactTypes};
 type Loan = <RustcFacts as FactTypes>::Loan;
 type Point = <RustcFacts as FactTypes>::Point;
+
+/// Local -> source name. `debug_info_name_map` is a HashMap; walk it in
+/// name order so that if two names ever share a Local (closure captures
+/// all live in `_1`), the same name wins on every run (#211).
+fn local_names(body: &rustc_middle::mir::Body<'_>) -> HashMap<Local, String> {
+    let by_name: BTreeMap<String, Local> = body.debug_info_name_map().into_iter().collect();
+    by_name.into_iter().map(|(name, local)| (local, name)).collect()
+}
 
 pub struct MIRBorrowData {
     pub borrow_idx: usize,
@@ -75,12 +83,13 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let p_output = Output::compute(&body_with_facts.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
 
         // compute local to name map
-        let mut loc_to_source_name: HashMap<Local, String> = HashMap::new();
-        body_with_facts.body.debug_info_name_map().into_iter().for_each(|(k, v)| {loc_to_source_name.insert(v, k);});
+        let loc_to_source_name = local_names(&body_with_facts.body);
         
         
         // compute the loan regions
         let mut loan_regions: HashMap<Loan, (usize, usize)> = HashMap::new();
+        // `loan_live_at` is an FxHashMap (fixed but arbitrary order).
+        #[expect(clippy::disallowed_methods, reason = "keeps a min/max line per loan; order doesn't matter")]
         p_output.loan_live_at.iter().for_each(|(point, loans)| {
           loans.iter().for_each(|loan| {
             loan_regions.entry(*loan).and_modify(|(l1, l2)|{
@@ -182,8 +191,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // would be nice to use MIR to figure out where drops occur rather than our own internal state logic
     pub fn gather_drop_data(&self, body_with_facts: &BodyWithBorrowckFacts) -> HashMap<String, usize> {
         // compute local to name map
-        let mut loc_to_source_name: HashMap<Local, String> = HashMap::new();
-        body_with_facts.body.debug_info_name_map().into_iter().for_each(|(k, v)| {loc_to_source_name.insert(v, k);});
+        let loc_to_source_name = local_names(&body_with_facts.body);
 
         let mut res = HashMap::new();
         for (local, loc_idx) in body_with_facts.input_facts.as_ref().unwrap().var_dropped_at.iter() {

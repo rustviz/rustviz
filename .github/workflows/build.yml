@@ -92,6 +92,18 @@ jobs:
           RV_RUNNER: local
         run: cargo test --workspace --locked
 
+      - name: Lint plugin for unordered HashMap/HashSet iteration (clippy)
+        # Their iteration order is random per process, and when it reached
+        # the output, diagrams differed between runs (#211). Only the two
+        # lints denied in rustviz-plugin/src/lib.rs run (banned methods are
+        # in clippy.toml); clippy's other lints are off. clippy is added
+        # here rather than in rust-toolchain.toml so local setups and the
+        # runner image don't grow.
+        if: runner.os == 'Linux'
+        run: |
+          rustup component add clippy
+          cargo clippy -p rustviz-plugin --locked -- -A clippy::all -D clippy::disallowed_methods -D clippy::iter_over_hash_type -D unfulfilled_lint_expectations
+
       - name: Smoke test the playground end-to-end (production code path)
         if: runner.os == 'Linux'
         # Production's path: RV_RUNNER=sandbox -> rv-runner.sh -> the

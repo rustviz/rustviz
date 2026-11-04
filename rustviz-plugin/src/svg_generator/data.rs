@@ -1221,6 +1221,20 @@ pub struct VisualizationData {
     pub fn_start_lines: HashMap<u64, usize>,
 }
 
+/// The RAPs of `raps` in declaration order: by RAP hash (assigned from
+/// a counter as the visitor registers each RAP, so it follows the
+/// source), then by name.
+///
+/// Use this instead of iterating a `HashSet`/`HashMap` of RAPs directly
+/// whenever the loop emits events or assigns event ids: std's hash
+/// collections iterate in a per-process random order, so the plugin's
+/// output would differ from run to run (#211).
+pub fn in_decl_order<'a>(raps: impl IntoIterator<Item = &'a ResourceAccessPoint>) -> Vec<&'a ResourceAccessPoint> {
+    let mut v: Vec<&ResourceAccessPoint> = raps.into_iter().collect();
+    v.sort_by(|a, b| ResourceAccessPoint::hash(a).cmp(ResourceAccessPoint::hash(b)).then_with(|| a.name().cmp(b.name())));
+    v
+}
+
 #[allow(non_snake_case)]
 pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&ResourceTy, &ResourceTy){
     let (from, to) = match external_event {
@@ -1913,7 +1927,7 @@ impl Visualizable for VisualizationData {
                 ExternalEvent::Branch { branches, .. } => {
                     for branch in branches.iter() {
                         // visit node
-                        for var in branch.decl_vars.iter() {
+                        for var in in_decl_order(&branch.decl_vars) {
                             let mut b_history: Vec<(usize, Event)> = Vec::new();
                             let is = &ResourceTy::Value(var.clone());
                             for (l, e) in branch.e_data.iter() {
@@ -1973,7 +1987,7 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, id } => {
                 // need to add events with more granularity for Branches
-                for var in live_vars.iter() { // for all the live variables in the branch
+                for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
                     let mut branch_history: Vec<BranchData> = Vec::new();
                     for branch in branches.iter() { // for each branch
@@ -2003,7 +2017,7 @@ impl Visualizable for VisualizationData {
 
                 // have to append events for variables declared inside the block
                 for branch in branches.iter() {
-                    for var in branch.decl_vars.iter() {
+                    for var in in_decl_order(&branch.decl_vars) {
                         let mut b_history: Vec<(usize, Event)> = Vec::new();
                         let is = &ResourceTy::Value(var.clone());
                         for (l, e) in branch.e_data.iter() {

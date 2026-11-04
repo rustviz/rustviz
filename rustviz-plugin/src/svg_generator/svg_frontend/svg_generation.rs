@@ -182,9 +182,10 @@ pub fn render_svg(
     let (post_hide_a, post_hide_s) = if hide_lines.is_empty() {
         (annotated_src_str.to_string(), source_rs_str.to_string())
     } else {
+        #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
         let mut sorted: Vec<usize> = hide_lines.iter().copied().collect();
         sorted.sort();
-        let removed_set: HashSet<usize> = hide_lines.iter().copied().collect();
+        let removed_set: HashSet<usize> = hide_lines.clone();
         // Number of hidden lines strictly less than `l`.
         let removed_before = move |l: usize| -> usize {
             sorted.iter().take_while(|&&r| r < l).count()
@@ -211,6 +212,7 @@ pub fn render_svg(
         visualization_data
             .fn_start_lines
             .retain(|_, l| !removed_set.contains(l));
+        #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "updates each value on its own")]
         for v in visualization_data.fn_start_lines.values_mut() {
             *v = shift(*v);
         }
@@ -252,6 +254,7 @@ pub fn render_svg(
     let a_lines_orig: Vec<&str> = annotated_src_str.lines().collect();
     let s_lines_orig: Vec<&str> = source_rs_str.lines().collect();
 
+    #[expect(clippy::disallowed_methods, reason = "sorted on the next statement")]
     let mut sorted_fn_starts: Vec<usize> = visualization_data
         .fn_start_lines
         .values()
@@ -306,6 +309,7 @@ pub fn render_svg(
             line + blanks.iter().filter(|&&f| f <= line).count()
         };
 
+        #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "updates each value on its own")]
         for v in visualization_data.fn_start_lines.values_mut() {
             *v = shift(*v);
         }
@@ -468,6 +472,7 @@ pub fn render_svg(
     // same source line as a fn signature don't shift the signature
     // (the extras are placed *after* the event's row, not before).
     extras_at_source_line.sort_by_key(|(s, _)| *s);
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "updates each value on its own")]
     for src_line in visualization_data.fn_start_lines.values_mut() {
         let extras_before: usize = extras_at_source_line
             .iter()
