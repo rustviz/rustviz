@@ -804,7 +804,7 @@ pub fn get_borrowers(borrower: &String, borrow_map: &HashMap<String, RefData>) -
 pub fn get_aliasing_data(r: &ResourceTy, borrow_map: &HashMap<String, RefData>) -> VecDeque<String> {
   match r {
     ResourceTy::Anonymous | ResourceTy::Caller => VecDeque::new(),
-    ResourceTy::Value(x) | ResourceTy::Deref(x) => {
+    ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _) => {
       match borrow_map.get(x.name()) {
         Some(r_data) => r_data.aliasing.to_owned(),
         None => VecDeque::new()

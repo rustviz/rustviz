@@ -511,6 +511,33 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
    ... from <Resource Owner 1>
  */
 
+// Write to one element of a resource: `v[i] = x;`, `a[i] += 1;`.
+// The element lives inside the resource `holder` owns (or, when
+// `holder` is a reference, inside the resource it points to), so
+// `holder` neither acquires a new resource nor drops its old one.
+// `place` is the element as written (`v[i]`). `source` names the
+// variable the new value was copied or moved from, if any.
+pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: bool, source: Option<(&String, bool)>) -> String {
+    let base = if holder_is_ref {
+        format!(
+            "the resource {0} points to is modified through {1}",
+            fmt_style(holder),
+            fmt_style(place)
+        )
+    } else {
+        format!(
+            "{0}'s resource is modified through {1}",
+            fmt_style(holder),
+            fmt_style(place)
+        )
+    };
+    match source {
+        Some((from, true)) => format!("{} (copied from {})", base, fmt_style(from)),
+        Some((from, false)) => format!("{} (moved from {})", base, fmt_style(from)),
+        None => base,
+    }
+}
+
 // 1   0        1   0
 // |            |   
 // o-->*   or   o-->*     the star event

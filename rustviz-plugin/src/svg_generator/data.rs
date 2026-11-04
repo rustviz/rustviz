@@ -235,7 +235,14 @@ pub enum ResourceTy {
     Anonymous, // an anonymous resource holder
     Deref(ResourceAccessPoint), // Dereferencing a RAP
     Caller, // For expressing relationship between return expr and fn
-    Value(ResourceAccessPoint) 
+    Value(ResourceAccessPoint),
+    // A write to an element of the RAP's resource: the LHS of
+    // `v[i] = x` / `a[i] += 1` / `r[i] = x`. Events land on the RAP's
+    // column (elements have none of their own), but the RAP neither
+    // acquires a new resource nor drops its old one; one element is
+    // overwritten. The String is the place as written (`v[i]`), used
+    // in tooltips and arrow labels.
+    Index(ResourceAccessPoint, String)
 }
 
 impl ResourceTy {
@@ -244,6 +251,7 @@ impl ResourceTy {
             ResourceTy::Anonymous => "Anonymous resource".to_owned(),
             ResourceTy::Value(r) => r.name().to_owned(),
             ResourceTy::Deref(r) => format!("*{}", r.name()),
+            ResourceTy::Index(_, place) => place.clone(),
             ResourceTy::Caller => "Caller".to_owned()
         }
     }
@@ -251,7 +259,7 @@ impl ResourceTy {
     pub fn real_name(&self) -> String {
         match self {
             ResourceTy::Anonymous => "Anonymous resource".to_owned(),
-            ResourceTy::Value(r) | ResourceTy::Deref(r) => r.name().to_owned(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _) => r.name().to_owned(),
             ResourceTy::Caller => "Caller".to_owned()
         }
     }
@@ -259,27 +267,27 @@ impl ResourceTy {
     pub fn hash(&self) -> &u64 {
         match self {
             ResourceTy::Caller | ResourceTy::Anonymous => &std::u64::MAX,
-            ResourceTy::Value(r) | ResourceTy::Deref(r) => r.hash(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _) => r.hash(),
         }
     }
 
     pub fn is_ref(&self) -> bool {
       match self {
-        ResourceTy::Value(r) | ResourceTy::Deref(r) => r.is_ref(),
+        ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _) => r.is_ref(),
         _ => false
       }
     }
 
     pub fn is_mutref(&self) -> bool {
         match self {
-            ResourceTy::Value(r) | ResourceTy::Deref(r) => r.is_mutref(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _) => r.is_mutref(),
             _ => false
           }
     }
 
     pub fn is_closure(&self) -> bool {
         match self {
-            ResourceTy::Value(r) | ResourceTy::Deref(r) => r.is_closure(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _) => r.is_closure(),
             _ => false
         }
     }
@@ -287,7 +295,7 @@ impl ResourceTy {
     pub fn extract_rap(&self) -> Option<&ResourceAccessPoint> {
         match self {
             ResourceTy::Anonymous | ResourceTy::Caller => None,
-            ResourceTy::Deref(r) | ResourceTy::Value(r) => Some(r)
+            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _) => Some(r)
         }
     }
 
@@ -1426,6 +1434,14 @@ impl Event {
                     // generic message because there's no captured
                     // upvar to name on the closure side yet.
                     safe_message(hover_messages::event_dot_closure_capture_acquire, &self.deref_name(my_name), from)
+                } else if let ResourceTy::Index(r, place) = is {
+                    // `v[i] = s;` / `v[i] = 5;` overwrites one element
+                    // of the resource v owns (or points to); v
+                    // doesn't acquire anything. Name the source only
+                    // when it's a variable: a call's result or a
+                    // literal has no name worth repeating.
+                    let src_name = from.extract_rap().filter(|f| !f.is_fn()).map(|_| from.name());
+                    hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), src_name.as_ref().map(|n| (n, false)))
                 } else if let ResourceTy::Deref(r) = is {
                     // `*r += 1;` modifies what r points to in place.
                     // `*r = v;` is an assignment to the place `*r`: it
@@ -1452,6 +1468,11 @@ impl Event {
                 } else {
                     safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
                 }
+            }
+            Event::Copy{ from, is: ResourceTy::Index(r, place), ..} => {
+                // `v[i] = y;` with y: Copy overwrites one element.
+                let src_name = from.extract_rap().filter(|f| !f.is_fn()).map(|_| from.name());
+                hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), src_name.as_ref().map(|n| (n, true)))
             }
             Event::Copy{ from, is: ResourceTy::Deref(r), ..} => {
                 // `*r = y;` with y: Copy overwrites the resource r
@@ -2283,10 +2304,12 @@ impl Visualizable for VisualizationData {
             _ => {
                 let could_be = ResourceTy::Deref(rap.clone());
                 let (from, to) = ResourceAccessPoint_extract(event);
+                // An element write (`v[i] = x`) lands on v's column.
+                let to_elem = matches!(to, ResourceTy::Index(r, _) if r == rap);
                 if *from == *is || *from == could_be {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, false));
                 }
-                else if *to == *is || *to == could_be {
+                else if *to == *is || *to == could_be || to_elem {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
                 else if let Some(r) = event.is_gos_ev() {
@@ -2341,7 +2364,7 @@ impl Visualizable for VisualizationData {
         fn maybe_append_event (vd: & mut VisualizationData, resource_ty: &ResourceTy, event: Event, line_number: usize){
           match resource_ty {
             ResourceTy::Anonymous | ResourceTy::Caller => {}
-            ResourceTy::Deref(r) | ResourceTy::Value(r) => {
+            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _) => {
                 vd._append_event(&r, event, &line_number);
             }
           }

@@ -311,7 +311,9 @@ const Description: React.FC = () => (
       </li>
       <li>
         Writes to a field through a reference (<code>self.n += 1</code> in a{' '}
-        <code>&amp;mut self</code> method) or to <code>v[i]</code> aren&apos;t drawn.
+        <code>&amp;mut self</code> method) aren&apos;t drawn. A write to an
+        element (<code>v[i] = x</code>) is drawn on <code>v</code>&apos;s column,
+        unless the element is a reference (<code>v[i] = &amp;s</code>).
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

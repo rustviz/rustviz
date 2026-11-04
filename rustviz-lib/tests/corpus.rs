@@ -445,6 +445,10 @@ const EXPECTED_OK: &[&str] = &[
     "diverging_call_arm",
     // A diverging branch's column stops at its end (#317).
     "diverging_branch_stops",
+    // — Element writes (#144): `v[i] = …` is drawn on v's column as a
+    //   modification of v's resource, directly or through a reference.
+    "index_assign",
+    "index_assign_through_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4385,6 +4389,67 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              reaches the end of the conditional, and m's column doesn't either",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "index_assign",
+        // `v[0] = 9`, `v[1] += k`, `v[2] = v[0]`, `names[0] = s`,
+        // `grid[1][0] = 7`, `ps[0] = p`: one element is overwritten;
+        // the collection keeps its resource. Before #144 these writes
+        // weren't drawn, and `p.name` still dropped a String that had
+        // moved into `ps[0]` with `p`.
+        must_contain: &[
+            "v's resource is modified through v[0]",
+            "v's resource is modified through v[1]",
+            "v's resource is modified through v[2]",
+            "Move from s to names[0]",
+            "names's resource is modified through names[0] (moved from s)",
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+            "Move from String::from to names[0]",
+            "grid's resource is modified through grid[1][0]",
+            "Move from p to ps[0]",
+            "ps's resource is modified through ps[0] (moved from p)",
+            "p.name's resource is moved",
+            "p.name goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            // Treating `names[0] = …` as a write to `names` itself
+            // (the first version of this change) said the whole Vec
+            // was replaced and dropped.
+            "names acquires ownership of a new resource; its previous resource is dropped",
+            "v acquires ownership of a new resource; its previous resource is dropped",
+            // `v[1] += k`: k is an operand, not the element's new value.
+            "v's resource is modified through v[1] (copied from k)",
+            "Copy from k to v[1]",
+            "p.name goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "index_assign_through_ref",
+        // `xs[i] = x` (xs: &mut [i32]), `dst[0] = s` (dst: &mut Vec),
+        // `r[0] = …` (r = &mut v): the write modifies the resource the
+        // reference points to. The parameters' borrows still end on
+        // the write's line (another arrow on that line used to hide
+        // that event).
+        must_contain: &[
+            "Copy from x to xs[i]",
+            "the resource xs points to is modified through xs[i] (copied from x)",
+            "xs's mutable borrow ends",
+            "Move from s to dst[0]",
+            "the resource dst points to is modified through dst[0] (moved from s)",
+            "dst's mutable borrow ends",
+            "s goes out of scope. No resource is dropped.",
+            "Move from String::from to r[0]",
+            "the resource r points to is modified through r[0]",
+            "Return mutably borrowed resource from r to v",
+        ],
+        must_not_contain: &[
+            "xs acquires ownership of a resource",
+            "dst acquires ownership of a resource",
+            "dst acquires ownership of a new resource; its previous resource is dropped",
+            "r acquires ownership of a resource",
+            "s goes out of scope. Its resource is dropped.",
+        ],
     },
 ];
 
