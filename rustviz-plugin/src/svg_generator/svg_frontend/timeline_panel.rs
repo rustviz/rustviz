@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StructsInfo, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1071,6 +1071,27 @@ fn render_dot(
                         let resource_info: &str = ". No resource is dropped.";
                         data.title = event.print_message_with_name(& mut name);
                         data.title.push_str(resource_info);
+                    } else if let Some((moved, dropped)) = struct_partial_move_split(visualization_data, *hash) {
+                        // Partially moved struct (#207): only the
+                        // fields still holding a value are dropped.
+                        let title = hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &moved, &dropped);
+                        if dropped.is_empty() {
+                            data.title = title;
+                        } else {
+                            let cx = timeline_data.x_val;
+                            let cy = get_y_axis_pos(*line_number);
+                            let drop_data = DropDotData {
+                                hash: *hash as u64,
+                                dot_x: cx,
+                                dot_y: cy,
+                                title,
+                                p1x: cx - 3, p1y: cy - 1,
+                                p2x: cx + 3, p2y: cy - 1,
+                                p3x: cx,     p3y: cy + 3,
+                            };
+                            append_drop_dot(drop_data, timeline_data, dots);
+                            continue;
+                        }
                     } else if is_copy {
                         // Copy types have no Drop glue — going out of
                         // scope just reclaims storage. Render a plain
@@ -1410,22 +1431,71 @@ fn render_dots_string(
                     // a `let r = Rect{..}` shows the drop on r at end of
                     // scope (and on r.w / r.h, which are also Struct
                     // RAPs in the data model).
-                    let penultimate_state = timeline
-                        .states
-                        .get(timeline.states.len().saturating_sub(2))
-                        .unwrap_or(&(0, 0, State::Invalid))
-                        .2
-                        .clone();
-                    matches!(
-                        penultimate_state,
-                        State::FullPrivilege { .. } | State::PartialPrivilege { .. }
-                    )
+                    holds_resource_at_scope_end(timeline)
                 } else { false };
                 render_dot(hash, &timeline.history, &resource_owners_layout[hash], visualization_data, resource_hold, &mut dots);
             },
         }
     }
     dots
+}
+
+// Whether an owner / struct column still holds its resource just
+// before going out of scope: the penultimate state (the last one is the
+// out-of-scope state) is FullPrivilege / PartialPrivilege.
+fn holds_resource_at_scope_end(timeline: &Timeline) -> bool {
+    let penultimate_state = timeline
+        .states
+        .get(timeline.states.len().saturating_sub(2))
+        .unwrap_or(&(0, 0, State::Invalid))
+        .2
+        .clone();
+    matches!(
+        penultimate_state,
+        State::FullPrivilege { .. } | State::PartialPrivilege { .. }
+    )
+}
+
+// For a struct column (or a struct-typed field column such as
+// `o.inner`) whose fields were partly moved out (#207): the names of
+// the moved-out fields, and of the non-Copy leaf fields that still hold
+// a value at scope end, both in declaration order (timelines are keyed
+// by declaration-ordered hashes). A nested field counts under its
+// ancestors: `o.inner.x` moved out leaves `o.inner.y` and `o.z` to be
+// dropped. None when no field below `hash` was moved out.
+fn struct_partial_move_split(
+    visualization_data: &VisualizationData,
+    hash: u64,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let rap = &visualization_data.timelines.get(&hash)?.resource_access_point;
+    let ResourceAccessPoint::Struct(Struct { owner, .. }) = rap else { return None };
+    let root = if rap.is_member() { *owner } else { hash };
+    let prefix = format!("{}.", rap.name());
+    let fields: Vec<(&Timeline, &String, bool)> = visualization_data
+        .timelines
+        .values()
+        .filter_map(|t| match &t.resource_access_point {
+            ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, is_copy, .. })
+                if *owner == root && name.starts_with(&prefix) => Some((t, name, *is_copy)),
+            _ => None,
+        })
+        .collect();
+    let mut moved: Vec<String> = Vec::new();
+    let mut dropped = Vec::new();
+    for (timeline, name, is_copy) in &fields {
+        // Fields of an already-listed moved-out field went with it.
+        if moved.iter().any(|m| name.starts_with(&format!("{}.", m))) {
+            continue;
+        }
+        let child_prefix = format!("{}.", name);
+        let is_leaf = !fields.iter().any(|(_, n, _)| n.starts_with(&child_prefix));
+        if !holds_resource_at_scope_end(timeline) {
+            moved.push((*name).clone());
+        } else if is_leaf && !is_copy {
+            dropped.push((*name).clone());
+        }
+    }
+    if moved.is_empty() { None } else { Some((moved, dropped)) }
 }
 
 fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, Event)>, id: usize) -> Option<& 'a TimelineColumnData> {

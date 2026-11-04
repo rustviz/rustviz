@@ -306,6 +306,9 @@ const EXPECTED_OK: &[&str] = &[
     "same_line_events_one_dot",
     // A drop and a call on one merged dot: the drop mark sits below it.
     "drop_and_call_one_dot",
+    // A partially moved struct drops only its remaining fields (#207).
+    "struct_partial_move_all",
+    "struct_partial_move_nested",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2625,6 +2628,56 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[],
+    },
+    // ─── Partially moved structs (#207) ──────────────────────────────
+    // A struct with fields moved out isn't dropped as a whole; its
+    // scope-end tooltip names what was moved and what is dropped.
+    TooltipExpect {
+        name: "struct_partial_move_two",
+        must_contain: &[
+            "p goes out of scope. p.name was moved out earlier, so only p.nick is dropped.",
+        ],
+        must_not_contain: &[
+            "p goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_update_syntax",
+        must_contain: &[
+            "user1 goes out of scope. user1.username was moved out earlier, so only user1.email is dropped.",
+        ],
+        must_not_contain: &[
+            "user1 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_partial_move_all",
+        // Only the Copy `p.age` is left: nothing to drop.
+        must_contain: &[
+            "p goes out of scope. p.name and p.nick were moved out earlier, so no resource is dropped.",
+            "p.age goes out of scope",
+        ],
+        must_not_contain: &[
+            "p goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_partial_move_nested",
+        // A moved-out field's own fields went with it (`q.inner.x` is
+        // not listed separately), and the partially moved `o.inner`
+        // gets the same treatment as `o`.
+        must_contain: &[
+            "o goes out of scope. o.inner.x was moved out earlier, so only o.inner.y and o.z are dropped.",
+            "o.inner goes out of scope. o.inner.x was moved out earlier, so only o.inner.y is dropped.",
+            "o.inner.y goes out of scope. Its resource is dropped.",
+            "q goes out of scope. q.inner was moved out earlier, so only q.z is dropped.",
+            "q.inner goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "o goes out of scope. Its resource is dropped.",
+            "o.inner goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+        ],
     },
 ];
 
