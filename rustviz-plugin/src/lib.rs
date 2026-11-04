@@ -131,10 +131,95 @@ impl rustc_driver::Callbacks for RVCallbacks {
       _compiler: &rustc_interface::interface::Compiler,
       tcx: rustc_middle::ty::TyCtxt<'tcx>,
     ) -> rustc_driver::Compilation {
-      plugin::rv_visitor(tcx, &self.args);
-      // allow compilation to continue.
-      rustc_driver::Compilation::Continue
+      match catch_plugin_panic(|| plugin::rv_visitor(tcx, &self.args)) {
+        // allow compilation to continue.
+        Ok(()) => rustc_driver::Compilation::Continue,
+        Err(msg) => {
+          // Report through rustc's own diagnostics rather than letting
+          // the panic escape: cargo then prints a normal "could not
+          // compile" summary instead of the panic, a backtrace hint and
+          // the full driver command line.
+          tcx.dcx().err(msg);
+          rustc_driver::Compilation::Stop
+        }
+      }
     }
+}
+
+/// Stable prefix of the one-line message the plugin prints when it hits a
+/// construct it can't handle. `rustviz-lib` matches on it to tell "RustViz
+/// can't visualize this yet" apart from "this program doesn't compile";
+/// keep the two in sync (`rustviz_lib::UNSUPPORTED_PREFIX`).
+pub const UNSUPPORTED_PREFIX: &str = "rustviz: unsupported: ";
+
+const ISSUES_URL: &str = "https://github.com/rustviz/rustviz/issues";
+
+/// Panic message and location captured by the hook in `catch_plugin_panic`.
+static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Developers get the stock panic output (and a backtrace, with
+/// `RUST_BACKTRACE=1`) by setting `RUSTVIZ_DEBUG=1` or `RUST_BACKTRACE`.
+fn want_full_panic_output() -> bool {
+  let set = |k: &str| env::var(k).is_ok_and(|v| !v.is_empty() && v != "0");
+  set("RUSTVIZ_DEBUG") || set("RUST_BACKTRACE")
+}
+
+/// Run `f`, turning a panic into the one-line `rustviz: unsupported: ...`
+/// message. The panic hook is swapped only for the duration of `f`, so
+/// rustc's own handling of panics elsewhere is unchanged.
+fn catch_plugin_panic(f: impl FnOnce()) -> Result<(), String> {
+  use std::{panic, sync::Arc};
+
+  let verbose = want_full_panic_output();
+  let prev: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync> = Arc::from(panic::take_hook());
+  let prev_in_hook = Arc::clone(&prev);
+  panic::set_hook(Box::new(move |info| {
+    let msg = info
+      .payload()
+      .downcast_ref::<&str>()
+      .map(|s| (*s).to_string())
+      .or_else(|| info.payload().downcast_ref::<String>().cloned())
+      .unwrap_or_else(|| "unknown panic".to_string());
+    let loc = info.location().map(|l| {
+      let file = std::path::Path::new(l.file())
+        .file_name()
+        .map_or_else(|| l.file().to_string(), |f| f.to_string_lossy().into_owned());
+      format!("{}:{}", file, l.line())
+    });
+    let mut slot = LAST_PANIC.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.is_none() {
+      *slot = Some(match loc {
+        Some(loc) => format!("{}: {}", loc, msg),
+        None => msg,
+      });
+    }
+    drop(slot);
+    if verbose {
+      prev_in_hook(info);
+    }
+  }));
+
+  let result = panic::catch_unwind(panic::AssertUnwindSafe(f));
+  panic::set_hook(Box::new(move |info| prev(info)));
+
+  result.map_err(|_| {
+    let detail = LAST_PANIC
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+      .unwrap_or_else(|| "unknown panic".to_string());
+    // Keep it on one line: rustviz-lib looks for the prefix line-wise.
+    let detail: String = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail = match detail.char_indices().nth(300) {
+      Some((i, _)) => format!("{}...", &detail[..i]),
+      None => detail,
+    };
+    format!(
+      "{}RustViz can't visualize this program yet (internal error at {}). \
+       Please report it at {} with your snippet.",
+      UNSUPPORTED_PREFIX, detail, ISSUES_URL
+    )
+  })
 }
 
 

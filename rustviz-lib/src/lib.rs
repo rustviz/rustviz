@@ -141,28 +141,275 @@ pub const HELPERS_JS: &str = include_str!("helpers.js");
 /// a safety net against malicious input that wedges rustc.
 const RUNNER_TIMEOUT_SECS: u64 = 20;
 
-#[derive(Debug)]
-enum RvError {
-    FsError(String),
-    PluginError(String),
+/// Coarse classification of a [`Rustviz::new`] failure, for callers that
+/// present failures differently (the playground picks an HTTP status and
+/// a heading from it). Get it with [`error_kind`] or [`RvError::kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// The user's program doesn't compile (type error, borrow-check
+    /// error, syntax error, ...). Not a RustViz bug.
+    DoesNotCompile,
+    /// The program compiles but uses something the plugin can't handle
+    /// yet (the plugin panicked). A RustViz limitation or bug.
+    Unsupported,
+    /// The compile didn't finish within the runner's time limit.
     Timeout,
-    DockerUnavailable(String),
+    /// The sandbox / runner couldn't be started or is misconfigured.
+    SandboxUnavailable,
+    /// Anything else.
+    Other,
+}
+
+impl ErrorKind {
+    /// Stable kebab-case name, e.g. for an HTTP header or a CSS class.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorKind::DoesNotCompile => "does-not-compile",
+            ErrorKind::Unsupported => "unsupported",
+            ErrorKind::Timeout => "timeout",
+            ErrorKind::SandboxUnavailable => "sandbox-unavailable",
+            ErrorKind::Other => "other",
+        }
+    }
+}
+
+/// Classify an error returned by [`Rustviz::new`]. Errors that didn't
+/// come from RustViz itself (I/O, UTF-8, ...) are [`ErrorKind::Other`].
+pub fn error_kind(err: &(dyn Error + 'static)) -> ErrorKind {
+    err.downcast_ref::<RvError>()
+        .map_or(ErrorKind::Other, RvError::kind)
+}
+
+/// First sentence of the [`RvError::DoesNotCompile`] message. Its
+/// `Display` is this sentence, a blank line, then rustc's diagnostics.
+pub const DOES_NOT_COMPILE_INTRO: &str = "This program doesn't compile, and RustViz only visualizes \
+programs that rustc accepts, including the borrow checker. Here is rustc's error:";
+
+/// Prefix of the line the plugin prints on stderr when it hits a construct
+/// it can't handle (see `catch_plugin_panic` in rustviz-plugin/src/lib.rs;
+/// keep the two in sync).
+pub const UNSUPPORTED_PREFIX: &str = "rustviz: unsupported: ";
+
+const ISSUES_URL: &str = "https://github.com/rustviz/rustviz/issues";
+
+/// Error returned (boxed) by [`Rustviz::new`] for failures RustViz
+/// recognizes. Downcast a `Box<dyn Error>` to this, or call
+/// [`error_kind`], to branch on the kind.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RvError {
+    /// The program doesn't compile; `diagnostics` is rustc's output with
+    /// cargo's noise removed and the generated crate's path shown as
+    /// `your code`.
+    DoesNotCompile { diagnostics: String },
+    /// The plugin can't visualize this program; `message` is a full,
+    /// student-readable sentence (without [`UNSUPPORTED_PREFIX`]).
+    Unsupported { message: String },
+    /// The runner's time limit was hit.
+    Timeout,
+    /// The sandbox or runner couldn't be launched.
+    SandboxUnavailable(String),
+    /// `RV_RUNNER` / `RV_SANDBOX_CMD` are invalid.
     BadConfig(String),
+    /// Setting up the temporary crate failed.
+    FsError(String),
+    /// Unclassified plugin failure (cleaned-up stderr, or a description).
+    PluginError(String),
+}
+
+impl RvError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            RvError::DoesNotCompile { .. } => ErrorKind::DoesNotCompile,
+            RvError::Unsupported { .. } => ErrorKind::Unsupported,
+            RvError::Timeout => ErrorKind::Timeout,
+            RvError::SandboxUnavailable(_) | RvError::BadConfig(_) => {
+                ErrorKind::SandboxUnavailable
+            }
+            RvError::FsError(_) | RvError::PluginError(_) => ErrorKind::Other,
+        }
+    }
 }
 
 impl fmt::Display for RvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RvError::DoesNotCompile { diagnostics } => {
+                write!(f, "{}\n\n{}", DOES_NOT_COMPILE_INTRO, diagnostics)
+            }
+            RvError::Unsupported { message } => write!(f, "{}", message),
             RvError::FsError(msg) => write!(f, "File system error: {}", msg),
             RvError::PluginError(msg) => write!(f, "{}", msg),
             RvError::Timeout => write!(f, "Visualization timed out"),
-            RvError::DockerUnavailable(msg) => write!(f, "Sandbox unavailable: {}", msg),
+            RvError::SandboxUnavailable(msg) => write!(f, "Sandbox unavailable: {}", msg),
             RvError::BadConfig(msg) => write!(f, "Invalid runner configuration: {}", msg),
         }
     }
 }
 
 impl Error for RvError {}
+
+/// Turn the stderr of a failed `cargo rv-plugin` run into an [`RvError`]:
+///
+/// 1. the plugin's `rustviz: unsupported:` line (or, from a plugin without
+///    the panic handler, a raw `panicked at`) → [`RvError::Unsupported`];
+/// 2. rustc diagnostics → [`RvError::DoesNotCompile`];
+/// 3. anything else → [`RvError::PluginError`] with the same cleanup.
+fn classify_failure(stderr: &str) -> RvError {
+    let stderr = strip_ansi(stderr);
+    if let Some(message) = stderr.lines().find_map(|l| {
+        l.find(UNSUPPORTED_PREFIX)
+            .map(|i| l[i + UNSUPPORTED_PREFIX.len()..].trim().to_string())
+    }) {
+        return RvError::Unsupported { message };
+    }
+    if let Some(detail) = raw_panic_detail(&stderr) {
+        return RvError::Unsupported {
+            message: format!(
+                "RustViz can't visualize this program yet (internal error at {}). \
+                 Please report it at {} with your snippet.",
+                detail, ISSUES_URL
+            ),
+        };
+    }
+    let cleaned = clean_diagnostics(&stderr);
+    // `error[E…]` covers type and borrow-check errors; "previous error"
+    // (cargo's "due to N previous error(s)") also catches syntax errors,
+    // which have no error code.
+    if stderr.contains("error[E") || stderr.contains("previous error") {
+        RvError::DoesNotCompile { diagnostics: cleaned }
+    } else if cleaned.is_empty() {
+        RvError::PluginError("The RustViz plugin failed without an error message.".to_string())
+    } else {
+        RvError::PluginError(cleaned)
+    }
+}
+
+/// `"expr_visitor.rs:862: called `Option::unwrap()` on a `None` value"`
+/// from a stock Rust panic message
+/// (`thread 'rustc' (…) panicked at <file>:<line>:<col>:` + message line).
+fn raw_panic_detail(stderr: &str) -> Option<String> {
+    let mut lines = stderr.lines();
+    let at = lines.find_map(|l| l.split_once("panicked at ").map(|(_, rest)| rest))?;
+    let at = at.trim().trim_end_matches(':');
+    // `<path>:<line>:<col>` → `<file name>:<line>`.
+    let mut parts = at.rsplitn(3, ':');
+    let loc = match (parts.next(), parts.next(), parts.next()) {
+        (Some(_col), Some(line), Some(path)) => {
+            let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            format!("{}:{}", file, line)
+        }
+        _ => at.to_string(),
+    };
+    let msg = lines.next().unwrap_or("").trim();
+    Some(if msg.is_empty() { loc } else { format!("{}: {}", loc, msg) })
+}
+
+/// Remove ANSI color escapes (`ESC [ … letter`), in case a caller forced
+/// cargo's color output on.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Keep rustc's diagnostics, drop cargo's and the plugin's noise, and show
+/// the generated crate's source file as `your code`.
+fn clean_diagnostics(stderr: &str) -> String {
+    const CARGO_PROGRESS: &[&str] = &[
+        "Compiling ", "Checking ", "Finished ", "Blocking ", "Updating ", "Locking ",
+        "Downloading ", "Downloaded ", "Running ", "Fresh ", "Adding ", "Creating ",
+    ];
+    let mut kept: Vec<String> = Vec::new();
+    let mut in_caused_by = false;
+    for line in stderr.lines() {
+        let t = line.trim_start();
+        if in_caused_by {
+            // cargo indents the body of a "Caused by:" block.
+            if line.starts_with(' ') || t.is_empty() {
+                continue;
+            }
+            in_caused_by = false;
+        }
+        if t.starts_with("Caused by:") {
+            in_caused_by = true;
+            continue;
+        }
+        if CARGO_PROGRESS.iter().any(|p| t.starts_with(p))
+            || t.starts_with("error: could not compile `")
+            || t.starts_with("warning: build failed")
+            || t.contains("-Ztrack-diagnostics: created at")
+            || t.starts_with("note: run with `RUST_BACKTRACE=1`")
+        {
+            continue;
+        }
+        kept.push(rewrite_crate_paths(line));
+    }
+    // Dropping a trailing `= note:` can leave a dangling `  |` gutter line
+    // at the end of a diagnostic; rustc never ends one that way.
+    let mut out: Vec<&str> = Vec::new();
+    for (i, line) in kept.iter().enumerate() {
+        let next_blank = kept.get(i + 1).is_none_or(|n| n.trim().is_empty());
+        if line.trim() == "|" && next_blank {
+            continue;
+        }
+        if line.trim().is_empty() && out.last().is_none_or(|l| l.trim().is_empty()) {
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n").trim().to_string()
+}
+
+/// Replace the generated crate's `src/lib.rs` (relative, as cargo reports
+/// it, or absolute, e.g. `/tmp/.tmpXYZ/user-code/src/lib.rs`) with
+/// `your code`, keeping any `:line:col` suffix. Windows paths
+/// (`src\\lib.rs`, `C:\\...\\user-code\\src\\lib.rs`) are handled too.
+fn rewrite_crate_paths(line: &str) -> String {
+    const FILES: [&str; 2] = ["src/lib.rs", "src\\lib.rs"];
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some((i, file)) = FILES
+        .iter()
+        .filter_map(|f| rest.find(f).map(|i| (i, *f)))
+        .min_by_key(|(i, _)| *i)
+    {
+        let end = i + file.len();
+        let start = rest[..i]
+            .rfind(|c: char| c.is_whitespace() || "`'\"(=".contains(c))
+            .map_or(0, |j| j + 1);
+        let token = &rest[start..end];
+        let boundary_ok = rest[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        let norm = token.replace('\\', "/");
+        let ours = norm == "src/lib.rs" || norm == "./src/lib.rs" || norm.ends_with("user-code/src/lib.rs");
+        out.push_str(&rest[..start]);
+        if ours && boundary_ok {
+            out.push_str("your code");
+        } else {
+            out.push_str(token);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
 
 /// A rendered RustViz visualization: the code panel, the timeline
 /// panel, and the SVG height needed to display them together.
@@ -341,7 +588,7 @@ fn run_with_deadline(
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| RvError::DockerUnavailable(format!("failed to spawn {}: {}", what, e)))?;
+        .map_err(|e| RvError::SandboxUnavailable(format!("failed to spawn {}: {}", what, e)))?;
 
     let stdin = child.stdin.take();
     let input = code_str.as_bytes().to_vec();
@@ -379,7 +626,7 @@ fn run_with_deadline(
         if status.code() == Some(124) || stderr.contains(RUNNER_TIMEOUT_SENTINEL) {
             return Err(Box::new(RvError::Timeout));
         }
-        return Err(Box::new(RvError::PluginError(stderr)));
+        return Err(Box::new(classify_failure(&stderr)));
     }
     Ok(stdout)
 }
@@ -428,15 +675,18 @@ fn run_local(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
     let output = Command::new("cargo")
         .arg("rv-plugin")
+        // Plain diagnostics: these end up in user-facing error cards, and
+        // CI (or a user's shell) may set CARGO_TERM_COLOR=always.
+        .env("CARGO_TERM_COLOR", "never")
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()?;
 
     if !output.status.success() {
-        return Err(Box::new(RvError::PluginError(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        )));
+        return Err(Box::new(classify_failure(&String::from_utf8_lossy(
+            &output.stderr,
+        ))));
     }
     Ok(output.stdout)
 }
@@ -549,5 +799,181 @@ mod tests {
                 workspace_copy.display()
             );
         }
+    }
+
+    // ---- Failure classification. Fixtures are real `cargo rv-plugin`
+    // stderr captured from the plugin (see tests/fixtures/stderr/).
+
+    fn fixture(name: &str) -> &'static str {
+        match name {
+            "borrowck_e0499" => include_str!("../tests/fixtures/stderr/borrowck_e0499.txt"),
+            "type_error_e0308" => include_str!("../tests/fixtures/stderr/type_error_e0308.txt"),
+            "use_after_move_e0382" => {
+                include_str!("../tests/fixtures/stderr/use_after_move_e0382.txt")
+            }
+            "syntax_error" => include_str!("../tests/fixtures/stderr/syntax_error.txt"),
+            "unsupported" => include_str!("../tests/fixtures/stderr/unsupported.txt"),
+            "raw_panic" => include_str!("../tests/fixtures/stderr/raw_panic.txt"),
+            other => panic!("no fixture {}", other),
+        }
+    }
+
+    /// Noise that must never reach a student, whatever the kind.
+    fn assert_no_noise(msg: &str) {
+        for noise in [
+            "-Ztrack-diagnostics",
+            "RUST_BACKTRACE",
+            "could not compile",
+            "Caused by",
+            "process didn't exit",
+            "rv-plugin-driver",
+            "src/lib.rs",
+            "panicked at",
+        ] {
+            assert!(!msg.contains(noise), "{:?} leaked into:\n{}", noise, msg);
+        }
+    }
+
+    fn does_not_compile(name: &str) -> String {
+        match classify_failure(fixture(name)) {
+            RvError::DoesNotCompile { diagnostics } => diagnostics,
+            other => panic!("{}: expected DoesNotCompile, got {:?}", name, other),
+        }
+    }
+
+    #[test]
+    fn borrowck_error_is_does_not_compile() {
+        let d = does_not_compile("borrowck_e0499");
+        assert_no_noise(&d);
+        assert!(d.starts_with("error[E0499]: cannot borrow `s` as mutable more than once"));
+        assert!(d.contains(" --> your code:5:14\n"), "{}", d);
+        assert!(d.contains("second mutable borrow occurs here"));
+        assert!(d.contains("For more information about this error, try `rustc --explain E0499`."));
+        // The `  |` gutter that preceded the dropped note goes too.
+        assert!(d.contains("first borrow later used here\n\nFor more"), "{}", d);
+    }
+
+    #[test]
+    fn type_error_is_does_not_compile() {
+        let d = does_not_compile("type_error_e0308");
+        assert_no_noise(&d);
+        assert!(d.starts_with("error[E0308]: mismatched types\n --> your code:2:18"), "{}", d);
+        assert!(d.contains("expected `i32`, found `&str`"));
+    }
+
+    #[test]
+    fn use_after_move_keeps_other_notes_and_help() {
+        let d = does_not_compile("use_after_move_e0382");
+        assert_no_noise(&d);
+        assert!(d.contains("  |\n  = note: this error originates in the macro"), "{}", d);
+        assert!(d.contains("help: consider cloning the value"));
+        assert!(d.contains("let s2 = s1.clone();"));
+    }
+
+    #[test]
+    fn syntax_error_without_code_is_does_not_compile() {
+        let d = does_not_compile("syntax_error");
+        assert_no_noise(&d);
+        assert!(d.starts_with("error: expected expression, found `;`\n --> your code:1:21"), "{}", d);
+    }
+
+    #[test]
+    fn does_not_compile_display_leads_with_explanation() {
+        let e = classify_failure(fixture("borrowck_e0499"));
+        assert_eq!(e.kind(), ErrorKind::DoesNotCompile);
+        let shown = e.to_string();
+        assert!(shown.starts_with(DOES_NOT_COMPILE_INTRO));
+        assert!(shown.starts_with("This program doesn't compile, and RustViz only visualizes programs that rustc accepts, including the borrow checker."));
+        assert!(shown.contains(":\n\nerror[E0499]"));
+        let boxed: Box<dyn Error> = Box::new(e);
+        assert_eq!(error_kind(boxed.as_ref()), ErrorKind::DoesNotCompile);
+    }
+
+    #[test]
+    fn plugin_unsupported_line_is_unsupported() {
+        let e = classify_failure(fixture("unsupported"));
+        assert_eq!(e.kind(), ErrorKind::Unsupported);
+        let shown = e.to_string();
+        assert_no_noise(&shown);
+        assert_eq!(
+            shown,
+            "RustViz can't visualize this program yet (internal error at expr_visitor.rs:862: \
+             called `Option::unwrap()` on a `None` value). Please report it at \
+             https://github.com/rustviz/rustviz/issues with your snippet."
+        );
+    }
+
+    /// A panic the plugin's handler didn't catch (older plugin, or a panic
+    /// outside the visitor) still reads as "unsupported", not as a compile
+    /// error, even though cargo says "could not compile".
+    #[test]
+    fn raw_panic_is_unsupported() {
+        let e = classify_failure(fixture("raw_panic"));
+        assert_eq!(e.kind(), ErrorKind::Unsupported);
+        let shown = e.to_string();
+        assert_no_noise(&shown);
+        assert!(shown.contains("(internal error at expr_visitor.rs:862: called `Option::unwrap()` on a `None` value)"), "{}", shown);
+        assert!(shown.contains("https://github.com/rustviz/rustviz/issues"));
+    }
+
+    #[test]
+    fn unrecognized_failure_is_other_and_cleaned() {
+        let e = classify_failure(
+            "    Blocking waiting for file lock on build directory\n\
+             error: could not compile `user-code` (lib)\n\n\
+             Caused by:\n  process didn't exit successfully: `/x/rv-plugin-driver rustc …` (signal: 9, SIGKILL)\n\
+             something else went wrong\n",
+        );
+        assert_eq!(e.kind(), ErrorKind::Other);
+        assert_eq!(e.to_string(), "something else went wrong");
+        assert_eq!(classify_failure("").kind(), ErrorKind::Other);
+        assert!(!classify_failure("").to_string().is_empty());
+    }
+
+    #[test]
+    fn cargo_progress_and_ansi_are_stripped() {
+        let raw = "   Compiling user-code v0.1.0 (/tmp/work/user-code)\n\
+                   \u{1b}[0m\u{1b}[1m\u{1b}[38;5;9merror[E0425]\u{1b}[0m: cannot find value `y` in this scope\n\
+                   \x20--> src/lib.rs:1:20\n";
+        match classify_failure(raw) {
+            RvError::DoesNotCompile { diagnostics } => assert_eq!(
+                diagnostics,
+                "error[E0425]: cannot find value `y` in this scope\n --> your code:1:20"
+            ),
+            other => panic!("expected DoesNotCompile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn crate_paths_rewritten() {
+        for (input, want) in [
+            (" --> src/lib.rs:5:14", " --> your code:5:14"),
+            (" --> /tmp/work/user-code/src/lib.rs:5:14", " --> your code:5:14"),
+            (" --> /tmp/.tmpAbC123/user-code/src/lib.rs:12:1", " --> your code:12:1"),
+            (" --> ./src/lib.rs:3:9", " --> your code:3:9"),
+            // Windows: rustc reports backslash paths.
+            (" --> src\\lib.rs:2:18", " --> your code:2:18"),
+            (" --> C:\\Users\\r\\AppData\\Local\\Temp\\.tmpAb1\\user-code\\src\\lib.rs:5:14", " --> your code:5:14"),
+            (" --> C:\\rustc\\abc\\library\\core\\src\\lib.rs:1:1", " --> C:\\rustc\\abc\\library\\core\\src\\lib.rs:1:1"),
+            ("::: src/lib.rs:2:4 and `src/lib.rs`", "::: your code:2:4 and `your code`"),
+            ("(src/lib.rs:1:1)", "(your code:1:1)"),
+            // Not the user's crate: left alone.
+            (" --> /rustc/abc/library/core/src/lib.rs:1:1", " --> /rustc/abc/library/core/src/lib.rs:1:1"),
+            ("see mysrc/lib.rs", "see mysrc/lib.rs"),
+            ("src/lib.rsx", "src/lib.rsx"),
+            ("no path here", "no path here"),
+        ] {
+            assert_eq!(rewrite_crate_paths(input), want, "input {:?}", input);
+        }
+    }
+
+    #[test]
+    fn error_kind_names_are_stable() {
+        // The playground sends these to the frontend; don't rename.
+        assert_eq!(ErrorKind::DoesNotCompile.as_str(), "does-not-compile");
+        assert_eq!(ErrorKind::Unsupported.as_str(), "unsupported");
+        assert_eq!(RvError::Timeout.kind(), ErrorKind::Timeout);
+        let io: Box<dyn Error> = Box::new(std::io::Error::other("x"));
+        assert_eq!(error_kind(io.as_ref()), ErrorKind::Other);
     }
 }

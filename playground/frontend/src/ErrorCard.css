@@ -20,6 +20,8 @@
 #error_message {
   color: white;
   margin: 0;
+  background: none;
+  padding: 0;
   /* rustc errors are multi-line and column-aligned: the carets and
      squiggly underlines under the offending tokens depend on a
      monospace font + preserved whitespace to land in the right
@@ -33,4 +35,21 @@
      card; we already cap the card at 1060 px, so wrapping is the
      right behavior for any line longer than that. */
   word-break: break-word;
+}
+
+/* Plain-language explanation between the heading and the diagnostics. */
+.err_intro {
+  color: white;
+  margin: 6px 0 10px;
+  max-width: 80ch;
+}
+
+.err_report {
+  color: #ccc;
+  margin: 10px 0 0;
+  font-size: 14px;
+}
+
+.err_report a {
+  color: #6cb6ff;
 }

@@ -1,0 +1,3 @@
+error: rustviz: unsupported: RustViz can't visualize this program yet (internal error at expr_visitor.rs:862: called `Option::unwrap()` on a `None` value). Please report it at https://github.com/rustviz/rustviz/issues with your snippet.
+
+error: could not compile `user-code` (lib) due to 1 previous error

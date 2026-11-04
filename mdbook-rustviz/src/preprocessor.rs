@@ -131,6 +131,10 @@ impl Preprocessor for RustvizPlugin {
 
 
 
+fn html_escape(s: &str) -> String {
+	s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32) -> String{
 	// create new example directory: src/assets/example-x/
 	let example_dir_str = format!("example-{}", ex_counter);
@@ -163,9 +167,14 @@ fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32) -> Stri
       visualization_div
     }
     Err(e) =>{
-      warn!("example {} failed with status: {:#?}", ex_counter, e);
+      warn!("example {} failed: {}", ex_counter, e);
       warn!("example code {}", code_string);
-      format!("<p><b>Error generating visualization</b> {}</p>", e)
+      // The message is multi-line rustc output full of `<`/`>` (generics,
+      // `&str`), so escape it and keep its layout.
+      format!(
+        "<p><b>Error generating visualization</b></p>\n<pre>{}</pre>",
+        html_escape(&e.to_string())
+      )
     }
   }
 }

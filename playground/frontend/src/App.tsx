@@ -259,7 +259,9 @@ const Description: React.FC = () => (
     <p>
       RustViz is a research tool. It only visualizes programs that compile
       (code with a borrow-checker error is rejected with rustc&apos;s message),
-      and it handles a subset of Rust. In particular:
+      and it handles a subset of Rust. When your program compiles but uses
+      something RustViz can&apos;t handle, you&apos;ll see &quot;RustViz can&apos;t
+      visualize this program yet&quot; with a link to report it. In particular:
     </p>
     <p><strong>Some of what&apos;s drawn is wrong</strong>, so don&apos;t rely on it for:</p>
     <ul>
@@ -292,8 +294,9 @@ const Description: React.FC = () => (
       </li>
     </ul>
     <p>
-      <strong>Some valid programs crash the visualizer.</strong> We track the
-      ones we know about as{' '}
+      <strong>Some valid programs crash the visualizer</strong> (you&apos;ll
+      see &quot;RustViz can&apos;t visualize this program yet&quot;). We track
+      the ones we know about as{' '}
       <a
         href="https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash"
         target="_blank"
@@ -486,6 +489,10 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isErr, setErr] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Server-reported failure kind (X-RustViz-Error-Kind: "does-not-compile",
+  // "unsupported", ...) and the code that produced it, for the error card.
+  const [errorKind, setErrorKind] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState('');
   const [editor, setEditor] = useState<Editor | null>(null);
   const [code_svg, setCodeSvg] = useState<string | null>(null);
   const [timeline_svg, setTimelineSvg] = useState<string | null>(null);
@@ -641,7 +648,9 @@ const App: React.FC = () => {
         });
       } else {
         console.error('Error:', response.statusText);
-        setError(response.data);
+        setError(String(response.data));
+        setErrorKind(null);
+        setErrorCode(code);
         setErr(true);
       }
     } catch (error) {
@@ -651,10 +660,15 @@ const App: React.FC = () => {
       if (inflightRef.current !== controller) return;
 
       if (axios.isAxiosError(error) && error.response) {
-        setError(error.response.data);
+        const data = error.response.data;
+        setError(typeof data === 'string' ? data : JSON.stringify(data));
+        const kind = error.response.headers?.['x-rustviz-error-kind'];
+        setErrorKind(typeof kind === 'string' ? kind : null);
       } else {
         setError('An unexpected error occurred');
+        setErrorKind(null);
       }
+      setErrorCode(code);
       console.error('An error occurred:', error);
       setErr(true);
     } finally {
@@ -994,7 +1008,7 @@ const App: React.FC = () => {
               flight — losing it on every Generate click feels worse
               than briefly showing stale arrows. */}
           {isErr && error ? (
-            <ErrorCard err_string={error} />
+            <ErrorCard err_string={error} kind={errorKind} code={errorCode} />
           ) : (
             <div className="viz-content">
               <div className="flex-container vis_block">
