@@ -295,8 +295,10 @@ rather than listed here.
   are drawn in its own arm, since it only runs once that arm's pattern
   has matched. When the guard is false and a later arm runs, the guard
   still ran first, but the later arm's column doesn't show it.
-- `if let` chains in an `if` condition (`if let Some(a) = x && let
-  Some(b) = y`): the bindings and their uses aren't shown.
+- `if let` chains (`if let Some(a) = x && let Some(b) = y`): the whole
+  condition's events are drawn in the `if` branch. When a later part
+  fails and the `else` branch runs, the parts that already ran (e.g. a
+  borrow made by the first `let`) aren't shown in the `else` column.
 - Assignments to a place that has no column of its own are drawn on
   the column of the variable the place is reached from, like an
   element write: a tuple field

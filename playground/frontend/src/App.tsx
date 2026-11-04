@@ -321,7 +321,8 @@ const Description: React.FC = () => (
         happens to what it captured, not the body&apos;s steps); in a method
         chain only
         the first call is drawn on the variable (later calls work on temporary
-        results); a match guard&apos;s events appear only in its own arm;{' '}
+        results); a match guard&apos;s events appear only in its own arm, and
+        an <code>if let</code> chain&apos;s only in the <code>if</code> branch;{' '}
         <code>async</code>/<code>await</code> aren&apos;t visualized.
       </li>
       <li>
