@@ -253,7 +253,18 @@ const EXPECTED_OK: &[&str] = &[
     "macro_format_args_borrow",
     "macro_dbg",
     "macro_match_arm_body",
-    "macro_write_assert_eq",];
+    "macro_write_assert_eq",
+    // Struct boxes in the timeline header (#192): a `String` bound by a
+    // pattern used to become an empty struct group drawn with
+    // width="-80"; back-to-back structs shared one box; a struct with no
+    // field columns got a negative-width box. Box geometry is pinned by
+    // `struct_boxes_span_their_own_columns`.
+    "while_let_pop_string",
+    "struct_box_adjacent",
+    "if_let_struct_fields_unused",
+    // Unit / empty structs get a label-only box each (#348).
+    "unit_struct_box",
+];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
 /// appear verbatim as a `data-tooltip-text` value somewhere in the rendered
@@ -2280,7 +2291,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "panic! reads from len through an implicit reference, so len isn't moved",
             "assert_eq! reads from len through an implicit reference, so len isn't moved",
         ],
-    },];
+    },
+];
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2349,6 +2361,20 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
             off.len(),
             &off[..off.len().min(5)]
         );
+    }
+    assert_no_negative_sizes(name, &timeline);
+}
+
+/// SVG rejects negative `width` / `height` (browsers log a console error
+/// and skip the element). The timeline used to draw empty struct boxes
+/// with width="-80" (#192).
+fn assert_no_negative_sizes(name: &str, timeline: &str) {
+    for attr in ["width=\"-", "height=\"-"] {
+        if let Some(i) = timeline.find(attr) {
+            let start = timeline[..i].rfind('<').unwrap_or(0);
+            let end = timeline[i..].find('>').map_or(timeline.len(), |e| i + e + 1);
+            panic!("{}: negative size in timeline: {}", name, &timeline[start..end]);
+        }
     }
 }
 
@@ -2473,6 +2499,7 @@ fn corpus_expected_tooltips_present() {
     for expect in EXPECTED_TOOLTIPS {
         let res = std::panic::catch_unwind(|| {
             let rv = run_with_local_backend(expect.name);
+            assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
             let actual = timeline_tooltips(&rv.timeline_panel_string());
 
             let missing: Vec<&str> = expect
@@ -2633,6 +2660,80 @@ fn compile_errors_are_reported_not_swallowed() {
         .expect_err("a type error must not render");
     let msg = err.to_string();
     assert!(msg.contains("mismatched types"), "expected rustc's diagnostic, got:\n{}", msg);
+}
+
+/// Numeric attribute `key` of an SVG start tag (the text after `<name `).
+fn num_attr(tag: &str, key: &str) -> f64 {
+    let k = format!(" {}=\"", key);
+    let tag = format!(" {}", tag);
+    let v = &tag[tag.find(&k).unwrap_or_else(|| panic!("no {} in {}", key, tag)) + k.len()..];
+    let v = &v[..v.find('"').unwrap()];
+    v.parse().unwrap_or_else(|_| panic!("{}={:?} is not a number", key, v))
+}
+
+/// Struct boxes: the rounded `<rect>`s drawn in the timeline header
+/// around a struct's label and its field labels, as (left, right) x.
+fn struct_boxes(timeline: &str) -> Vec<(f64, f64)> {
+    timeline
+        .split("<rect ")
+        .skip(1)
+        .map(|r| &r[..r.find('>').unwrap()])
+        .filter(|r| r.contains("rx=\"20\""))
+        .map(|r| {
+            let x = num_attr(r, "x");
+            (x, x + num_attr(r, "width"))
+        })
+        .collect()
+}
+
+/// x of the column label whose text is exactly `label`.
+fn label_x(timeline: &str, label: &str) -> f64 {
+    for t in timeline.split("<text ").skip(1) {
+        let (tag, rest) = t.split_once('>').unwrap();
+        if tag.contains("class=\"label") && rest.split('<').next() == Some(label) {
+            return num_attr(tag, "x");
+        }
+    }
+    panic!("no column label {:?}", label)
+}
+
+/// A `String` bound by `while let Some(s)` is an owner, not a struct, so
+/// it gets no struct box (#192: an empty box with width="-80").
+#[test]
+fn pattern_bound_string_has_no_struct_box() {
+    let t = run_with_local_backend("while_let_pop_string").timeline_panel_string();
+    assert_eq!(struct_boxes(&t), vec![], "while_let_pop_string: unexpected struct box");
+}
+
+/// Back-to-back structs get one box each; `a`'s box used to stretch over
+/// `b`'s columns too, and `b` got none (#192).
+#[test]
+fn adjacent_structs_get_one_box_each() {
+    let t = run_with_local_backend("struct_box_adjacent").timeline_panel_string();
+    let boxes = struct_boxes(&t);
+    assert_eq!(boxes.len(), 2, "struct_box_adjacent: expected a box per struct, got {:?}", boxes);
+    for (b, labels) in boxes.iter().zip([["a", "a.x", "a.y"], ["b", "b.x", "b.y"]]) {
+        for l in labels {
+            let x = label_x(&t, l);
+            assert!(b.0 < x && x < b.1, "struct_box_adjacent: {} (x={}) outside box {:?}", l, x, b);
+        }
+    }
+    assert!(boxes[0].1 < label_x(&t, "b"), "struct_box_adjacent: a's box {:?} covers b", boxes[0]);
+}
+
+/// A struct none of whose fields has a column gets a box around its own
+/// label (#192: width="-80").
+#[test]
+fn struct_without_field_columns_boxes_its_own_label() {
+    let t = run_with_local_backend("if_let_struct_fields_unused").timeline_panel_string();
+    let boxes = struct_boxes(&t);
+    let x = label_x(&t, "p");
+    assert!(
+        boxes.len() == 1 && boxes[0].0 < x && x < boxes[0].1,
+        "if_let_struct_fields_unused: expected one box around p (x={}), got {:?}",
+        x,
+        boxes
+    );
 }
 
 /// A guard that moves an outer variable (`Some(_) if consume(s) =>`) moves

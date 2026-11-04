@@ -563,16 +563,30 @@ fn compute_column_layout<'a>(
 
             let styled_name = SPAN_BEGIN.to_string() + &name + SPAN_END;
 
-            if (owner == -1) && timeline.resource_access_point.is_struct_group() && !timeline.resource_access_point.is_member() {
-                owner = timeline.resource_access_point.hash().clone() as i64;
-                owner_x = x;
-            } else if (owner != -1) && timeline.resource_access_point.is_struct_group() && timeline.resource_access_point.is_member() {
-                last_x = x;
-            } else if (owner != -1) && !timeline.resource_access_point.is_struct_group() {
+            // Struct boxes: a box spans a struct's own column and the
+            // columns of its members that directly follow it (members
+            // are registered right after their struct, so their hashes
+            // are contiguous). A member extends the open box only if it
+            // belongs to that struct (`get_owner`), and a new struct
+            // closes the open box and opens its own, so two structs
+            // declared back to back get one box each. `last_x` starts
+            // at the struct's own column: a struct none of whose fields
+            // got a column (none was ever used) gets a box around its
+            // own label rather than a negative width (#192).
+            let rap = &timeline.resource_access_point;
+            let starts_struct = rap.is_struct_group() && !rap.is_member();
+            let extends_open_struct =
+                owner != -1 && rap.is_member() && rap.get_owner() as i64 == owner;
+            if owner != -1 && !extends_open_struct {
                 structs_info.structs.push((owner, owner_x, last_x));
                 owner = -1;
-                owner_x = 0;
-                last_x = 0;
+            }
+            if starts_struct {
+                owner = *rap.hash() as i64;
+                owner_x = x;
+                last_x = x;
+            } else if extends_open_struct {
+                last_x = x;
             }
 
             resource_owners_layout.insert(*hash, TimelineColumnData

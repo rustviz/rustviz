@@ -945,7 +945,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             if ty.is_ref() {
                 let ref_mutability = bool_of_mut(ty.ref_mutability().unwrap()); // You need to define this function
                 self.add_ref(name.clone(), ref_mutability, muta, line_num, parent.clone(), VecDeque::new(), scope, false);
-            } else if ty.is_adt() {
+            } else if ty.is_adt() && !ty_is_special_owner(&ty) {
+                // Same rule as `define_lhs` and fn params: only
+                // user-defined (crate-local) structs get a struct
+                // group with per-field columns. Library types like
+                // `String` / `Vec` / `Box` are opaque owners, so a
+                // binding such as `Some(s)` with `s: String` falls
+                // through to `add_owner` below. Without this check `s`
+                // became a struct whose private field (`s.vec`) never
+                // gets a column, and the renderer drew an empty
+                // struct box with a negative width (#192).
                 match ty.ty_adt_def().unwrap().adt_kind() {
                     AdtKind::Struct => {
                         let owner_hash = self.rap_hashes as u64; // Assuming self.rap_hashes exists
