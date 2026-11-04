@@ -503,9 +503,13 @@ pub enum ExternalEvent {
     // a use of the Owner, happens when var pass by reference
     // its really borrow and return but happens on the same line,
     // use this event instead of borrow and return for more concise visualization 
+    // `implicit`: the `&` isn't written in the source; Rust inserts
+    // it (`println!("{}", s)` is `format_args!` taking `&s`). The
+    // tooltip says so, since without it the call reads like a move.
     PassByStaticReference {
         from: ResourceTy,
         to: ResourceTy, // must be a function
+        implicit: bool,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -519,6 +523,7 @@ pub enum ExternalEvent {
         to: ResourceTy, // must be a function
         is_reborrow: bool,
         result_has_lifetime: bool,
+        implicit: bool, // see PassByStaticReference
         id: usize
     },
     GoOutOfScope {
@@ -1780,7 +1785,7 @@ impl Visualizable for VisualizationData {
               _ => panic!("not possible")
           }
         },
-        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id} => {
+        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, ..} => {
           if to_o { 
             vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
             (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
@@ -2034,7 +2039,7 @@ impl Visualizable for VisualizationData {
 
             // Technically appending individual events for PassByRef events is not necessary since
             // they do not change the state of either variable - however - it's useful to have when 
-            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id} => {
+            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, ..} => {
                 maybe_append_event(self, &from_ro.to_owned(), Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);

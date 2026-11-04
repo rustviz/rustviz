@@ -247,7 +247,13 @@ const EXPECTED_OK: &[&str] = &[
     "match_guard_borrow",
     "match_guard_reads_binding",
     "match_guard_let_chain",
-];
+    // — Macro arguments (#177): formatting macros, `dbg!`, `write!`,
+    //   `assert_eq!` and `panic!` show the borrow / move of each
+    //   argument; a brace-less match arm whose body is a macro call.
+    "macro_format_args_borrow",
+    "macro_dbg",
+    "macro_match_arm_body",
+    "macro_write_assert_eq",];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
 /// appear verbatim as a `data-tooltip-text` value somewhere in the rendered
@@ -2186,7 +2192,95 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s's resource is moved",
         ],
     },
-];
+
+    // ─── Macro arguments (#177) ──────────────────────────────────────
+    // `format_args!` (behind println!/format!/eprintln!/write!/panic!)
+    // takes every argument by shared reference, so each named
+    // argument is read for that line. Before #177 none of these
+    // lines produced any event. A read through a reference is named
+    // after the reference (`r.w`, `*p` read through r / p), not "*p".
+    TooltipExpect {
+        name: "macro_format_args_borrow",
+        must_contain: &[
+            "println! reads from s through an implicit reference, so s isn't moved",
+            "println! reads from n through an implicit reference, so n isn't moved",   // inline `{n}`
+            "format! reads from s through an implicit reference, so s isn't moved",
+            "eprintln! reads from t through an implicit reference, so t isn't moved",
+            "println! reads from r through an implicit reference, so r isn't moved",   // `r.w` through a reference
+            "println! reads from p through an implicit reference, so p isn't moved",   // `*p`
+        ],
+        must_not_contain: &[
+            // println! only borrows; it never takes ownership.
+            "Move from s to println!",
+            "println! reads from/writes to s",
+            "println! reads from *p",
+            "*p's resource is immutably borrowed",
+            // `assert!(cond, "{}", t)` formats t only if the assertion
+            // fails, so t isn't shown as read unconditionally.
+            "assert! reads from t through an implicit reference, so t isn't moved",
+        ],
+    },
+    // `dbg!(e)` takes e by value and returns it: `dbg!(&a)` lends a,
+    // a statement `dbg!(c);` moves c into dbg! (the returned value is
+    // dropped there), and `let b = dbg!(a)` is a move from a to b. On
+    // main all of these showed nothing, so `a` and `c` were wrongly
+    // "dropped" at the end of main and `let r = dbg!(&b)` made r an
+    // owner of a resource instead of a borrow of b.
+    TooltipExpect {
+        name: "macro_dbg",
+        must_contain: &[
+            "dbg! reads from a",
+            "Move from a to b",
+            "Immutable borrow from b to r",
+            "Return immutably borrowed resource from r to b",
+            "Move from c to dbg!",
+            "Copy from x to dbg!",
+            "c goes out of scope. No resource is dropped.",
+            // `write!(f, …)` inside the Debug impl: f is borrowed
+            // mutably by write_fmt, self.w is read.
+            "write! reads from/writes to f through an implicit mutable reference, so f isn't moved",
+            "write! reads from self through an implicit reference, so self isn't moved",
+        ],
+        must_not_contain: &[
+            "r acquires ownership of a resource",
+            "Return immutably borrowed resource from r to *r",
+            // `dbg!(&a)`: the user wrote the `&`, so no "implicit" note.
+            "dbg! reads from a through an implicit reference, so a isn't moved",
+            "c goes out of scope. Its resource is dropped.",
+            "a goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // `Some(s) => println!("{}", s),`: the arm body is a macro call
+    // whose span lives in std's macros.rs. The match handler must map
+    // it back to the arm's line, or the arm's events fall outside the
+    // arm and s is reported as holding nothing when it goes out of
+    // scope.
+    TooltipExpect {
+        name: "macro_match_arm_body",
+        must_contain: &[
+            "println! reads from s through an implicit reference, so s isn't moved",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "macro_write_assert_eq",
+        must_contain: &[
+            "write! reads from/writes to out through an implicit mutable reference, so out isn't moved",
+            "write! reads from v through an implicit reference, so v isn't moved",
+            "assert_eq! reads from v through an implicit reference, so v isn't moved",
+            "assert_eq! reads from w through an implicit reference, so w isn't moved",
+            "panic! reads from msg through an implicit reference, so msg isn't moved",
+        ],
+        must_not_contain: &[
+            // `v.len()` is a call, not a place: its own event ("len
+            // reads from v") is the read, not a read of `len`.
+            "panic! reads from len through an implicit reference, so len isn't moved",
+            "assert_eq! reads from len through an implicit reference, so len isn't moved",
+        ],
+    },];
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -594,9 +594,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: false },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
-        from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false,
+        from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: false,
       },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id }
@@ -634,7 +634,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      from: arg, to: func, id, is_reborrow, result_has_lifetime,
+      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit: false,
     });
     *self.unique_id += 1;
   }

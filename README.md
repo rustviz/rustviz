@@ -253,7 +253,11 @@ rather than listed here.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library
-  macros like `println!`, `vec!`, `assert!` are unwrapped).
+  macros like `println!`, `vec!`, `assert!` are unwrapped; a user macro
+  shows only what it passes on to them).
+- A `for` loop variable taken from a range or a call (`for i in 0..n`,
+  `for c in s.chars()`) has no start or end on its timeline, only the
+  reads in the body.
 - Raw pointers aren't modelled: `let p = &mut x as *mut i32;` shows no
   borrow of `x`, so a write `*p = 2` isn't connected to `x`.
 - `const` and `static` items get no column of their own; reading one
