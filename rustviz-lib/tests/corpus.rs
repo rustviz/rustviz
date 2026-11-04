@@ -2480,8 +2480,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "field_of_method_result_assign",
         must_contain: &[
-            "last_mut reads from/writes to v",
-            "first_mut reads from/writes to v",
+            "last_mut reads from/writes to v (implicitly mutably borrowed)",
+            "first_mut reads from/writes to v (implicitly mutably borrowed)",
             "t's resource is moved",
             "t goes out of scope. No resource is dropped.",
             "v goes out of scope. Its resource is dropped.",
@@ -2550,7 +2550,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "len holds a copyable value",
             "len goes out of scope",
-            "len reads from s",
+            "len reads from s (implicitly borrowed)",
         ],
         must_not_contain: &[],
     },
@@ -2561,7 +2561,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // being lent s's resource and copied into n.
         must_contain: &[
             "len holds a copyable value",
-            "len reads from s",
+            "len reads from s (implicitly borrowed)",
             "n is initialized by copy from len",
         ],
         must_not_contain: &[
