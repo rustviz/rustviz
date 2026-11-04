@@ -2528,6 +2528,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let Some((when, end_line, owner)) = self.temporary_scope_end(expr) else { return };
+    // Branch events are sliced out by line, so a one-line `match` / `if`
+    // can't hold a column of its own (the same limit as #354 / #459).
+    if self.inside_one_line_branch(expr) {
+      return;
+    }
     self.temp_drops_noted.insert(expr.hir_id);
 
     // The temporary gets a short column: it acquires the call's result
@@ -2546,6 +2551,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let id = *self.unique_id;
     self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), id });
     *self.unique_id += 1;
+  }
+
+  /// True iff `expr` sits inside an `if` / `match` that starts and ends
+  /// on one line.
+  fn inside_one_line_branch(&self, expr: &'tcx Expr<'tcx>) -> bool {
+    let sm = self.tcx.sess.source_map();
+    self.tcx.hir_parent_iter(expr.hir_id).any(|(_, node)| match node {
+      rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::If(..) | ExprKind::Match(..)) && !e.span.from_expansion() => {
+        sm.lookup_char_pos(e.span.lo()).line == sm.lookup_char_pos(e.span.hi()).line
+      }
+      _ => false,
+    })
   }
 
   /// True iff the value of the call `expr` is used only in a way that

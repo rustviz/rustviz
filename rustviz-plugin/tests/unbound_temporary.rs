@@ -44,5 +44,7 @@ fn main() {
     };
     // Numbers have nothing to drop:
     let k = String::from("abc").len();
+    // A one-line match can't hold a column (#459): no temporary drawn.
+    match Some(make()) { Some(_) => {} None => {} }
     println!("{} {} {} {} {}", tail(), kept, bound, k, make());
 }
