@@ -1000,6 +1000,10 @@ const EXPECTED_OK: &[&str] = &[
     "for_tuple_pattern_move",
     "for_tuple_pattern_borrow",
     "for_iterator_break_outer",
+    // `let r = loop { … break k; }` gives `r` the value (#431).
+    "loop_break_value_moved",
+    "loop_break_value_outer_var",
+    "loop_break_value_labelled",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11212,6 +11216,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "is left early, while this temporary is still alive",
             "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
         ],
+    },
+    // ─── `let r = loop { … break k; }` (#431) ───────────────────────
+    TooltipExpect {
+        name: "loop_break_value_moved",
+        must_contain: &[
+            "Move from k to r",
+            "r acquires ownership of a resource",
+            "r goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["r goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "loop_break_value_outer_var",
+        // `break s` moves `s`; `break n * 2` copies.
+        must_contain: &[
+            "Move from s to r",
+            "r goes out of scope. Its resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+            "doubled is bound to a value",
+        ],
+        must_not_contain: &[
+            "r goes out of scope. No resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_value_labelled",
+        must_contain: &[
+            "Move from String::from to w",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["w goes out of scope. No resource is dropped."],
     },
 ];
 

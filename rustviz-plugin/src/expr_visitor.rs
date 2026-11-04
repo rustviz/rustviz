@@ -289,6 +289,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // so `print_lifetimes` can't see that `o`'s borrow has to last
   // until then; the arm records it here instead.
   pub borrow_floor: HashMap<String, usize>,
+  // `let r = loop { … break k; };` (#431): the loop's id, what its
+  // `break` values go to (`r`) and how (move or copy). A `break` with a
+  // value, in that loop, pairs the value with `r` the way `let r = k;`
+  // would.
+  pub break_binds: Vec<(rustc_hir::HirId, ResourceTy, Evt)>,
 
   // Names of the variables in scope right now, in declaration order
   // (#410). `add_rap` pushes; a block, a match arm, an `if let` and a
@@ -4773,6 +4778,13 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       for arm in arms.iter() {
         self.match_rhs_arm(lhs.clone(), arm.body, evt.clone());
       }
+    }
+    // `let r = loop { … break k; };`: `r` gets what `break` carries
+    // out (#431). A `break` is visited with the loop body, which
+    // `process_let_binding` does after this, so it only registers where
+    // the values go; `visit_expr`'s `Break` arm pairs them.
+    ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => {
+      self.break_binds.push((rhs.hir_id, lhs, evt));
     }
     ExprKind::DropTemps(exp) => {
       self.match_rhs(lhs, &exp, evt);
