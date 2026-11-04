@@ -2778,7 +2778,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from z to p.y",
             "n is assigned a new value",
             "n is assigned a copy of m",
-            "b is assigned a new value",
+            "b is written to; writing to a union never drops its old contents",
         ],
         must_not_contain: &[
             "p.x acquires ownership of a resource",
@@ -2786,6 +2786,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.y is initialized by copy from z",
             "n is initialized by copy from m",
             "b acquires ownership of a resource",
+            "b is assigned a new value",
         ],
     },
     TooltipExpect {
