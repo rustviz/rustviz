@@ -940,29 +940,7 @@ fn render_dot(
                 // { ... }` ends with ResourceMoved even though
                 // there's no syntactic Move directly in the outer
                 // branch's events.
-                let any_moved = branch_history.iter().any(|b| {
-                    b.states.last()
-                        .map(|s| !state_is_alive(&s.2))
-                        .unwrap_or(true)
-                });
-                let any_alive = branch_history.iter().any(|b| {
-                    b.states.last()
-                        .map(|s| state_is_alive(&s.2))
-                        .unwrap_or(false)
-                });
-                // `if cond { … }` records one branch; the implicit
-                // untouched else still keeps the resource alive on
-                // the path the user didn't write. Treat that
-                // implicit path as an alive branch when classifying
-                // the merge: an all-moved-recorded if-without-else
-                // is semantically a *mixed* merge (drop dot), not an
-                // every-branch one.
-                let has_implicit_untouched = !all_paths_present(ty, branch_history.len());
-                let mixed_moved = (any_moved && any_alive)
-                    || (any_moved && has_implicit_untouched);
-                let all_moved = !any_alive
-                    && !branch_history.is_empty()
-                    && !has_implicit_untouched;
+                let (mixed_moved, all_moved) = merge_move_kind(branch_history, ty);
                 // `let s;` left unassigned on some path (#234): that
                 // branch ends with no value, not with a move, so
                 // nothing is dropped there. The dot gets no message:
@@ -989,21 +967,19 @@ fn render_dot(
                     // Mixed: at least one branch moved, at least
                     // one didn't (counting the implicit untouched
                     // else of an `if` without an else as a
-                    // didn't-move branch). Rust inserts an
-                    // implicit drop in the non-moving branches so
-                    // the post state matches; the drop dot at the
-                    // merge makes that visible.
-                    let title = hover_messages::event_dot_branch_merge_moved_with_drop(&is.real_name());
-                    let drop_data = DropDotData {
+                    // didn't-move branch). The variable is maybe-moved
+                    // from here on. Rust doesn't drop it at the
+                    // branch's end: a runtime drop flag decides at
+                    // scope end whether it still owns its resource
+                    // (#179), so this is a plain dot and the drop is
+                    // shown, conditionally, on the scope-end dot.
+                    let m_data = EventDotData {
                         hash: *hash as u64,
                         dot_x: cx,
                         dot_y: cy,
-                        title,
-                        p1x: cx - 3, p1y: cy - 1,
-                        p2x: cx + 3, p2y: cy - 1,
-                        p3x: cx,     p3y: cy + 3,
+                        title: hover_messages::event_dot_branch_merge_moved_with_drop(&is.real_name()),
                     };
-                    append_drop_dot(drop_data, timeline_data, dots);
+                    append_dot(m_data, timeline_data, dots, None);
                 } else if all_moved {
                     // Every branch ends without the resource —
                     // either by a direct move or by an implicit
@@ -1072,6 +1048,22 @@ fn render_dot(
                             continue;
                         }
                         data.title = event.print_message_with_name(&mut name);
+                    } else if !resource_hold && maybe_moved_at_end(history) {
+                        // Moved in some branches of a conditional but
+                        // not others (#179): the drop flag decides here.
+                        let cx = timeline_data.x_val;
+                        let cy = get_y_axis_pos(*line_number);
+                        let drop_data = DropDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name),
+                            p1x: cx - 3, p1y: cy - 1,
+                            p2x: cx + 3, p2y: cy - 1,
+                            p3x: cx,     p3y: cy + 3,
+                        };
+                        append_drop_dot(drop_data, timeline_data, dots);
+                        continue;
                     } else if !resource_hold {
                         // Resource was already moved out — same copy
                         // for both Copy and non-Copy types: just note
@@ -1254,6 +1246,56 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
     (moved, acquired)
 }
 
+// Classify a conditional's merge for one variable by each branch's
+// effective end state (`branch.states.last()`) and whether it ends
+// maybe-moved after a nested merge. Returns (mixed, all_moved): `mixed` when
+// at least one path moved it and at least one didn't (an `if` without
+// `else` has an implicit untouched path), `all_moved` when every path
+// ended without the resource.
+fn merge_move_kind(branch_history: &[BranchData], ty: &BranchType) -> (bool, bool) {
+    let any_moved = branch_history.iter().any(|b| {
+        b.states.last()
+            .map(|s| !state_is_alive(&s.2))
+            .unwrap_or(true)
+    });
+    // A branch that ends after a nested mixed merge is maybe-moved: it
+    // counts as a path that still holds the value too.
+    let any_alive = branch_history.iter().any(|b| {
+        b.states.last()
+            .map(|s| state_is_alive(&s.2))
+            .unwrap_or(false)
+            || maybe_moved_at_end(&b.e_data)
+    });
+    let has_implicit_untouched = !all_paths_present(ty, branch_history.len());
+    let mixed = (any_moved && any_alive) || (any_moved && has_implicit_untouched);
+    let all_moved = !any_alive && !branch_history.is_empty() && !has_implicit_untouched;
+    (mixed, all_moved)
+}
+
+// True when the last thing that decided this column's ownership was a
+// conditional that moved it on some paths only, so at scope end Rust
+// drops the value only if it wasn't moved (#179).
+fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
+    let mut maybe = false;
+    for (_, e) in history {
+        match e {
+            Event::Branch { branch_history, ty, .. } => {
+                let (mixed, all_moved) = merge_move_kind(branch_history, ty);
+                if mixed {
+                    maybe = true;
+                } else if all_moved {
+                    maybe = false;
+                }
+            }
+            Event::Acquire { is: ResourceTy::Value(_), .. }
+            | Event::Copy { is: ResourceTy::Value(_), .. }
+            | Event::Move { .. } => maybe = false,
+            _ => {}
+        }
+    }
+    maybe
+}
+
 fn all_paths_present(ty: &BranchType, n_branches: usize) -> bool {
     match ty {
         // Plain `if cond { … }` without an else has only one branch
@@ -1296,7 +1338,8 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
                 hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref()),
             _ => hover_messages::event_dot_branch_merge_bound(var_name),
         },
-        BranchJoin::Unchanged => String::new(),
+        // No branch moved it (#179: this used to be an empty tooltip).
+        BranchJoin::Unchanged => hover_messages::event_dot_branch_merge_unchanged(var_name),
     }
 }
 

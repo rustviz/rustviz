@@ -318,6 +318,8 @@ const EXPECTED_OK: &[&str] = &[
     // A borrow of a string literal or a static names it when it ends.
     "ref_static_lender",
     "ref_static_lender_mut",
+    // Merge dots of variables no branch moves get a tooltip (#179).
+    "match_unchanged_merge",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1235,14 +1237,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "if_else_move_join",
         // Variable `s` consumed in if branch, only borrowed in else
-        // branch. Mixed move/alive merge → drop dot with the
-        // implicit-drop explanation (Rust drops `s` at the end of
-        // any branch that didn't move it so the post-state is
-        // consistent across branches).
+        // branch. Mixed move/alive merge: `s` is maybe-moved, and a
+        // runtime drop flag decides at scope end whether it's dropped
+        // (#179; it used to say "dropped at the branch's end").
         must_contain: &[
             "Move from s to consume",
-            "s was moved in at least one branch above; \
-             in branches where it was not, its resource is dropped at the branch's end.",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["merge"],
     },
@@ -1262,16 +1266,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "nested_if_move_join",
         // Inner if: consume on one inner branch, borrow on the
-        // other → mixed → inner merge gets the implicit-drop
-        // tooltip. Outer if: both branches end without the
-        // resource (else by direct consume, then-arm by the inner
-        // merge's implicit drop) → outer merge says every branch.
+        // other → mixed. Outer if: the else consumes, and the then-arm
+        // ends maybe-moved, so the outer merge is mixed too (#179).
         must_contain: &[
-            "s was moved in at least one branch above; \
-             in branches where it was not, its resource is dropped at the branch's end.",
-            "s was moved or dropped in every branch above",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
         ],
-        must_not_contain: &["merge"],
+        must_not_contain: &[
+            // #179: a path keeps `s` (inner branch that only borrows),
+            // so the outer merge is maybe-moved, not all-moved.
+            "s was moved or dropped in every branch above",
+            "merge",
+        ],
     },
     TooltipExpect {
         name: "if_as_let_rhs_multiline",
@@ -1320,19 +1329,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "deep_nested_if",
         // Three-level nesting. Each merge classifies on its own
-        // branches' end states; the outermost ends up all-moved
-        // because every path reaches a consume (some directly,
-        // some via the chain of nested merges already inserting
-        // implicit drops).
+        // branches' end states; a branch ending maybe-moved (after a
+        // nested mixed merge) counts as one that may still hold `s`,
+        // so every merge here is mixed (#179).
         must_contain: &[
             "Move from s to consume",
-            "s was moved or dropped in every branch above",
             // At least one inner merge is the mixed implicit-drop
             // case (consume on one path, borrow on the other).
-            "s was moved in at least one branch above; \
-             in branches where it was not, its resource is dropped at the branch's end.",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // #179: a path keeps `s` (inner branch that only borrows),
+            // so the outer merge is maybe-moved, not all-moved.
+            "s was moved or dropped in every branch above",
             // The outer merge no longer hedges with "at least one";
             // the deepest mixed merges still do, but the corpus
             // pins exact strings so an outer regression to the
@@ -1402,8 +1415,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // even/odd N just affects placement, not classification.
         must_contain: &[
             "Move from s to consume",
-            "s was moved in at least one branch above; \
-             in branches where it was not, its resource is dropped at the branch's end.",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "may have been moved (consumed in at least one branch above)",
@@ -1440,8 +1456,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from s to consume",
             "show reads from s",
-            "s was moved in at least one branch above; \
-             in branches where it was not, its resource is dropped at the branch's end.",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "may have been moved (consumed in at least one branch above)",
@@ -1455,8 +1474,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Closure capture (immutable borrow) from s to f",
             "Move from s to consume",
-            "s was moved in at least one branch above; \
-             in branches where it was not, its resource is dropped at the branch's end.",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "may have been moved (consumed in at least one branch above)",
@@ -2824,6 +2846,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "r's mutable borrow ends (what it borrows from isn't shown)",
             "Return mutably borrowed resource from r to *r",
+        ],
+    },
+    // ─── Merge-point tooltips (#179) ────────────────────────────────
+    TooltipExpect {
+        name: "match_unchanged_merge",
+        // No branch moves `opt` / `self`: the merge dot says so
+        // instead of carrying an empty tooltip.
+        must_contain: &[
+            "opt isn't moved in any of the branches above",
+            "self isn't moved in any of the branches above",
+            "opt goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[""],
+    },
+    TooltipExpect {
+        name: "if_else_move_join",
+        // Rust doesn't drop `s` at the end of the branch that didn't
+        // move it; a drop flag decides at scope end.
+        must_contain: &[],
+        must_not_contain: &[
+            "s was moved in at least one branch above; \
+             in branches where it was not, its resource is dropped at the branch's end.",
+            "s goes out of scope. No resource is dropped.",
         ],
     },
 ];
