@@ -68,6 +68,41 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
     )
 }
 
+// A struct whose fields were partly moved out goes out of scope. Rust
+// drops only the fields that still hold a value (`dropped`); the
+// moved-out ones (`moved`) are already gone, and the struct as a whole
+// isn't dropped because it no longer holds a complete value. `moved` is
+// never empty; `dropped` lists only non-Copy fields (a Copy field has
+// nothing to drop).
+pub fn event_dot_struct_partial_go_out_of_scope(
+    my_name: &String,
+    moved: &[String],
+    dropped: &[String],
+) -> String {
+    fn join(names: &[String]) -> (String, bool) {
+        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        let s = match fmt.len() {
+            0 | 1 => fmt.concat(),
+            n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+        };
+        (s, names.len() > 1)
+    }
+    let (moved_s, moved_plural) = join(moved);
+    let rest = if dropped.is_empty() {
+        String::from("no resource is dropped")
+    } else {
+        let (dropped_s, dropped_plural) = join(dropped);
+        format!("only {} {} dropped", dropped_s, if dropped_plural { "are" } else { "is" })
+    };
+    format!(
+        "{0} goes out of scope. {1} {2} moved out earlier, so {3}.",
+        fmt_style(my_name),
+        moved_s,
+        if moved_plural { "were" } else { "was" },
+        rest
+    )
+}
+
 // An owned (non-ref) function parameter receives its resource from
 // whatever the caller passed. The L-shaped arrow on the param's
 // timeline visually anchors that "from outside this scope" origin;
