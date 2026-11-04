@@ -351,6 +351,10 @@ rather than listed here.
   also shows its previous resource dropped on its own column, but not
   inside an `if`/`match` arm or through a reborrow (`let r2 = &mut *r;`);
   a parameter's struct belongs to the caller, so no column shows it.
+  Reads through a reference (`let a = p.x;`, `&p.name`, `p.name.len()`)
+  are drawn on the reference's column the same way, but a mutable
+  borrow of such a field (`&mut r.a`, `r.a.push_str(..)` where `r:
+  &mut S`) isn't drawn.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   tooltip says "its previous resource is dropped"; the field has no
   column to draw that on.

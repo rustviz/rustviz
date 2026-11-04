@@ -945,6 +945,20 @@ pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, poi
     )
 }
 
+// Copy out of a field reached through a reference: `let a = p.x;`
+// with p: &P. The value is read from what p points to (which p
+// doesn't own), so it's phrased like the write case above, including
+// "value" when p points to a Copy type (#312).
+pub fn event_dot_copy_through_deref_field(ref_name: &String, place: &String, target_name: &String, pointee_copy: bool) -> String {
+    format!(
+        "the {3} {0} points to is read through {1} (copied to {2})",
+        fmt_style(ref_name),
+        fmt_style(place),
+        fmt_style(target_name),
+        held(pointee_copy)
+    )
+}
+
 // 1   0        1   0
 // |            |   
 // o-->*   or   o-->*     the star event

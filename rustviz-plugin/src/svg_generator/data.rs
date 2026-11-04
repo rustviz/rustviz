@@ -1846,6 +1846,15 @@ impl Event {
             Event::Duplicate{ is: ResourceTy::Index(r, place, _), .. } => {
                 hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
             }
+            Event::Duplicate{ to, is: ResourceTy::DerefField(r, place, _), ..} => {
+                // `let a = p.x;` with p a reference: the field is
+                // copied out of the resource p points to (#266).
+                let target = match to {
+                    ResourceTy::Caller => "the caller".to_owned(),
+                    _ => to.name(),
+                };
+                hover_messages::event_dot_copy_through_deref_field(r.name(), place, &target, r.points_to_copy())
+            }
             Event::Duplicate{ to, is, ..} => {
                 match to {
                     // A `move` closure capturing a Copy value copies it (#311).
