@@ -976,6 +976,26 @@ impl std::fmt::Display for State {
 // place isn't: what it holds belongs to r's lender.
 fn holds_copy_value(rty: &ResourceTy) -> bool {
     matches!(rty, ResourceTy::Value(r) if r.is_copy_owner())
+        // A borrow from / returned to a reference r (or `*r`) is of
+        // what r points to (#313), a value if that's Copy (#312).
+        || matches!(rty, ResourceTy::Value(r) | ResourceTy::Deref(r) if r.points_to_copy())
+}
+
+// The lender of a borrow, when it is a reference r: the borrow is then
+// of what r points to, reached through r (#313).
+fn ref_lender(rty: &ResourceTy) -> Option<&ResourceAccessPoint> {
+    match rty {
+        ResourceTy::Value(r) | ResourceTy::Deref(r) if r.is_ref() => Some(r),
+        _ => None,
+    }
+}
+
+// Name of the variable / function on the other end of a borrow, if any.
+fn borrower_name(rty: &ResourceTy) -> Option<String> {
+    match rty {
+        ResourceTy::Value(r) | ResourceTy::Deref(r) => Some(r.name().to_owned()),
+        _ => None,
+    }
 }
 
 fn safe_message(
@@ -1277,7 +1297,9 @@ impl Event {
 
             }
             Event::StaticLend{ to, is, ..} => {
-                let is_copy = holds_copy_value(is);
+                // Only an owner's own Copy value here: a reference
+                // lender is handled by event_dot_lend_through_ref.
+                let is_copy = matches!(is, ResourceTy::Value(r) if r.is_copy_owner());
                 if to.is_closure() {
                     let target_name = safe_message(|_, t| t.clone(), my_name, to);
                     hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
@@ -1289,14 +1311,19 @@ impl Event {
                     let omit_read_only = is.extract_rap()
                         .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
                     let target_name = safe_message(|_, t| t.clone(), my_name, to);
+                    if let Some(r) = ref_lender(is) {
+                        return hover_messages::event_dot_lend_through_ref(r.name(), &target_name, false, r.is_mutref(), r.points_to_copy());
+                    }
                     hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, omit_read_only, is_copy)
                 }
             }
             Event::MutableLend{ to, is, ..} => {
-                let is_copy = holds_copy_value(is);
+                let is_copy = matches!(is, ResourceTy::Value(r) if r.is_copy_owner());
                 let target_name = safe_message(|_, t| t.clone(), my_name, to);
                 if to.is_closure() {
                     hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
+                } else if let Some(r) = ref_lender(is) {
+                    hover_messages::event_dot_lend_through_ref(r.name(), &target_name, true, r.is_mutref(), r.points_to_copy())
                 } else {
                     hover_messages::event_dot_mut_lend(&self.deref_name(my_name), &target_name, is_copy)
                 }
@@ -1370,6 +1397,11 @@ impl Event {
                 } else {
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }
+            }
+            Event::StaticReacquire{ from, is, ..} | Event::MutableReacquire{ from, is, ..} if ref_lender(is).is_some() => {
+                let r = ref_lender(is).unwrap();
+                let mutable = matches!(self, Event::MutableReacquire { .. });
+                hover_messages::event_dot_reacquire_through_ref(r.name(), borrower_name(from).as_ref(), mutable, r.is_mutref(), r.points_to_copy())
             }
             Event::StaticReacquire{ from, is, ..} => {
                 let from_name = safe_message(|_, t| t.clone(), my_name, from);

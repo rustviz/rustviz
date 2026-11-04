@@ -1526,6 +1526,11 @@ fn timeline_segment_title(
     if let (State::PartialPrivilege { .. }, ResourceAccessPoint::StaticRef(_)) = (state, rap) {
         return hover_messages::state_static_ref_full_privilege(rap.name(), rap.points_to_copy());
     }
+    // A `&mut` whose referent is shared through it (`let r3 = &*r;`)
+    // is read-only meanwhile; it has no resource of its own (#313).
+    if let (State::PartialPrivilege { .. }, ResourceAccessPoint::MutRef(_)) = (state, rap) {
+        return hover_messages::state_mut_ref_partial_privilege(rap.name(), rap.points_to_copy());
+    }
     state.print_message_with_name(rap.name())
 }
 
