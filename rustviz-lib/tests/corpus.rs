@@ -428,6 +428,12 @@ const EXPECTED_OK: &[&str] = &[
     // `ref` bindings in by-value parameters borrow the value the
     // function owns, not the caller's (#377).
     "param_ref_binding_own",
+    // Inherent-method shapes (#136): one-field accessor, each receiver
+    // kind, unit struct, nested struct consumed by a method (#319).
+    "inherent_method_one_field",
+    "inherent_method_receivers",
+    "inherent_method_unit_struct",
+    "nested_struct_moved_into_fn",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4184,6 +4190,80 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "name is an immutable borrow from the caller",
             "x is an immutable borrow of",
             "w is an immutable borrow of",
+        ],
+    },
+    TooltipExpect {
+        name: "inherent_method_one_field",
+        // `h.get()` with `fn get(&self) -> i32 { self.n }` on a
+        // one-field struct used to panic (#74, #136). The call borrows
+        // `h` for its duration and copies the i32 result out.
+        must_contain: &[
+            "h's resource is immutably borrowed by get; h is read-only while the borrow is live",
+            "get reads from h",
+            "Copy from get to v",
+            "h goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "h's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "inherent_method_receivers",
+        // One method per receiver kind (#136): `self` consumes `w`,
+        // `self: &mut Self` / `self: &Self` borrow `c` (the second one
+        // called as `Counter::get(&c)`), a `&'a str` result borrows
+        // from `p`, and `&self` methods on a tuple struct and a
+        // generic struct.
+        must_contain: &[
+            "Move from w to into_inner",
+            "Move from into_inner to inner",
+            "w goes out of scope. No resource is dropped.",
+            "w.s goes out of scope. No resource is dropped.",
+            "inner goes out of scope. Its resource is dropped.",
+            "incr reads from/writes to c",
+            "Counter::get reads from c",
+            "Immutable borrow from p to nm",
+            "Return immutably borrowed resource from nm to p",
+            "first reads from pair",
+            "pair.0 goes out of scope. Its resource is dropped.",
+            "x reads from pt",
+        ],
+        must_not_contain: &[
+            "w goes out of scope. Its resource is dropped.",
+            "c's resource is moved",
+            "p's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "inherent_method_unit_struct",
+        // `fn make() -> Marker { Marker }` returns a unit struct built
+        // by its constructor; it used to panic in the renderer
+        // (#136). The constructor value goes to the caller undrawn.
+        must_contain: &[
+            "Move from Marker to m",
+            "Move from Marker::make to n",
+            "name reads from m",
+            "name reads from n",
+        ],
+        must_not_contain: &[
+            "m's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_struct_moved_into_fn",
+        // Moving a struct into a consuming method or `drop` moves its
+        // nested struct's fields along (#319): `o.inner.v` and
+        // `q.inner.v` have nothing left to drop at the end of main.
+        must_contain: &[
+            "o.inner.v's resource is moved",
+            "o.inner.v goes out of scope. No resource is dropped.",
+            "q.inner.v's resource is moved",
+            "q.inner.v goes out of scope. No resource is dropped.",
+            "i.v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "o.inner.v goes out of scope. Its resource is dropped.",
+            "q.inner.v goes out of scope. Its resource is dropped.",
         ],
     },
 ];
