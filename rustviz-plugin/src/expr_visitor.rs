@@ -97,6 +97,9 @@ pub struct RapData {
   // borrows, which lives as long as r's `let` does (#400). Lets the
   // branch / block code that ends r's scope end the temporary's too.
   pub extended_temp: Option<String>,
+  // An unbound temporary's (#457) declaring scope: the block, or match
+  // arm body, whose branch declares it, so a branch's decl set covers it.
+  pub temp_owner: Option<rustc_hir::HirId>,
 }
 
 /// A `let` binding with no initializer (`let x;`), remembered until
@@ -204,6 +207,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
   pub temp_count: usize,
+
+  // Calls whose temporary result's drop has been stated (#457), so a
+  // call the visitor reaches twice says it once.
+  pub temp_drops_noted: HashSet<rustc_hir::HirId>,
+  // Numbers the next unbound temporary's column label (#457).
+  pub unbound_temp_count: usize,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -432,7 +441,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
     self.raps.entry(key).or_insert_with(|| {
       self.rap_hashes += 1;
-      RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None }
+      RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None, temp_owner: None }
     });
   }
 
@@ -471,7 +480,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       ExternalEvent::GoOutOfScope { ro, .. }
       | ExternalEvent::ManuallyDropByHand { ro, .. }
-      | ExternalEvent::OwnerDropAtReassign { ro, .. } => {
+      | ExternalEvent::OwnerDropAtReassign { ro, .. }
+      | ExternalEvent::TemporaryDrop { ro, .. } => {
         self.skip_raps.contains(ro.name())
       }
       ExternalEvent::InitRefParam { param, .. } => {

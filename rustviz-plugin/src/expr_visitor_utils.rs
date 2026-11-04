@@ -323,8 +323,23 @@ fn collect_pat_bindings(
   }
 }
 
+/// The unbound temporaries (#457) whose scope is `owner` (a block, or a
+/// match arm's body expression). They're declared there like a `let`
+/// binding, but dropped by their own TemporaryDrop event, not by a
+/// GoOutOfScope at the end of the branch (see `needs_scope_end`).
+pub fn unbound_temps_of(owner: rustc_hir::HirId, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+  #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+  raps.values().filter(|rd| rd.temp_owner == Some(owner)).map(|rd| rd.rap.to_owned()).collect()
+}
+
+/// False for a RAP that is dropped by an event of its own: an unbound
+/// temporary has no end-of-block GoOutOfScope.
+pub fn needs_scope_end(r: &ResourceAccessPoint) -> bool {
+  !r.is_unbound_temporary()
+}
+
 pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint>{
-  let mut res:HashSet<ResourceAccessPoint> = HashSet::new();
+  let mut res:HashSet<ResourceAccessPoint> = unbound_temps_of(block.hir_id, raps);
   for stmt in block.stmts.iter() {
     res.extend(get_decl_of_stmt(&stmt, tcx, raps));
   }
@@ -334,7 +349,7 @@ pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, Rap
 pub fn get_decl_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
   match expr.kind {
     ExprKind::Block(b, _) => get_decl_of_block(b, tcx, raps),
-    _ => HashSet::new() // maybe should handle match expressions as well? 
+    _ => unbound_temps_of(expr.hir_id, raps) // maybe should handle match expressions as well? 
   }
 }
 
@@ -556,7 +571,7 @@ pub fn collect_event_live_vars(
                 let (from, to) = ResourceAccessPoint_extract(ev);
                 for rty in [from, to] {
                     if let ResourceTy::Value(rap) = rty {
-                        if !rap.is_fn() {
+                        if !rap.is_fn() && !rap.is_unbound_temporary() {
                             out.insert(rap.clone());
                         }
                     }

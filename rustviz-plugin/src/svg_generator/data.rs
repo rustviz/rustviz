@@ -343,6 +343,16 @@ pub fn temporary_label(n: usize) -> String {
     }
 }
 
+/// Column label of the n-th (1-based) unbound temporary in a fn: a
+/// call's result that no variable takes and Rust drops at the end of
+/// its statement (#457).
+pub fn unbound_temporary_label(n: usize) -> String {
+    match n {
+        1 => "(unbound temporary)".to_owned(),
+        n => format!("(unbound temporary {})", n),
+    }
+}
+
 impl ResourceAccessPoint {
     /// A copy of this function RAP marked as `std::mem::drop` called on
     /// a value that needs drop.
@@ -373,6 +383,13 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::MutRef(m) => m.write,
             _ => PlaceWrite::Update,
         }
+        }
+    }
+
+    /// True iff this RAP is an unbound temporary (see
+    /// `unbound_temporary_label`).
+    pub fn is_unbound_temporary(&self) -> bool {
+        self.name().starts_with("(unbound temporary")
     }
 
     /// True iff this RAP is a lifetime-extended temporary (see
@@ -778,6 +795,17 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    // `ro`, an unbound temporary (the value a call returns that nothing
+    // takes: `make();`, `let _ = make();`, `make().len()`,
+    // `f(&make())`), is dropped (#457). Plays the part of GoOutOfScope
+    // for that RAP. `ty` is the value's type as written in messages;
+    // `when` says when ("at the end of this statement").
+    TemporaryDrop {
+        ro: ResourceAccessPoint,
+        ty: String,
+        when: String,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -824,7 +852,7 @@ impl ExternalEvent {
 
     pub fn is_gos_ev(&self) -> Option<&ResourceAccessPoint> {
         match self {
-            ExternalEvent::GoOutOfScope { ro, .. } => Some(ro),
+            ExternalEvent::GoOutOfScope { ro, .. } | ExternalEvent::TemporaryDrop { ro, .. } => Some(ro),
             _ => None
         }
     }
@@ -837,6 +865,7 @@ impl ExternalEvent {
             &ExternalEvent::Branch { id, .. } | &ExternalEvent::GoOutOfScope { id , ..} |
             &ExternalEvent::OwnerDropAtReassign { id, .. } |
             &ExternalEvent::ManuallyDropByHand { id, .. } |
+            &ExternalEvent::TemporaryDrop { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. }=> id
@@ -990,6 +1019,8 @@ pub enum Event {
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
+    // An unbound temporary is dropped (see ExternalEvent).
+    TemporaryDrop { ty: String, when: String },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1282,6 +1313,9 @@ impl Display for Event {
             Event::ManuallyDropByHand => {
                 write!(f, "Value is dropped by hand")
             },
+            Event::TemporaryDrop { ty, when } => {
+                write!(f, "Temporary {} is dropped {}", ty, when)
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -1362,6 +1396,9 @@ impl Event {
             }
             Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
                 hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
+            }
+            Event::TemporaryDrop { ty, when } => {
+                hover_messages::event_dot_temporary_drop(ty, when)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -1506,6 +1543,9 @@ impl Event {
                     // variable is bound to a reference, which never
                     // owns its referent.
                     hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref())
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
+                    // `make();`, `make().len()`: nothing takes the value.
+                    safe_message(hover_messages::event_dot_unbound_temporary_acquire, &self.deref_name(my_name), from)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_temporary()) {
                     // `let r = &String::from("a");`: say why this
                     // temporary has a column until the end of the
@@ -1953,6 +1993,8 @@ impl Visualizable for VisualizationData {
             // preserve the previous state for any input — the dot is
             // a visual annotation, not an ownership transition.
             (_, Event::OwnerDropAtReassign) => (*previous_state).clone(),
+            // An unbound temporary's column ends where it is dropped.
+            (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
 
             // `ManuallyDrop::drop(&mut md)`: no resource left, and md
             // must not be used again.
@@ -2317,6 +2359,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
         },
+        ExternalEvent::TemporaryDrop{ ty, when, .. } => {
+          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone() })]
+        },
 
         _ => panic!("should not be calling this on branches")
       }
@@ -2590,6 +2635,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
+            },
+            ExternalEvent::TemporaryDrop{ro, ty, when, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when }, line_number);
             },
         }
     }

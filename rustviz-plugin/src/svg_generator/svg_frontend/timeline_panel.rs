@@ -1217,7 +1217,7 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
-                Event::OwnerDropAtReassign => {
+                Event::OwnerDropAtReassign | Event::TemporaryDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = get_y_axis_pos(*line_number);
                     let title = event.print_message_with_name(&mut name);

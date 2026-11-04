@@ -351,8 +351,13 @@ const Description: React.FC = () => (
         <li>
         A temporary borrowed by a <code>let</code> (
         <code>let r = &amp;String::from(&quot;a&quot;);</code>) gets a{' '}
-        <code>(temporary)</code> column that lives to the end of the block; other
-        temporaries (<code>f(&amp;String::from(&quot;a&quot;))</code>) aren&apos;t drawn.
+        <code>(temporary)</code> column that lives to the end of the block. A
+        call&apos;s result that nothing binds or moves on (
+        <code>make();</code>, <code>make().len()</code>,{' '}
+        <code>f(&amp;make())</code>) gets a short{' '}
+        <code>(unbound temporary)</code> column. Other temporaries (
+        <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
+        <code>for</code> head) drop without being drawn or mentioned.
       </li>
     </ul>
     <p>

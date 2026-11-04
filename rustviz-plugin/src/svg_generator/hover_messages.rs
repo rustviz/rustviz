@@ -284,6 +284,23 @@ pub fn event_dot_owner_drop_at_reassign(my_name: &String) -> String {
     )
 }
 
+// A call's result that nothing takes ownership of is a temporary; Rust
+// drops it when its statement (or other temporary scope) ends (#457).
+// The two dots of its column: where it comes into being, and the drop.
+pub fn event_dot_unbound_temporary_acquire(_my_name: &String, from_name: &String) -> String {
+    format!(
+        "A temporary holds the value that {0} returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+        fmt_style(from_name)
+    )
+}
+
+pub fn event_dot_temporary_drop(ty: &String, when: &String) -> String {
+    format!(
+        "This temporary {0} is dropped {1}: nothing bound it to a variable or moved it on. Its resource is dropped",
+        fmt_style(ty), when
+    )
+}
+
 //     0
 //     
 // f1  *   the star event

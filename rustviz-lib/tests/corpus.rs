@@ -490,6 +490,8 @@ const EXPECTED_OK: &[&str] = &[
     // a move into a call survives a borrow ending on the same line.
     "mutref_moved_into_generic",
     "move_into_call_same_line_borrow_end",
+    // A call's result nothing takes is a temporary, dropped at the end of its statement (#457).
+    "unbound_temporary",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5035,6 +5037,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // ─── Unbound temporaries (#457) ──────────────────────────────────
+    TooltipExpect {
+        name: "unbound_temporary",
+        // `let _ = f();`, `f();`, `f().len()`, `show(&f())`, a match
+        // scrutinee, an `if` condition, a block's tail expression, both
+        // arms of an if/else and a `println!` argument each drop a
+        // temporary, and the drop is stated (timing checked with a
+        // Drop-printing program). Values that are moved on (`let kept =
+        // make();`, `match Some(make()) { Some(s) => s, .. }`) are not
+        // temporaries: no 11th column.
+        must_contain: &[
+            "Move from String::from to (unbound temporary)",
+            "Move from make to (unbound temporary 2)",
+            "Move from make to (unbound temporary 3)",
+            "Move from String::from to (unbound temporary 4)",
+            "Move from Some to (unbound temporary 5)",
+            "Move from make to (unbound temporary 6)",
+            "Move from make to (unbound temporary 7)",
+            "Move from make to (unbound temporary 8)",
+            "Move from String::from to (unbound temporary 9)",
+            "Move from make to (unbound temporary 10)",
+            "A temporary holds the value that make returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that String::from returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that Some returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of the condition: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option&lt;String&gt; is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "Move from make to (unbound temporary 11)",
+            "Move from Some to (unbound temporary 11)",
+            "Move from String::from to (unbound temporary 11)",
         ],
     },
 ];
