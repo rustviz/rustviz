@@ -278,13 +278,17 @@ const Description: React.FC = () => (
       </li>
       <li>
         Shadowed variables (<code>let x</code> twice) share one column;{' '}
-        tuples (<code>let t = (…)</code>, <code>t.0</code>) show no events;{' '}
         <code>Rc</code> clones each appear to drop the value.
       </li>
       <li>
         An <code>if</code> written on one line (<code>if c {'{'} take(s); {'}'}</code>)
         is drawn as if its body always ran; spread it over several lines to see
         the move as conditional.
+      </li>
+      <li>
+        Destructuring a struct (<code>let P {'{'} a, b {'}'} = p;</code>) is
+        drawn as moving all of <code>p</code>; an <code>if let</code> with a
+        tuple pattern shows no bindings.
       </li>
     </ul>
     <p>
