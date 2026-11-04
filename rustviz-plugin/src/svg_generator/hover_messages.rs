@@ -426,6 +426,18 @@ pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String
     }
 }
 
+// `x?` returns from the function on `Err` / `None`; every value the
+// function still owns is dropped there (#430). The dot sits on the
+// owner's column, which goes on: on success nothing happens here.
+pub fn event_dot_owner_drop_if_try_returns(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+         resource is dropped. If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt
+    )
+}
+
 //     0
 //     
 // f1  *   the star event

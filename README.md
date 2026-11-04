@@ -283,10 +283,12 @@ rather than listed here.
   values declared inside the loop. That's drawn when the exit is in an
   `if`/`else` branch or a `match` arm, but not in an `if` without
   `else` (`if done { return; }`; it is when that body also moves a
-  value, which draws the `if` as a branch), and not for the `?`
-  operator. A value moved on some paths before the exit only gets no
-  drop there: whether it's dropped depends on the path (Rust tracks it
-  with a runtime drop flag).
+  value, which draws the `if` as a branch). A value moved on some paths
+  before the exit only gets no drop there: whether it's dropped depends
+  on the path (Rust tracks it with a runtime drop flag). The `?`
+  operator returns early on `Err` / `None`, dropping what the function
+  owns: that's drawn as a dot on each owner at the `?`, saying the value
+  is dropped only if the `?` returns early; the owner's column goes on.
 - Method chains (`v.iter().map(f).collect()`): only the first call
   has `v` as its receiver and is drawn on `v`'s column. Each later
   call's receiver is the previous call's result, a temporary with no

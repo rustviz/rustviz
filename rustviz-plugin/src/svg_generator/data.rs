@@ -1125,6 +1125,14 @@ pub enum ExternalEvent {
         labeled_block: bool,
         id: usize
     },
+    // The `?` operator returns early on `Err` / `None`, dropping what
+    // the function owns at that point (#430). Only on that path: the
+    // owner stays alive here, so this is a dot on its column, like
+    // `OwnerDropAtReassign`.
+    OwnerDropIfTryReturns {
+        ro: ResourceAccessPoint,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -1214,6 +1222,7 @@ impl ExternalEvent {
             &ExternalEvent::ManuallyDropByHand { id, .. } |
             &ExternalEvent::TemporaryDrop { id, .. } |
             &ExternalEvent::LoopExitMove { id, .. } |
+            &ExternalEvent::OwnerDropIfTryReturns { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -1378,6 +1387,9 @@ pub enum Event {
     TemporaryDrop { ty: String, when: String },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, labeled_block: bool },
+    // The owner's resource is dropped here only if the `?` returns
+    // early (#430). The owner's state is unchanged.
+    OwnerDropIfTryReturns,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1694,6 +1706,9 @@ impl Display for Event {
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
+            Event::OwnerDropIfTryReturns => {
+                write!(f, "Resource is dropped if the `?` returns early")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -1790,6 +1805,9 @@ impl Event {
             }
             Event::TemporaryDrop { ty, when } => {
                 hover_messages::event_dot_temporary_drop(ty, when)
+            }
+            Event::OwnerDropIfTryReturns => {
+                hover_messages::event_dot_owner_drop_if_try_returns(my_name)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -2543,6 +2561,9 @@ impl Visualizable for VisualizationData {
             (_, Event::OwnerDropAtReassign { .. }) => (*previous_state).clone(),
             // An unbound temporary's column ends where it is dropped.
             (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
+            // Dropped only on the path that returns; the code after the
+            // `?` runs on the other one.
+            (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
 
             // `ManuallyDrop::drop(&mut md)`: no resource left, and md
             // must not be used again.
@@ -2942,6 +2963,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, labeled_block, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, labeled_block: *labeled_block })]
         },
+        ExternalEvent::OwnerDropIfTryReturns{..} => {
+          vec![(line_num, Event::OwnerDropIfTryReturns)]
+        },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
       }
@@ -3255,6 +3279,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::LoopExitMove{ro, definite, labeled_block, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, labeled_block }, line_number);
+            },
+            ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
             },
         }
     }
