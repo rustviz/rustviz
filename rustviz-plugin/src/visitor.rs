@@ -1053,6 +1053,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               r.aliasing = new_aliasing;
               r.lender = new_lender;
               r.static_lender = new_static_lender;
+              r.borrow_span = borrow_span_of(rhs_expr);
             }
 
             // ex:
@@ -1082,6 +1083,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               r.aliasing = new_aliasing.clone();
               r.lender = new_lender;
               r.static_lender = new_static_lender;
+              r.borrow_span = borrow_span_of(rhs_expr);
 
               let old_aliasing_data = self.borrow_map.get(&lhs_rty.real_name()).unwrap().aliasing.clone();
               // update other aliases' aliasing data 

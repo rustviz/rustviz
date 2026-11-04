@@ -32,6 +32,9 @@ pub struct MIRBorrowData {
     pub region: (usize, usize),
     pub borrowed_place: Option<String>,
     pub assigned_place: Option<String>,
+    /// Source span of the borrow expression (`&x`) this loan was issued
+    /// at; see `RefData::borrow_span`.
+    pub span: Span,
     // could add more useful members if necessary like kind of mutable borrow, regionvid, etc...
 
 }
@@ -132,7 +135,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 res.push(MIRBorrowData {borrow_idx: b_idx.index(), 
                                         region: (assignment_line, loan_regions.get(b_idx).unwrap().1),
                                         borrowed_place: b_name, 
-                                        assigned_place: a_name});
+                                        assigned_place: a_name,
+                                        span: self.location_to_span(location, &body_with_facts)});
               }
               None => { }
             }
@@ -206,6 +210,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         res
     }
 
+
+    /// The loan issued at exactly the `&x` expression `r` was assigned
+    /// from (#233). Only the kill line is used, as in `borrow_match`.
+    pub fn borrow_span_match(r: &RefData, b: &MIRBorrowData) -> bool {
+        r.borrow_span.is_some_and(|sp| sp == b.span)
+    }
 
     // Helper function to help refine loan regions that we compute in HIR
     pub fn borrow_match(r: &RefData, b: &MIRBorrowData) -> Option<usize> {

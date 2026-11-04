@@ -582,6 +582,17 @@ pub fn events_move_out_of_outer(
     })
 }
 
+/// The span of `expr` if it is a borrow expression (`&x`, `&mut x`),
+/// also through a `DropTemps` wrapper. Used to tie a reference to the
+/// MIR loan issued at that expression (#233).
+pub fn borrow_span_of(expr: &Expr) -> Option<rustc_span::Span> {
+  match expr.kind {
+    ExprKind::AddrOf(..) => Some(expr.span),
+    ExprKind::DropTemps(inner) => borrow_span_of(inner),
+    _ => None,
+  }
+}
+
 // Used for filtering events from the main event container
 pub fn filter_ev((line_num, _ev): &(usize, ExternalEvent), split: usize, merge: usize) -> bool {
   if *line_num <= merge && *line_num >= split {

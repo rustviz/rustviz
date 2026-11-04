@@ -385,6 +385,9 @@ const EXPECTED_OK: &[&str] = &[
     // ... also when an if/match picks between literals, and for `&CONST`.
     "ref_static_lender_branches",
     "ref_static_lender_const",
+    // Two refs borrowing the same variable on one line (#233).
+    "two_refs_same_line",
+    "two_refs_tuple",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3715,6 +3718,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p's immutable borrow ends (what it borrows from isn't shown)",
             "q's immutable borrow ends (what it borrows from isn't shown)",
             "v's borrow of the constant",
+        ],
+    },
+    // ─── Two refs to one variable on one line (#233) ───────────────
+    // Each ref gets its own MIR loan (matched by the span of its `&x`).
+    // `a` dies first while `b` still borrows `x`, so only `b` returns
+    // the borrow. Before the fix both got `a`'s end line, and both
+    // "returned" the borrow there while `b` was still in use.
+    TooltipExpect {
+        name: "two_refs_same_line",
+        must_contain: &[
+            "a's immutable borrow ends",
+            "b's immutable borrow ends",
+            "Return immutably borrowed resource from b to x",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from a to x",
+        ],
+    },
+    TooltipExpect {
+        name: "two_refs_tuple",
+        must_contain: &[
+            "a's immutable borrow ends",
+            "b's immutable borrow ends",
+            "Return immutably borrowed resource from b to x",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from a to x",
         ],
     },
 ];
