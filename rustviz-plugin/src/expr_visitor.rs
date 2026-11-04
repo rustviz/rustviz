@@ -1154,7 +1154,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             // copied code - should definetly make a function of this
             if ty.is_ref() {
                 let ref_mutability = bool_of_mut(ty.ref_mutability().unwrap()); // You need to define this function
-                self.add_ref(name.clone(), ref_mutability, muta, line_num, parent.clone(), VecDeque::new(), scope, false);
+                // Who the binding borrows from. A binding that borrows
+                // the matched place (`Some(ref x)`, or `Some(x)` matched
+                // through a reference by default binding modes) borrows
+                // the scrutinee. A by-value binding of reference type on
+                // a non-reference scrutinee instead *copies* a reference
+                // stored inside it (`Some(x)` on an `Option<&T>`): it
+                // borrows whatever that stored reference borrows, not the
+                // scrutinee. What a non-reference value holds isn't
+                // tracked, so leave the lender unknown rather than name
+                // the scrutinee (#304).
+                let by_ref = matches!(
+                    ty_results.pat_binding_modes().get(id).map(|m| m.0),
+                    Some(rustc_hir::ByRef::Yes(..))
+                );
+                let lender = if by_ref || parent_ty.is_ref() { parent.clone() } else { ResourceTy::Anonymous };
+                self.add_ref(name.clone(), ref_mutability, muta, line_num, lender, VecDeque::new(), scope, false);
             } else if ty.is_adt() && !ty_is_special_owner(&ty) {
                 // Same rule as `define_lhs` and fn params: only
                 // user-defined (crate-local) structs get a struct
