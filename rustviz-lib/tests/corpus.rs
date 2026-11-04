@@ -253,7 +253,8 @@ const EXPECTED_OK: &[&str] = &[
     "macro_format_args_borrow",
     "macro_dbg",
     "macro_match_arm_body",
-    "macro_write_assert_eq",];
+    "macro_write_assert_eq",
+];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
 /// appear verbatim as a `data-tooltip-text` value somewhere in the rendered
@@ -2280,7 +2281,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "panic! reads from len through an implicit reference, so len isn't moved",
             "assert_eq! reads from len through an implicit reference, so len isn't moved",
         ],
-    },];
+    },
+];
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
