@@ -169,6 +169,12 @@ fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
         title = title, cx = cx, cy = cy, hash = dot.hash, triangle = triangle,
     )
 }
+
+/// A name in code font for a tooltip, escaped (see
+/// `hover_messages::escape_tooltip_name`).
+fn styled_name_html(name: &str) -> String {
+    SPAN_BEGIN.to_string() + &hover_messages::escape_tooltip_name(name) + SPAN_END
+}
 static BRANCH_WEIGHT: i64 = 25;
 #[derive(Debug, Clone)]
 pub struct TimelineColumnData {
@@ -725,7 +731,7 @@ fn compute_column_layout<'a>(
                 ref_bool = true;
             }
 
-            let styled_name = SPAN_BEGIN.to_string() + &name + SPAN_END;
+            let styled_name = styled_name_html(&name);
 
             // Struct boxes: a box spans a struct's own column and the
             // columns of its members that directly follow it (members
@@ -2123,9 +2129,9 @@ fn render_arrow (
             }
             let mut title = string_of_external_event(external_event);
             // complete title
-            let styled_from_string = SPAN_BEGIN.to_string() + &from.name() + SPAN_END;
+            let styled_from_string = styled_name_html(&from.name());
             title = format!("{} from {}", title, styled_from_string);
-            let styled_to_string = SPAN_BEGIN.to_string() + &to.name() + SPAN_END;
+            let styled_to_string = styled_name_html(&to.name());
             // A by-value capture of a closure literal passed to a call
             // goes into the closure, which is then passed to the callee.
             let into_closure = matches!(external_event,
@@ -2201,7 +2207,7 @@ fn render_arrow (
                         x: x2 + 3,
                         y: y2 + 5,
                         hash: from_function.hash.to_owned() as u64,
-                        title: SPAN_BEGIN.to_string() + &from_function.name + SPAN_END,
+                        title: styled_name_html(&from_function.name),
                     };
     
                     if to_timeline.is_struct_group {
@@ -2219,8 +2225,8 @@ fn render_arrow (
                 (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByStaticReference { .. })
                 | (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByMutableReference { .. }) => { 
                     // (Some(variable), Some(function), PassByRef)
-                    let styled_fn_name = SPAN_BEGIN.to_string() + &function.name + SPAN_END;
-                    let styled_from_name = SPAN_BEGIN.to_string() + &from_variable.name() + SPAN_END;
+                    let styled_fn_name = styled_name_html(&function.name);
+                    let styled_from_name = styled_name_html(&from_variable.name());
 
                     // get position of to_variable
                     let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
@@ -2297,7 +2303,7 @@ fn render_arrow (
                     );
                 }
                 (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(to_function)), _e) => { // (Some(variable), Some(function), _)
-                    let styled_fn_name = SPAN_BEGIN.to_string() + &to_function.name + SPAN_END;
+                    let styled_fn_name = styled_name_html(&to_function.name);
                     //  ro1 (to_function) <- ro2 (from_variable)
                     let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
                     // Marker-end terminates near the function logo
@@ -3233,9 +3239,7 @@ fn render_ref_line(
                                 data.x1 = resource_owners_layout[hash].x_val;
                                 data.y1 = get_y_axis_pos(*line_start);
 
-                                let styled = SPAN_BEGIN.to_string()
-                                    + &visualization_data.get_name_from_hash(hash).unwrap()
-                                    + SPAN_END;
+                                let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
                                 data.title = match ro {
                                     ResourceAccessPoint::MutRef(_) =>
                                         format!("{} holds a mutable reference", styled),
@@ -3252,9 +3256,7 @@ fn render_ref_line(
                                 data.x1 = resource_owners_layout[hash].x_val;
                                 data.y1 = get_y_axis_pos(*line_start);
 
-                                let styled = SPAN_BEGIN.to_string()
-                                    + &visualization_data.get_name_from_hash(hash).unwrap()
-                                    + SPAN_END;
+                                let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
                                 data.title = format!("{} holds an immutable reference", styled);
                                 data.line_class = String::from("solid");
                                 alive = true;

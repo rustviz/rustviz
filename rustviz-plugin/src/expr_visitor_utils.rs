@@ -805,6 +805,34 @@ pub fn overloaded_by_value_binop<'tcx>(expr: &Expr<'tcx>, tcx: &TyCtxt<'tcx>) ->
   }
 }
 
+/// `a == b`, `a < b`, … where the comparison is a call to a trait
+/// method, i.e. the operands aren't primitives (`String`, `Vec`, a
+/// struct with `#[derive(PartialEq)]`). Such a comparison is
+/// `PartialEq::eq(&a, &b)` / `PartialOrd::lt(&a, &b)`: rustc inserts a
+/// `&` on each operand (an autoref adjustment), so both are borrowed
+/// for the call and neither is moved (#366). Returns the operator's
+/// text and the operands written in the source (not inside a macro's
+/// expansion), in source order. Built-in comparisons on primitives
+/// (`i < n` on integers) aren't method calls and return `None`.
+pub fn overloaded_comparison<'tcx>(
+  expr: &'tcx Expr<'tcx>,
+  tcx: &TyCtxt<'tcx>,
+) -> Option<(&'static str, Vec<&'tcx Expr<'tcx>>)> {
+  let ExprKind::Binary(op, lhs, rhs) = expr.kind else { return None };
+  if op.node.is_by_value() || !tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
+    return None;
+  }
+  let operands = [lhs, rhs].into_iter().filter(|e| !e.span.from_expansion()).collect();
+  Some((op.node.as_str(), operands))
+}
+
+/// True iff rustc inserted a shared borrow (`&`) of `e` (an autoref
+/// adjustment), as it does for the operands of an overloaded
+/// comparison.
+pub fn is_auto_borrowed(e: &Expr, typeck: &TypeckResults) -> bool {
+  typeck.expr_adjustments(e).iter().any(|a| matches!(a.kind, Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Not))))
+}
+
 /// `a <op> b` where `<op>` is a built-in arithmetic / bitwise operator
 /// on primitives (`x + y`, `a.x * 2`, `n % 2` with i32 operands), i.e.
 /// not a method call. Like its trait method (`Add::add(self, rhs)`),

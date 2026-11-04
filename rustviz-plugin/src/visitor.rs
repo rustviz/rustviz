@@ -818,12 +818,43 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // A built-in arithmetic / bitwise operator on primitives
           // (`x + y` on i32) reads its operands the same way: each
           // one that names a column is copied into the operator
-          // (#241). Comparisons read through a reference and aren't
-          // drawn.
+          // (#241). Comparisons read through a reference: see below.
           let fn_name = op_name.to_owned();
           self.add_fn(fn_name.clone());
           for operand in operands {
             self.match_arg(operand, fn_name.clone());
+          }
+        } else if let Some((op_name, operands)) = overloaded_comparison(expr, &self.tcx) {
+          // A comparison on non-primitive operands (`a == b` on
+          // Strings) is `PartialEq::eq(&a, &b)`: each operand is
+          // borrowed for the call through a `&` that rustc inserts,
+          // the way it auto-references a method receiver (`s.len()`),
+          // and the dot says so, with the same short note (#366).
+          // A written `&a` is an ordinary argument. An operand that
+          // already is a reference (`r == q` with `r: &String`), or is
+          // reached through `*`, is read through, with no note, as for
+          // a receiver.
+          let fn_name = op_name.to_owned();
+          let typeck = self.tcx.typeck(expr.hir_id.owner);
+          for operand in operands {
+            if let ExprKind::AddrOf(_, _, inner) = operand.kind {
+              if !matches!(get_rap(inner, &self.tcx, &self.raps), ResourceTy::Anonymous) {
+                self.match_arg(operand, fn_name.clone());
+              }
+              continue;
+            }
+            if !is_auto_borrowed(operand, typeck) {
+              continue;
+            }
+            let Some(rap) = expr_to_rap_name(operand, &self.tcx)
+              .and_then(|n| self.raps.get(&n))
+              .map(|rd| rd.rap.to_owned()) else { continue };
+            self.add_fn(fn_name.clone());
+            let line_num = expr_to_line(operand, &self.tcx);
+            self.update_rap(&rap, line_num);
+            let implicit = if is_method_autoref(operand, typeck) { ImplicitRef::Autoref } else { ImplicitRef::No };
+            let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
+            self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), implicit, false);
           }
         }
       }
