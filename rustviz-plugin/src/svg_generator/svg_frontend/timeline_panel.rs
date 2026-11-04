@@ -2231,6 +2231,19 @@ fn render_arrow (
                         _ => String::new(),
                     };
 
+                    // `&self` method on a value with interior mutability
+                    // (`c.set(2)` on a Cell, `cell.borrow_mut()`,
+                    // `m.lock()`, atomics): the borrow checker sees a
+                    // shared borrow, but the value inside can change,
+                    // so "reads from" would be false (#203).
+                    let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: false, .. })
+                        && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
+                    let title = if interior_mut {
+                        hover_messages::fn_dot_shared_borrow_interior_mut(&function.name, &from_variable.name())
+                    } else {
+                        format!("{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix)
+                    };
+
                     // The call icon shares the dot of the borrow it makes
                     // (see `DotLayer::add_call`).
                     dots.add_call(
@@ -2238,7 +2251,7 @@ fn render_arrow (
                         from_timeline.x_val,
                         get_y_axis_pos(*line_number),
                         from_timeline,
-                        format!("{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix),
+                        title,
                         external_event.get_id(),
                     );
                 }
