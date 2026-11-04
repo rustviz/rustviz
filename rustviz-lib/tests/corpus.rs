@@ -354,6 +354,9 @@ const EXPECTED_OK: &[&str] = &[
     "match_ref_binding_borrows",
     // Copy values are "values" in copy / borrow tooltips too (#274).
     "copy_value_wording",
+    // — An explicit `ref` / `ref mut` binding on an owned value borrows
+    //   the matched place; it isn't a copy or a move (#338).
+    "ref_binding_borrows_owned",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3303,6 +3306,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "k's resource is captured (immutably borrowed) by closure f",
             "p's resource is copied",
             "p.x's resource is copied",
+        ],
+    },
+    // ─── Explicit `ref` bindings on an owned value (#338) ───────────
+    TooltipExpect {
+        name: "ref_binding_borrows_owned",
+        // `Some(ref s)` on an `Option<String>` binds `s: &String`, a
+        // shared borrow of the String inside `opt`: nothing is copied
+        // and `opt` keeps its value. `Some(ref mut n)` is a mutable
+        // borrow, not a move: `name` still owns (and drops) its
+        // String. A Copy payload (`Some(ref k)` on `Option<i32>`) is
+        // borrowed too.
+        must_contain: &[
+            "Partial immutable borrow from opt to s",
+            "Return immutably borrowed resource from s to opt",
+            "Mutable borrow from name to n",
+            "Return mutably borrowed resource from n to name",
+            "name goes out of scope. Its resource is dropped.",
+            "Partial immutable borrow from num to k",
+        ],
+        must_not_contain: &[
+            "Partial copy from opt to s",
+            "s is initialized by copy from opt",
+            "opt's resource is copied",
+            "Move from name to n",
+            "name's resource is moved",
+            "name goes out of scope. No resource is dropped.",
+            "Partial copy from num to k",
         ],
     },
 ];
