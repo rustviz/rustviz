@@ -518,6 +518,27 @@ pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &Str
     )
 }
 
+// Source dot on a reference r when a closure captures `*r` through it
+// (`|| r.push('a')`, `|| r.len()`; #277): the closure reborrows what r
+// points to. r owns nothing, so "r's resource is captured" was wrong.
+// A `&mut` r can't be used while a mutable reborrow is live and is
+// read-only during a shared one; a `&T` r was read-only already.
+pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, ref_is_mut: bool) -> String {
+    let base = format!(
+        "the resource {0} points to is captured by closure {1} ({2} reborrow through {0})",
+        fmt_style(ref_name),
+        fmt_style(closure_name),
+        if mutable { "a mutable" } else { "an immutable" }
+    );
+    if mutable {
+        format!("{0}; {1} can't be used while the borrow is live", base, fmt_style(ref_name))
+    } else if ref_is_mut {
+        format!("{0}; {1} is read-only while the borrow is live", base, fmt_style(ref_name))
+    } else {
+        base
+    }
+}
+
 // Combined tooltip for the closure binding's Bind-Acquire dot
 // when one or more upvars are captured at the closure literal.
 // `captures` lists (upvar_name, capture_kind_label) pairs in the

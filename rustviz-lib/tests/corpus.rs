@@ -320,6 +320,8 @@ const EXPECTED_OK: &[&str] = &[
     "ref_static_lender_mut",
     // Merge dots of variables no branch moves get a tooltip (#179).
     "match_unchanged_merge",
+    // A closure capturing through a reference reborrows `*r` (#277).
+    "closure_capture_through_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2869,6 +2871,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s was moved in at least one branch above; \
              in branches where it was not, its resource is dropped at the branch's end.",
             "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    // ─── Closure capture through a reference (#277) ──────────────────
+    TooltipExpect {
+        name: "closure_capture_through_ref",
+        // `|| r.push('b')` / `|| r.len()` / `|| *p += 1` capture `*r` /
+        // `*p`: a reborrow of what the reference points to. r and p
+        // own nothing. `t` is captured as before.
+        must_contain: &[
+            "the resource r points to is captured by closure f (a mutable reborrow through r); r can't be used while the borrow is live",
+            "Closure f captures: *r (mutably reborrowed)",
+            "Closure capture (mutable reborrow) from r to f",
+            "the resource r points to is captured by closure len (an immutable reborrow through r); r is read-only while the borrow is live",
+            "Closure len captures: *r (immutably reborrowed)",
+            "Closure capture (immutable reborrow) from r to len",
+            "the resource p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
+            "Closure h captures: t (mutably borrowed)",
+            "t's resource is captured (mutably borrowed) by closure h",
+        ],
+        must_not_contain: &[
+            "r's resource is captured (mutably borrowed) by closure f",
+            "r's resource is captured (immutably borrowed) by closure len",
+            "p's resource is captured (mutably borrowed) by closure g",
+            "Closure f captures: r (mutably borrowed)",
+            "Closure len captures: r (immutably borrowed)",
+            "Closure capture (mutable borrow) from r to f",
         ],
     },
 ];

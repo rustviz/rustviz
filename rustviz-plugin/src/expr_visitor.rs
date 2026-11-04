@@ -1636,6 +1636,13 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           Some(rd) => rd.rap.to_owned(),
           None => continue,
         };
+        // A closure that uses a reference variable through it
+        // (`|| r.push('a')`, `|| r.len()`) captures the place `*r`,
+        // i.e. it reborrows what r points to rather than borrowing r
+        // itself (#277). Tagged like `&mut *r` (`is_reborrow`).
+        let through_ref = upvar_rap.is_ref()
+          && matches!(capture.place.projections.first(),
+                      Some(p) if matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
         let from = ResourceTy::Value(upvar_rap);
         let to = lhs.clone();
         let evt_kind = match capture.info.capture_kind {
@@ -1651,7 +1658,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             _ => Evt::SBorrow,
           },
         };
-        self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false);
+        match evt_kind {
+          Evt::SBorrow | Evt::MBorrow =>
+            self.add_borrow_ev(line_num, evt_kind.clone(), to, from.clone(), through_ref),
+          _ => self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false),
+        }
 
         // For ref captures, find the matching MIR loan and emit
         // a Die event at its kill line so the borrow returns on

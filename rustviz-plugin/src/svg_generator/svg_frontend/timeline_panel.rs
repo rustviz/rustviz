@@ -1166,6 +1166,8 @@ fn render_dot(
                         } else {
                             data.title = event.print_message_with_name(& mut name);
                         }
+                    } else if let Some(title) = closure_reborrow_lend_title(event, visualization_data) {
+                        data.title = title;
                     } else {
                         data.title = event.print_message_with_name(& mut name);
                     }
@@ -1364,6 +1366,18 @@ fn collect_closure_captures(
                     out.push((name, "moved"));
                 }
             }
+            // A capture of `*r` through a reference r is a reborrow
+            // of what r points to, not a borrow of r (#277).
+            ExternalEvent::StaticBorrow { from, to, is_reborrow: true, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((format!("*{}", name), "immutably reborrowed"));
+                }
+            }
+            ExternalEvent::MutableBorrow { from, to, is_reborrow: true, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((format!("*{}", name), "mutably reborrowed"));
+                }
+            }
             ExternalEvent::StaticBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
                     out.push((name, "immutably borrowed"));
@@ -1378,6 +1392,31 @@ fn collect_closure_captures(
         }
     }
     out
+}
+
+// Source-side dot of a closure capture that reborrows through a
+// reference (`|| r.push('a')` captures `*r`; #277). The lend event
+// itself doesn't carry `is_reborrow`, so look up the capture event it
+// came from by id.
+fn closure_reborrow_lend_title(event: &Event, visualization_data: &VisualizationData) -> Option<String> {
+    let (to, is, id, mutable) = match event {
+        Event::StaticLend { to, is, id } => (to, is, *id, false),
+        Event::MutableLend { to, is, id } => (to, is, *id, true),
+        _ => return None,
+    };
+    if !to.is_closure() {
+        return None;
+    }
+    let reborrow = visualization_data.external_events.iter().any(|(_, ev)| match ev {
+        ExternalEvent::StaticBorrow { id: i, is_reborrow, .. }
+        | ExternalEvent::MutableBorrow { id: i, is_reborrow, .. } => *i == id && *is_reborrow,
+        _ => false,
+    });
+    if !reborrow {
+        return None;
+    }
+    let r = is.extract_rap()?;
+    Some(hover_messages::event_dot_capture_reborrow_through_ref(r.name(), &to.name(), mutable, r.is_mutref()))
 }
 
 // Count of upvars move-captured by the closure identified by
