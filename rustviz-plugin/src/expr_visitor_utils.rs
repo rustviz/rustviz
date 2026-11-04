@@ -281,6 +281,10 @@ fn collect_pat_bindings(
     PatKind::Binding(_, _, ident, sub_pat) => {
       if let Some(rd) = raps.get(&ident.to_string()) {
         out.insert(rd.rap.to_owned());
+        // The temporary a `let r = &…;` keeps alive is declared with r.
+        if let Some(t) = rd.extended_temp.as_ref().and_then(|t| raps.get(t)) {
+          out.insert(t.rap.to_owned());
+        }
       }
       if let Some(sp) = sub_pat {
         collect_pat_bindings(sp, raps, out);

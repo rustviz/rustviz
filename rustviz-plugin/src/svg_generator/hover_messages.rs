@@ -619,6 +619,18 @@ pub fn event_dot_acquire(my_name: &String, _target_name: &String) -> String {
     )
 }
 
+// Acquire of a temporary that a `let` borrows (`let r =
+// &String::from("a");`, #400). Without a `let`, a temporary is dropped
+// at the end of its statement; borrowing it in a `let` extends its
+// lifetime to the end of the enclosing block, which is why it has a
+// column until then.
+pub fn event_dot_temporary_acquire(my_name: &String) -> String {
+    format!(
+        "{0} acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
+        fmt_style(my_name)
+    )
+}
+
 // Same Acquire event shape, but the destination column holds a Copy
 // type (i32, bool, etc. — no heap, no ownership semantics) and the
 // source is Anonymous (a literal, an arithmetic expression, or a

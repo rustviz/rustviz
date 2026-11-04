@@ -347,6 +347,12 @@ const Description: React.FC = () => (
         A reference field of a struct bound by <code>if let</code>/
         <code>match</code> (<code>x.part</code>) isn&apos;t linked to what it
         borrows.
+        </li>
+        <li>
+        A temporary borrowed by a <code>let</code> (
+        <code>let r = &amp;String::from(&quot;a&quot;);</code>) gets a{' '}
+        <code>(temporary)</code> column that lives to the end of the block; other
+        temporaries (<code>f(&amp;String::from(&quot;a&quot;))</code>) aren&apos;t drawn.
       </li>
     </ul>
     <p>
