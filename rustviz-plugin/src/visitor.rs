@@ -481,7 +481,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // events, function-dot icon on the timeline). Skip the arms —
       // their bodies are synthetic panics we don't want to surface
       // as user events.
-      ExprKind::Match(scrutinee, _, _) => {
+      ExprKind::Match(scrutinee, _, source) => {
         // `dbg!(a, b)` is `match (a, b,) { args => { …eprint…; (tmp_1, tmp_2) } }`:
         // each argument is passed by value into the macro and handed
         // back as its result. As a statement the result is then
@@ -500,6 +500,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           return;
         }
         self.descend_through_expansion(scrutinee);
+        // `e?`: the `Err` / `None` arm returns from the function.
+        if let rustc_hir::MatchSource::TryDesugar(_) = source {
+          self.note_try(expr);
+        }
       }
       // Symmetric for `if cond { … } else { … }` desugarings (older
       // assert! shapes, `?`'s ControlFlow check, etc.). Walk the
@@ -1013,33 +1017,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       },
     };
     let moved = value.map(|e| locals_moved_by(self.tcx, e)).unwrap_or_default();
-    // Rust drops in reverse declaration order; a name declared twice
-    // (shadowing) is dropped once.
     let end = branch_len.min(self.in_scope.len());
-    if from >= end {
-      return;
-    }
-    let mut seen: HashSet<&str> = HashSet::new();
-    let names: Vec<String> = self.in_scope[from..end].iter().rev()
-      .filter(|n| seen.insert(n.as_str()))
-      .cloned()
-      .collect();
-    for name in names {
-      let base = name.split('.').next().unwrap_or(&name);
-      let Some(rd) = self.raps.get(&name) else { continue };
-      if rd.rap.is_copy() || rd.rap.is_fn() || moved.contains(base) || self.skip_raps.contains(&name) {
-        continue;
-      }
-      // A temporary (#400, #457) stays in `in_scope` until its block
-      // ends, but one whose own scope (its statement, for an unbound
-      // one) ended above was dropped there already.
-      if rd.rap.is_temporary() && rd.scope < line {
-        continue;
-      }
-      let rap = rd.rap.clone();
-      if !self.owns_value_here(*rap.hash()) {
-        continue;
-      }
+    for rap in self.droppable_locals(from, end, &moved, true, line) {
       let id = *self.unique_id;
       *self.unique_id += 1;
       self.exit_drops.insert(id);
@@ -1061,6 +1040,58 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id }),
       }
+    }
+  }
+
+  /// The locals in `in_scope[from..end]` that own a value to drop at
+  /// an exit, in the order Rust drops them: reverse declaration order,
+  /// a name declared twice (shadowing) once. `moved` are the ones the
+  /// exit's value hands on; `refs` says whether to include
+  /// non-`Copy` references (`&mut T`). A temporary whose scope ended
+  /// before `line` was dropped already.
+  fn droppable_locals(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<ResourceAccessPoint> {
+    if from >= end {
+      return Vec::new();
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out = Vec::new();
+    for name in self.in_scope[from..end].iter().rev().filter(|n| seen.insert(n.as_str())) {
+      let base = name.split('.').next().unwrap_or(name);
+      let Some(rd) = self.raps.get(name) else { continue };
+      if rd.rap.is_copy() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
+        || moved.contains(base) || self.skip_raps.contains(name) {
+        continue;
+      }
+      // A temporary (#400, #457) stays in `in_scope` until its block
+      // ends, but one whose own scope (its statement, for an unbound
+      // one) ended above was dropped there already.
+      if rd.rap.is_temporary() && rd.scope < line {
+        continue;
+      }
+      if !self.owns_value_here(*rd.rap.hash()) {
+        continue;
+      }
+      out.push(rd.rap.clone());
+    }
+    out
+  }
+
+  /// The `?` operator `e?` returns early on `Err` / `None`, dropping
+  /// every value the function owns at that point (#430). That happens
+  /// on the error path only, so it isn't a drop that ends a column:
+  /// each such owner gets a dot saying so, on the line of the `?`.
+  fn note_try(&mut self, try_expr: &'tcx Expr<'tcx>) {
+    let line = span_end_line(&try_expr.span, &self.tcx);
+    let end = self.in_scope.len();
+    for rap in self.droppable_locals(0, end, &BTreeSet::new(), false, line) {
+      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
+        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
+      if dup {
+        continue;
+      }
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id });
     }
   }
 
@@ -3302,6 +3333,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
             }
           }
+          // `e?`: the `Err` / `None` arm returns from the function
+          // (#430). The scrutinee `Try::branch(e)` was visited above.
+          rustc_hir::MatchSource::TryDesugar(_) => self.note_try(expr),
           _ => {}
         }
       }

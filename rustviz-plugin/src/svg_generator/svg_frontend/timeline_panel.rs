@@ -1328,7 +1328,7 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
-                Event::OwnerDropAtReassign { .. } | Event::TemporaryDrop { .. } => {
+                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::TemporaryDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     // A reassignment that drops an Rc/Arc/Weak says it only lowers a count (#373).

@@ -810,6 +810,11 @@ const EXPECTED_OK: &[&str] = &[
     "exit_temporary_drops",
     // A reference whose lender is unknown ends its borrow without naming one (#463).
     "ref_unknown_lender_end",
+    // The `?` operator's early return drops what the function owns
+    // there, on the error path only (#430).
+    "try_drops_owned",
+    "try_in_branch",
+    "try_in_loop_two_on_a_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8707,6 +8712,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from s to *s",
             "Return immutably borrowed value from r to *r",
             "Return immutably borrowed value from s to *s",
+        ],
+    },
+    // ─── The `?` operator's early return (#430) ─────────────────────
+    TooltipExpect {
+        name: "try_drops_owned",
+        // `b` and `c` are owned at both `?`. `a` was moved into `take`
+        // before them, `n` and `opt` are `Copy`: no dot for those.
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's \
+             resource is dropped. If the `?` succeeds, nothing happens to b here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and c's \
+             resource is dropped. If the `?` succeeds, nothing happens to c here.",
+        ],
+        must_not_contain: &[
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+             resource is dropped. If the `?` succeeds, nothing happens to a here.",
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and n's \
+             resource is dropped. If the `?` succeeds, nothing happens to n here.",
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and opt's \
+             resource is dropped. If the `?` succeeds, nothing happens to opt here.",
+        ],
+    },
+    TooltipExpect {
+        name: "try_in_branch",
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+             resource is dropped. If the `?` succeeds, nothing happens to t here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+             resource is dropped. If the `?` succeeds, nothing happens to u here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+             resource is dropped. If the `?` succeeds, nothing happens to v here.",
+        ],
+        must_not_contain: &[
+            // `s` is a reference.
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+             resource is dropped. If the `?` succeeds, nothing happens to s here.",
+        ],
+    },
+    TooltipExpect {
+        name: "try_in_loop_two_on_a_line",
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and label's \
+             resource is dropped. If the `?` succeeds, nothing happens to label here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and note's \
+             resource is dropped. If the `?` succeeds, nothing happens to note here.",
+        ],
+        must_not_contain: &[
+            // `total` is a `Copy`; `pair` and `items` are references.
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and total's \
+             resource is dropped. If the `?` succeeds, nothing happens to total here.",
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and pair's \
+             resource is dropped. If the `?` succeeds, nothing happens to pair here.",
         ],
     },
 ];
