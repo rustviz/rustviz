@@ -379,6 +379,9 @@ const EXPECTED_OK: &[&str] = &[
     "match_one_line",
     "if_else_next_line",
     "else_if_chain",
+    // A fn parameter written as a pattern (`(a, b): (String, i32)`,
+    // `P { name, .. }: P`) gives each of its names a column (#331).
+    "param_patterns",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3647,6 +3650,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquired ownership of a resource (in all branches above)",
         ],
         must_not_contain: &[],
+    },
+    // ─── Patterns in fn parameters (#331) ───────────────────────────
+    TooltipExpect {
+        name: "param_patterns",
+        // Each name a parameter pattern binds is a parameter of its
+        // own. `a` owns the caller's String and drops it at the end of
+        // `first`; `s` in `peek((s, n): &(String, i32))` is bound by
+        // reference (default binding mode), so it borrows from the
+        // caller; `name` owns the String moved out of the caller's `P`.
+        // On main none of these names had a column, so their uses drew
+        // nothing.
+        must_contain: &[
+            "a acquires ownership from the caller",
+            "len reads from a",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope",
+            "s is an immutable borrow from the caller",
+            "len reads from s",
+            "x acquires ownership from the caller",
+            "y goes out of scope",
+            "name acquires ownership from the caller",
+            "len reads from name",
+            "name goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquires ownership from the caller",
+            "s goes out of scope. Its resource is dropped.",
+        ],
     },
 ];
 
