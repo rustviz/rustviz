@@ -236,6 +236,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               live_tuples: Vec::new(),
               binding_columns: Vec::new(),
               break_binds: Vec::new(),
+              break_pats: Vec::new(),
+              loop_breaks: Vec::new(),
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
@@ -331,6 +333,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               all_paths_exit: false,
           borrow_floor: HashMap::new(),
           break_binds: Vec::new(),
+          break_pats: Vec::new(),
+          loop_breaks: Vec::new(),
           in_scope: Vec::new(),
           exit_frames: Vec::new(),
           literal_temps: HashMap::new(),

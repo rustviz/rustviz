@@ -4258,8 +4258,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         intravisit::walk_expr(self, expr);
         // `let r = loop { break k; }`: `r` gets `k` (#431).
         if let (Ok(target), Some(value)) = (dest.target_id, value) {
+          if let Some((_, pat, scope, inside)) = self.break_pats.iter().rev().find(|(id, ..)| *id == target).cloned() {
+            // The bindings live in the `let`'s scope, not the loop's.
+            let loop_scope = std::mem::replace(&mut self.current_scope, scope);
+            let loop_inside = std::mem::replace(&mut self.inside_branch, inside);
+            self.bind_pat(pat, value, false);
+            self.current_scope = loop_scope;
+            self.inside_branch = loop_inside;
+          } else
           if let Some((_, lhs, evt)) = self.break_binds.iter().rev().find(|(id, ..)| *id == target).cloned() {
             self.match_rhs(lhs, value, evt);
+          } else {
+            self.loop_breaks.push((target, value));
           }
         }
         if let Ok(target) = dest.target_id {
@@ -5117,13 +5127,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => false,
       };
     if init_is_branching {
-      self.bind_pat(pat, init, is_skipped);
+      // `let (a, b) = loop { … break (x, y); }`: each `break` value is
+      // bound against the pattern (#452).
+      if matches!(init.kind, ExprKind::Loop(..)) && !matches!(pat.kind, PatKind::Binding(..)) {
+        self.break_pats.push((init.hir_id, pat, self.current_scope, self.inside_branch));
+      } else {
+        self.bind_pat(pat, init, is_skipped);
+      }
       self.visit_expr(init);
       // A reference returned by a call in a branch keeps that call's
       // borrow (#337).
       if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
         self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), init);
       }
+      self.break_pats.retain(|(id, ..)| *id != init.hir_id);
       self.break_binds.retain(|(id, ..)| *id != init.hir_id);
     } else {
       if !is_skipped {

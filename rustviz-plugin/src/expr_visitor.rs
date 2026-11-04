@@ -294,6 +294,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // value, in that loop, pairs the value with `r` the way `let r = k;`
   // would.
   pub break_binds: Vec<(rustc_hir::HirId, ResourceTy, Evt)>,
+  // `break` values seen in a loop whose receiver isn't known yet (the
+  // loop is the right-hand side of an assignment, a tuple pattern, an
+  // argument…): `match_rhs` pairs them once it is.
+  // A tuple/struct pattern bound to a loop's value: bound against each
+  // `break` value (#452).
+  pub break_pats: Vec<(rustc_hir::HirId, &'tcx Pat<'tcx>, usize, bool)>,
+  pub loop_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>)>,
 
   // Names of the variables in scope right now, in declaration order
   // (#410). `add_rap` pushes; a block, a match arm, an `if let` and a
@@ -2245,6 +2252,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
+    // `f(loop { … break k; })`: what `break` carries is the argument
+    // (#452).
+    if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = arg.kind {
+      let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
+        .filter(|(id, _)| *id == arg.hir_id).map(|(_, v)| *v).collect();
+      self.loop_breaks.retain(|(id, _)| *id != arg.hir_id);
+      for value in seen {
+        self.match_arg(value, fn_name.clone());
+      }
+      return;
+    }
     // A tuple built in the argument list (`show((s, 1))`,
     // `v.push((s, n))`): each element is passed into the call with it,
     // so `s` is moved into the call (#189).
@@ -4784,6 +4802,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // `process_let_binding` does after this, so it only registers where
     // the values go; `visit_expr`'s `Break` arm pairs them.
     ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => {
+      let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
+        .filter(|(id, _)| *id == rhs.hir_id).map(|(_, v)| *v).collect();
+      self.loop_breaks.retain(|(id, _)| *id != rhs.hir_id);
+      for value in seen {
+        self.match_rhs(lhs.clone(), value, evt.clone());
+      }
       self.break_binds.push((rhs.hir_id, lhs, evt));
     }
     ExprKind::DropTemps(exp) => {
