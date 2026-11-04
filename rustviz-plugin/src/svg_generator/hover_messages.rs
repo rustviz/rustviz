@@ -545,6 +545,27 @@ pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String)
     )
 }
 
+// Source dot for a Copy upvar captured by value (`move || m + 1`
+// with m: i32; #311). The closure gets its own copy, so the upvar
+// stays usable and the closure has nothing of it to drop. A `&T` is
+// Copy too: the closure gets a copy of the reference, and the data it
+// points to isn't copied.
+pub fn event_dot_capture_copy_to_closure(my_name: &String, target_name: &String, is_ref: bool) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let target_fmt = fmt_style(target_name);
+    if is_ref {
+        format!(
+            "{0}'s reference is captured (copied) by closure {1}; the data it points to is not copied",
+            my_name_fmt, target_fmt
+        )
+    } else {
+        format!(
+            "{0}'s value is captured (copied) by closure {1}",
+            my_name_fmt, target_fmt
+        )
+    }
+}
+
 // Source dot for an immutably captured upvar. Mirrors event_dot_static_lend.
 pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);

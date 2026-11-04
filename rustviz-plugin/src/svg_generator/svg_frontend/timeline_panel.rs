@@ -874,6 +874,7 @@ fn render_dot(
         let is_closure_capture_event = match event {
             Event::Acquire { from: ResourceTy::Anonymous, .. } => false,
             Event::Acquire { is, .. }
+            | Event::Copy { is, .. }
             | Event::StaticBorrow { is, .. }
             | Event::MutableBorrow { is, .. } => is.is_closure(),
             _ => false,
@@ -1401,6 +1402,11 @@ fn collect_closure_captures(
             ExternalEvent::MutableBorrow { from, to, is_reborrow: true, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
                     out.push((format!("*{}", name), "mutably reborrowed"));
+                }
+            }
+            ExternalEvent::Copy { from, to, .. } if matches_closure(to, closure_hash) => {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "copied"));
                 }
             }
             ExternalEvent::StaticBorrow { from, to, .. } if matches_closure(to, closure_hash) => {

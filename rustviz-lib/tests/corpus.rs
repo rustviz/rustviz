@@ -344,6 +344,8 @@ const EXPECTED_OK: &[&str] = &[
     "unary_operand_copies",
     // By-value captures of a closure passed straight to a call (#230).
     "closure_arg_move_captures",
+    // A `move` closure copies the Copy values it captures (#311).
+    "move_closure_copy_capture",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3155,6 +3157,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n's resource is moved",
             "Move from p to thread::spawn",
             "p.age's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "move_closure_copy_capture",
+        // `move` copies Copy captures (m: i32, the field p.x, the
+        // `&String` r) into the closure; only s is moved, so f drops
+        // one captured resource and m / p.x / p.name stay usable.
+        must_contain: &[
+            "m's value is captured (copied) by closure f",
+            "Closure capture (copy) from m to f",
+            "p.x's value is captured (copied) by closure f",
+            "Closure f captures: s (moved), m (copied), p.x (copied)",
+            "f owns a closure which owns 1 resource via capture",
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "p.name goes out of scope. Its resource is dropped.",
+            "r's reference is captured (copied) by closure g; the data it points to is not copied",
+            "Closure g captures: r (copied)",
+            "g owns a closure",
+            "g goes out of scope",
+        ],
+        must_not_contain: &[
+            "m's resource is captured (moved) by closure f",
+            "Closure capture (move) from m to f",
+            "p's resource is captured (moved) by closure f",
+            "p.name's resource is moved",
+            "f goes out of scope. Its 3 captured resources are dropped.",
+            "f owns a closure which owns 3 resources via capture",
+            "r's resource is captured (moved) by closure g",
+            "g owns a closure which owns 1 resource via capture",
+            "g goes out of scope. Its 1 captured resource is dropped.",
         ],
     },
 ];
