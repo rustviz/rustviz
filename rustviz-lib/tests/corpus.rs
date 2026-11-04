@@ -628,6 +628,9 @@ const EXPECTED_OK: &[&str] = &[
     "branch_call_ref_match",
     "branch_call_ref_method",
     "branch_ref_if_addr",
+    // A write through a local `&mut` drops the old value on the
+    // lender's field column (`s.a`), also for `*w = S { .. }` (#152).
+    "field_write_through_local_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6424,6 +6427,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from r to *r",
+        ],
+    },
+    TooltipExpect {
+        name: "field_write_through_local_ref",
+        // `r.a = …` after `let r = &mut s;` overwrites s's field: the
+        // old String is dropped on `s.a`'s column, not on a column of
+        // the reference's own (#152). Overwriting the whole struct
+        // through `*w` drops the fields' old values too (#268).
+        must_contain: &[
+            "Move from String::from to r.a",
+            "the resource r points to is modified through r.a",
+            "the resource r points to is modified through r.n",
+            "the resource r points to is modified through r.inner.v",
+            "the resource q points to is modified through q.v",
+            "s.a acquires ownership of a new resource; its previous resource is dropped",
+            "s.inner.v acquires ownership of a new resource; its previous resource is dropped",
+            "s.inner acquires ownership of a new resource; its previous resource is dropped",
+            "the resource w points to is modified through *w",
+        ],
+        must_not_contain: &[
+            "r.a acquires ownership of a resource",
+            "r.a is the owner of the resource",
+            "r.n acquires ownership of a resource",
+            "s.n acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
 ];

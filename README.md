@@ -309,8 +309,11 @@ rather than listed here.
   subject ("c.n is assigned a new value"); an update like `+=` says
   "the resource c points to is modified through c.n". When the
   assignment replaces a value that needs drop (a `String` field), the
-  tooltip says "its previous resource is dropped"; the field has no
-  column to draw that on.
+  tooltip says "its previous resource is dropped". When the
+  reference borrows a local struct (`let r = &mut s; r.a = …`), `s.a`
+  also shows its previous value dropped on its own column, but not
+  inside an `if`/`match` arm or through a reborrow (`let r2 = &mut *r;`);
+  a parameter's struct belongs to the caller, so no column shows it.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await` aren't visualized.
