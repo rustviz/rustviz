@@ -738,6 +738,42 @@ pub enum ImplicitRef {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoredIn(pub Option<String>);
 
+/// A borrow that reaches a variable through the reference a call
+/// returned: `let w = first_word(&s);` makes `w` borrow `s`, and
+/// `let r = longest(&a, &b);` makes `r` borrow both `a` and `b`,
+/// because the signature ties the result's lifetime to both arguments
+/// (#171).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BorrowVia {
+    /// The call whose result holds the borrow (`first_word`).
+    pub func: String,
+    /// Every variable the result borrows from, in argument order.
+    pub lenders: Vec<String>,
+    /// The signature also ties the result to an argument whose data
+    /// has no column (a string literal, the caller's data behind a
+    /// reference parameter), so it may point there instead.
+    pub also_unnamed: bool,
+    /// Which of the call's arguments the signature ties the result to.
+    pub tie: ArgTie,
+}
+
+/// Which arguments of a call a returned reference's lifetime is tied
+/// to by the callee's signature. Positions count the receiver of a
+/// method call as position 0; it only shapes the tooltip wording.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ArgTie {
+    /// The call is a method call (`s.as_str()`): position 0 is the
+    /// receiver, "the value it was called on".
+    pub receiver: bool,
+    /// Number of arguments, counting the receiver.
+    pub total: usize,
+    /// Tied positions, in order.
+    pub tied: Vec<usize>,
+    /// How many of the tied arguments have no column to draw (a
+    /// literal, a value that isn't tracked).
+    pub unnamed: usize,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -769,11 +805,14 @@ pub enum ExternalEvent {
     // borrow of an owner (`&s`) or of the reference variable itself
     // (`&r`, `&mut r`). Decided syntactically at the `AddrOf` site in
     // `match_rhs`; every other producer passes `false`.
+    // `via`: the borrow reaches `to` through the reference a call
+    // returned (`let w = first_word(&s);`, #171); see `BorrowVia`.
     StaticBorrow {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
         is_reborrow: bool,
+        via: Option<BorrowVia>,
         id: usize
     },
     MutableBorrow {
@@ -781,6 +820,7 @@ pub enum ExternalEvent {
         to: ResourceTy,
         is_partial: bool,
         is_reborrow: bool,
+        via: Option<BorrowVia>,
         id: usize
     },
     // `static_lender`: what the reference borrowed, when that has no
@@ -810,6 +850,10 @@ pub enum ExternalEvent {
     // a use of the Owner, happens when var pass by reference
     // its really borrow and return but happens on the same line,
     // use this event instead of borrow and return for more concise visualization 
+    // `result_keeps_borrow`: the call returns a reference that is bound
+    // to a variable and still borrows `from` (`let w = first_word(&s);`,
+    // #171), so `from` isn't given back when the call returns; it is
+    // given back when that variable's borrow ends.
     // `implicit`: whether the `&` was inserted by Rust rather than
     // written (see `ImplicitRef`). The tooltip says so, since without
     // it the call reads like a move.
@@ -823,6 +867,7 @@ pub enum ExternalEvent {
         refcell_borrow_mut: bool,
         // See `StoredIn`.
         stored_in: StoredIn,
+        result_keeps_borrow: bool,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -838,6 +883,7 @@ pub enum ExternalEvent {
         result_has_lifetime: bool,
         implicit: ImplicitRef, // see PassByStaticReference
         stored_in: StoredIn, // see PassByStaticReference
+        result_keeps_borrow: bool,
         id: usize
     },
     GoOutOfScope {
@@ -2000,6 +2046,11 @@ impl Visualizable for VisualizationData {
                 State::FullPrivilege { s: LineState::Full }
             }
 
+            // Second lender of a `&mut` returned by a call tied to two
+            // `&mut` arguments (see the StaticBorrow arm below).
+            (State::FullPrivilege{..}, Event::MutableBorrow { .. }) if self.is_mutref(hash) =>
+                State::FullPrivilege { s: LineState::Full },
+
             // happends when a mutable reference returns, invalid otherwise
             (State::FullPrivilege{..}, Event::MutableDie{ .. }) =>
                 State::OutOfScope,
@@ -2023,6 +2074,21 @@ impl Visualizable for VisualizationData {
             (State::PartialPrivilege{ .. }, Event::StaticLend{ ..}) => {
                 State::PartialPrivilege { s: LineState::Full }
             }
+
+            // A reference returned by a call that ties its result to
+            // several arguments (`longest(&a, &b)`) borrows from each
+            // of them: one borrow event per lender, and one end per
+            // lender when the reference's last use is reached (#171).
+            (State::PartialPrivilege{ .. }, Event::StaticBorrow{ .. }) =>
+                State::PartialPrivilege { s: LineState::Full },
+            (State::OutOfScope, Event::StaticDie{ .. })
+            | (State::OutOfScope, Event::MutableDie{ .. }) => State::OutOfScope,
+
+            // `let w = first_mut(&mut v);`: v is mutably lent to the
+            // call, and the call's result keeps that borrow (no
+            // reacquire in between), so the lend to `w` continues the
+            // same revocation rather than starting a second one.
+            (State::RevokedPrivilege{ .. }, Event::MutableLend{ .. }) => (*previous_state).clone(),
                 
             // self statically borrowed resource, and it returns; TODO what about references to self?
             (State::PartialPrivilege{ .. }, Event::StaticDie{ .. }) =>
@@ -2414,12 +2480,12 @@ impl Visualizable for VisualizationData {
         },
         // A reference the call may store (`StoredIn`) is given back
         // later, by its own StaticDie / MutableDie.
-        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
+        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
           if to_o { 
             vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
             (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
           }
-          else if stored_in.0.is_some() {
+          else if stored_in.0.is_some() || *result_keeps_borrow {
             vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
           else { 
@@ -2427,12 +2493,12 @@ impl Visualizable for VisualizationData {
             (line_num,  Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
         },
-        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
+        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
           if to_o { 
             vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
             (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})]
           }
-          else if stored_in.0.is_some() {
+          else if stored_in.0.is_some() || *result_keeps_borrow {
             vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
           else { 
@@ -2705,20 +2771,23 @@ impl Visualizable for VisualizationData {
 
             // Technically appending individual events for PassByRef events is not necessary since
             // they do not change the state of either variable - however - it's useful to have when 
+            // With `result_keeps_borrow` the lender isn't given back its
+            // resource here either: the call's result still borrows it,
+            // and the end of that borrow gives it back (#171).
             // A reference the call may store (`StoredIn`, #513) is given
             // back to `from` later, by its own StaticDie / MutableDie.
-            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
+            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
                 maybe_append_event(self, &from_ro.to_owned(), Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                if stored_in.0.is_none() {
+                if stored_in.0.is_none() && !result_keeps_borrow {
                     maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::StaticDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
+            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                if stored_in.0.is_none() {
+                if stored_in.0.is_none() && !result_keeps_borrow {
                     maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);

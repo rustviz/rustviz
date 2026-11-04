@@ -3,7 +3,7 @@ use crate::svg_generator::data::ResourceAccessPoint;
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::StaticLender;
+use crate::svg_generator::data::{ArgTie, StaticLender};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -1134,6 +1134,83 @@ pub fn arrow_static_lend_val_to_val(from_name: &String, to_name: &String) -> Str
         from_name_fmt,
         to_name_fmt
     )
+}
+
+// Appended to the "Immutable borrow from s to w" / "Mutable borrow
+// from s to w" arrow title when `w` is the reference a call returned
+// (`let w = first_word(&s);`, #171): says why, via the lifetimes in the
+// callee's signature. With several lenders the signature ties the
+// result to several arguments (`longest(&a, &b)`): the borrow checker
+// can't know which one it points into, so all of them stay borrowed
+// for as long as the result is used.
+pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie) -> String {
+    let func_fmt = fmt_style(func);
+    fn join(items: &[String]) -> String {
+        match items.len() {
+            0 => String::new(),
+            1 => items[0].clone(),
+            2 => format!("{} and {}", items[0], items[1]),
+            n => format!("{}, and {}", items[..n - 1].join(", "), items[n - 1]),
+        }
+    }
+    fn ordinal(i: usize) -> String {
+        const NAMES: [&str; 10] = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+        NAMES.get(i).map(|s| s.to_string()).unwrap_or_else(|| format!("{}th", i + 1))
+    }
+    fn count_word(n: usize) -> String {
+        const NAMES: [&str; 10] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+        NAMES.get(n).map(|s| s.to_string()).unwrap_or_else(|| n.to_string())
+    }
+    // Which arguments the result's lifetime is the same as.
+    let first_arg = usize::from(tie.receiver);
+    let n_args = tie.total.saturating_sub(first_arg);
+    let recv_tied = tie.receiver && tie.tied.contains(&0);
+    let args: Vec<usize> = tie.tied.iter().filter(|&&i| i >= first_arg).map(|i| i - first_arg).collect();
+    let arg_part = if args.is_empty() {
+        None
+    } else if args.len() == n_args && n_args == 1 {
+        Some("its argument".to_owned())
+    } else if args.len() == n_args && !recv_tied {
+        Some(match n_args {
+            2 => "both arguments".to_owned(),
+            n => format!("all {} arguments", count_word(n)),
+        })
+    } else if args.len() == 1 {
+        Some(format!("its {} argument", ordinal(args[0])))
+    } else {
+        let ords: Vec<String> = args.iter().map(|&i| ordinal(i)).collect();
+        Some(format!("its {} arguments", join(&ords)))
+    };
+    let mut tied = match (recv_tied, arg_part) {
+        (true, Some(a)) => format!("the value it was called on and {}", a),
+        (true, None) => "the value it was called on".to_owned(),
+        (false, Some(a)) => a,
+        (false, None) => "its arguments".to_owned(),
+    };
+    let tied_count = tie.tied.len().max(1);
+    if tie.unnamed > 0 && tied_count >= 2 {
+        tied.push_str(&match (tie.unnamed, tied_count) {
+            (1, 2) => " (the other is a value with no column here)".to_owned(),
+            (1, _) => " (one of them is a value with no column here)".to_owned(),
+            (k, _) => format!(" ({} of them are values with no column here)", count_word(k)),
+        });
+    }
+    let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+    let unnamed_slots = tie.unnamed.max(usize::from(also_unnamed));
+    let tail = if names.len() >= 2 {
+        let either = if names.len() + unnamed_slots == 2 { "either" } else { "any of them" };
+        let kept = match (names.len(), unnamed_slots > 0) {
+            (2, false) => "both stay borrowed".to_owned(),
+            (_, false) => "all of them stay borrowed".to_owned(),
+            (_, true) => format!("{} stay borrowed", join(&names)),
+        };
+        format!(", so it may point into {}, and {} while {} is in use", either, kept, fmt_style(to_name))
+    } else if names.len() == 1 && (tied_count >= 2 || also_unnamed) {
+        format!(", so {} stays borrowed while {} is in use", names[0], fmt_style(to_name))
+    } else {
+        String::new()
+    };
+    format!(": {0}'s signature gives the reference it returns the same lifetime as {1}{2}", func_fmt, tied, tail)
 }
 
 // 1   0

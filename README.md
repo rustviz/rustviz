@@ -200,10 +200,17 @@ panic.
 
 **Renders, but some of what's shown is wrong:**
 
-- Functions that return a reference (`fn first_word(s: &String) ->
-  &str`, `longest`, `largest`, `v.get(i)`, `v.iter()`): the result isn't
-  linked to the borrow it came from, and the input's borrow is shown
-  ending at the call even while the result is still in use.
+- A variable that holds a borrow without being a reference (`let
+  third = v.get(2);` holding an `Option<&i32>`, `let it = v.iter();`)
+  isn't drawn as borrowing `v`: `v`'s borrow is shown ending on that
+  line. A reference later taken out of it (`it.next().unwrap()`, or
+  `Some(x)` in a `match` on `third`) isn't linked to `v` either.
+  (A reference returned by a call *is* drawn as borrowing what the
+  callee's signature ties it to: `first_word(&s)`, `longest(&a, &b)`,
+  `v.first().unwrap()`.)
+- A reference returned by a call in one branch of an `if` / `match`
+  that initializes a variable (`let w = if c { first_word(&s) } else {
+  "none" };`) isn't linked to `s`.
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
 - A variable assigned in only some branches (`let mut s; if c { s = …
   }`) is drawn as owning a value after the `if`, and a later `s = …` as

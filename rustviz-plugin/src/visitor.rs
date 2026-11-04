@@ -276,7 +276,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let id = *self.unique_id;
             self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
               from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
-              stored_in: StoredIn::default(),
+              result_keeps_borrow: false, stored_in: StoredIn::default(),
             });
             *self.unique_id += 1;
           }
@@ -373,7 +373,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, stored_in: StoredIn::default() });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() });
       *self.unique_id += 1;
     }
   }
@@ -1328,6 +1328,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
               else {
                 self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &ref_data);
+                // ...and to each further lender (#171).
+                for co in ref_data.co_lenders.iter() {
+                  let evt = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
+                  self.add_ev(line_num, evt, co.clone(), lhs_rty.clone(), false);
+                }
               }
 
               // Add event for possible lender if necessary
@@ -1348,13 +1353,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // }
 
               // update lhs_rty with new lender information
-              let (new_lender, new_aliasing, new_static_lender) = self.get_ref_data_full(&rhs_expr);
+              let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = self.get_ref_data_full(&rhs_expr);
               let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
               r.assigned_at = line_num;
               r.aliasing = new_aliasing;
               r.lender = new_lender;
               r.static_lender = new_static_lender;
               r.borrow_span = borrow_span_of(rhs_expr);
+              r.co_lenders = new_co_lenders;
             }
 
             // ex:
@@ -1378,13 +1384,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
 
               // update modified (derefed) reference's lender and aliasing data
-              let (new_lender, new_aliasing, new_static_lender) = self.get_ref_data_full(&rhs_expr);
+              let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = self.get_ref_data_full(&rhs_expr);
               let r = self.borrow_map.get_mut(modified_ref_name).unwrap();
               r.assigned_at = line_num;
               r.aliasing = new_aliasing.clone();
               r.lender = new_lender;
               r.static_lender = new_static_lender;
               r.borrow_span = borrow_span_of(rhs_expr);
+              r.co_lenders = new_co_lenders;
 
               let old_aliasing_data = self.borrow_map.get(&lhs_rty.real_name()).unwrap().aliasing.clone();
               // update other aliases' aliasing data 

@@ -2391,6 +2391,10 @@ fn render_arrow (
                     };
                 }
             }
+            if let ExternalEvent::StaticBorrow { via: Some(via), .. }
+                 | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
+                title.push_str(&hover_messages::arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie));
+            }
 
             // order of points is to -> from
             let mut data = ArrowData {

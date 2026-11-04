@@ -37,6 +37,7 @@ pub mod expr_visitor;
 pub mod expr_visitor_utils;
 pub mod annotated_source_gen;
 pub mod mir_data;
+pub mod ref_flow;
 pub mod rustviz_library;
 pub mod svg_generator;
 

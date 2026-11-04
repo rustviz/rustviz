@@ -580,6 +580,18 @@ const EXPECTED_OK: &[&str] = &[
     // (#477); pinned by `struct_box_contains_long_member_labels`.
     "struct_box_long_last_label",
     "struct_box_long_owner_label",
+    // — Functions returning a reference (#171): the result borrows from
+    //   the arguments its signature ties it to; tooltips pinned in
+    //   EXPECTED_TOOLTIPS.
+    "fn_ret_ref_first_word",
+    "fn_ret_ref_longest",
+    "fn_ret_ref_longest_literal",
+    "fn_ret_ref_methods",
+    "fn_ret_ref_mut",
+    "fn_ret_ref_unrelated_arg",
+    "fn_ret_ref_iter_next",
+    "fn_ret_ref_reassign",
+    "fn_ret_ref_struct_field",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -646,16 +658,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "return_shared_ref",
         // Returning a `&T` copies the reference (references are Copy),
         // never the String behind it. A returned String is still moved.
+        // In the caller, `w` and `p` borrow `owned` (#171).
         must_contain: &[
             "a reference from s is returned to the caller; the data it points to is not copied",
             "a reference from r is returned to the caller; the data it points to is not copied",
             "t's resource is moved to the caller",
+            "Immutable borrow from owned to w: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from owned to p: pick's signature gives the reference it returns the same lifetime as its argument",
         ],
         must_not_contain: &[
+            ", through the reference first_word returned",
+            ", through the reference pick returned",
             "s's resource is copied to the caller",
             "s's resource is moved to the caller",
             "r's resource is copied to the caller",
             "r's resource is moved to the caller",
+            "Copy from first_word to w",
+            "Copy from pick to p",
         ],
     },
     TooltipExpect {
@@ -751,12 +770,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Rust Book 8.3 word count: `*count += 1` through the
         // `&mut` returned by `or_insert`; `text` is a `&str`.
         must_contain: &[
-            "Mutable borrow from map to count",
+            // `count` borrows `map` through or_insert's result (#171).
+            "Mutable borrow from map to count: or_insert's signature gives the reference it returns the same lifetime as the value it was called on",
             "the value count points to is modified through *count",
             "text is bound to an immutable reference",
             "text holds an immutable reference; it can read the borrowed resource",
         ],
         must_not_contain: &[
+            ", through the reference or_insert returned",
             "*count acquires ownership of a resource",
             "text acquires ownership of a resource",
             "text is the owner of the resource",
@@ -851,17 +872,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "cell_ref_return",
-        // `r: &Cell<i32>` (returned by a fn, so its lifeline is in
-        // FullPrivilege) is written through with `r.set(2)`. A shared
+        // `r: &Cell<i32>` (returned by `pick(&c)`, so a shared borrow of
+        // `c`, #171) is written through with `r.set(2)`. A shared
         // reference to a Cell/RefCell/Mutex can modify the referent, so
-        // the lifeline must not claim r can't modify it, nor that r owns it.
+        // nothing may claim r can't modify it, that c is read-only
+        // while r is live, or that r owns it.
         must_contain: &[
             "r holds an immutable reference; it can read the borrowed value",
+            "Immutable borrow from c to r: pick's signature gives the reference it returns the same lifetime as its argument",
+            "c's resource is immutably borrowed by r",
         ],
         must_not_contain: &[
             "r holds an immutable reference; it can read the borrowed resource",
+            ", through the reference pick returned",
             "r holds an immutable reference; it can read but not modify the borrowed resource",
             "r is the owner of the resource",
+            "c's resource is immutably borrowed by r; c is read-only while the borrow is live",
         ],
     },
     TooltipExpect {
@@ -5424,6 +5450,153 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. No resource is dropped.",
             "i is live in a conditional expression",
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+    // ─── Functions returning a reference (#171) ──────────────────────
+    TooltipExpect {
+        name: "fn_ret_ref_first_word",
+        // Book ch. 4.3: `word` borrows `my_string` until word's last
+        // use. It used to be drawn as an independent value copied out
+        // of `first_word`, with my_string's borrow ending at the call.
+        must_contain: &[
+            "first_word reads from my_string",
+            "Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "my_string's resource is immutably borrowed by word; my_string is read-only while the borrow is live",
+            "word immutably borrows a resource",
+            "Return immutably borrowed resource from word to my_string",
+        ],
+        must_not_contain: &[
+            ", through the reference first_word returned",
+            "Copy from first_word to word",
+            "word is initialized by copy from first_word",
+            "Return immutably borrowed resource from word to *word",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_longest",
+        // Book ch. 10.3: one lifetime `'a` on both parameters and the
+        // result, so `result` borrows from both arguments.
+        must_contain: &[
+            "Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
+            "Immutable borrow from string2 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
+            "string1's resource is immutably borrowed by result; string1 is read-only while the borrow is live",
+            "string2's resource is immutably borrowed by result; string2 is read-only while the borrow is live",
+            "Return immutably borrowed resource from result to string1",
+            "Return immutably borrowed resource from result to string2",
+        ],
+        must_not_contain: &[
+            ", through the reference longest returned",
+            "Copy from longest to result",
+            "result is initialized by copy from longest",
+            "Return immutably borrowed resource from result to *result",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_longest_literal",
+        // Book ch. 10.3, with a string literal as second argument: it
+        // has no column, and the result may point into it instead.
+        must_contain: &[
+            "Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments (the other is a value with no column here), so string1 stays borrowed while result is in use",
+            "Return immutably borrowed resource from result to string1",
+        ],
+        must_not_contain: &[
+            ", through the reference longest returned",
+            "Copy from longest to result",
+            "Return immutably borrowed resource from result to *result",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_methods",
+        // `&self` methods: the result borrows the receiver, through
+        // `.unwrap()` on the `Option<&T>` too. `get(&team)` borrows
+        // `team` only for the call (the result's lifetime is self's).
+        must_contain: &[
+            "Immutable borrow from v to f: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Immutable borrow from scores to score: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return immutably borrowed resource from f to v",
+            "Return immutably borrowed resource from score to scores",
+            "get reads from team",
+        ],
+        must_not_contain: &[
+            ", through the reference unwrap returned",
+            ", through the reference as_str returned",
+            "Immutable borrow from team to score",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_mut",
+        // `&mut` version: v can't be used until x's last use.
+        must_contain: &[
+            "Mutable borrow from v to x: first_mut's signature gives the reference it returns the same lifetime as its argument",
+            "v's resource is mutably borrowed by x; v can't be used while the borrow is live",
+            "x mutably borrows a resource",
+            "Return mutably borrowed resource from x to v",
+        ],
+        must_not_contain: &[
+            ", through the reference first_mut returned",
+            "Move from first_mut to x",
+            "x is bound to a mutable reference",
+            "Return mutably borrowed resource from x to *x",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_unrelated_arg",
+        // `fn pick_first<'a, 'b>(x: &'a str, _y: &'b str) -> &'a str`:
+        // only the `'a` argument stays borrowed.
+        must_contain: &[
+            "Immutable borrow from a to r: pick_first's signature gives the reference it returns the same lifetime as its first argument",
+            "Return immutably borrowed resource from r to a",
+            "pick_first reads from b",
+        ],
+        must_not_contain: &[
+            ", through the reference pick_first returned",
+            "Copy from pick_first to r",
+            "Immutable borrow from b to r",
+            "Return immutably borrowed resource from r to b",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_iter_next",
+        // `x` borrows `v` (through the iterator), not the iterator
+        // `it`. What a non-reference variable holds isn't tracked, so
+        // x's lender is left out (an honest omission) rather than
+        // drawn as `it`, which is what this used to say.
+        must_contain: &[
+            "x is initialized by copy from unwrap",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from it to x",
+            "it's resource is immutably borrowed by x; it is read-only while the borrow is live",
+            "Return immutably borrowed resource from x to it",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_reassign",
+        // Reassigning `r` ends its borrow of both of longest's
+        // arguments and starts a borrow of `c`.
+        must_contain: &[
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from r to b",
+            "Immutable borrow from c to r: first's signature gives the reference it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from r to c",
+        ],
+        must_not_contain: &[
+            ", through the reference first returned",
+            "Copy from longest to r",
+            "Copy from first to r",
+            "Return immutably borrowed resource from r to *r",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_struct_field",
+        // A struct field initialised from a call returning a reference.
+        must_contain: &[
+            "Immutable borrow from novel to e.part: first_sentence's signature gives the reference it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from e.part to novel",
+        ],
+        must_not_contain: &[
+            ", through the reference first_sentence returned",
+            "Copy from first_sentence to e.part",
+            "Return immutably borrowed resource from e.part to *e.part",
         ],
     },
     TooltipExpect {

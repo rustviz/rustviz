@@ -266,8 +266,12 @@ const Description: React.FC = () => (
     <p><strong>Some of what&apos;s drawn is wrong</strong>, so don&apos;t rely on it for:</p>
     <ul>
       <li>
-        Functions that return a reference (e.g. <code>first_word</code>,{' '}
-        <code>longest</code>): the result isn&apos;t linked to what it borrows.
+        A variable that holds a borrow without being a reference (
+        <code>let third = v.get(2);</code>, <code>let it = v.iter();</code>)
+        isn&apos;t drawn as borrowing <code>v</code>, and a reference taken
+        out of it later isn&apos;t linked to <code>v</code>. (A reference
+        returned by a call, like <code>first_word(&amp;s)</code> or{' '}
+        <code>longest(&amp;a, &amp;b)</code>, is.)
       </li>
       <li>
         A variable assigned in only some branches of an <code>if</code> is drawn
