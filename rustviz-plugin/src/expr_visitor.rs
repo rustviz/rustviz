@@ -964,12 +964,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `&GREETING` / `&mut COUNTER`: a borrow of the static itself.
       // (`&CONST` borrows a fresh copy of the constant's value, which
       // may or may not be promoted to a static; not named.)
-      ExprKind::AddrOf(_, _, inner) => match inner.kind {
+      ExprKind::AddrOf(_, mutbl, inner) => match inner.kind {
         ExprKind::Path(QPath::Resolved(_, p))
           if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) =>
             item_name(p).map(StaticLender::Static),
+        // `&CONST`: a fresh copy of the constant's value, which Rust
+        // promotes to a `'static` only when the value has no
+        // destructor and no interior mutability (judged here from the
+        // type, which is conservative). Never for `&mut`.
+        ExprKind::Path(QPath::Resolved(_, p))
+          if mutbl == rustc_hir::Mutability::Not => match p.res {
+            Res::Def(DefKind::Const { .. }, def_id) => {
+              let ty = self.tcx.type_of(def_id).instantiate_identity().skip_normalization();
+              let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+              if ty.is_freeze(self.tcx, env) && !ty.needs_drop(self.tcx, env) {
+                item_name(p).map(StaticLender::PromotedConst)
+              } else {
+                None
+              }
+            }
+            _ => None,
+          },
         _ => None,
       },
+      // `if c { "a" } else { "b" }`, `match n { 0 => "zero", _ => "many" }`:
+      // the borrow is of 'static data only if every arm that yields a
+      // value agrees (arms of type `!`, like `panic!()`, yield none).
+      ExprKind::If(_, then, Some(els)) => self.merge_static_lenders(&[then, els]),
+      ExprKind::Match(_, arms, _) => {
+        let bodies: Vec<&'tcx Expr> = arms.iter().map(|a| a.body).collect();
+        self.merge_static_lenders(&bodies)
+      }
       ExprKind::Path(QPath::Resolved(_, p)) => match p.res {
         // The binding is a reference, so the item's value is one: the
         // binding gets a copy of it and borrows what it points to.
@@ -987,6 +1012,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExprKind::Block(b, _) => b.expr.and_then(|e| self.static_lender_of(e)),
       _ => None,
     }
+  }
+
+  /// The one StaticLender shared by every value-yielding branch of an
+  /// `if` / `match`; None if any branch is unknown or they differ.
+  fn merge_static_lenders(&self, branches: &[&'tcx Expr]) -> Option<StaticLender> {
+    let typeck = self.tcx.typeck(branches[0].hir_id.owner);
+    let mut found: Option<StaticLender> = None;
+    for e in branches {
+      if typeck.expr_ty(e).is_never() { continue; }
+      let l = self.static_lender_of(e)?;
+      match &found {
+        Some(f) if *f != l => return None,
+        _ => found = Some(l),
+      }
+    }
+    found
   }
 
   // 

@@ -382,6 +382,9 @@ const EXPECTED_OK: &[&str] = &[
     // A fn parameter written as a pattern (`(a, b): (String, i32)`,
     // `P { name, .. }: P`) gives each of its names a column (#331).
     "param_patterns",
+    // ... also when an if/match picks between literals, and for `&CONST`.
+    "ref_static_lender_branches",
+    "ref_static_lender_const",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3677,6 +3680,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "s acquires ownership from the caller",
             "s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_static_lender_branches",
+        // Every value-yielding arm is a string literal (a diverging arm
+        // doesn't count): named. A literal mixed with a call result or
+        // with a const's reference stays generic.
+        must_contain: &[
+            "a's borrow of the string literal ends (string literals live for the whole program)",
+            "b's borrow of the string literal ends (string literals live for the whole program)",
+            "d's borrow of the string literal ends (string literals live for the whole program)",
+            "m's immutable borrow ends (what it borrows from isn't shown)",
+            "n's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "a's immutable borrow ends (what it borrows from isn't shown)",
+            "b's immutable borrow ends (what it borrows from isn't shown)",
+            "d's immutable borrow ends (what it borrows from isn't shown)",
+            "m's borrow of the string literal",
+            "n's borrow of the string literal",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_static_lender_const",
+        // `&CONST` is promoted to a 'static only for a value with no
+        // destructor and no interior mutability.
+        must_contain: &[
+            "p's borrow of the constant ANSWER ends (Rust stores the borrowed value for the whole program)",
+            "q's borrow of the constant ORIGIN ends (Rust stores the borrowed value for the whole program)",
+            "v's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "p's immutable borrow ends (what it borrows from isn't shown)",
+            "q's immutable borrow ends (what it borrows from isn't shown)",
+            "v's borrow of the constant",
         ],
     },
 ];

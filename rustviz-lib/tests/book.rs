@@ -508,9 +508,10 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Copy from n to x",
             "msg is bound to an immutable reference (in all branches above)",
-            "L8 msg's immutable borrow ends (what it borrows from isn't shown)",
+            "L8 msg's borrow of the string literal ends (string literals live for the whole program)",
         ],
         must_not_contain: &[
+            "L8 msg's immutable borrow ends (what it borrows from isn't shown)",
             "msg is the owner of the resource",
             "msg acquires ownership of a resource",
             "msg acquired ownership of a resource (in all branches above)",

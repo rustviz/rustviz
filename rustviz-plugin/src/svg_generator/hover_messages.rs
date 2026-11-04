@@ -971,6 +971,8 @@ pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &St
             format!("what the static {} points to ends (it lives for the whole program)", fmt_style(name)),
         StaticLender::PointeeOfConst(name) =>
             format!("what the constant {} points to ends (it lives for the whole program)", fmt_style(name)),
+        StaticLender::PromotedConst(name) =>
+            format!("the constant {} ends (Rust stores the borrowed value for the whole program)", fmt_style(name)),
     };
     format!(
         "{0}'s {1}borrow of {2}",
