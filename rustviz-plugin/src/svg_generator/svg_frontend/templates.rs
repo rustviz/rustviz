@@ -201,67 +201,50 @@ pub static CSS_TEMPLATE: &'static str =
     .branch-group:hover .tooltip-trigger {
         filter: url(#glow);
     }
-    
-    /* hash based styling */
-    [data-hash=\"0\"] {
-        fill: #6e6b5e;
-    }
-    
-    [data-hash=\"1\"] {
-        fill: #1893ff;
-        stroke: #1893ff;
-    }
-    
-    [data-hash=\"2\"] {
-        fill: #ff7f50;
-        stroke: #ff7f50;
-    }
-    
-    [data-hash=\"3\"] {
-        fill: #8635ff;
-        stroke: #8635ff;
-    }
-    
-    [data-hash=\"4\"] {
-        fill: #dc143c;
-        stroke: #dc143c;
-    }
-    
-    [data-hash=\"5\"] {
-        fill: #0a810a;
-        stroke: #0a810a;
-    }
-    
-    [data-hash=\"6\"] {
-        fill: #008080;
-        stroke: #008080;
-    }
-    
-    [data-hash=\"7\"] {
-        fill: #ff6cce;
-        stroke: #ff6cce;
-    }
-    
-    [data-hash=\"8\"] {
-        fill: #00d6fc;
-        stroke: #00d6fc;
-    }
-    
-    [data-hash=\"9\"] {
-        fill: #b99f35;
-        stroke: #b99f35;
-    }
-    [data-hash=\"10\"] {
-        fill: #15a710;
-        stroke: #15a710;
-    }
-    [data-hash=\"11\"] {
-        fill: #000000;
-        stroke: #000000;
-    }
-    [data-hash=\"12\"] {
-        fill: #463ae9;
-        stroke: #463ae9;
-    }";
+";
 
 
+
+/// Column colours, indexed by `data-hash`. Hash 0 is the code panel's
+/// colour for function names (fill only); every resource access point
+/// and called function gets the next hash from 1 up.
+const HASH_PALETTE: [&str; 13] = [
+    "#6e6b5e", // 0: function names
+    "#1893ff", "#ff7f50", "#8635ff", "#dc143c", "#0a810a", "#008080",
+    "#ff6cce", "#00d6fc", "#b99f35", "#15a710", "#000000", "#463ae9",
+];
+
+/// The `[data-hash="N"]` colour rules for hashes `0..=max_hash` (at
+/// least the whole palette). Hashes past the palette reuse its colours
+/// 1..=12 in order, so every column's state lines get a stroke however
+/// many variables the program has. Without a rule a column's lines had
+/// no stroke at all (#279). Only the colour cycles: `data-hash` itself
+/// stays unique, since it's also what links code-panel names to their
+/// columns on hover.
+pub fn hash_css(max_hash: u64) -> String {
+    let cycle = (HASH_PALETTE.len() - 1) as u64;
+    let last = max_hash.max(cycle);
+    let mut css = String::from("\n    /* hash based styling */\n");
+    css.push_str(&format!(
+        "    [data-hash=\"0\"] {{ fill: {}; }}\n",
+        HASH_PALETTE[0]
+    ));
+    for h in 1..=last {
+        let c = HASH_PALETTE[((h - 1) % cycle + 1) as usize];
+        css.push_str(&format!(
+            "    [data-hash=\"{h}\"] {{ fill: {c}; stroke: {c}; }}\n"
+        ));
+    }
+    css
+}
+
+/// Largest hash an SVG fragment refers to, as `data-hash="N"` or as a
+/// function name's `hash="N"` (which the hover script copies into
+/// `data-hash` to colour the name).
+pub fn max_hash_in(svg: &str) -> u64 {
+    svg.split("hash=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next()?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+}

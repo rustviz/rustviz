@@ -297,6 +297,9 @@ const EXPECTED_OK: &[&str] = &[
     // timeline_panel.rs, these keep the shapes rendering on-canvas.
     "match_five_arms",
     "match_three_arms_nested_middle",
+    // More columns than the 12-colour palette: every column still gets
+    // a stroke colour (#279).
+    "many_columns_palette",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2672,6 +2675,15 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         covered
     );
     for (panel, svg) in [("code", &code), ("timeline", &timeline)] {
+        let uncoloured = hashes_without_colour(svg);
+        assert!(
+            uncoloured.is_empty(),
+            "{}: {} panel uses data-hash value(s) {:?} with no fill+stroke colour rule \
+             (in the timeline, those columns' state lines have no stroke and are invisible)",
+            name,
+            panel,
+            uncoloured
+        );
         let off = off_canvas_ys(svg);
         assert!(
             off.is_empty(),
@@ -2696,6 +2708,40 @@ fn assert_no_negative_sizes(name: &str, timeline: &str) {
             panic!("{}: negative size in timeline: {}", name, &timeline[start..end]);
         }
     }
+}
+
+/// Every hash (from 1 up) that the panel's elements use, as
+/// `data-hash="N"` or a function name's `hash="N"` (the hover script
+/// copies it into `data-hash`), whose `[data-hash="N"]` rule in the
+/// panel's stylesheet is missing or lacks a `fill` or `stroke`. A
+/// column without one draws its state lines with no stroke (#279).
+/// Hash 0 is the code panel's function-name colour and is fill-only.
+fn hashes_without_colour(svg: &str) -> Vec<u64> {
+    let (style, body) = match svg.find("]]>") {
+        Some(i) => (&svg[..i], &svg[i..]),
+        None => return vec![u64::MAX],
+    };
+    let mut used: Vec<u64> = body
+        .split("hash=\"")
+        .skip(1)
+        .filter_map(|r| r.split('"').next()?.parse().ok())
+        .filter(|&h| h > 0)
+        .collect();
+    used.sort();
+    used.dedup();
+    used.into_iter()
+        .filter(|h| {
+            let sel = format!("[data-hash=\"{}\"]", h);
+            match style.find(&sel) {
+                Some(i) => {
+                    let rule = &style[i + sel.len()..];
+                    let rule = &rule[..rule.find('}').unwrap_or(rule.len())];
+                    !(rule.contains("fill:") && rule.contains("stroke:"))
+                }
+                None => true,
+            }
+        })
+        .collect()
 }
 
 /// Every y coordinate (`y`, `y1`, `y2`, `cy`, and the y half of each
@@ -3331,4 +3377,30 @@ fn guard_that_moves_is_refused() {
     let msg = err.to_string();
     assert!(msg.contains("match guards that move or assign a variable declared outside the guard (`s`"),
         "expected the guard-move refusal, got:\n{}", msg);
+}
+
+/// #279: past the 12th hash, columns had no colour rule, so their state
+/// lines had no stroke and only their dots showed. The fixture has more
+/// hashes than the palette; every column's lines must get a stroke.
+#[test]
+fn columns_past_the_palette_get_a_stroke() {
+    let rv = run_with_local_backend("many_columns_palette");
+    let timeline = rv.timeline_panel_string();
+    let body = &timeline[timeline.find("]]>").unwrap()..];
+    let line_hashes: Vec<u64> = body
+        .split('<')
+        .filter(|tag| {
+            (tag.starts_with("line ") || tag.starts_with("path "))
+                && (tag.contains("class=\"hollow") || tag.contains("class=\"solid"))
+        })
+        .filter_map(|tag| tag.split("data-hash=\"").nth(1)?.split('"').next()?.parse().ok())
+        .collect();
+    assert!(
+        line_hashes.iter().any(|&h| h > 12),
+        "fixture no longer has a column past the 12-colour palette (state-line hashes {:?}); \
+         add variables so the test still covers #279",
+        line_hashes
+    );
+    assert_eq!(hashes_without_colour(&timeline), Vec::<u64>::new());
+    assert_eq!(hashes_without_colour(&rv.code_panel_string()), Vec::<u64>::new());
 }

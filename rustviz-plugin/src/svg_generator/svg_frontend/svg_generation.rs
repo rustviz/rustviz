@@ -538,7 +538,6 @@ pub fn render_svg(
 
     let svg_code_template = CODE_PANEL_TEMPLATE;
     let svg_timeline_template = TIMELINE_PANEL_TEMPLATE;
-    let css_string = CSS_TEMPLATE;
     visualization_data.compute_states();
 
     // println!("timelines {:#?}", visualization_data.timelines);
@@ -579,7 +578,10 @@ pub fn render_svg(
     let code_panel_width = std::cmp::max(400, (max_x_space as i32) * 9 + 40);
     let mut svg_data = SvgData {
         visualization_name: "vis".to_owned(),
-        css: css_string.to_owned(),
+        // Both panels share one stylesheet, with a colour rule for
+        // every hash either of them uses.
+        css: CSS_TEMPLATE.to_owned()
+            + &hash_css(max_hash_in(&code_panel_string).max(max_hash_in(&timeline_panel_string))),
         code: code_panel_string,
         diagram: timeline_panel_string,
         tl_id: "tl_".to_owned() + "vis",
