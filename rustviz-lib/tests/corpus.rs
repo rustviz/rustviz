@@ -333,6 +333,8 @@ const EXPECTED_OK: &[&str] = &[
     "interior_mut_user_borrow_mut",
     // Operands of built-in arithmetic operators are copied in (#241).
     "binop_operand_copies",
+    "method_autoref_receiver",
+    "method_autoref_ref_receiver",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -508,7 +510,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "iter_mut_deref",
         // `for x in v.iter_mut() { *x *= 2; }`.
         must_contain: &[
-            "iter_mut reads from/writes to v",
+            "iter_mut reads from/writes to v (implicitly mutably borrowed)",
             "the resource x points to is modified through *x",
         ],
         must_not_contain: &[
@@ -769,7 +771,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "field_method_call",
         must_contain: &[
             "Move from String::from to r.s",
-            "push_str reads from/writes to r.s",
+            "push_str reads from/writes to r.s (implicitly mutably borrowed)",
         ],
         must_not_contain: &[],
     },
@@ -809,7 +811,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // "X reads from/writes to Y" on the fn-icon dot.
         must_contain: &[
             "Move from String::from to s",
-            "push_str reads from/writes to s",
+            "push_str reads from/writes to s (implicitly mutably borrowed)",
         ],
         must_not_contain: &[],
     },
@@ -838,7 +840,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the fn-icon dot. The Copy return value lands in n.
         must_contain: &[
             "Move from String::from to s",
-            "len reads from s",
+            "len reads from s (implicitly borrowed)",
             "Copy from len to n",
         ],
         must_not_contain: &[],
@@ -872,7 +874,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "assign_field_of_method_result",
         must_contain: &[
-            "last_mut reads from/writes to v",
+            "last_mut reads from/writes to v (implicitly mutably borrowed)",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[],
@@ -889,7 +891,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. No resource is dropped.",
             "c's resource is moved",
             "c goes out of scope. No resource is dropped.",
-            "rename reads from/writes to u",
+            "rename reads from/writes to u (implicitly mutably borrowed)",
         ],
         must_not_contain: &[
             "a goes out of scope. Its resource is dropped.",
@@ -1218,7 +1220,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "method_call_in_println",
         must_contain: &[
-            "get reads from r",
+            "get reads from r (implicitly borrowed)",
         ],
         must_not_contain: &[],
     },
@@ -1850,8 +1852,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `*v.last_mut().unwrap() = 5` and `*map.entry(k).or_insert(0) += 1`:
         // the base receiver's call is shown; `k` is moved into `entry`.
         must_contain: &[
-            "last_mut reads from/writes to v",
-            "entry reads from/writes to map",
+            "last_mut reads from/writes to v (implicitly mutably borrowed)",
+            "entry reads from/writes to map (implicitly mutably borrowed)",
             "Move from k to entry",
             "v goes out of scope. Its resource is dropped.",
             "map goes out of scope. Its resource is dropped.",
@@ -1914,7 +1916,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "self is an immutable borrow from the caller",
             "out is a mutable borrow from the caller",
-            "area reads from rect1",
+            "area reads from rect1 (implicitly borrowed)",
         ],
         must_not_contain: &[
             "f, immutable",
@@ -1974,8 +1976,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r goes out of scope. No resource is dropped.",
             "Copy from c to unwrap_or",
             "c's resource is copied",
-            "clone reads from s",
-            "is_some reads from c",
+            "clone reads from s (implicitly borrowed)",
+            "is_some reads from c (implicitly borrowed)",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -2014,7 +2016,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow ends (#190).
         must_contain: &[
             "into_iter reads from r",
-            "len reads from v",
+            "len reads from v (implicitly borrowed)",
             "v goes out of scope. Its resource is dropped.",
             "n is initialized by copy from count",
             "Copy from count to n",
@@ -2258,7 +2260,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `Some(t) if t.len() > 2 =>`: the guard reads the arm's own
         // binding.
         must_contain: &[
-            "len reads from t",
+            "len reads from t (implicitly borrowed)",
             "Partial move from opt to t",
             "t goes out of scope. Its resource is dropped.",
         ],
@@ -2287,7 +2289,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `n if let Some(w) = words.last() && check(&s) =>`: both parts
         // of the chain produce events; `w` is scoped to the arm.
         must_contain: &[
-            "last reads from words",
+            "last reads from words (implicitly borrowed)",
             "Copy from last to w",
             "check reads from s",
             "w goes out of scope",
@@ -2383,7 +2385,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             // `v.len()` is a call, not a place: its own event ("len
-            // reads from v") is the read, not a read of `len`.
+            // reads from v (implicitly borrowed)") is the read, not a
+            // read of `len`.
             "panic! reads from len through an implicit reference, so len isn't moved",
             "assert_eq! reads from len through an implicit reference, so len isn't moved",
         ],
@@ -3015,6 +3018,48 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from x to z",
             "Copy from x to <",
             "Copy from y to <",
+        ],
+    },
+    TooltipExpect {
+        name: "method_autoref_receiver",
+        // rustc auto-references an owner receiver: `s.len()` is
+        // `String::len(&s)`. Without the note the dot read like a move.
+        must_contain: &[
+            "len reads from s (implicitly borrowed)",
+            "push_str reads from/writes to s (implicitly mutably borrowed)",
+            "push reads from/writes to v (implicitly mutably borrowed)",
+            // Through a Box: `String::len(&**b)` still borrows b.
+            "len reads from b (implicitly borrowed)",
+            // A written `&`: no note.
+            "is_empty reads from s",
+            "String::len reads from s",
+            "String::push_str reads from/writes to s",
+        ],
+        must_not_contain: &[
+            "len reads from s",
+            "push_str reads from/writes to s",
+            "is_empty reads from s (implicitly borrowed)",
+            "String::len reads from s (implicitly borrowed)",
+            "String::push_str reads from/writes to s (implicitly mutably borrowed)",
+            // The macro wording is only for macro arguments.
+            "len reads from s through an implicit reference, so s isn't moved",
+        ],
+    },
+    TooltipExpect {
+        name: "method_autoref_ref_receiver",
+        // A reference receiver is dereffed and reborrowed, not
+        // auto-referenced: no "(implicitly borrowed)" note, and the
+        // `&mut` case keeps only its reborrow note.
+        must_contain: &[
+            "len reads from r",
+            "push_str reads from/writes to w (mutable reborrow — w can't be used until push_str returns)",
+            "is_empty reads from r",
+        ],
+        must_not_contain: &[
+            "len reads from r (implicitly borrowed)",
+            "push_str reads from/writes to w (implicitly mutably borrowed)",
+            "push_str reads from/writes to w (implicitly mutably borrowed) (mutable reborrow — w can't be used until push_str returns)",
+            "is_empty reads from r (implicitly borrowed)",
         ],
     },
 ];

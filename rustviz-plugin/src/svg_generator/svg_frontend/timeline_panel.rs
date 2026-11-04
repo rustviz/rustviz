@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -2221,13 +2221,19 @@ fn render_arrow (
                         _ => String::new(),
                     };
                     // The `&` / `&mut` was inserted by Rust, not written
-                    // (`println!("{}", s)` takes `&s`): say so, or the
-                    // call reads like it moves s.
+                    // (`println!("{}", s)` takes `&s`, `s.len()` is
+                    // `String::len(&s)`): say so, or the call reads like
+                    // it moves s. Method calls are everywhere, so their
+                    // note is the shorter one.
                     let implicit_suffix: String = match external_event {
-                        ExternalEvent::PassByStaticReference { implicit: true, .. } => format!(
+                        ExternalEvent::PassByStaticReference { implicit: ImplicitRef::MacroArg, .. } => format!(
                             " through an implicit reference, so {} isn't moved", styled_from_name),
-                        ExternalEvent::PassByMutableReference { implicit: true, .. } => format!(
+                        ExternalEvent::PassByMutableReference { implicit: ImplicitRef::MacroArg, .. } => format!(
                             " through an implicit mutable reference, so {} isn't moved", styled_from_name),
+                        ExternalEvent::PassByStaticReference { implicit: ImplicitRef::Autoref, .. } =>
+                            " (implicitly borrowed)".to_string(),
+                        ExternalEvent::PassByMutableReference { implicit: ImplicitRef::Autoref, .. } =>
+                            " (implicitly mutably borrowed)".to_string(),
                         _ => String::new(),
                     };
 
@@ -2236,7 +2242,7 @@ fn render_arrow (
                     // `m.lock()`, atomics): the borrow checker sees a
                     // shared borrow, but the value inside can change,
                     // so "reads from" would be false (#203).
-                    let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: false, .. })
+                    let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: ImplicitRef::No | ImplicitRef::Autoref, .. })
                         && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
                     let title = if interior_mut {
                         hover_messages::fn_dot_shared_borrow_interior_mut(

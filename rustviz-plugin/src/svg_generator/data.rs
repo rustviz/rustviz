@@ -486,6 +486,22 @@ pub enum StaticLender {
     PointeeOfConst(String),
 }
 
+/// Whether the `&` / `&mut` of a pass-by-reference event was written in
+/// the source or inserted by Rust. Drives the call dot's tooltip: without
+/// a note, `println!("{}", s)` or `s.len()` reads like it moves `s`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImplicitRef {
+    /// Written (`f(&s)`, `(&s).len()`), or the argument already is a
+    /// reference (`r.len()` with `r: &String`).
+    No,
+    /// A formatting macro's argument: `println!("{}", s)` goes
+    /// through `format_args!`, which takes `&s`.
+    MacroArg,
+    /// A method receiver that rustc auto-referenced: `s.len()` is
+    /// `String::len(&s)`, `s.push_str(t)` is `String::push_str(&mut s, t)`.
+    Autoref,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -552,13 +568,13 @@ pub enum ExternalEvent {
     // a use of the Owner, happens when var pass by reference
     // its really borrow and return but happens on the same line,
     // use this event instead of borrow and return for more concise visualization 
-    // `implicit`: the `&` isn't written in the source; Rust inserts
-    // it (`println!("{}", s)` is `format_args!` taking `&s`). The
-    // tooltip says so, since without it the call reads like a move.
+    // `implicit`: whether the `&` was inserted by Rust rather than
+    // written (see `ImplicitRef`). The tooltip says so, since without
+    // it the call reads like a move.
     PassByStaticReference {
         from: ResourceTy,
         to: ResourceTy, // must be a function
-        implicit: bool,
+        implicit: ImplicitRef,
         // The callee is `RefCell::borrow_mut`, identified by its
         // DefId (not its name: a user type may define its own
         // `borrow_mut(&self)`). Selects the runtime-exclusivity wording.
@@ -576,7 +592,7 @@ pub enum ExternalEvent {
         to: ResourceTy, // must be a function
         is_reborrow: bool,
         result_has_lifetime: bool,
-        implicit: bool, // see PassByStaticReference
+        implicit: ImplicitRef, // see PassByStaticReference
         id: usize
     },
     GoOutOfScope {

@@ -617,6 +617,31 @@ pub fn is_implicit_mut_reborrow(expr: &Expr, typeck: &TypeckResults) -> bool {
     ))
 }
 
+/// True iff rustc auto-referenced the method receiver `rcvr` in place:
+/// `s.len()` is `String::len(&s)`, `s.push_str(t)` is
+/// `String::push_str(&mut s, t)`, `v.iter()` is `<[T]>::iter(&*v)`. The
+/// receiver is a place that isn't itself a reference, and its
+/// adjustments include an autoborrow (`Adjust::Borrow(AutoBorrow::Ref)`,
+/// possibly after auto-derefs through `Box` / `Deref` impls).
+///
+/// Not an autoref (returns false):
+/// - `r.len()` / `r.push_str(..)` with `r: &String` / `&mut String`:
+///   rustc derefs and reborrows (`&*r`, `&mut *r`); no new borrow of a
+///   place is created. The `&mut` case has its own reborrow note.
+/// - `(&s).len()`: the `&` is written; the receiver is a reference.
+/// - `(*r).len()`: the place is reached through an explicit `*`, so
+///   the inserted `&` reborrows `*r` rather than borrowing a local.
+pub fn is_method_autoref(rcvr: &Expr, typeck: &TypeckResults) -> bool {
+  let ty = typeck.expr_ty(rcvr);
+  if ty.is_ref() || ty.is_raw_ptr() {
+    return false;
+  }
+  if let ExprKind::Unary(UnOp::Deref, _) = rcvr.kind {
+    return false;
+  }
+  typeck.expr_adjustments(rcvr).iter().any(|a| matches!(a.kind, Adjust::Borrow(AutoBorrow::Ref(..))))
+}
+
 /// True iff the type of `call` (a call / method-call expression)
 /// mentions a lifetime, so the call's result may carry a borrow that
 /// outlives the call itself (`let w = first(r);` keeps `r` unusable

@@ -623,9 +623,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: false, refcell_borrow_mut: false },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
-        from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: false,
+        from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
       },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None }
@@ -676,12 +676,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   /// `add_ev` for a `PassByMRef`, tagged with whether the call
-  /// reborrows the `&mut` argument and whether the call's result
-  /// can carry that reborrow past the call.
-  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool) {
+  /// reborrows the `&mut` argument, whether the call's result
+  /// can carry that reborrow past the call, and whether Rust
+  /// inserted the `&mut` (see `ImplicitRef`).
+  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit: false,
+      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit,
+    });
+    *self.unique_id += 1;
+  }
+
+  /// `add_ev` for a `PassBySRef` with an explicit `ImplicitRef`.
+  pub fn add_pass_by_sref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool) {
+    let id = *self.unique_id;
+    self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
+      from: arg, to: func, id, implicit, refcell_borrow_mut,
     });
     *self.unique_id += 1;
   }
@@ -787,7 +797,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             rustc_hir::Node::Expr(call) => call_result_has_lifetime(call, tycheck_results),
             _ => true,
           };
-          self.add_pass_by_mref_ev(line_num, to_ro, from_ro, is_reborrow, result_has_lifetime)
+          self.add_pass_by_mref_ev(line_num, to_ro, from_ro, is_reborrow, result_has_lifetime, ImplicitRef::No)
         }
       }
     }
