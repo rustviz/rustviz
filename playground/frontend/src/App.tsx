@@ -318,6 +318,10 @@ const Description: React.FC = () => (
         and unions are drawn as a single owner; a write through{' '}
         <code>*cell.borrow_mut()</code> shows only the call, not the write.
       </li>
+      <li>
+        In <code>fn f(ref s: String)</code>, <code>s</code> borrows the String{' '}
+        <code>f</code> owns; that String has no column, so its drop isn&apos;t shown.
+      </li>
     </ul>
     <p>
       If you find an example that exposes a bug, please open an issue on the{' '}

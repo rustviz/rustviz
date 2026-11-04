@@ -425,6 +425,9 @@ const EXPECTED_OK: &[&str] = &[
     "long_ref_label_then_short",
     // Element / slice borrows through a reference are reborrows (#407).
     "index_reborrow_through_ref",
+    // `ref` bindings in by-value parameters borrow the value the
+    // function owns, not the caller's (#377).
+    "param_ref_binding_own",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4142,6 +4145,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from r to sl",
             "(implicitly mutably borrowed) (mutable reborrow",
             "push reads from/writes to rv (implicitly mutably borrowed)",
+        ],
+    },
+    // ─── `ref` bindings in by-value parameters (#377) ──────────────
+    TooltipExpect {
+        name: "param_ref_binding_own",
+        // `fn whole(ref s: String)`: the caller's String is moved into
+        // `whole`, which owns it; `s: &String` borrows that, so it is
+        // not "a borrow from the caller" (rustc: "cannot return value
+        // referencing function parameter"). Same for a `ref` inside a
+        // tuple or struct parameter pattern (part of the value) and for
+        // `ref mut`. Bindings reached through a reference, written
+        // (`&(ref x, y)`) or implicit (`(w, z): &(String, i32)`), do
+        // borrow the caller's data.
+        must_contain: &[
+            "s is an immutable borrow of the value passed to whole, which whole owns",
+            "a is an immutable borrow of part of the value passed to part, which part owns",
+            "v is a mutable borrow of the value passed to grow, which grow owns",
+            "name is an immutable borrow of part of the value passed to field, which field owns",
+            "x is an immutable borrow from the caller",
+            "w is an immutable borrow from the caller",
+            "Move from s1 to whole",
+            "Move from t to part",
+        ],
+        must_not_contain: &[
+            "s is an immutable borrow from the caller",
+            "a is an immutable borrow from the caller",
+            "v is a mutable borrow from the caller",
+            "name is an immutable borrow from the caller",
+            "x is an immutable borrow of",
+            "w is an immutable borrow of",
         ],
     },
 ];

@@ -266,6 +266,9 @@ rather than listed here.
   borrow of `x`, so a write `*p = 2` isn't connected to `x`.
 - `const` and `static` items get no column of their own; reading one
   shows only the binding it's read into.
+- A `ref` binding in a by-value parameter (`fn f(ref s: String)`) is
+  drawn as a borrow of the value `f` owns, but that value has no column
+  of its own, so its drop when `f` returns isn't shown.
 
 The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).
