@@ -337,6 +337,8 @@ const EXPECTED_OK: &[&str] = &[
     "method_autoref_ref_receiver",
     // `(&mut s).method()` is a fresh borrow of s, not a reborrow (#367).
     "method_addrof_receiver",
+    // A moved-out reference's state isn't about ownership (#292).
+    "moved_ref_state",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3077,6 +3079,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "push_str reads from/writes to s (mutable reborrow — s can't be used until push_str returns)",
+        ],
+    },
+    // ─── A moved-out reference's state (#292) ────────────────────────
+    TooltipExpect {
+        name: "moved_ref_state",
+        // q's `&mut` is moved into q2; q is usable again once it's
+        // assigned a new reference. It never owned anything.
+        must_contain: &[
+            "q's mutable reference was moved out, so q can't be used until it's assigned again",
+            "q's mutable reference is moved (not the resource it points to)",
+        ],
+        must_not_contain: &[
+            "q's resource was moved, so q no longer has ownership",
+            "q's resource was moved, so q no longer has ownership; cannot access data.",
         ],
     },
 ];
