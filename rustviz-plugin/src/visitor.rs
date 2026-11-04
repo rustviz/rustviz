@@ -1931,10 +1931,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // scrutinee is evaluated either way and stays outside.
         let if_lo;
         let if_hash_lo;
+        // `if let … = (x, y)` moves `x` and `y` into the tuple even when
+        // the pattern doesn't match; the else branch shows that (#327).
+        let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
             if_hash_lo = self.rap_hashes;
+            scrutinee_moves = self.tuple_scrutinee_moves(let_expr.init);
             let (bound, first_in_branch) = self.register_iflet_let_bindings(let_expr, None);
             // Copies out of the scrutinee stay before the split (#496).
             if_lo = first_in_branch;
@@ -2019,7 +2023,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .filter(|(_, e)| if_ids.contains(&e.get_id())
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
-            if !events_move_out_of_outer(&body_ev, &if_scope) {
+            // A tuple scrutinee's variables are moved whether or not the
+            // body runs (#327), so that's a second path as well.
+            if scrutinee_moves.is_empty() && !events_move_out_of_outer(&body_ev, &if_scope) {
                 for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
                     self.preprocessed_events.push((
                         if_end,
@@ -2095,6 +2101,20 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut else_decl = else_decl;
         else_decl.extend(else_inner);
         else_decl.extend(else_scoped);
+        // The pattern didn't match, but the tuple literal it was matched
+        // against already took `x` / `y` (the if branch's own moves come
+        // from register_iflet_let_bindings).
+        for r in scrutinee_moves {
+          else_ev.insert(0, (if_end, ExternalEvent::Move {
+            from: ResourceTy::Value(r.clone()),
+            to: ResourceTy::Anonymous,
+            id: *self.unique_id,
+            is_partial: false,
+            into_closure: false,
+          }));
+          *self.unique_id += 1;
+          liveness.insert(r);
+        }
 
         
         let if_map = create_line_map(&if_ev);
@@ -2154,14 +2174,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // No `else` (and the body moves something, see above): the
           // implicit empty `else` is a second path that leaves every
           // variable as it was (#257).
-          None => (
+          None => {
+            // The scrutinee's moves (#327) are all this path has.
+            let else_map = create_line_map(&else_ev);
+            (
             vec!["If".to_owned(), "Else".to_owned()],
             vec![if_slice, else_slice],
             vec![
               ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits },
-              ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
+              ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
             ],
-          ),
+            )
+          }
         };
         // The arm of an `if let` with pattern bindings is named so for
         // the drawing: they bind on the split line, and the arm's column
@@ -2356,10 +2380,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // locals (#234); see join_uninit_locals.
             let uninit_before = self.uninit_locals.clone();
             let mut uninit_ends = Vec::new();
+            // `match (x, y) { … }` moves `x` and `y` into the tuple
+            // whatever arm is taken (#327).
+            let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
             for arm in arms.iter() {
               let arm_hash_lo = self.rap_hashes;
               let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
               let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
+              // Parents this arm's pattern moves out of.
+              let mut arm_moved: Vec<ResourceTy> = Vec::new();
 
               // get line info
               // An arm body can be a bare macro call
@@ -2430,6 +2459,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
                     for (to_ro, e, from, partial) in associated_ro.iter() {
+                      if matches!(e, Evt::Move) {
+                        arm_moved.push(from.clone());
+                      }
                       // If the type of the pat is not the same as the parent associated with it then it must be a partial move
                       let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
                       let id = *self.unique_id;
@@ -2469,6 +2501,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
                     for (to_ro, e, from, partial) in associated_ro.iter() {
+                      if matches!(e, Evt::Move) {
+                        arm_moved.push(from.clone());
+                      }
                       let id = *self.unique_id;
                       *self.unique_id += 1;
                       let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
@@ -2491,6 +2526,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       }
                     }
                   }
+                }
+              }
+
+              // A variable the scrutinee tuple took but this arm's
+              // pattern doesn't move out (`_ => …`, `(Some(_), b)`): it
+              // was still moved into the tuple, and isn't usable after
+              // the match (#327).
+              for r in scrutinee_moves.iter() {
+                if arm_moved.contains(&ResourceTy::Value(r.clone())) {
+                  continue;
+                }
+                let id = *self.unique_id;
+                *self.unique_id += 1;
+                let ext_ev = self.ext_ev_of_evt(Evt::Move, ResourceTy::Anonymous, ResourceTy::Value(r.clone()), id, false);
+                if inline {
+                  self.add_external_event(pat_line, ext_ev);
+                } else {
+                  branch_e_data.push((pat_line, ext_ev));
                 }
               }
 
