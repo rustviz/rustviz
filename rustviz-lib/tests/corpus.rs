@@ -270,6 +270,10 @@ const EXPECTED_OK: &[&str] = &[
     "closure_call_copy_arg",
     "closure_call_move_arg",
     "generic_fn_param_call",
+    // A closure's body also runs when another closure's body calls it,
+    // or a function of the program it was passed to calls it (#278).
+    "closure_nested_calls",
+    "closure_passed_to_fn",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2450,6 +2454,40 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "f is initialized by copy from Anonymous resource",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_nested_calls",
+        // `g()` runs g's body, which calls f, so f's body reads s
+        // (#278); `twice(true)` may call push (it's inside an `if`);
+        // `c()` runs b's body, which runs a's. Each dot replaces the
+        // separate "no longer borrowed" dot it sat on top of.
+        must_contain: &[
+            "Calling g also runs f's body (g calls f), which reads s through f's immutable borrow. f's immutable borrow of s ends after this call",
+            "Calling twice can also run push's body (twice can call push), which can modify t through push's mutable borrow. push's mutable borrow of t ends after this call",
+            "Calling c also runs a's body (c calls b, which calls a), which reads n through a's immutable borrow. a's immutable borrow of n ends after this call",
+            "Calling c also runs b's body (c calls b), which uses a through b's immutable borrow. b's immutable borrow of a ends after this call",
+        ],
+        must_not_contain: &[
+            "s's resource is no longer immutably borrowed",
+            "Calling twice also runs push's body (twice calls push), which can modify t through push's mutable borrow. push's mutable borrow of t ends after this call",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_passed_to_fn",
+        // `apply(&show)` / `call_twice(&mut inc)`: those functions call
+        // their parameter, so the closure's body runs during the call
+        // (#278). `ignore(len)` doesn't call it, and `Option::map`'s
+        // body isn't part of the program, so `w` gets no such dot.
+        must_contain: &[
+            "Calling apply also runs show's body (apply calls show), which reads s through show's immutable borrow. show's immutable borrow of s ends after this call",
+            "Calling call_twice also runs inc's body (call_twice calls inc), which can modify count through inc's mutable borrow. inc's mutable borrow of count ends after this call",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Calling ignore also runs len's body (ignore calls len), which reads w through len's immutable borrow",
+            "Calling ignore also runs len's body (ignore calls len), which reads w through len's immutable borrow. len's immutable borrow of w ends after this call",
+            "Calling ignore can also run len's body (ignore can call len), which reads w through len's immutable borrow",
         ],
     },
 ];

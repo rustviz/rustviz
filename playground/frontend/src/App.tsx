@@ -303,8 +303,10 @@ const Description: React.FC = () => (
     <ul>
       <li>
         Loops show one iteration; calling a closure shows which captured
-        variables its body reads or can change, but not the body&apos;s
-        individual steps; method chains show only the first call; a match
+        variables its body reads or can change (also when another closure
+        or one of your functions calls it, but not when a standard-library
+        function such as <code>Option::map</code> does), but not the
+        body&apos;s individual steps; method chains show only the first call; a match
         guard&apos;s events appear only in its own arm;{' '}
         <code>async</code>/<code>await</code> isn&apos;t visualized.
       </li>

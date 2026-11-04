@@ -426,6 +426,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // `f(..)` with `f` a local closure: its body runs now,
             // after the arguments are evaluated (#133).
             self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
+            // `apply(&f)` with `apply` defined in this crate and
+            // calling its parameter: f's body runs during the call (#278).
+            if let ExprKind::Path(QPath::Resolved(_, rustc_hir::Path { res: Res::Def(_, callee_def), .. })) = fn_expr.kind {
+              let callee_name = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap_or_default();
+              self.closure_passed_to_fn_events(*callee_def, &callee_name, args, 0, expr_to_line(expr, &self.tcx));
+            }
           }
         }
       }
@@ -529,6 +535,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         for arg in args.iter(){
           self.visit_expr(&arg);
           self.match_arg(&arg, fn_name.clone());
+        }
+        // `obj.run(&f)` with `run` defined in this crate and calling
+        // its closure parameter: f's body runs during the call (#278).
+        if let Some(callee_def) = self.tcx.typeck(expr.hir_id.owner).type_dependent_def_id(expr.hir_id) {
+          self.closure_passed_to_fn_events(callee_def, &fn_name, args, 1, expr_to_line(expr, &self.tcx));
         }
       }
       ExprKind::Binary(_, expra, exprb) => {

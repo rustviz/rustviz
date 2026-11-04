@@ -515,6 +515,55 @@ pub fn event_dot_closure_body_use(
     msg
 }
 
+// Like event_dot_closure_body_use, for a closure `f` whose body runs
+// because something else called it (#278): another closure's body
+// (`g = || f()`), or a function `f` was passed to whose body calls it.
+// `via` lists the callers, outermost first, each with whether its call
+// to the next is conditional: "Calling g also runs f's body (g calls
+// f), which reads s through f's immutable borrow"; "can also run" /
+// "can call" when some call on the way may not happen.
+pub fn event_dot_nested_closure_body_use(
+    my_name: &String,
+    closure_name: &String,
+    kind: crate::svg_generator::data::CaptureUse,
+    via: &[(String, bool)],
+    upvar_is_closure: bool,
+    interior_mut: bool,
+    borrow_ends: Option<bool>,
+) -> String {
+    use crate::svg_generator::data::CaptureUse;
+    let me = fmt_style(my_name);
+    let f = fmt_style(closure_name);
+    let mut chain = String::new();
+    for (i, (caller, conditional)) in via.iter().enumerate() {
+        let callee = match via.get(i + 1) {
+            Some((next, _)) => fmt_style(next),
+            None => f.clone(),
+        };
+        let verb = if *conditional { "can call" } else { "calls" };
+        if i == 0 {
+            chain = format!("{} {} {}", fmt_style(caller), verb, callee);
+        } else {
+            chain.push_str(&format!(", which {} {}", verb, callee));
+        }
+    }
+    let runs = if via.iter().any(|(_, c)| *c) { "can also run" } else { "also runs" };
+    let outer = via.first().map(|(n, _)| fmt_style(n)).unwrap_or_default();
+    let what = match kind {
+        CaptureUse::Read if upvar_is_closure || interior_mut => format!("uses {1} through {0}'s immutable borrow", f, me),
+        CaptureUse::Read => format!("reads {1} through {0}'s immutable borrow", f, me),
+        CaptureUse::Modify => format!("can modify {1} through {0}'s mutable borrow", f, me),
+        CaptureUse::ModifyThroughRef => format!("can modify the value {} refers to", me),
+    };
+    let mut msg = format!("Calling {} {} {}'s body ({}), which {}", outer, runs, f, chain, what);
+    if let Some(is_mut) = borrow_ends {
+        msg.push_str(&format!(
+            ". {0}'s {2} borrow of {1} ends after this call",
+            f, me, if is_mut { "mutable" } else { "immutable" }));
+    }
+    msg
+}
+
 // Closure-side dot when a `move`-captured upvar lands on `f`'s
 // timeline. Mirrors event_dot_acquire.
 pub fn event_dot_closure_capture_acquire(my_name: &String, from_name: &String) -> String {

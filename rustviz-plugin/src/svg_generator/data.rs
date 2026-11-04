@@ -456,6 +456,24 @@ pub enum CaptureUse {
     ModifyThroughRef,
 }
 
+/// A use of a variable by the body of a closure that runs because
+/// something else called it (#278): another closure's body
+/// (`let g = || f(); g();`), or a function the closure was passed to
+/// (`apply(&f)` where `apply`'s body calls its parameter).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NestedCaptureUse {
+    /// The closure whose body uses `var` (`f`); `var` is one of its
+    /// captures by reference.
+    pub closure: ResourceAccessPoint,
+    pub var: ResourceAccessPoint,
+    pub kind: CaptureUse,
+    /// The calls that lead to `closure`'s body, outermost first: each
+    /// caller's name (a closure or a function) and whether its call
+    /// to the next one is conditional (inside an `if`, `match`, loop,
+    /// or a body with an early exit). `[("g", false)]` for `g = || f()`.
+    pub via: Vec<(String, bool)>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -565,9 +583,13 @@ pub enum ExternalEvent {
     // shows the borrow. `consumes`: the closure is `FnOnce` (its body
     // moves a captured value out), so the call uses the closure up;
     // otherwise the call changes no state.
+    // `nested`: uses by the bodies of closures this call runs too
+    // (#278). For a call of a function that calls a closure passed to
+    // it, `closure` is Anonymous and only `nested` is filled in.
     ClosureCall {
         closure: ResourceTy,
         uses: Vec<(ResourceAccessPoint, CaptureUse)>,
+        nested: Vec<NestedCaptureUse>,
         consumes: bool,
         id: usize
     },
@@ -778,10 +800,13 @@ pub enum Event {
     // The body of `closure`, called on this line, uses `is` (which it
     // captured by reference) as `kind` says. From
     // ExternalEvent::ClosureCall; doesn't change state.
+    // `via` is empty for a direct call of `closure`; otherwise the
+    // chain of calls that runs its body (see NestedCaptureUse).
     ClosureBodyUse {
         closure: ResourceTy,
         is: ResourceTy,
         kind: CaptureUse,
+        via: Vec<(String, bool)>,
         id: usize
     },
 }
@@ -1939,7 +1964,7 @@ impl Visualizable for VisualizationData {
                                         id: *id}));
                 }
             }
-            ExternalEvent::ClosureCall { closure, uses, consumes, id } => {
+            ExternalEvent::ClosureCall { closure, uses, nested, consumes, id } => {
                 if closure.extract_rap() == Some(rap) {
                     let borrowed = uses.iter().map(|(r, _)| ResourceTy::Value(r.clone())).collect();
                     b_history.push((line_number, Event::ClosureCall { is: closure.clone(), borrowed, consumes: *consumes, id: *id }));
@@ -1947,7 +1972,14 @@ impl Visualizable for VisualizationData {
                 for (upvar, kind) in uses {
                     if upvar == rap {
                         b_history.push((line_number, Event::ClosureBodyUse {
-                            closure: closure.clone(), is: is.clone(), kind: *kind, id: *id }));
+                            closure: closure.clone(), is: is.clone(), kind: *kind, via: Vec::new(), id: *id }));
+                    }
+                }
+                for n in nested {
+                    if &n.var == rap {
+                        b_history.push((line_number, Event::ClosureBodyUse {
+                            closure: ResourceTy::Value(n.closure.clone()), is: is.clone(), kind: n.kind,
+                            via: n.via.clone(), id: *id }));
                     }
                 }
             }
@@ -2156,12 +2188,17 @@ impl Visualizable for VisualizationData {
             ExternalEvent::OwnerDropAtReassign{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign, line_number);
             },
-            ExternalEvent::ClosureCall { closure, uses, consumes, id } => {
+            ExternalEvent::ClosureCall { closure, uses, nested, consumes, id } => {
                 let borrowed = uses.iter().map(|(r, _)| ResourceTy::Value(r.clone())).collect();
                 maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), borrowed, consumes, id }, line_number);
                 for (upvar, kind) in uses {
                     let is = ResourceTy::Value(upvar);
-                    maybe_append_event(self, &is.clone(), Event::ClosureBodyUse { closure: closure.clone(), is, kind, id }, line_number);
+                    maybe_append_event(self, &is.clone(), Event::ClosureBodyUse { closure: closure.clone(), is, kind, via: Vec::new(), id }, line_number);
+                }
+                for n in nested {
+                    let is = ResourceTy::Value(n.var);
+                    maybe_append_event(self, &is.clone(), Event::ClosureBodyUse {
+                        closure: ResourceTy::Value(n.closure), is, kind: n.kind, via: n.via, id }, line_number);
                 }
             },
         }

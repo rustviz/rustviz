@@ -730,21 +730,33 @@ fn render_dot(
                 append_dot(&data, output, timeline_data, registry);
                 continue;
             }
-            Event::ClosureBodyUse { closure, is, kind, .. } => {
+            Event::ClosureBodyUse { closure, is, kind, via, .. } => {
                 let borrow_ends = history.iter().find_map(|(l, e)| match e {
                     Event::StaticReacquire { from, .. } if l == line_number && from == closure => Some(false),
                     Event::MutableReacquire { from, .. } if l == line_number && from == closure => Some(true),
                     _ => None,
                 });
                 let rap = is.extract_rap();
-                let title = hover_messages::event_dot_closure_body_use(
-                    &is.real_name(),
-                    &closure.name(),
-                    *kind,
-                    rap.map_or(false, |r| r.is_closure()),
-                    rap.map_or(false, |r| r.has_interior_mut()),
-                    borrow_ends,
-                );
+                let title = if via.is_empty() {
+                    hover_messages::event_dot_closure_body_use(
+                        &is.real_name(),
+                        &closure.name(),
+                        *kind,
+                        rap.map_or(false, |r| r.is_closure()),
+                        rap.map_or(false, |r| r.has_interior_mut()),
+                        borrow_ends,
+                    )
+                } else {
+                    hover_messages::event_dot_nested_closure_body_use(
+                        &is.real_name(),
+                        &closure.name(),
+                        *kind,
+                        via,
+                        rap.map_or(false, |r| r.is_closure()),
+                        rap.map_or(false, |r| r.has_interior_mut()),
+                        borrow_ends,
+                    )
+                };
                 let data = EventDotData {
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,

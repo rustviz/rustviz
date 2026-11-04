@@ -533,11 +533,12 @@ pub fn collect_event_live_vars(
             | ExternalEvent::InitRefParam { .. } => {}
             // A call of a closure inside the branch: the closure and
             // the variables its body uses get the call's dots there.
-            ExternalEvent::ClosureCall { closure, uses, .. } => {
+            ExternalEvent::ClosureCall { closure, uses, nested, .. } => {
                 if let ResourceTy::Value(rap) = closure {
                     out.insert(rap.clone());
                 }
                 out.extend(uses.iter().map(|(rap, _)| rap.clone()));
+                out.extend(nested.iter().map(|n| n.var.clone()));
             }
             _ => {
                 let (from, to) = ResourceAccessPoint_extract(ev);
@@ -982,4 +983,77 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
     }
   _ => ResourceTy::Anonymous,
   }
+}
+/// The body of the closure `closure_local`.
+pub fn closure_body<'tcx>(tcx: TyCtxt<'tcx>, closure_local: rustc_hir::def_id::LocalDefId) -> Option<&'tcx rustc_hir::Body<'tcx>> {
+  match tcx.hir_node_by_def_id(closure_local) {
+    rustc_hir::Node::Expr(Expr { kind: ExprKind::Closure(c), .. }) => Some(tcx.hir_body(c.body)),
+    _ => None,
+  }
+}
+
+/// Whether `body` calls the local variable `target` directly
+/// (`target(..)`): `None` if it doesn't, `Some(conditional)` if it
+/// does. `conditional` is false only if some call isn't inside an
+/// `if` / `match` arm / loop / the right operand of `&&` / `||`, and
+/// the body has no `return`, `break` or `?` that could skip it.
+/// Calls inside a closure written in `body` aren't counted (that
+/// closure may never run).
+pub fn calls_local<'tcx>(body: &'tcx Expr<'tcx>, target: rustc_hir::HirId) -> Option<bool> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Finder {
+    target: rustc_hir::HirId,
+    depth: usize,
+    found: Option<bool>,
+    early_exit: bool,
+  }
+  impl<'v> Visitor<'v> for Finder {
+    fn visit_expr(&mut self, e: &'v Expr<'v>) {
+      if let ExprKind::Call(callee, _) = e.kind {
+        if let ExprKind::Path(QPath::Resolved(None, p)) = callee.kind {
+          if p.res == Res::Local(self.target) {
+            let conditional = self.depth > 0;
+            self.found = Some(self.found.map_or(conditional, |c| c && conditional));
+          }
+        }
+      }
+      match e.kind {
+        ExprKind::If(cond, then, els) => {
+          self.visit_expr(cond);
+          self.depth += 1;
+          self.visit_expr(then);
+          if let Some(els) = els { self.visit_expr(els); }
+          self.depth -= 1;
+        }
+        ExprKind::Match(scrutinee, arms, source) => {
+          if matches!(source, rustc_hir::MatchSource::TryDesugar(_)) {
+            self.early_exit = true;
+          }
+          self.visit_expr(scrutinee);
+          self.depth += 1;
+          for arm in arms { self.visit_arm(arm); }
+          self.depth -= 1;
+        }
+        ExprKind::Binary(op, l, r) if matches!(op.node, rustc_hir::BinOpKind::And | rustc_hir::BinOpKind::Or) => {
+          self.visit_expr(l);
+          self.depth += 1;
+          self.visit_expr(r);
+          self.depth -= 1;
+        }
+        ExprKind::Loop(..) => {
+          self.depth += 1;
+          intravisit::walk_expr(self, e);
+          self.depth -= 1;
+        }
+        ExprKind::Ret(..) | ExprKind::Break(..) => {
+          self.early_exit = true;
+          intravisit::walk_expr(self, e);
+        }
+        _ => intravisit::walk_expr(self, e),
+      }
+    }
+  }
+  let mut f = Finder { target, depth: 0, found: None, early_exit: false };
+  f.visit_expr(body);
+  f.found.map(|c| c || f.early_exit)
 }

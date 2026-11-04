@@ -239,9 +239,13 @@ rather than listed here.
   in a variable marks its body running there, on `f` and on each
   variable `f` borrowed (whether the body reads it or can modify it).
   The body's individual steps (the functions it calls, its own local
-  variables) aren't drawn, and neither are calls made elsewhere: a
-  closure passed to a function and called inside it, or one called
-  from another closure's body.
+  variables) aren't drawn. A closure called from another closure's
+  body (`let g = || f(); g();`), or passed to a function of the
+  program whose body calls it (`apply(&f)`), is marked the same way at
+  the outer call (`g();`, `apply(&f);`), on the variables it borrowed.
+  Calls that happen inside the standard library (`o.map(f)`,
+  `v.iter().for_each(&f)`), or in a function that receives the closure
+  only to pass it on to another function, aren't marked.
 - Loops (`for`, `while`, `loop`) show a single iteration.
 - Method chains (`a.get_mut().push(x)`): only the first call renders.
 - Match guards (`pat if cond =>`, `pat if let … =>`): the guard's events

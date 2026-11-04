@@ -717,10 +717,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Some(rd) if rd.rap.is_closure() => rd.rap.to_owned(),
       _ => return,
     };
-    // One entry per captured variable, in rustc's capture order
-    // (deterministic). Field captures (`|| p.x`) are attributed to the
-    // root variable like the capture events are; if several places of
-    // one variable are captured, the strongest use wins.
+    let uses = self.closure_capture_uses(closure_local);
+    // Closures this body calls run too (#278); their uses are listed
+    // separately, except for variables this closure uses itself.
+    let mut nested = Vec::new();
+    let mut seen = HashSet::from([closure_local]);
+    self.nested_closure_uses(closure_local, &name, Vec::new(), &mut nested, &mut seen);
+    nested.retain(|n| !uses.iter().any(|(r, _)| r.name() == n.var.name()));
+    // An `FnOnce` closure's body moves a captured value out
+    // (`|| drop(s)`, `move || s`), so calling it consumes the closure.
+    let consumes = closure_args.as_closure().kind() == rustc_middle::ty::ClosureKind::FnOnce;
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line_num, ExternalEvent::ClosureCall {
+      closure: ResourceTy::Value(closure_rap),
+      uses,
+      nested,
+      consumes,
+      id,
+    });
+  }
+
+  /// How `closure_local`'s body uses each variable it captured by
+  /// reference, from rustc's capture analysis: one entry per variable,
+  /// in capture order (deterministic). Field captures (`|| p.x`) are
+  /// attributed to the root variable like the capture events are; if
+  /// several places of one variable are captured, the strongest use
+  /// wins. Variables captured by value belong to the closure since its
+  /// definition and aren't listed.
+  fn closure_capture_uses(&self, closure_local: rustc_hir::def_id::LocalDefId) -> Vec<(ResourceAccessPoint, CaptureUse)> {
     let mut uses: Vec<(ResourceAccessPoint, CaptureUse)> = Vec::new();
     let closure_typeck = self.tcx.typeck(closure_local);
     for capture in closure_typeck.closure_min_captures_flattened(closure_local) {
@@ -756,15 +781,128 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         None => uses.push((rd.rap.to_owned(), kind)),
       }
     }
-    // An `FnOnce` closure's body moves a captured value out
-    // (`|| drop(s)`, `move || s`), so calling it consumes the closure.
-    let consumes = closure_args.as_closure().kind() == rustc_middle::ty::ClosureKind::FnOnce;
+    uses
+  }
+
+  /// The closures that `outer_local`'s body calls (#278): each
+  /// variable it captured (by reference or by value) that holds a
+  /// closure written in the same fn, and that the body calls directly
+  /// (`f()`). Calling `outer` runs their bodies too, so their capture
+  /// uses are appended to `out`, with `via` extended by `outer_name`
+  /// and whether its call is conditional; then the same for the
+  /// closures they call. `seen` guards against visiting a closure twice.
+  fn nested_closure_uses(
+    &self,
+    outer_local: rustc_hir::def_id::LocalDefId,
+    outer_name: &str,
+    via: Vec<(String, bool)>,
+    out: &mut Vec<NestedCaptureUse>,
+    seen: &mut HashSet<rustc_hir::def_id::LocalDefId>,
+  ) {
+    let Some(body) = closure_body(self.tcx, outer_local) else { return };
+    let outer_typeck = self.tcx.typeck(outer_local);
+    for capture in outer_typeck.closure_min_captures_flattened(outer_local) {
+      let upvar_hir_id = match capture.place.base {
+        rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
+        _ => continue,
+      };
+      if !capture.place.projections.is_empty() {
+        continue;
+      }
+      let rustc_middle::ty::Closure(inner_def_id, _) = capture.place.ty().kind() else { continue };
+      let Some(inner_local) = inner_def_id.as_local() else { continue };
+      if self.tcx.typeck_root_def_id(*inner_def_id) != self.tcx.typeck_root_def_id(outer_local.to_def_id()) {
+        continue;
+      }
+      let Some(conditional) = calls_local(body.value, upvar_hir_id) else { continue };
+      self.push_nested_uses(inner_local, upvar_hir_id, outer_name, conditional, &via, out, seen);
+    }
+  }
+
+  /// `outer_name` (a closure or a function) calls the closure held in
+  /// the variable `inner_hir_id` of the current fn, whose definition is
+  /// `inner_local`: record its body's capture uses as reached through
+  /// `via` + this call, then follow the closures it calls.
+  fn push_nested_uses(
+    &self,
+    inner_local: rustc_hir::def_id::LocalDefId,
+    inner_hir_id: rustc_hir::HirId,
+    outer_name: &str,
+    conditional: bool,
+    via: &[(String, bool)],
+    out: &mut Vec<NestedCaptureUse>,
+    seen: &mut HashSet<rustc_hir::def_id::LocalDefId>,
+  ) {
+    if !seen.insert(inner_local) {
+      return;
+    }
+    let inner_name = self.tcx.hir_name(inner_hir_id).as_str().to_owned();
+    let inner_rap = match self.raps.get(&inner_name) {
+      Some(rd) if rd.rap.is_closure() => rd.rap.to_owned(),
+      _ => return,
+    };
+    let mut via2 = via.to_vec();
+    via2.push((outer_name.to_owned(), conditional));
+    for (var, kind) in self.closure_capture_uses(inner_local) {
+      if !out.iter().any(|n| n.var.name() == var.name()) {
+        out.push(NestedCaptureUse { closure: inner_rap.clone(), var, kind, via: via2.clone() });
+      }
+    }
+    self.nested_closure_uses(inner_local, &inner_name, via2, out, seen);
+  }
+
+  /// A call `callee(.., &f, ..)` (or a method call) of a function
+  /// defined in this crate, passing a local closure `f` (by value, `&f`
+  /// or `&mut f`) whose parameter the callee's body calls directly: the
+  /// closure's body runs during this call (#278). Draw its uses on the
+  /// columns of the variables it borrowed, like a call `f()` would.
+  /// Functions from other crates (`Option::map`, `Iterator::for_each`),
+  /// and callees that only pass the closure on, aren't followed: their
+  /// bodies aren't available or would need a deeper analysis.
+  /// `param_offset` is 1 for a method call (`self` is parameter 0).
+  pub fn closure_passed_to_fn_events(
+    &mut self,
+    callee_def: rustc_hir::def_id::DefId,
+    callee_name: &str,
+    args: &'tcx [Expr<'tcx>],
+    param_offset: usize,
+    line_num: usize,
+  ) {
+    let Some(callee_local) = callee_def.as_local() else { return };
+    if !matches!(self.tcx.def_kind(callee_def), DefKind::Fn | DefKind::AssocFn) {
+      return;
+    }
+    let Some(callee_body) = self.tcx.hir_maybe_body_owned_by(callee_local) else { return };
+    let mut nested = Vec::new();
+    let mut seen = HashSet::new();
+    for (i, arg) in args.iter().enumerate() {
+      let inner = match arg.kind {
+        ExprKind::AddrOf(_, _, e) => e,
+        _ => arg,
+      };
+      let ExprKind::Path(QPath::Resolved(None, path)) = inner.kind else { continue };
+      let Res::Local(var_hir_id) = path.res else { continue };
+      let typeck = self.tcx.typeck(inner.hir_id.owner);
+      let rustc_middle::ty::Closure(closure_def_id, _) = typeck.expr_ty(inner).kind() else { continue };
+      let Some(closure_local) = closure_def_id.as_local() else { continue };
+      if self.tcx.typeck_root_def_id(*closure_def_id) != inner.hir_id.owner.to_def_id() {
+        continue;
+      }
+      let Some(param) = callee_body.params.get(i + param_offset) else { continue };
+      let PatKind::Binding(_, param_hir_id, _, None) = param.pat.kind else { continue };
+      let Some(conditional) = calls_local(callee_body.value, param_hir_id) else { continue };
+      self.push_nested_uses(closure_local, var_hir_id, callee_name, conditional, &[], &mut nested, &mut seen);
+    }
+    if nested.is_empty() {
+      return;
+    }
     let id = *self.unique_id;
     *self.unique_id += 1;
     self.add_external_event(line_num, ExternalEvent::ClosureCall {
-      closure: ResourceTy::Value(closure_rap),
-      uses,
-      consumes,
+      closure: ResourceTy::Anonymous,
+      uses: Vec::new(),
+      nested,
+      consumes: false,
       id,
     });
   }
