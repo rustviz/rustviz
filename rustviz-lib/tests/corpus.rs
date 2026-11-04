@@ -287,6 +287,9 @@ const EXPECTED_OK: &[&str] = &[
     // Straight arrows hop over the dots they cross (#252); the
     // crossing check itself runs on every snippet in this list.
     "arrow_hops_over_dots",
+    // Arrow tails start at the edge of their source dot (#269); the
+    // tail check runs on every snippet in this list.
+    "arrow_tail_off_source_dot",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2553,6 +2556,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "arrow_tail_off_source_dot",
+        // The source dots whose middles the arrows used to cover
+        // (#269). Tooltip text is unchanged; the geometry is checked
+        // by `arrow_tails_start_at_the_dot_edge`. Listed so the
+        // fixture keeps drawing these dots and arrows.
+        must_contain: &[
+            "s's resource is moved",
+            "Move from s to t",
+            "Immutable borrow from a to b",
+            "Immutable borrow from a to c",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -2618,6 +2635,13 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         "{}: straight arrow(s) drawn across event dots, hiding their tooltips: {:?}",
         name,
         crossed
+    );
+    let covered = arrow_tails_on_dots(&timeline);
+    assert!(
+        covered.is_empty(),
+        "{}: arrow tail(s) drawn inside their source dot, hiding the dot's tooltip: {:?}",
+        name,
+        covered
     );
     for (panel, svg) in [("code", &code), ("timeline", &timeline)] {
         let off = off_canvas_ys(svg);
@@ -2746,6 +2770,73 @@ fn arrows_crossing_dots(svg: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// First point of every gray arrow shaft (`<polyline>` or hop `<path>`).
+/// Shafts are written source first, so this is the arrow's tail.
+fn arrow_tails(svg: &str) -> Vec<(f64, f64)> {
+    let polylines = start_tags(svg, "polyline")
+        .into_iter()
+        .filter(|t| attr(t, "stroke") == Some("gray"))
+        .filter_map(|t| attr(t, "points"));
+    let paths = start_tags(svg, "path")
+        .into_iter()
+        .filter(|t| attr(t, "stroke") == Some("gray"))
+        .filter_map(|t| attr(t, "d"))
+        .map(|d| d.trim_start_matches('M'));
+    polylines
+        .chain(paths)
+        .filter_map(|pts| {
+            let mut v = pts
+                .split(|c: char| c == ' ' || c == ',')
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse::<f64>());
+            Some((v.next()?.ok()?, v.next()?.ok()?))
+        })
+        .collect()
+}
+
+/// Arrow tails that start inside an event dot (closer than its 5px
+/// radius to the centre). Arrows are drawn after dots, so such a tail
+/// covers the middle of the dot and hovering there shows the arrow's
+/// tooltip instead of the dot's (#269).
+fn arrow_tails_on_dots(svg: &str) -> Vec<String> {
+    let dots = dot_centres(svg);
+    let mut out = Vec::new();
+    for (x, y) in arrow_tails(svg) {
+        for &(cx, cy) in &dots {
+            if (x - cx).hypot(y - cy) < 5.0 - 1e-9 {
+                out.push(format!("tail ({}, {}) inside dot at ({}, {})", x, y, cx, cy));
+            }
+        }
+    }
+    out
+}
+
+/// #269: arrows used to start at their source dot's centre. Each tail
+/// must sit on the edge of a drawn dot instead, for straight arrows and
+/// for trapezoids that leave the dot diagonally.
+#[test]
+fn arrow_tails_start_at_the_dot_edge() {
+    let rv = run_with_local_backend("arrow_tail_off_source_dot");
+    let timeline = rv.timeline_panel_string();
+    assert_eq!(arrow_tails_on_dots(&timeline), Vec::<String>::new());
+    let dots = dot_centres(&timeline);
+    let (mut straight, mut diagonal) = (0, 0);
+    for (x, y) in arrow_tails(&timeline) {
+        let on_edge = dots
+            .iter()
+            .any(|&(cx, cy)| ((x - cx).hypot(y - cy) - 5.25).abs() < 1e-6);
+        if !on_edge {
+            continue; // e.g. a `String::from` arrow, whose tail is at the `f`
+        }
+        if dots.iter().any(|&(_, cy)| cy == y) { straight += 1 } else { diagonal += 1 }
+    }
+    // `let t = s;` and `let b = &a;` are straight; `let c = &a;`
+    // (second arrow on its line) is a trapezoid.
+    assert!(straight >= 2 && diagonal >= 1,
+        "expected tails on dot edges (straight {}, diagonal {}): {:?}",
+        straight, diagonal, arrow_tails(&timeline));
 }
 
 /// A straight arrow that would cross event dots is drawn as a `<path>`

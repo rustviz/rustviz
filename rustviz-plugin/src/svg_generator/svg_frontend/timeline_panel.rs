@@ -1362,6 +1362,29 @@ fn fetch_line_map<'a>(
     }
 }
 
+/// How far an arrow's tail starts from the centre of its source dot:
+/// the dot's 5px radius plus the hairline the caller-return L already
+/// leaves (`source_x = cx + 5.25`).
+const TAIL_CLEARANCE: f64 = 5.25;
+
+/// Where an arrow whose tail is at `tail`, heading towards `next`,
+/// should start. Arrows are drawn after dots, so a tail on a dot's
+/// centre covers the middle of that dot and hovering there shows the
+/// arrow's tooltip instead of the dot's (#269). When a dot is drawn at
+/// `tail`, start at its edge instead, the way the head is pulled back
+/// by `head_offset`. A tail with no dot under it stays put.
+fn tail_off_dot(tail: (f64, f64), next: (f64, f64), dots: &DotPositions) -> (f64, f64) {
+    let on_dot = tail.0.fract() == 0.0
+        && tail.1.fract() == 0.0
+        && dots.contains(&(tail.0 as i64, tail.1 as i64));
+    let (dx, dy) = (next.0 - tail.0, next.1 - tail.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if !on_dot || len <= TAIL_CLEARANCE {
+        return tail;
+    }
+    (tail.0 + dx / len * TAIL_CLEARANCE, tail.1 + dy / len * TAIL_CLEARANCE)
+}
+
 /// Build the SVG markup for a straight horizontal arrow that hops
 /// over any event dot it would otherwise pass through.
 ///
@@ -1426,6 +1449,11 @@ fn render_hopping_arrow(
         overlap_xs.into_iter().rev().collect()
     };
 
+    let first_x = match hops.first() {
+        Some(&ox) => ox as f64,
+        None => end_x_pulled,
+    };
+    let (source_x, _) = tail_off_dot((source_x, y_f), (first_x, y_f), dot_positions);
     let mut d = format!("M {} {}", source_x, y_f);
     for ox in &hops {
         let oxf = *ox as f64;
@@ -1966,6 +1994,15 @@ fn render_arrow (
                         data.coordinates[0].1 += sin_ratio * head_offset;
                     }
                 }
+
+                // The last point is the tail. Start it at the edge of
+                // the source dot rather than its centre. Done after the
+                // head pullback so an arrow between the two halves of
+                // one column (`s` to `*s`, where both ends start on the
+                // same dot) leaves the dot in the direction it points.
+                let n = data.coordinates.len();
+                data.coordinates[n - 1] =
+                    tail_off_dot(data.coordinates[n - 1], data.coordinates[n - 2], dot_positions);
 
                 // Compute the inline arrow-head triangle, sized to
                 // match the previous SVG marker (viewBox 0 0 10 10,
