@@ -290,6 +290,8 @@ const EXPECTED_OK: &[&str] = &[
     // Arrow tails start at the edge of their source dot (#269); the
     // tail check runs on every snippet in this list.
     "arrow_tail_off_source_dot",
+    // A borrow of a temporary whose borrow ends on the same line (#204).
+    "borrow_of_temporary_same_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2569,6 +2571,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from a to c",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "borrow_of_temporary_same_line",
+        // `let r = &Point { .. };` with r never used: the borrow starts
+        // and ends on line 9. The start (a borrow from a temporary) isn't
+        // in the renderer's line map, so it used to be dropped whenever
+        // the end shared its line, leaving r with an end dot and no
+        // borrow (#204). Calling the closure on line 12 also emits an
+        // off-map event that's still left out on purpose: its text would
+        // be false (the call doesn't initialise add_one).
+        must_contain: &[
+            "r immutably borrows a resource",
+            "r holds an immutable reference",
+            "r's immutable borrow ends",
+            "m mutably borrows a resource",
+            "m holds a mutable reference",
+            "m's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "add_one is initialized by copy from Anonymous resource",
+        ],
     },
 ];
 
