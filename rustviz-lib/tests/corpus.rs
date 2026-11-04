@@ -528,6 +528,13 @@ const EXPECTED_OK: &[&str] = &[
     // One-line if / if let / match: condition events go on the split
     // dot, events after the conditional on the join dot (#492).
     "one_line_cond_events",
+    // A scrutinee that moves a value is evaluated before the branch
+    // (#450); one-line matches on a temporary used to panic (#459).
+    "if_let_scrutinee_move",
+    "if_let_scrutinee_move_else_move",
+    "match_scrutinee_move",
+    "match_on_temporary_one_line",
+    "match_on_temporary_variants",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5330,6 +5337,94 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
         ],
     },
+    TooltipExpect {
+        name: "if_let_scrutinee_move",
+        // `v.into_iter()` in the scrutinee moves `v` before the branch is
+        // chosen (#450). It was drawn inside the first branch, which
+        // returns: the merge ignored it and `v` was said to be dropped.
+        must_contain: &[
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v is live in a conditional expression ",
+            "v goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "v was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when v goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_scrutinee_move_else_move",
+        // `v` moved by the scrutinee (unconditional); `t` moved in the
+        // `else` only (conditional).
+        must_contain: &[
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+            "t is live in a conditional expression ",
+            "t's resource is moved into drop, which drops it",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "v is live in a conditional expression ",
+            "v goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "match_scrutinee_move",
+        must_contain: &[
+            "v's resource is moved",
+            "v goes out of scope. No resource is dropped.",
+            "w's resource is moved",
+            "w goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v is live in a conditional expression ",
+            "w is live in a conditional expression ",
+            "v goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_on_temporary_one_line",
+        // Used to panic (#459). `c` is moved into the temporary on the
+        // `match` line, whatever the arm.
+        must_contain: &[
+            "c's resource is moved",
+            "c goes out of scope. No resource is dropped.",
+            "d's resource is moved",
+            "d goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c is live in a conditional expression ",
+            "c goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_on_temporary_variants",
+        // Used to panic (#459).
+        must_contain: &[
+            "a's resource is moved",
+            "b's resource is moved",
+            "c's resource is moved",
+            "d's resource is moved",
+            "x's resource is moved into drop, which drops it",
+            "n is bound to a copyable value",
+            "a goes out of scope. No resource is dropped.",
+            "d goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -5949,6 +6044,27 @@ fn else_if_is_drawn_in_the_else_branch() {
     assert_eq!(splits.len(), 2, "{:?}", splits);
     let (outer, inner) = (splits[0], splits[1]);
     assert!(inner.0 > outer.0, "inner `if` at x={} is not right of the parent column x={}", inner.0, outer.0);
+}
+
+/// #450: a scrutinee's move happens before the conditional, so its dot is
+/// on the parent column, not in an arm's column (arms are drawn to the
+/// side of the parent, and the other arm would otherwise show the value
+/// still held).
+#[test]
+fn scrutinee_move_is_on_the_parent_column() {
+    for (name, var, born) in [
+        ("if_let_scrutinee_move", "v", "v acquires ownership from the caller"),
+        ("if_let_scrutinee_move_else_move", "v", "v acquires ownership of a resource"),
+        ("match_scrutinee_move", "w", "w acquires ownership of a resource"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let parent = dots_with_tooltip(&timeline, born);
+        let moved = dots_with_tooltip(&timeline, &format!("{}'s resource is moved", var));
+        assert_eq!((parent.len(), moved.len()), (1, 1), "{}: dots {:?} {:?}", name, parent, moved);
+        assert_eq!(parent[0].0, moved[0].0,
+            "{}: the move at {:?} is not on {}'s own column x={}", name, moved[0], var, parent[0].0);
+    }
 }
 
 /// `(cx, cy)` of every dot in a timeline panel one of whose tooltip
