@@ -691,6 +691,14 @@ const EXPECTED_OK: &[&str] = &[
     "fnmut_call_unchanged",
     // A built-in comparison (`t < lim`) reads both operands (#497).
     "comparison_reads",
+    // — A collection filled by `collect()` or `push(&s)` holds the
+    //   borrows of the references it stores (#392), and a reference
+    //   passed for a by-value generic parameter is carried by the
+    //   result (`id(&s)`, `Some(&s)`; #424); tooltips pinned below.
+    "collect_push_borrows",
+    "push_mut_refs",
+    "generic_by_value_ref",
+    "push_owned_not_holder",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6917,12 +6925,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "refs_index_untracked",
-        // `collect()` / `push` don't make a holder (#392), so what
-        // `first` / `last` borrow isn't named. They still don't borrow
-        // the collection they were copied out of.
+        // `words` (filled by `collect()`) and `refs` (filled by `push`)
+        // hold borrows of `text` and `s` (#392), so the references
+        // copied out of them borrow `text` and `s`, never the
+        // collection itself.
         must_contain: &[
-            "first's immutable borrow ends (what it borrows from isn't shown)",
-            "last's immutable borrow ends (what it borrows from isn't shown)",
+            "Immutable borrow from text to first: first is a reference copied out of words",
+            "Immutable borrow from s to last: last is a reference copied out of refs",
+            "Return immutably borrowed resource from first to text",
+            "Return immutably borrowed resource from last to s",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from first to *first",
@@ -7187,6 +7198,79 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "p.x has no value yet",
             "p.y has no value yet",
+        ],
+    },
+    // ─── Collections filled by collect() / push (#392) ───────────────
+    TooltipExpect {
+        name: "collect_push_borrows",
+        // #392's repro. `words` and `refs` hold borrows of `text` and
+        // `s` until line 7: rustc rejects `drop(s)` or moving `text`
+        // before then.
+        must_contain: &[
+            "Immutable borrow from text to words: collect's signature gives the value it returns the same lifetime as the value it was called on; words isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from words to text",
+            "Immutable borrow from s to refs, stored in refs by push; refs isn't a reference, but its value now holds one",
+            "refs holds a value that immutably borrows s's resource (refs isn't a reference itself)",
+            "refs owns a value that can hold references (refs isn't a reference itself)",
+            "Return immutably borrowed resource from refs to s",
+            "refs goes out of scope. Its value is dropped, but not the data it borrowed.",
+        ],
+        must_not_contain: &[
+            ", through the value collect returned",
+            "Move from collect to words",
+            "words is the owner of the resource",
+            "refs is the owner of the resource",
+            "refs goes out of scope. Its resource is dropped.",
+            // `Vec::new()` holds no reference yet.
+            "refs holds a value that contains a reference (refs isn't a reference itself)",
+        ],
+    },
+    TooltipExpect {
+        name: "push_mut_refs",
+        // Two `&mut` pushed into one Vec: both x and y stay mutably
+        // borrowed until slots's last use (line 8), before `x += 1`.
+        must_contain: &[
+            "Mutable borrow from x to slots, stored in slots by push; slots isn't a reference, but its value now holds one",
+            "Mutable borrow from y to slots, stored in slots by push; slots isn't a reference, but its value now holds one",
+            "Return mutably borrowed value from slots to x",
+            "Return mutably borrowed value from slots to y",
+        ],
+        must_not_contain: &[
+            "slots is the owner of the resource",
+            "slots goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "generic_by_value_ref",
+        // #424: `id(&s)` returns the reference it was given, and
+        // `Some(&s)` stores it; both keep `s` borrowed until line 8.
+        must_contain: &[
+            "Immutable borrow from s to r: id's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from s to o: Some's signature gives the value it returns the same lifetime as its argument; o isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from r to s",
+            "Return immutably borrowed resource from o to s",
+        ],
+        must_not_contain: &[
+            ", through the reference id returned",
+            ", through the value Some returned",
+            "Copy from id to r",
+            "Copy from Some to o",
+            "Return immutably borrowed resource from r to *r",
+        ],
+    },
+    TooltipExpect {
+        name: "push_owned_not_holder",
+        // Guard, passes before and after: a Vec<String> holds no
+        // borrow, and `retain` doesn't store its closure.
+        must_contain: &[
+            "names is the owner of the resource",
+            "nums is the owner of the resource",
+            "names goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "names owns a value that can hold references (names isn't a reference itself)",
+            "nums owns a value that can hold references (nums isn't a reference itself)",
+            "Immutable borrow from k to nums",
         ],
     },
 ];

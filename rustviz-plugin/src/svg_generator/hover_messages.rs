@@ -1185,6 +1185,13 @@ pub fn arrow_static_lend_val_to_val(from_name: &String, to_name: &String) -> Str
 pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier) -> String {
     let func_fmt = fmt_style(func);
     let to_fmt = fmt_style(to_name);
+    if carrier == ViaCarrier::StoredBy {
+        // `refs.push(&s)` (#392): `func` is the method.
+        return format!(
+            ", stored in {0} by {1}; {0} isn't a reference, but its value now holds one",
+            to_fmt, func_fmt
+        );
+    }
     if carrier == ViaCarrier::Element {
         // `let r = refs[0];` (#349): `func` is the collection.
         if lenders.len() <= 1 {
@@ -1207,7 +1214,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
-        ViaCarrier::Element => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
@@ -1571,6 +1578,17 @@ pub fn state_holder_full_privilege(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
         "{0} holds a value that contains a reference ({0} isn't a reference itself)",
+        my_name_fmt
+    )
+}
+
+// A holder whose value starts out without a reference (`let mut refs
+// = Vec::new();`, filled later by `refs.push(&s)`; #392). Its type can
+// hold references; whether it holds one depends on the line.
+pub fn state_holder_starts_empty(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} owns a value that can hold references ({0} isn't a reference itself)",
         my_name_fmt
     )
 }

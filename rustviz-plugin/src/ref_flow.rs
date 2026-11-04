@@ -33,6 +33,7 @@
 use rustc_hir::{Expr, ExprKind, QPath, UnOp};
 use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Ty};
 use rustc_middle::ty::adjustment::{Adjust, DerefAdjustKind};
+use rustc_span::def_id::DefId;
 use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
@@ -46,6 +47,22 @@ struct ArgFlow<'tcx> {
   /// The place flow goes through a `&mut` parameter, so the loan the
   /// result keeps is a mutable one (`v.iter_mut()`, `v.get_mut(0)`).
   place_mut: bool,
+  /// The parameter isn't a reference type (`x: T`, `self: Self`): the
+  /// argument's whole value is carried, so if it is a reference
+  /// (`id(&s)`, `Some(&s)`, `refs.push(&s)` with `T = &String`), the
+  /// result carries that reference's borrow (#424).
+  by_value: bool,
+}
+
+/// Which type a call's arguments may flow into.
+#[derive(Clone, Copy)]
+enum FlowTarget<'s> {
+  /// The call's result.
+  Result,
+  /// One field of the struct the call returns.
+  Field(&'s str),
+  /// The receiver of a `&mut self` method (`refs.push(&s)`).
+  Receiver,
 }
 
 /// What an adjusted argument refers to, after rustc's auto-deref steps.
@@ -66,7 +83,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn callee_sig(
     &self,
     call: &'tcx Expr<'tcx>,
-  ) -> Option<(ty::FnSig<'tcx>, Option<GenericArgsRef<'tcx>>, Vec<&'tcx Expr<'tcx>>)> {
+  ) -> Option<(ty::FnSig<'tcx>, Option<GenericArgsRef<'tcx>>, Vec<&'tcx Expr<'tcx>>, Option<DefId>)> {
     let typeck = self.tcx.typeck(call.hir_id.owner);
     match call.kind {
       ExprKind::Call(fn_expr, args) => {
@@ -74,12 +91,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         match fty.kind() {
           ty::FnDef(def_id, gargs) => {
             let sig = self.tcx.fn_sig(*def_id).instantiate_identity().skip_norm_wip();
-            Some((self.tcx.liberate_late_bound_regions(*def_id, sig), Some(*gargs), args.iter().collect()))
+            Some((self.tcx.liberate_late_bound_regions(*def_id, sig), Some(*gargs), args.iter().collect(), Some(*def_id)))
           }
           ty::FnPtr(..) => {
             let sig = fty.fn_sig(self.tcx);
             let scope = call.hir_id.owner.to_def_id();
-            Some((self.tcx.liberate_late_bound_regions(scope, sig), None, args.iter().collect()))
+            Some((self.tcx.liberate_late_bound_regions(scope, sig), None, args.iter().collect(), None))
           }
           _ => None,
         }
@@ -89,7 +106,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
         let mut all = vec![rcvr];
         all.extend(args.iter());
-        Some((self.tcx.liberate_late_bound_regions(def_id, sig), typeck.node_args_opt(call.hir_id), all))
+        Some((self.tcx.liberate_late_bound_regions(def_id, sig), typeck.node_args_opt(call.hir_id), all, Some(def_id)))
       }
       _ => None,
     }
@@ -98,20 +115,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// For each argument of `call`, whether the call's result can borrow
   /// what that argument refers to or holds.
   fn call_arg_flows(&self, call: &'tcx Expr<'tcx>) -> Option<Vec<ArgFlow<'tcx>>> {
-    self.call_arg_flows_into(call, None)
+    self.call_arg_flows_into(call, FlowTarget::Result)
   }
 
   /// `call_arg_flows`, for the whole result (`field = None`) or for
   /// one field of a struct result (`Excerpt::new(&novel)` returns an
   /// `Excerpt<'a>` whose `part: &'a str` borrows `novel`).
-  fn call_arg_flows_into(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> Option<Vec<ArgFlow<'tcx>>> {
-    let (sig, gargs, args) = self.callee_sig(call)?;
-    let output = match field {
-      None => sig.output(),
-      Some(f) => match sig.output().kind() {
+  fn call_arg_flows_into(&self, call: &'tcx Expr<'tcx>, target: FlowTarget<'_>) -> Option<Vec<ArgFlow<'tcx>>> {
+    let (sig, gargs, args, def_id) = self.callee_sig(call)?;
+    let output = match target {
+      FlowTarget::Result => sig.output(),
+      FlowTarget::Field(f) => match sig.output().kind() {
         ty::Adt(def, fargs) if def.is_struct() =>
           def.all_fields().find(|fd| fd.name.as_str() == f)?.ty(self.tcx, fargs),
         _ => return None,
+      },
+      // What a `&mut self` method can store into its receiver: the
+      // receiver's own type (`Vec<T>` in `push(&mut self, value: T)`).
+      FlowTarget::Receiver => match sig.inputs().first()?.kind() {
+        ty::Ref(_, inner, m) if m.is_mut() => *inner,
+        _ => return Some(Vec::new()),
       },
     };
     // A type parameter matters only if this call instantiates it with
@@ -137,6 +160,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => {}
       }
     }
+    // A result type parameter bounded by a trait that mentions other
+    // parameters can be built from values of those: `collect<B:
+    // FromIterator<Self::Item>>(self) -> B` fills `B` with the
+    // iterator's items, so `B` carries whatever `Self` carries (#392).
+    // Only for the result: a bound on an argument (`retain<F:
+    // FnMut(&T) -> bool>(&mut self, f: F)`) doesn't store it.
+    if matches!(target, FlowTarget::Result) && !params.is_empty() {
+      if let Some(def_id) = def_id {
+        let bound: Vec<u32> = params.clone();
+        for (clause, _) in self.tcx.predicates_of(def_id).predicates.iter() {
+          let Some(pred) = clause.as_trait_clause() else { continue };
+          let pred = pred.skip_binder();
+          if !matches!(pred.self_ty().kind(), ty::Param(p) if bound.contains(&p.index)) {
+            continue;
+          }
+          for arg in pred.trait_ref.args.iter().skip(1) {
+            for g in arg.walk() {
+              match g.kind() {
+                GenericArgKind::Lifetime(r) if !r.is_static() && !regions.contains(&r) => regions.push(r),
+                GenericArgKind::Type(t) => {
+                  if let ty::Param(p) = t.kind() {
+                    if carries_ref(p.index) && !params.contains(&p.index) {
+                      params.push(p.index);
+                    }
+                  }
+                }
+                _ => {}
+              }
+            }
+          }
+        }
+      }
+    }
     if regions.is_empty() && params.is_empty() {
       return Some(Vec::new());
     }
@@ -148,13 +204,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       })
     };
     let mut flows = Vec::new();
-    for (index, (input, arg)) in sig.inputs().iter().zip(args).enumerate() {
+    // The receiver doesn't flow into itself.
+    let skip = usize::from(matches!(target, FlowTarget::Receiver));
+    for (index, (input, arg)) in sig.inputs().iter().zip(args).enumerate().skip(skip) {
       let (place, content, place_mut) = match input.kind() {
         ty::Ref(r, inner, m) => (regions.contains(r), shares(*inner), m.is_mut()),
         _ => (false, shares(*input), false),
       };
       if place || content {
-        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut });
+        let by_value = !matches!(input.kind(), ty::Ref(..));
+        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value });
       }
     }
     Some(flows)
@@ -180,17 +239,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `call_lenders_full` for the reference stored in field `field` of
   /// the struct `call` returns, and whether that borrow is mutable.
   pub fn call_field_lenders(&self, call: &'tcx Expr<'tcx>, field: &str) -> (Vec<ResourceTy>, bool, bool) {
-    let flows = self.call_arg_flows_into(call, Some(field)).unwrap_or_default();
+    let flows = self.call_arg_flows_into(call, FlowTarget::Field(field)).unwrap_or_default();
     let is_mut = flows.iter().any(|f| f.place_mut || (f.content && self.value_borrow_is_mut(f.arg)));
     let (ls, unnamed) = self.lenders_of_flows(flows);
     (ls, unnamed, is_mut)
+  }
+
+  /// Whether `call` is a `&mut self` method whose signature lets it
+  /// store a borrow carried by another argument into the receiver:
+  /// `push(&mut self, value: T)` on a `Vec<&String>` (#392). Decided
+  /// from types alone.
+  pub fn call_stores_into_receiver(&self, call: &'tcx Expr<'tcx>) -> bool {
+    matches!(call.kind, ExprKind::MethodCall(..))
+      && self.call_arg_flows_into(call, FlowTarget::Receiver).is_some_and(|f| !f.is_empty())
+  }
+
+  /// The variables whose borrows `call` stores into its receiver
+  /// (`refs.push(&s)` → `s`), and whether any of them is mutable.
+  pub fn receiver_store_lenders(&self, call: &'tcx Expr<'tcx>) -> (Vec<ResourceTy>, bool) {
+    let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
+    let is_mut = flows.iter().any(|f| f.place_mut || (f.content && self.value_borrow_is_mut(f.arg)));
+    (self.lenders_of_flows(flows).0, is_mut)
   }
 
   fn lenders_of_flows(&self, flows: Vec<ArgFlow<'tcx>>) -> (Vec<ResourceTy>, bool) {
     let mut out: Vec<ResourceTy> = Vec::new();
     let mut unnamed = false;
     for flow in flows {
-      let ls = self.arg_lenders(flow.arg, flow.place, flow.content);
+      let ls = self.arg_lenders(flow.arg, flow.place, flow.content, flow.by_value);
       // A closure passed by value (`.map(|p| p.len())`) holds only
       // what it captures by reference; one that captures nothing that
       // way holds no borrow at all.
@@ -198,7 +274,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         unnamed = true;
       }
       for l in ls {
-        if !matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+        // A function isn't a lender: a value it returned that we don't
+        // track (`for word in text.split_whitespace()`) borrows data
+        // with no column.
+        if !matches!(&l, ResourceTy::Value(r) | ResourceTy::Deref(r) if !r.is_fn()) {
           unnamed = true;
         } else if !out.contains(&l) {
           out.push(l);
@@ -211,14 +290,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Which of `call`'s arguments its signature ties the result to,
   /// and how many of those have no column (see `ArgTie`).
   pub fn call_arg_tie(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> ArgTie {
-    let Some((_, _, args)) = self.callee_sig(call) else { return ArgTie::default() };
+    let Some((_, _, args, _)) = self.callee_sig(call) else { return ArgTie::default() };
     let mut tie = ArgTie {
       receiver: matches!(call.kind, ExprKind::MethodCall(..)),
       total: args.len(),
       ..ArgTie::default()
     };
-    for flow in self.call_arg_flows_into(call, field).unwrap_or_default() {
-      let named = self.arg_lenders(flow.arg, flow.place, flow.content).iter()
+    let target = match field { Some(f) => FlowTarget::Field(f), None => FlowTarget::Result };
+    for flow in self.call_arg_flows_into(call, target).unwrap_or_default() {
+      let named = self.arg_lenders(flow.arg, flow.place, flow.content, flow.by_value).iter()
         .any(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
       tie.tied.push(flow.index);
       // A closure that captures nothing by reference holds no borrow:
@@ -308,7 +388,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// Lenders reachable through one argument, after rustc's adjustments
   /// (auto-ref of a method receiver, auto-deref, deref coercion).
-  fn arg_lenders(&self, arg: &'tcx Expr<'tcx>, place: bool, content: bool) -> Vec<ResourceTy> {
+  fn arg_lenders(&self, arg: &'tcx Expr<'tcx>, place: bool, content: bool, by_value: bool) -> Vec<ResourceTy> {
+    if by_value {
+      // Passed by value: whatever the value holds, including the
+      // borrow of a reference passed for a type parameter.
+      return if content { self.value_lenders(arg) } else { Vec::new() };
+    }
     let typeck = self.tcx.typeck(arg.hir_id.owner);
     let adjs = typeck.expr_adjustments(arg);
     let mut res = Vec::new();
