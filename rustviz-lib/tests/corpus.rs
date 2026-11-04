@@ -648,6 +648,10 @@ const EXPECTED_OK: &[&str] = &[
     "holder_closure_ref",
     // A value moved into a call on a line with another arrow (#379).
     "move_into_call_shared_line",
+    // A reassignment inside an if/else or match arm shows the previous
+    // value being dropped (#267).
+    "reassign_in_branch_drop",
+    "reassign_through_ref_in_branch",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6654,6 +6658,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // ─── Reassignment inside a branch (#267) ────────────────────────
+    TooltipExpect {
+        name: "reassign_in_branch_drop",
+        // `x = …` in both arms, `y = …` in one match arm, a whole
+        // struct `s = S { … }` (drops `s.a`/`s.b` too) and `s.a = …`.
+        // These dots used to be plain "acquires ownership of a
+        // resource" with no drop.
+        must_contain: &[
+            "x acquires ownership of a new resource; its previous resource is dropped",
+            "y acquires ownership of a new resource; its previous resource is dropped",
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "s.a acquires ownership of a new resource; its previous resource is dropped",
+            "s.b acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            // `z` was moved into `take` just before, in the same arm:
+            // nothing is left to drop at `z = …`.
+            "z acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "reassign_through_ref_in_branch",
+        // `*r = …` in both arms: `t` (r's lender) gets a branched
+        // column with its old String dropped in each arm. Before, `t`
+        // had no branch at all (and before #148 this panicked, #264).
+        must_contain: &[
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "*r acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "the resource r points to is modified through *r",
+            "its previous value is dropped",
+            "(copied from",
+            "(moved from",
         ],
     },
 ];

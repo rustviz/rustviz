@@ -581,6 +581,14 @@ pub fn collect_event_live_vars(
             ExternalEvent::LoopExitMove { ro, .. } => {
                 out.insert(ro.clone());
             }
+            // A reassignment in a branch drops the old value of `ro`:
+            // for `*r = …` that's r's lender, which no other event in
+            // the branch may mention (#267).
+            ExternalEvent::OwnerDropAtReassign { ro, .. } => {
+                if !ro.is_fn() {
+                    out.insert(ro.clone());
+                }
+            }
             _ => {
                 let (from, to) = ResourceAccessPoint_extract(ev);
                 for rty in [from, to] {
