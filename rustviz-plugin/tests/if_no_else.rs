@@ -1,9 +1,7 @@
-// `if cond { body }` (no else). Pre-fix the visualization
-// synthesized an empty "Else" branch label even when the user
-// didn't write one; now the Branch event is single-branch with
-// just the "If" label, and `s`'s join state at the merge reflects
-// the implicit-untouched else (still owned in the no-else path,
-// so MovedAfter — not BoundHere).
+// `if cond { body }` (no else) whose body moves `s`. `s` is moved
+// only when `cond` holds; otherwise it's still owned and dropped at
+// scope end (a runtime drop flag decides). Drawn like an `if` with an
+// empty `else` (#257); it used to show an unconditional move.
 
 fn consume(_s: String) {}
 

@@ -278,6 +278,11 @@ const Description: React.FC = () => (
         tuples (<code>let t = (…)</code>, <code>t.0</code>) show no events;{' '}
         <code>Rc</code> clones each appear to drop the value.
       </li>
+      <li>
+        An <code>if</code> written on one line (<code>if c {'{'} take(s); {'}'}</code>)
+        is drawn as if its body always ran; spread it over several lines to see
+        the move as conditional.
+      </li>
     </ul>
     <p>
       <strong>Some valid programs crash the visualizer</strong> (you&apos;ll
