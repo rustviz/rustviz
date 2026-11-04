@@ -3100,10 +3100,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.destructure_moved = moved;
     self.destructure_ref_data = ref_data;
     // Parts nothing is assigned to (`(a, _) = (s, t)`) are moved
-    // into the temporary and dropped with it.
+    // into the temporary and dropped with it, at the end of the
+    // statement. The temporary has no column, so the move's tooltip
+    // is where that drop is stated (unless the type has nothing to
+    // drop).
     for e in &discarded {
       if moved_name(self, e).is_some() {
-        self.match_rhs(ResourceTy::Anonymous, e, Evt::Move);
+        let ty = self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id);
+        let needs_drop = ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner));
+        let to = if needs_drop { ResourceTy::Temporary { extended: false } } else { ResourceTy::Anonymous };
+        self.match_rhs(to, e, Evt::Move);
       }
     }
     for &i in &order {

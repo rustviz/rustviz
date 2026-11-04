@@ -287,13 +287,20 @@ pub enum ResourceTy {
     // an assignment (and what it does to the old element: the element has
     // no column to draw a drop on, so the tooltip states it) or an
     // in-place update.
-    Index(ResourceAccessPoint, String, PlaceWrite)
+    Index(ResourceAccessPoint, String, PlaceWrite),
+    // The temporary a literal in `let (ref a, ..) = (s, t);` builds: an
+    // anonymous holder like `Anonymous`, but one whose drop is not
+    // drawn (it has no column), so the move into it says when it is
+    // dropped: at the end of the statement, or with a `ref` binding
+    // (`extended`) at the end of the block. Only used for a value
+    // whose type needs drop.
+    Temporary { extended: bool },
 }
 
 impl ResourceTy {
     pub fn name(&self) -> String {
         match self {
-            ResourceTy::Anonymous => "Anonymous resource".to_owned(),
+            ResourceTy::Anonymous | ResourceTy::Temporary { .. } => "Anonymous resource".to_owned(),
             ResourceTy::Value(r) => r.name().to_owned(),
             ResourceTy::Deref(r) => format!("*{}", r.name()),
             ResourceTy::Index(_, place, _) => place.clone(),
@@ -304,7 +311,7 @@ impl ResourceTy {
 
     pub fn real_name(&self) -> String {
         match self {
-            ResourceTy::Anonymous => "Anonymous resource".to_owned(),
+            ResourceTy::Anonymous | ResourceTy::Temporary { .. } => "Anonymous resource".to_owned(),
             ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.name().to_owned(),
             ResourceTy::Caller => "Caller".to_owned()
         }
@@ -312,7 +319,7 @@ impl ResourceTy {
 
     pub fn hash(&self) -> &u64 {
         match self {
-            ResourceTy::Caller | ResourceTy::Anonymous => &std::u64::MAX,
+            ResourceTy::Caller | ResourceTy::Anonymous | ResourceTy::Temporary { .. } => &std::u64::MAX,
             ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.hash(),
         }
     }
@@ -346,7 +353,7 @@ impl ResourceTy {
 
     pub fn extract_rap(&self) -> Option<&ResourceAccessPoint> {
         match self {
-            ResourceTy::Anonymous | ResourceTy::Caller => None,
+            ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Temporary { .. } => None,
             ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => Some(r)
         }
     }
@@ -1723,6 +1730,7 @@ impl Event {
                 let v = is_plain(is);
                 match to {
                     ResourceTy::Caller => safe_message(if v { hover_messages::event_dot_move_to_caller_value } else { hover_messages::event_dot_move_to_caller }, &self.deref_name(my_name), to),
+                    ResourceTy::Temporary { extended } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v),
                     _ if to.is_closure() => safe_message(if v { hover_messages::event_dot_capture_move_to_closure_value } else { hover_messages::event_dot_capture_move_to_closure }, &self.deref_name(my_name), to),
@@ -2857,7 +2865,7 @@ impl Visualizable for VisualizationData {
         // Eventually we should collect these interactions with anonymous owners and display them in the code panel
         fn maybe_append_event (vd: & mut VisualizationData, resource_ty: &ResourceTy, event: Event, line_number: usize){
           match resource_ty {
-            ResourceTy::Anonymous | ResourceTy::Caller => {}
+            ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Temporary { .. } => {}
             ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => {
                 vd._append_event(&r, event, &line_number);
             }

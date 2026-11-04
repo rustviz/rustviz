@@ -5549,6 +5549,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. No resource is dropped.",
             "i is live in a conditional expression",
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+    },
     TooltipExpect {
         name: "tuple_destructure_assign",
         // `(x, y) = (y, x)`, `(a, b) = (b, a)` (Strings), and
@@ -5593,7 +5595,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c goes out of scope. Its resource is dropped.",
             "Move from s to a",
             "a acquires ownership of a new resource; its previous resource is dropped",
-            "t's resource is moved",
+            // t is moved into the tuple temporary, which is dropped at the
+            // end of the statement; it has no column, so the move's
+            // tooltip says so.
+            "t's resource is moved into a temporary that is dropped at the end of this statement",
             "t goes out of scope. No resource is dropped.",
             "Move from q to p",
             "Move from p to q",
@@ -5608,6 +5613,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "lhs, immutable",
             // Before #151, the `_` part read as never moved.
             "t goes out of scope. Its resource is dropped.",
+            // The drop is real and must be stated.
+            "t's resource is moved",
             "b acquires ownership of a new resource; its previous resource is dropped",
             "c acquires ownership of a new resource; its previous resource is dropped",
             "p acquires ownership of a new resource; its previous resource is dropped",

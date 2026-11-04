@@ -538,7 +538,7 @@ pub fn render_svg(
                 // owning (and later dropping) what it gave away.
                 let into_fn = to.extract_rap().map_or(false, |rap| rap.is_fn())
                     && !from_fn;
-                let into_unmodelled_place = matches!(to, ResourceTy::Anonymous)
+                let into_unmodelled_place = matches!(to, ResourceTy::Anonymous | ResourceTy::Temporary { .. })
                     && !matches!(from, ResourceTy::Anonymous);
                 let is_borrow = matches!(event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
                 let borrow_of_temporary = is_borrow

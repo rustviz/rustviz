@@ -643,6 +643,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // A borrow stored in an element (`v[0] = &u`, #282) is drawn on
       // the lender's column only: v's column doesn't model it.
       (_, ResourceTy::Index(..), ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => {},
+      (_, ResourceTy::Temporary { .. }, _) => {},
       (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..),
        ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..), _) // maybe change later
       // `v[i] = s` / `v[i] = y`: an arrow into v's column.
@@ -1942,7 +1943,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if ty.builtin_deref(false).unwrap().is_ref() {
         match &lender {
           // (get_rap never yields DerefField; it's an assignment-LHS place.)
-          ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) => { (lender, aliasing) }
+          ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) | ResourceTy::Temporary { .. } => { (lender, aliasing) }
           ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
             aliasing.push_front(x.name().to_owned()); // here the lender is added to the list of aliases 
             (lender, aliasing)
