@@ -411,7 +411,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             }
           }
           _ => {
-            let fn_name: String = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
+            // Calling a local variable (a closure, a `fn` pointer, a
+            // generic `F: Fn(..)` parameter): its arguments go to the
+            // call, not into the variable's own column.
+            let fn_name: String = match self.local_callee_target(fn_expr) {
+              Some(key) => key,
+              None => hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap(),
+            };
             self.add_fn(fn_name.clone());
             for arg in args.iter(){
               self.visit_expr(&arg);
