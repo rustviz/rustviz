@@ -661,6 +661,12 @@ const EXPECTED_OK: &[&str] = &[
     "refs_array_literal",
     "refs_vec_mut",
     "refs_index_untracked",
+    // A value or reference that borrows through a reference parameter
+    // (`v.iter()`, `first_word(s)` with `v: &Vec<i32>`, `s: &String`;
+    // #393); tooltips pinned below.
+    "holder_ref_param_iter",
+    "holder_ref_param_iter_mut",
+    "fn_ret_ref_through_param",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6784,6 +6790,65 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from first to words",
             "Return immutably borrowed resource from last to refs",
             "words's resource is no longer immutably borrowed",
+        ],
+    },
+    // ─── Borrows through a reference parameter (#393) ────────────────
+    TooltipExpect {
+        name: "holder_ref_param_iter",
+        // `it` borrows the caller's Vec through the reference parameter
+        // `v`; v's column stands for that data, as for `&v[0]`.
+        must_contain: &[
+            "Immutable borrow from v to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "it holds a value that immutably borrows the data v points to (it isn't a reference itself)",
+            "Return immutably borrowed resource from it to v",
+            "it goes out of scope. Its value is dropped, but not the data it borrowed.",
+        ],
+        must_not_contain: &[
+            ", through the value iter returned",
+            "Move from iter to it",
+            "it is the owner of the resource",
+            "it acquires ownership of a resource",
+            "it goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_ref_param_iter_mut",
+        // iter_mut reborrows `*v` mutably: `it`, and `first` taken out
+        // of it, keep that borrow until line 4 (rustc rejects using
+        // `it` after `v.push(0)`).
+        must_contain: &[
+            "Mutable borrow from v to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "it holds a value that mutably borrows the data v points to (it isn't a reference itself)",
+            "Mutable borrow from v to first: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return mutably borrowed resource from it to v",
+            "Return mutably borrowed resource from first to v",
+        ],
+        must_not_contain: &[
+            ", through the value iter_mut returned",
+            ", through the reference unwrap returned",
+            "Move from iter_mut to it",
+            "it is the owner of the resource",
+            "first is initialized by copy from unwrap",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_ret_ref_through_param",
+        // A reference returned by a call on a reference parameter
+        // borrows what the parameter points to, like `&s[..1]` does.
+        must_contain: &[
+            "Immutable borrow from s to w: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from v to q: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return immutably borrowed resource from w to s",
+            "Return immutably borrowed resource from q to v",
+        ],
+        must_not_contain: &[
+            ", through the reference first_word returned",
+            ", through the reference unwrap returned",
+            "Copy from first_word to w",
+            "w is initialized by copy from first_word",
+            "Copy from unwrap to q",
+            "q is initialized by copy from unwrap",
+            "Return immutably borrowed resource from w to *w",
         ],
     },
 ];
