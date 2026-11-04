@@ -316,7 +316,10 @@ impl ResourceAccessPoint {
     }
 
     pub fn is_copy_owner(&self) -> bool {
-        matches!(self, ResourceAccessPoint::Owner(Owner { is_copy: true, .. }))
+        // A Copy struct or Copy field (`p.x: i32`) holds a value like a
+        // Copy owner does (#178).
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_copy: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_copy: true, .. }))
     }
 
     /// True if this RAP is part of a struct grouping — either the
@@ -1076,8 +1079,14 @@ impl Event {
                     ResourceTy::Caller if matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
                         safe_message(hover_messages::event_dot_copy_ref_to_caller, &self.deref_name(my_name), to),
                     ResourceTy::Caller => safe_message(hover_messages::event_dot_copy_to_caller, &self.deref_name(my_name), to),
+                    _ if !to.is_closure() && matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
+                        hover_messages::event_dot_ref_copied(my_name),
                     _ => safe_message(hover_messages::event_dot_copy_to, &self.deref_name(my_name), to)
                 }
+            }
+            // Moving a `&mut` moves the reference, not its referent.
+            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), ..} if !to.is_closure() => {
+                hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller))
             }
             Event::Move{ to ,..} => {
                 match to {

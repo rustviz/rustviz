@@ -275,10 +275,6 @@ const Description: React.FC = () => (
         drawn, so a moved-in value is shown as dropped at the end.
       </li>
       <li>
-        Moving a <code>&amp;mut</code> (<code>let r2 = r;</code>) is described as
-        moving the resource rather than the reference.
-      </li>
-      <li>
         A variable assigned in only some branches of an <code>if</code> is drawn
         as owning a value afterwards; Rust treats it as possibly uninitialized.
       </li>

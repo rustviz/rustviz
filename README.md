@@ -207,10 +207,6 @@ panic.
 - A closure passed straight to a function (`thread::spawn(move || …)`,
   `apply(|x| x + k)`) has no captures drawn, so a value it `move`s is
   still shown as dropped at the end of scope.
-- Some wording on references is still off: moving a `&mut` (`let r2 =
-  r;`) says "r's resource is moved" (it's the reference that moves), and
-  a `&T` binding such as `let s: &str = "hi";` ends with "Return
-  immutably borrowed resource from s to *s".
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
 - A variable assigned in only some branches (`let mut s; if c { s = …
   }`) is drawn as owning a value after the `if`, and a later `s = …` as

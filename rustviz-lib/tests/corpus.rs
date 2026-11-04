@@ -312,6 +312,9 @@ const EXPECTED_OK: &[&str] = &[
     // Union writes and scope end don't drop fields (#191).
     "union_manually_drop",
     "union_whole_assign",
+    // Reference moves/copies and Copy assignments are worded as such (#178).
+    "ref_move_copy_wording",
+    "copy_field_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -825,15 +828,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
 
     TooltipExpect {
         name: "chained_field_assign",
-        // "acquires ownership" for an i32 field is the plugin's existing
-        // wording for every struct-field write (flat `o.x = 5` says the
-        // same on main); this entry pins that the chained write lands on
-        // `o.inner.x`'s column, not that wording.
+        // The chained write lands on `o.inner.x`'s column. Writing to
+        // an i32 field is an assignment, not an acquisition (#178).
         must_contain: &[
             "o.inner.x, mutable",
+            "o.inner.x is assigned a new value",
+        ],
+        must_not_contain: &[
             "o.inner.x acquires ownership of a resource",
         ],
-        must_not_contain: &[],
     },
     TooltipExpect {
         name: "chained_field_assign_move",
@@ -2708,6 +2711,74 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u is initialized by copy from y",
             "u acquires ownership of a new resource; its previous resource is dropped",
             "u goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // ─── Wording on references and Copy assignments (#178) ──────────
+    TooltipExpect {
+        name: "ref_move_copy_wording",
+        // Moving / returning a `&mut` and copying a `&T` move or copy
+        // the reference; `s` and `x` keep their resources.
+        must_contain: &[
+            "r's mutable reference is moved (not the resource it points to)",
+            "r's mutable reference is moved to the caller (not the resource it points to)",
+            "a's reference is copied (not the resource it points to)",
+            "Move from r to r2",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "r's resource is moved",
+            "r's resource is moved to the caller",
+            "a's resource is copied",
+        ],
+    },
+    TooltipExpect {
+        name: "str_literal_ref",
+        // The string literal has no column: the borrow isn't
+        // "returned" from s to *s.
+        must_contain: &[
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "s's reference is copied (not the resource it points to)",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from s to *s",
+            "Return immutably borrowed resource from t to *t",
+            "s's resource is copied",
+        ],
+    },
+    TooltipExpect {
+        name: "hashmap_entry_count",
+        // `map` owns its HashMap to the end (already right on main;
+        // pinned because #178 reported "No resource is dropped").
+        must_contain: &[
+            "map goes out of scope. Its resource is dropped.",
+            "text's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "map goes out of scope. No resource is dropped.",
+            "Return immutably borrowed resource from text to *text",
+        ],
+    },
+    TooltipExpect {
+        name: "copy_field_assign",
+        // Copy fields hold values, not resources; writing to a Copy
+        // place that already holds a value is an assignment.
+        must_contain: &[
+            "p.x holds a value",
+            "p.x is bound to a value",
+            "p.x is assigned a new value",
+            "p.y is assigned a copy of z",
+            "Copy from z to p.y",
+            "n is assigned a new value",
+            "n is assigned a copy of m",
+            "b is assigned a new value",
+        ],
+        must_not_contain: &[
+            "p.x acquires ownership of a resource",
+            "p.x is the owner of the resource",
+            "p.y is initialized by copy from z",
+            "n is initialized by copy from m",
+            "b acquires ownership of a resource",
         ],
     },
 ];
