@@ -129,6 +129,18 @@ pub fn path_key(p: &Path, tcx: &TyCtxt) -> String {
   if matches!(p.res, Res::Local(_)) { name } else { fn_key(&name) }
 }
 
+/// The local a path expression names (`x` resolving to a `let` or
+/// pattern binding), if it is one.
+pub fn local_of_path(expr: &Expr) -> Option<HirId> {
+  match expr.kind {
+    ExprKind::Path(QPath::Resolved(None, p)) => match p.res {
+      Res::Local(hid) => Some(hid),
+      _ => None,
+    },
+    _ => None,
+  }
+}
+
 pub fn bool_of_mut (m: Mutability) -> bool {
   match m {
     Mutability::Not => {

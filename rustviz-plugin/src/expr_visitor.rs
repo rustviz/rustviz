@@ -224,6 +224,20 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // Calls whose temporary result's drop has been stated (#457), so a
   // call the visitor reaches twice says it once.
   pub temp_drops_noted: HashSet<rustc_hir::HirId>,
+  // State for the destructuring assignment being visited
+  // (`(a, b) = (b, a);`, see `visit_destructuring_assign`). rustc
+  // lowers it to `{ let (lhs, lhs) = (b, a); a = lhs; b = lhs; }`;
+  // the `lhs` temporaries get no columns. Instead each `a = lhs` is
+  // drawn as `a = <the part of the RHS that lhs held>`.
+  //   destructure_srcs: `lhs` binding → that RHS part.
+  //   destructure_moved: RAPs whose value the statement moves out
+  //     (their old value isn't dropped when they're assigned).
+  //   destructure_ref_data: a reference destination's new lender,
+  //     computed before any part of the statement is drawn.
+  pub destructure_srcs: HashMap<rustc_hir::HirId, &'tcx Expr<'tcx>>,
+  pub destructure_moved: HashSet<String>,
+  pub destructure_ref_data: HashMap<rustc_hir::HirId, (ResourceTy, VecDeque<String>, Option<StaticLender>, Vec<ResourceTy>)>,
+
 
   // Variables moved in a branch that then `break`s out of a loop
   // (#344), recorded when the branch is built; the loop turns them
