@@ -1727,12 +1727,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u._a, mutable",
             "u._b, mutable",
             // The read / borrow must not lose their source.
-<<<<<<< HEAD
-            "x is bound to a value",
-            "u is initialized by copy from y",
-=======
             "x is bound to a copyable value",
->>>>>>> 18a1d924 (plugin: say a Copy-typed column holds a copyable value)
+            "u is initialized by copy from y",
             "Return immutably borrowed resource from r to *r",
         ],
     },
