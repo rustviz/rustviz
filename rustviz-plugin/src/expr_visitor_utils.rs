@@ -836,7 +836,10 @@ pub fn get_regions(h: &HashSet<String>, borrow_map: &HashMap<String, RefData>) -
   let mut regions: Vec<(usize, HashSet<String>)> = Vec::new();
   for (a_place, k_place, borrower) in loans {
     match regions.last_mut() {
-      Some((k, members)) if a_place < *k => {
+      // `<=`: a borrow handed over on the line where the previous
+      // one ends (`r2 = t;` as t's last use) keeps the lender
+      // borrowed; it isn't returned in between (#291).
+      Some((k, members)) if a_place <= *k => {
         *k = max(*k, k_place);
         members.insert(borrower.clone());
       }
