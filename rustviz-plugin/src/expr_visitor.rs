@@ -300,6 +300,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     );
   }
 
+  /// For a call `f(args)` whose callee `f` is a local variable with a
+  /// column of its own (a closure binding, a `fn` pointer, a generic
+  /// `F: Fn(..)` parameter), the `raps` key of a Function RAP named
+  /// `f` that stands for the call, registered on first use.
+  ///
+  /// `match_arg` sends each argument to the RAP it's given. Given the
+  /// variable `f` itself, a call like `push(&mut s)` or `consume(s)`
+  /// put the argument into `f`'s column, where the renderer read it
+  /// as a closure capture ("s's resource is captured (moved) by
+  /// closure consume", #201), a Copy argument as "f is initialized by
+  /// copy" (#258), and a `&`/`&mut` borrow written at the call as an
+  /// arrow between two columns that the renderer couldn't place
+  /// (#210, a crash). Arguments are passed to the call, like those of
+  /// a named function, so they get a Function target too. Its key is
+  /// `f()`, which can't clash with a variable or fn name; its name
+  /// (what the renderer shows) is `f`.
+  pub fn local_callee_target(&mut self, callee: &Expr) -> Option<String> {
+    let ExprKind::Path(QPath::Resolved(None, path)) = callee.kind else { return None };
+    if !matches!(path.res, Res::Local(_)) {
+      return None;
+    }
+    let name = self.tcx.hir_name(path.segments[0].hir_id).as_str().to_owned();
+    match self.raps.get(&name) {
+      Some(rd) if !rd.rap.is_fn() => {}
+      _ => return None,
+    }
+    let key = format!("{}()", name);
+    if !self.raps.contains_key(&key) {
+      let rap = ResourceAccessPoint::Function(Function { name, hash: self.rap_hashes as u64 });
+      self.raps.insert(key.clone(), RapData {
+        rap,
+        scope: self.current_scope,
+        is_global: true,
+        fn_start_line: self.current_fn_start,
+      });
+      self.rap_hashes += 1;
+    }
+    Some(key)
+  }
+
   // Adds a function RAP
   pub fn add_fn(&mut self, name: String) {
     self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64 }), self.current_scope, true);
