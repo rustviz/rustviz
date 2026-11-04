@@ -486,6 +486,10 @@ const EXPECTED_OK: &[&str] = &[
     "partial_move_if_branches",
     // A temporary a `let` borrows gets a column to the end of the block (#400).
     "extended_temporary",
+    // A `&mut` passed to a generic `T` is moved, not reborrowed (#200);
+    // a move into a call survives a borrow ending on the same line.
+    "mutref_moved_into_generic",
+    "move_into_call_same_line_borrow_end",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -867,8 +871,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `let w = first(y)` returns a `&mut String` derived
             // from y: the reborrow lives on in w after first returns.
             "first reads from/writes to y (mutable reborrow — y can't be used while the reborrow is live)",
-            // `take(y)` into a generic `T`: y is moved, not reborrowed.
-            "take reads from/writes to y",
+            // `take(y)` into a generic `T`: y is moved, not reborrowed
+            // (#200).
+            "Move from y to take",
             // `show(x)` with x: `&String`: the reference is copied.
             "show reads from x",
             // x and y own nothing; the calls borrow what they point to
@@ -883,6 +888,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y's resource is no longer mutably borrowed",
             "first reads from/writes to y (mutable reborrow — y can't be used until first returns)",
             "take reads from/writes to y (mutable reborrow — y can't be used until take returns)",
+            "take reads from/writes to y",
             "show reads from x (immutable reborrow — x is read-only until show returns)",
         ],
     },
@@ -4999,6 +5005,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "Return immutably borrowed resource from r to String::from",
             "Immutable borrow from (temporary 5) to inner",
+        ],
+    },
+    TooltipExpect {
+        name: "mutref_moved_into_generic",
+        // `push(y)` (param `&mut String`): rustc reborrows y, so y comes
+        // back. `take(y)` (param `T`): no reborrow; the `&mut` itself is
+        // moved into take, like an owner passed by value. It used to be
+        // drawn as a borrow that y gets back.
+        must_contain: &[
+            "push reads from/writes to y (mutable reborrow — y can't be used until push returns)",
+            "Move from y to take",
+            "s's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "take reads from/writes to y",
+            "y's resource is mutably borrowed by take; y can't be used while the borrow is live",
+            "take reads from/writes to y (mutable reborrow — y can't be used until take returns)",
+        ],
+    },
+    TooltipExpect {
+        name: "move_into_call_same_line_borrow_end",
+        // r's borrow of t ends on the `takes(s, r.len())` line, and s is
+        // moved into takes there. Both arrows are drawn.
+        must_contain: &[
+            "Move from s to takes",
+            "s goes out of scope. No resource is dropped.",
+            "Return immutably borrowed resource from r to t",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
         ],
     },
 ];

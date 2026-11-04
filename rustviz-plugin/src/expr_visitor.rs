@@ -1263,6 +1263,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, tycheck_results),
             _ => is_implicit_mut_reborrow(arg, tycheck_results),
           };
+          // An existing `&mut` (not a fresh `&mut x` written at the
+          // call) that rustc didn't reborrow is moved into the call:
+          // `&mut T` isn't Copy, and the reborrow is only inserted
+          // when the parameter's type is itself a reference
+          // (`push(y)` with `x: &mut String`), not for a generic
+          // `take<T>(t: T)` (#200). Using `y` afterwards is E0382.
+          if !is_reborrow && !matches!(arg.kind, ExprKind::AddrOf(..))
+            && matches!(from_ro, ResourceTy::Value(_)) {
+            self.add_ev(line_num, Evt::Move, to_ro, from_ro, false);
+            return;
+          }
           // Unknown parent → assume the result may hold the borrow;
           // that only selects the weaker (always-true) wording.
           let result_has_lifetime = match self.tcx.parent_hir_node(arg.hir_id) {
