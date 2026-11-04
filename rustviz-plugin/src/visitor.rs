@@ -513,10 +513,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // resolved to `Deref(s)`, surfacing the nonsensical
           // tooltip "Return immutably borrowed resource from s
           // to *s".
+          let pointee_copy = self.ref_pointee_is_copy(ty, param.hir_id.owner);
           self.add_ref(name.clone(),
           bool_of_mut(ty.ref_mutability().unwrap()),
           bool_of_mut(binding_annotation.1), line_num,
-          ResourceTy::Caller, VecDeque::new(), self.current_scope, !self.inside_branch);
+          ResourceTy::Caller, VecDeque::new(), self.current_scope, !self.inside_branch, pointee_copy);
           // Stretch the loan to the closing brace so the dashed
           // ref-line trapezoid covers the full body.
           if let Some(rd) = self.borrow_map.get_mut(&name) {
@@ -1907,6 +1908,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
                     .pat_ty(user_pat);
                   if pat_ty.is_ref() {
+                    let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
                     self.add_ref(
                       pat_name.clone(),
                       bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -1916,6 +1918,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       std::collections::VecDeque::new(),
                       self.current_scope,
                       false,
+                      pointee_copy,
                     );
                   } else {
                     let is_copy = self.tcx.type_is_copy_modulo_regions(
@@ -2240,6 +2243,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let name = ident.to_string();
         let pat_ty = self.tcx.typeck(hirid.owner).pat_ty(pat);
         if pat_ty.is_ref() {
+          let pointee_copy = self.ref_pointee_is_copy(pat_ty, hirid.owner);
           self.add_ref(
             name.clone(),
             bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -2249,6 +2253,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             std::collections::VecDeque::new(),
             self.current_scope,
             false,
+            pointee_copy,
           );
         } else {
           let is_copy = self.tcx.type_is_copy_modulo_regions(

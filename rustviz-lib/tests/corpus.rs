@@ -364,6 +364,8 @@ const EXPECTED_OK: &[&str] = &[
     "if_no_else_read_only",
     "if_else_empty_same_line",
     "if_no_else_nested_move",
+    // A reference to a Copy value says "the borrowed value" (#312).
+    "ref_copy_referent_wording",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -473,10 +475,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Mutable borrow from x to y",
             "Return mutably borrowed value from y to x",
-            "y holds a mutable reference; it can read and write the borrowed resource",
-            "the resource y points to is modified through *y",
+            "y holds a mutable reference; it can read and write the borrowed value",
+            "the value y points to is modified through *y",
         ],
         must_not_contain: &[
+            "the resource y points to is modified through *y",
             "y is the owner of the resource",
             "*y acquires ownership of a resource",
             "Return mutably borrowed resource from y to x",
@@ -521,8 +524,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Rust Book 8.1 `for i in &mut v { *i += 50; }`.
         must_contain: &[
             "Mutable borrow from v to i",
-            "i holds a mutable reference; it can read and write the borrowed resource",
-            "the resource i points to is modified through *i",
+            "i holds a mutable reference; it can read and write the borrowed value",
+            "the value i points to is modified through *i",
         ],
         must_not_contain: &[
             "i is the owner of the resource",
@@ -535,7 +538,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `&mut` returned by `or_insert`; `text` is a `&str`.
         must_contain: &[
             "Mutable borrow from map to count",
-            "the resource count points to is modified through *count",
+            "the value count points to is modified through *count",
             "text is bound to an immutable reference",
             "text holds an immutable reference; it can read the borrowed resource",
         ],
@@ -550,7 +553,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `for x in v.iter_mut() { *x *= 2; }`.
         must_contain: &[
             "iter_mut reads from/writes to v (implicitly mutably borrowed)",
-            "the resource x points to is modified through *x",
+            "the value x points to is modified through *x",
         ],
         must_not_contain: &[
             "*x acquires ownership of a resource",
@@ -562,10 +565,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // initialized.
         must_contain: &[
             "Copy from y to *r",
-            "the resource r points to is modified through *r (copied from y)",
-            "r holds a mutable reference; it can read and write the borrowed resource",
+            "the value r points to is modified through *r (copied from y)",
+            "r holds a mutable reference; it can read and write the borrowed value",
         ],
         must_not_contain: &[
+            "the resource r points to is modified through *r (copied from y)",
             "*r is initialized by copy from y",
             "r is the owner of the resource",
         ],
@@ -3289,7 +3293,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r immutably borrows a value",
             "Return immutably borrowed value from r to m",
             "r's reference is copied (not the resource it points to)",
-            "r holds an immutable reference; it can read the borrowed resource",
+            "r holds an immutable reference; it can read the borrowed value",
             "k's value is mutably borrowed by w; k can't be used while the borrow is live",
             "k's value is no longer mutably borrowed",
             "w mutably borrows a value",
@@ -3430,6 +3434,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_copy_referent_wording",
+        // y, z, n, k point to i32s, which their lenders' columns call
+        // "a value"; s and q point to a String, still "the resource".
+        must_contain: &[
+            "y holds a mutable reference; it can read and write the borrowed value",
+            "the value y points to is modified through *y",
+            "z holds an immutable reference; it can read the borrowed value",
+            "n holds a mutable reference; it can read and write the borrowed value",
+            "k holds an immutable reference; it can read the borrowed value",
+            "the value n points to is modified through *n (copied from *k)",
+            "s holds a mutable reference; it can read and write the borrowed resource",
+            "the resource s points to is modified through *s",
+            "q holds a mutable reference; it can read and write the borrowed resource",
+        ],
+        must_not_contain: &[
+            "y holds a mutable reference; it can read and write the borrowed resource",
+            "the resource y points to is modified through *y",
+            "z holds an immutable reference; it can read the borrowed resource",
+            "n holds a mutable reference; it can read and write the borrowed resource",
+            "k holds an immutable reference; it can read the borrowed resource",
+            "the resource n points to is modified through *n (copied from *k)",
         ],
     },
 ];

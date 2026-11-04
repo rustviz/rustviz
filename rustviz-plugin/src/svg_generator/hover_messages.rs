@@ -480,21 +480,25 @@ pub fn event_dot_ref_acquire(my_name: &String, is_mut: bool) -> String {
 // Write through a dereference: `*r = v;`, `*r += 1;`. The place
 // `*r` is the resource r points to (owned by r's lender, or by the
 // Box), so nothing is acquired; the existing resource is modified.
-// `ref_name` is r, `deref_name` is *r.
-pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String) -> String {
+// `ref_name` is r, `deref_name` is *r. `pointee_copy`: r is a
+// reference to a Copy type (`&mut i32`), so what it points to is a
+// "value", as on the lender's own column (#312).
+pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, pointee_copy: bool) -> String {
     format!(
-        "the resource {0} points to is modified through {1}",
+        "the {2} {0} points to is modified through {1}",
         fmt_style(ref_name),
-        fmt_style(deref_name)
+        fmt_style(deref_name),
+        held(pointee_copy)
     )
 }
 
 // Copy-flavoured write through a dereference: `*r = y;` with y: Copy.
 // The place `*r` already exists, so it is not "initialized"; it is
-// overwritten with a copy of y.
+// overwritten with a copy of y. `*r` has y's type, which is Copy, so
+// what r points to is a "value" (#312).
 pub fn event_dot_copy_through_deref(ref_name: &String, deref_name: &String, from_name: &String) -> String {
     format!(
-        "the resource {0} points to is modified through {1} (copied from {2})",
+        "the value {0} points to is modified through {1} (copied from {2})",
         fmt_style(ref_name),
         fmt_style(deref_name),
         fmt_style(from_name)
@@ -1040,20 +1044,22 @@ pub fn state_full_privilege_copyable(my_name: &String) -> String {
 
 // FullPrivilege on a reference's lifeline. A reference never owns
 // the resource it points to, so the owner wording above would be
-// false; describe what the reference permits instead.
-pub fn state_mut_ref_full_privilege(my_name: &String) -> String {
+// false; describe what the reference permits instead. `pointee_copy`:
+// the referent type is Copy (`&mut i32`), so it's "the borrowed
+// value", matching the lender's own column (#312).
+pub fn state_mut_ref_full_privilege(my_name: &String, pointee_copy: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} holds a mutable reference; it can read and write the borrowed resource",
-        my_name_fmt
+        "{0} holds a mutable reference; it can read and write the borrowed {1}",
+        my_name_fmt, held(pointee_copy)
     )
 }
 
-pub fn state_static_ref_full_privilege(my_name: &String) -> String {
+pub fn state_static_ref_full_privilege(my_name: &String, pointee_copy: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} holds an immutable reference; it can read the borrowed resource",
-        my_name_fmt
+        "{0} holds an immutable reference; it can read the borrowed {1}",
+        my_name_fmt, held(pointee_copy)
     )
 }
 

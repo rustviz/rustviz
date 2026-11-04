@@ -133,6 +133,11 @@ pub struct MutRef {         // let (mut) r1 = &mut a;
     pub name: String,
     pub hash: u64,
     pub is_mut: bool,
+    /// True iff the referent type is Copy (`&mut i32`): the reference's
+    /// own tooltips then say "value" rather than "resource", like the
+    /// Copy column it borrows from (#312). Decided by the type, so it
+    /// holds whichever lender the reference is (re)assigned from.
+    pub pointee_copy: bool,
     /// Hash of the parent struct when this ref is a struct field
     /// (e.g. `Excerpt { p: &mut x }` makes p a MutRef whose
     /// member_of is Excerpt's hash). None for free-standing refs.
@@ -145,6 +150,8 @@ pub struct StaticRef {                // let (mut) r1 = & a;
     pub name: String,
     pub hash: u64,
     pub is_mut: bool,
+    /// Same as MutRef::pointee_copy (`&i32`; #312).
+    pub pointee_copy: bool,
     /// Same as MutRef::member_of — set when this ref is a struct
     /// field. Lets the layout pass include it in the parent's
     /// bounding box.
@@ -323,6 +330,13 @@ impl ResourceAccessPoint {
     pub fn is_manually_drop(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { is_manually_drop: true, .. })
                      | ResourceAccessPoint::Struct(Struct { is_manually_drop: true, .. }))
+    }
+
+    /// True iff this is a reference whose referent type is Copy
+    /// (`&i32`, `&mut bool`): what it points to is a "value" (#312).
+    pub fn points_to_copy(&self) -> bool {
+        matches!(self, ResourceAccessPoint::MutRef(MutRef { pointee_copy: true, .. })
+                     | ResourceAccessPoint::StaticRef(StaticRef { pointee_copy: true, .. }))
     }
 
     pub fn is_copy_owner(&self) -> bool {
@@ -1247,7 +1261,7 @@ impl Event {
                 } else if let ResourceTy::Deref(r) = is {
                     // `*r = v;` / `*r += 1;` writes to the resource r
                     // points to; *r doesn't acquire anything.
-                    hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name))
+                    hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy())
                 } else if let Some(rap) = is.extract_rap().filter(|rap| rap.is_ref()) {
                     // `let s: &str = "hi";`, `let r2 = r;` — the
                     // variable is bound to a reference, which never

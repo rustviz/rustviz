@@ -1510,9 +1510,9 @@ fn timeline_segment_title(
     if let State::FullPrivilege { .. } = state {
         match rap {
             ResourceAccessPoint::MutRef(_) =>
-                return hover_messages::state_mut_ref_full_privilege(rap.name()),
+                return hover_messages::state_mut_ref_full_privilege(rap.name(), rap.points_to_copy()),
             ResourceAccessPoint::StaticRef(_) =>
-                return hover_messages::state_static_ref_full_privilege(rap.name()),
+                return hover_messages::state_static_ref_full_privilege(rap.name(), rap.points_to_copy()),
             _ => {}
         }
     }
@@ -1524,7 +1524,7 @@ fn timeline_segment_title(
     // referent) and stays there when it's copied; it never had a
     // resource of its own to share (#274).
     if let (State::PartialPrivilege { .. }, ResourceAccessPoint::StaticRef(_)) = (state, rap) {
-        return hover_messages::state_static_ref_full_privilege(rap.name());
+        return hover_messages::state_static_ref_full_privilege(rap.name(), rap.points_to_copy());
     }
     state.print_message_with_name(rap.name())
 }
