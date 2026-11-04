@@ -539,6 +539,9 @@ const EXPECTED_OK: &[&str] = &[
     // call whose signature lets it store the reference (#513).
     "borrow_stored_through_local_ref",
     "borrow_stored_by_call",
+    "match_arm_macro_ref_binding",
+    "match_arm_call_mut_ref_binding",
+    "iflet_one_line_ref_binding",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5476,6 +5479,37 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "put reads from/writes to b",
         ],
     },
+    // #371: the borrow and its end are on one line. The texts were
+    // right before too; where the end is drawn is checked by
+    // `same_line_borrow_ends_below_its_use`.
+    TooltipExpect {
+        name: "match_arm_macro_ref_binding",
+        must_contain: &[
+            "Partial immutable borrow from opt to s",
+            "s's immutable borrow ends",
+            "Return immutably borrowed resource from s to opt",
+            "opt's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_arm_call_mut_ref_binding",
+        must_contain: &[
+            "Partial Mutable borrow from opt to s",
+            "s's mutable borrow ends",
+            "Return mutably borrowed resource from s to opt",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "iflet_one_line_ref_binding",
+        must_contain: &[
+            "Partial immutable borrow from opt to s",
+            "s's immutable borrow ends",
+            "Return immutably borrowed resource from s to opt",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -6939,4 +6973,47 @@ fn reference_bracket_starts_below_the_branch_diamond() {
          diamond ends at y={})",
         y, join, join + 30.0
     );
+}
+
+/// cy of every timeline dot whose tooltip starts with `prefix`.
+fn dot_ys(timeline: &str, prefix: &str) -> Vec<f64> {
+    timeline
+        .split("<circle ")
+        .skip(1)
+        .map(|c| &c[..c.find("/>").unwrap_or(c.len())])
+        .filter(|c| timeline_tooltips(c).iter().any(|t| t.starts_with(prefix)))
+        .map(|c| num_attr(c, "cy"))
+        .collect()
+}
+
+/// A reference bound and last used on the same line (#371): `Some(s) =>
+/// println!("{}", s),` on `&opt`, or a one-line `if let`. The borrow's
+/// end must be drawn below its start and no higher than the use, on
+/// both columns. It used to sit on the line's first row, next to the
+/// borrow, while the use landed on the row below.
+#[test]
+fn same_line_borrow_ends_below_its_use() {
+    for (name, kind, user) in [
+        ("match_arm_macro_ref_binding", "immutabl", "println!"),
+        ("match_arm_call_mut_ref_binding", "mutabl", "push"),
+        ("iflet_one_line_ref_binding", "immutabl", "println!"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let tl = rv.timeline_panel_string();
+        // The first such dot: `opt` is borrowed again after the arm.
+        let one = |prefix: String| -> f64 {
+            let ys = dot_ys(&tl, &prefix);
+            assert!(!ys.is_empty(), "{}: no dot {:?}", name, prefix);
+            ys.into_iter().fold(f64::INFINITY, f64::min)
+        };
+        let starts = one(format!("s {}y borrows a resource", kind));
+        let used = one(format!("s's resource is {}y borrowed by {}", kind, user));
+        let ends = one(format!("s's {}e borrow ends", kind));
+        let lent = one(format!("opt's resource is {}y borrowed by s", kind));
+        let back = one(format!("opt's resource is no longer {}y borrowed", kind));
+        assert!(starts < ends && used <= ends,
+            "{}: s's borrow starts at y={}, is used at y={}, ends at y={}", name, starts, used, ends);
+        assert!(lent < back && back == ends,
+            "{}: opt is lent at y={}, gets it back at y={} (s's end: y={})", name, lent, back, ends);
+    }
 }
