@@ -1558,7 +1558,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from n to Ok",
         ],
         must_not_contain: &[
-            "n is bound to a value",
+            "n is bound to a copyable value",
         ],
     },
     TooltipExpect {
@@ -1571,7 +1571,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is initialized by copy from map",
         ],
         must_not_contain: &[
-            "n is bound to a value",
+            "n is bound to a copyable value",
         ],
     },
     TooltipExpect {
@@ -1624,14 +1624,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Bind from Anonymous (the const has no column). Then
         // `let y = x` is a regular Copy from x to y.
         must_contain: &[
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "y is initialized by copy from x",
             "Copy from x to y",
         ],
         must_not_contain: &[
             // The const itself shouldn't get a column or events.
             "N is the owner",
-            "N holds a value",
+            "N holds a copyable value",
             "N goes out of scope",
             // No Move from N — const reads aren't moves.
             "Move from N to x",
@@ -1665,10 +1665,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // that). Mainly guards against a future change panicking on
         // raw pointers; update these strings when #194 is fixed.
         must_contain: &[
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "the resource p points to is modified through *p",
         ],
-        must_not_contain: &["*p is bound to a value"],
+        must_not_contain: &["*p is bound to a copyable value"],
     },
     TooltipExpect {
         name: "static_mut_write",
@@ -1724,8 +1724,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u._a, mutable",
             "u._b, mutable",
             // The read / borrow must not lose their source.
+<<<<<<< HEAD
             "x is bound to a value",
             "u is initialized by copy from y",
+=======
+            "x is bound to a copyable value",
+>>>>>>> 18a1d924 (plugin: say a Copy-typed column holds a copyable value)
             "Return immutably borrowed resource from r to *r",
         ],
     },
@@ -1760,7 +1764,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             // The read must not lose its source.
-            "r is bound to a value",
+            "r is bound to a copyable value",
         ],
     },
     // ─── Assignment through a deref of a temporary ───────────────────
@@ -2356,7 +2360,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "deferred_init_copy",
         must_contain: &[
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "Copy from x to y",
             "y is initialized by copy from x",
         ],
@@ -2497,7 +2501,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let area = area(&rect);`: the variable has its own column
         // and gets the fn's return value.
         must_contain: &[
-            "area holds a value",
+            "area holds a copyable value",
             "area is initialized by copy from area",
             "area goes out of scope",
         ],
@@ -2507,7 +2511,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "var_named_like_method",
         // `let len = s.len();`: the variable has its own column.
         must_contain: &[
-            "len holds a value",
+            "len holds a copyable value",
             "len goes out of scope",
             "len reads from s",
         ],
@@ -2519,7 +2523,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // not the i32 variable. Before #232 the variable was shown
         // being lent s's resource and copied into n.
         must_contain: &[
-            "len holds a value",
+            "len holds a copyable value",
             "len reads from s",
             "n is initialized by copy from len",
         ],
@@ -2764,8 +2768,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Copy fields hold values, not resources; writing to a Copy
         // place that already holds a value is an assignment.
         must_contain: &[
-            "p.x holds a value",
-            "p.x is bound to a value",
+            "p.x holds a copyable value",
+            "p.x is bound to a copyable value",
             "p.x is assigned a new value",
             "p.y is assigned a copy of z",
             "Copy from z to p.y",

@@ -412,7 +412,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c5_12_dbg_macro",
         must_contain: &[
-            "scale is bound to a value",
+            "scale is bound to a copyable value",
             "dbg! reads from rect1",
             "rect1 goes out of scope. Its resource is dropped.",
         ],
@@ -1110,7 +1110,7 @@ const BOOK: &[Snippet] = &[
         id: "m_04_loop_break_string",
         status: Wrong,
         note: "`break String::from(..)` gives s a String; never shown, and s shown not dropped",
-        must_contain: &["counter is bound to a value"],
+        must_contain: &["counter is bound to a copyable value"],
         known_wrong: &["s goes out of scope. No resource is dropped."],
         ..E
     },
@@ -1194,7 +1194,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_14_while_counter",
-        must_contain: &["number is bound to a value"],
+        must_contain: &["number is bound to a copyable value"],
         ..E
     },
     Snippet {
@@ -1211,7 +1211,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_16_match_range",
-        must_contain: &["n is bound to a value"],
+        must_contain: &["n is bound to a copyable value"],
         ..E
     },
     Snippet {
@@ -1229,14 +1229,14 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "m_18_const",
         note: "renders since #155 (was a crash in the probe)",
-        must_contain: &["x is bound to a value"],
+        must_contain: &["x is bound to a copyable value"],
         ..E
     },
     // ─── Extras: crash minimizations and controls ─────────────────────
     Snippet {
         id: "x01_field_compound_assign_main",
         must_contain: &[
-            "L6 c.n is bound to a value",
+            "L6 c.n is bound to a copyable value",
             "L7 c.n is assigned a new value",
             "c goes out of scope. Its resource is dropped.",
         ],
@@ -1287,7 +1287,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x06_const_in_expr",
         note: "renders since #155 (was a crash in the probe)",
-        must_contain: &["x is bound to a value"],
+        must_contain: &["x is bound to a copyable value"],
         ..E
     },
     Snippet {

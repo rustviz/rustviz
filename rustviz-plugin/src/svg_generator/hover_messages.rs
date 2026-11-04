@@ -382,7 +382,7 @@ pub fn event_dot_acquire_copyable(my_name: &String, _target_name: &String) -> St
     let my_name_fmt = fmt_style(my_name);
 
     format!(
-        "{0} is bound to a value",
+        "{0} is bound to a copyable value",
         my_name_fmt
     )
 }
@@ -868,7 +868,7 @@ pub fn state_full_privilege_copyable(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
 
     format!(
-        "{0} holds a value",
+        "{0} holds a copyable value",
         my_name_fmt
     )
 }
