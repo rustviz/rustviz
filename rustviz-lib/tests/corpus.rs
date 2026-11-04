@@ -559,6 +559,11 @@ const EXPECTED_OK: &[&str] = &[
     "if_arm_on_split_line",
     "match_arm_on_split_line",
     "if_arm_on_split_line_cond_event",
+    // Each segment of a branch column shows its own tooltip when
+    // hovered (#388); the check is `hover_polygons_off_their_segment`,
+    // run on every case above.
+    "branch_hover_per_segment",
+    "match_arm_hover_per_segment",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5734,6 +5739,117 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         stray.len(),
         &stray[..stray.len().min(5)]
     );
+    let mislabelled = hover_polygons_off_their_segment(&timeline);
+    assert!(
+        mislabelled.is_empty(),
+        "{}: {} branch column hover polygon(s) show another segment's tooltip: {:?}",
+        name,
+        mislabelled.len(),
+        &mislabelled[..mislabelled.len().min(5)]
+    );
+}
+
+/// #388: hovering a branch column shows the tooltip of the segment
+/// under the mouse. The transparent hover `<polygon>`s sit on top of
+/// the column's `<line>`s, so they're what the mouse hits; each must
+/// cover lines (one segment's: one centreline, or a hollow strip's two
+/// sides) whose tooltip is its own. One polygon used to span a whole
+/// run of segments and show the first one's text over all of them.
+/// Returns each polygon that breaks that. Bevel lines (the short
+/// connectors at a hollow strip's corners) are ignored.
+fn hover_polygons_off_their_segment(timeline_svg: &str) -> Vec<String> {
+    // Is `p` inside the polygon `poly` or within 2px of its edge? A
+    // hollow strip's two sides lie on its hover polygon's edges.
+    fn on(p: (f64, f64), poly: &[(f64, f64)]) -> bool {
+        let mut inside = false;
+        let mut near = false;
+        let mut j = poly.len() - 1;
+        for i in 0..poly.len() {
+            let ((xi, yi), (xj, yj)) = (poly[i], poly[j]);
+            if (yi > p.1) != (yj > p.1) && p.0 < (xj - xi) * (p.1 - yi) / (yj - yi) + xi {
+                inside = !inside;
+            }
+            // Distance from `p` to the edge (i, j).
+            let (dx, dy) = (xj - xi, yj - yi);
+            let len2 = dx * dx + dy * dy;
+            let t = if len2 > 0.0 { (((p.0 - xi) * dx + (p.1 - yi) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            if (p.0 - (xi + t * dx)).hypot(p.1 - (yi + t * dy)) <= 2.0 {
+                near = true;
+            }
+            j = i;
+        }
+        inside || near
+    }
+    // A tooltip without its markup (`&lt;span …&gt;s&lt;/span&gt; is …`).
+    let short = |s: &str| {
+        let mut text = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find("&lt;") {
+            text.push_str(&rest[..i]);
+            rest = rest[i..].find("&gt;").map_or("", |j| &rest[i + j + 4..]);
+        }
+        text.push_str(rest);
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let mut out = Vec::new();
+    for group in timeline_svg.split("<g class=\"branch-group\"").skip(1) {
+        let group = &group[..group.find("</g>").unwrap_or(group.len())];
+        let tags = |kind: &str| -> Vec<&str> {
+            group.split(kind).skip(1).map(|t| &t[..t.find('>').unwrap_or(t.len())]).collect()
+        };
+        // (midpoint, tooltip, endpoints) of each line longer than a bevel.
+        let all_lines: Vec<((f64, f64), &str, [i64; 4])> = tags("<line ").into_iter().filter_map(|tag| {
+            let n = |a: &str| tag_attr(tag, a).and_then(|v| v.parse::<f64>().ok());
+            let (x1, y1, x2, y2) = (n("x1")?, n("y1")?, n("x2")?, n("y2")?);
+            if (x2 - x1).hypot(y2 - y1) < 4.0 { return None; }
+            // Endpoints in a direction-free order, to 0.1px.
+            let q = |v: f64| (v * 10.0).round() as i64;
+            let (p, r) = ((q(x1), q(y1)), (q(x2), q(y2)));
+            let (p, r) = if p <= r { (p, r) } else { (r, p) };
+            Some((((x1 + x2) / 2.0, (y1 + y2) / 2.0), tag_attr(tag, "data-tooltip-text")?, [p.0, p.1, r.0, r.1]))
+        }).collect();
+        // Two segments with different tooltips drawn on exactly the same
+        // spot can't be told apart by position (the old padding of an
+        // `if let` arm's struct-field columns, `if_let_struct_fields_unused`,
+        // draws "has no value yet" and "holds a copyable value" over the
+        // same rows). Leave them out: no polygon can be right about them.
+        let stacked = |i: usize| all_lines.iter().enumerate()
+            .any(|(j, l)| j != i && l.2 == all_lines[i].2 && l.1 != all_lines[i].1);
+        let lines: Vec<((f64, f64), &str)> = all_lines.iter().enumerate()
+            .filter(|(i, _)| !stacked(*i))
+            .map(|(_, l)| (l.0, l.1))
+            .collect();
+        let stacked_mids: Vec<(f64, f64)> = all_lines.iter().enumerate()
+            .filter(|(i, _)| stacked(*i))
+            .map(|(_, l)| l.0)
+            .collect();
+        for tag in tags("<polygon ") {
+            let Some(title) = tag_attr(tag, "data-tooltip-text") else { continue };
+            let poly: Vec<(f64, f64)> = tag_attr(tag, "points").unwrap_or("")
+                .split_whitespace()
+                .filter_map(|p| {
+                    let (x, y) = p.split_once(',')?;
+                    Some((x.parse().ok()?, y.parse().ok()?))
+                })
+                .collect();
+            if poly.len() < 3 { continue; }
+            let covered: Vec<&str> = lines.iter()
+                .filter(|(m, _)| on(*m, &poly))
+                .map(|(_, t)| *t)
+                .collect();
+            if covered.is_empty() && stacked_mids.iter().any(|m| on(*m, &poly)) {
+                continue;
+            }
+            if covered.is_empty() || covered.iter().any(|t| *t != title) {
+                out.push(format!(
+                    "polygon {:?} over lines {:?}",
+                    short(title),
+                    covered.iter().map(|t| short(t)).collect::<Vec<_>>()
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// The value of attribute `name` in the tag `tag` (`<line ... y1="..." ...>`).

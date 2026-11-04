@@ -3022,7 +3022,7 @@ fn append_line(
 //     branch's body span is taken over by a nested Branch event
 //     (leading ends at line N, trailing starts many rows later,
 //     no body in between), each becomes its own run with its own
-//     hover polygon — the gap stays empty rather than getting
+//     hover polygons — the gap stays empty rather than getting
 //     bridged.
 
 /// Whether the variable still owns / can-borrow a resource at this
@@ -3336,8 +3336,8 @@ fn split_centerline_runs<'a>(segs: &'a [BranchSeg]) -> Vec<Vec<&'a BranchSeg>> {
 /// Render one centerline-contiguous run: per-segment visible lines
 /// (solid or hollow per state), plus bevel lines at any corners
 /// between adjacent hollow segments where the perpendicular rotates
-/// (e.g. diagonal leading meeting vertical body), plus a single
-/// transparent perimeter polygon for hover capture.
+/// (e.g. diagonal leading meeting vertical body), plus a transparent
+/// hover polygon per segment.
 fn render_branch_run(
     rap: &ResourceAccessPoint,
     hash: u64,
@@ -3420,74 +3420,44 @@ fn render_branch_run(
         }
     }
 
-    // Perimeter polygon. Always uses ±BRANCH_HALF_W offsets so
-    // pure-solid runs still get a hover surface wider than the
-    // visible centerline. `pointer-events:fill` so the transparent
-    // fill catches mouse events.
-    if let Some(perim) = run_perimeter(run) {
-        if perim.len() >= 3 {
-            let pts_str = perim.iter()
-                .map(|p| format!("{},{}", p.0, p.1))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let title = run.first().map(|s| s.title.clone()).unwrap_or_default();
-            // The polygon covers the whole run and is what the mouse
-            // hits, so it underlines the union of the run's vertical
-            // segments that lie on the arm's own lines.
-            let own = run.iter()
-                .filter_map(|s| seg_underline_y(s, own_y))
-                .fold(None, |acc: Option<(f64, f64)>, (t, b)| {
-                    Some(acc.map_or((t, b), |(at, ab)| (at.min(t), ab.max(b))))
-                });
-            let underline = match own {
-                Some((t, b)) => format!(" data-underline-y=\"{} {}\"", t, b),
-                None => " data-underline=\"none\"".to_owned(),
-            };
-            svg.push_str(&format!(
-                "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
-                hash, pts_str, title, underline,
-            ));
-        }
+    // Hover polygons, one per segment, on top of the lines. They're
+    // what the mouse hovers: transparent with `pointer-events:fill`,
+    // and as wide as a hollow strip (±BRANCH_HALF_W) even where the
+    // visible line is a solid centreline. Each shows its own
+    // segment's tooltip (#388: a single polygon over the whole run
+    // showed the run's first segment's text, e.g. "s is the owner"
+    // over the rows where `s` is borrowed) and underlines its own
+    // lines: the part of a vertical segment on the arm's own lines
+    // (`seg_underline_y`); a diagonal, a segment beside another arm's
+    // code, or an arm with no lines of its own, nothing (#369).
+    for seg in run.iter() {
+        let (dx, dy) = (seg.p2.0 - seg.p1.0, seg.p2.1 - seg.p1.1);
+        if dx.abs() < 1e-6 && dy.abs() < 1e-6 { continue; }
+        let pts_str = seg_quad(seg).iter()
+            .map(|p| format!("{},{}", p.0, p.1))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let underline = underline_attr(seg, own_y);
+        svg.push_str(&format!(
+            "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+            hash, pts_str, seg.title, underline,
+        ));
     }
 
     svg
 }
 
-/// Closed-loop perimeter for a centerline-contiguous run: left
-/// side forward, right side reversed. At corners (adjacent
-/// segments with different perpendicular directions) intermediate
-/// points get added so the polygon outlines the strip cleanly
-/// instead of cutting across the interior.
-fn run_perimeter(run: &[&BranchSeg]) -> Option<Vec<(f64, f64)>> {
-    if run.is_empty() { return None; }
-    let mut left: Vec<(f64, f64)> = Vec::new();
-    let mut right: Vec<(f64, f64)> = Vec::new();
-    let mut prev_l: Option<(f64, f64)> = None;
-    let mut prev_r: Option<(f64, f64)> = None;
-    for seg in run {
-        let perp = perp_unit(seg.p1, seg.p2);
-        let lx = perp.0 * BRANCH_HALF_W;
-        let ly = perp.1 * BRANCH_HALF_W;
-        let l1 = (seg.p1.0 + lx, seg.p1.1 + ly);
-        let l2 = (seg.p2.0 + lx, seg.p2.1 + ly);
-        let r1 = (seg.p1.0 - lx, seg.p1.1 - ly);
-        let r2 = (seg.p2.0 - lx, seg.p2.1 - ly);
-        match prev_l {
-            Some(p) if (p.0 - l1.0).abs() < 1e-6 && (p.1 - l1.1).abs() < 1e-6 => {}
-            _ => left.push(l1),
-        }
-        left.push(l2);
-        match prev_r {
-            Some(p) if (p.0 - r1.0).abs() < 1e-6 && (p.1 - r1.1).abs() < 1e-6 => {}
-            _ => right.push(r1),
-        }
-        right.push(r2);
-        prev_l = Some(l2);
-        prev_r = Some(r2);
-    }
-    let mut perim = left;
-    perim.extend(right.into_iter().rev());
-    Some(perim)
+/// The strip of half-width `BRANCH_HALF_W` around one segment's
+/// centreline, as a polygon's four corners.
+fn seg_quad(seg: &BranchSeg) -> [(f64, f64); 4] {
+    let (px, py) = perp_unit(seg.p1, seg.p2);
+    let (ox, oy) = (px * BRANCH_HALF_W, py * BRANCH_HALF_W);
+    [
+        (seg.p1.0 + ox, seg.p1.1 + oy),
+        (seg.p2.0 + ox, seg.p2.1 + oy),
+        (seg.p2.0 - ox, seg.p2.1 - oy),
+        (seg.p1.0 - ox, seg.p1.1 - oy),
+    ]
 }
 
 fn empty_panel_pair() -> (TimelinePanelData, TimelinePanelData) {
