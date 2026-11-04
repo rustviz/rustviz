@@ -228,19 +228,27 @@ function displayTooltip(tooltip, classname) {
             else if (e.currentTarget.tagName === 'use') {
                 begin = end = parseInt(e.currentTarget.getAttribute('y')) + 5;
             }
+            else if (e.currentTarget.tagName === 'g') {
+                // A group: a drop dot (circle + triangle), a merged call dot,
+                // or an arrow (shaft + head). It has no y attribute of its
+                // own: use its circle's centre, else the arrow's first point,
+                // else (a hop arrow's path) the lines its box spans.
+                let c = e.currentTarget.querySelector('circle');
+                let pl = e.currentTarget.querySelector('polyline');
+                if (c) {
+                    begin = end = parseInt(c.getAttribute('cy')) + 5;
+                } else if (pl) {
+                    let arr = pl.getAttribute('points').split(' ');
+                    begin = end = parseInt(arr[1]) + 5;
+                } else {
+                    let bb = e.currentTarget.getBBox();
+                    begin = bb.y;
+                    end = bb.y + bb.height + 5;
+                }
+            }
             else if (e.currentTarget.tagName === 'polyline') {
                 let arr = e.currentTarget.getAttribute('points').split(' ');
                 begin = end = parseInt(arr[1]) + 5;
-            }
-            else if (e.currentTarget.tagName === 'g') {
-                // RV2 arrow wrapper: <g><polyline/><polygon/></g>.
-                // Read the y-coord from the inner polyline, same
-                // shape as the standalone-polyline branch above.
-                let polyline = e.currentTarget.querySelector('polyline');
-                if (polyline) {
-                    let arr = polyline.getAttribute('points').split(' ');
-                    begin = end = parseInt(arr[1]) + 5;
-                }
             }
             else { // e.currentTarget.tagName === 'text'
                 begin = end = parseInt(e.currentTarget.getAttribute('y'));
