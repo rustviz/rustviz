@@ -12,27 +12,26 @@ use std::process::{Command, Stdio};
 
 use rustviz_lib::{error_kind, ErrorKind, Rustviz, DOES_NOT_COMPILE_INTRO, UNSUPPORTED_PREFIX};
 
-/// Snippets that panic the plugin on `main` at the time of writing. The
-/// tests only need *one* of them to still panic; when a plugin fix makes
-/// one visualize, it is skipped. If they all start working, add a new
-/// known-panicking snippet here. They are picked from different plugin
-/// code paths (assignment targets, closure-call arrows) so that a single
-/// fix doesn't retire them all at once.
+/// Snippets the plugin refuses on `main` (it panics, which surfaces as
+/// "RustViz can't visualize this program yet"). The tests only need
+/// *one* of them to still be refused; one that starts visualizing is
+/// skipped. If they all start working, add a new one here.
+///
+/// The first is a deliberate refusal, not a bug: a match guard that
+/// moves a variable declared outside it can't be drawn truthfully with
+/// one column per arm (#247, #248), so it stays refused until that
+/// design work is done. The second is an ordinary crash (#210).
 const KNOWN_PANICKING: &[(&str, &str)] = &[
-    // Calling a closure with a `&mut` argument (render_arrow).
+    // A match guard that moves an outer variable (#247).
+    (
+        "guard_moves_outer",
+        "fn consume(s: String) -> bool {\n    s.len() > 3\n}\nfn main() {\n    let s = String::from(\"hello\");\n    let opt = Some(5);\n    match opt {\n        Some(_) if consume(s) => println!(\"long\"),\n        _ => println!(\"other\"),\n    }\n}\n",
+    ),
+    // Calling a closure with a `&mut` argument (#210).
     (
         "closure_mutref_arg",
         "fn main() {\n    let mut s = String::from(\"a\");\n    let mut push = |q: &mut String| q.push('b');\n    push(&mut s);\n    println!(\"{}\", s);\n}\n",
     ),
-    // Assigning to an index (#144).
-    ("index_assign", "fn main() {\n    let mut v = vec![1, 2, 3];\n    v[0] = 10;\n    println!(\"{:?}\", v);\n}\n"),
-    // Assigning to a field of a method-call result (#175).
-    (
-        "temporary_field_assign",
-        "struct P {\n    n: i32,\n}\nfn main() {\n    let mut v = vec![P { n: 1 }];\n    v.last_mut().unwrap().n = 5;\n}\n",
-    ),
-    // Assigning to a tuple field.
-    ("tuple_field_assign", "fn main() {\n    let mut t = (1, 2);\n    t.0 = 5;\n    println!(\"{}\", t.0);\n}\n"),
 ];
 
 /// The Rust Book's "two mutable borrows" example (ch04-02).
