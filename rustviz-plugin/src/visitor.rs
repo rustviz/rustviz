@@ -255,7 +255,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: true });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: true, refcell_borrow_mut: false });
       *self.unique_id += 1;
     }
   }
@@ -741,7 +741,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime);
                     },
                     AutoBorrowMutability::Not => {
-                      self.add_ev(line_num, Evt::PassBySRef, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), false);
+                      let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
+                      let id = *self.unique_id;
+                      self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
+                        from: ResourceTy::Value(rcvr_rap.clone()), to: ResourceTy::Value(fn_rap.clone()),
+                        id, implicit: false, refcell_borrow_mut,
+                      });
+                      *self.unique_id += 1;
                     }
                     _ => {}
                   }

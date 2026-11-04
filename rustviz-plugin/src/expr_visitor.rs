@@ -623,7 +623,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: false },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: false, refcell_borrow_mut: false },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: false,
       },
@@ -732,6 +732,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         None
       }
     }
+  }
+
+  /// True when the method call `call` resolves to `RefCell::borrow_mut`.
+  /// Decided by the callee's DefId (an inherent method whose impl is for
+  /// the `RefCell` diagnostic item), so a user type with its own
+  /// `borrow_mut(&self)` doesn't match.
+  pub fn is_refcell_borrow_mut_call(&self, call: &Expr) -> bool {
+    let ExprKind::MethodCall(seg, ..) = call.kind else { return false };
+    if seg.ident.name.as_str() != "borrow_mut" {
+      return false;
+    }
+    let Some(def_id) = self.tcx.typeck(call.hir_id.owner).type_dependent_def_id(call.hir_id) else { return false };
+    let Some(impl_id) = self.tcx.impl_of_assoc(def_id) else { return false };
+    self.tcx.type_of(impl_id).skip_binder().ty_adt_def()
+      .map_or(false, |adt| self.tcx.is_diagnostic_item(rustc_span::sym::RefCell, adt.did()))
   }
 
   // add events for arguments in a function call

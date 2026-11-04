@@ -882,10 +882,10 @@ pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &St
 // What's different is that the value inside can change through it, so
 // "reads from" would be false for `c.set(2)`. For `RefCell::borrow_mut`
 // the exclusivity a `&mut` would give is checked at runtime instead.
-pub fn fn_dot_shared_borrow_interior_mut(fn_name: &String, my_name: &String) -> String {
+pub fn fn_dot_shared_borrow_interior_mut(fn_name: &String, my_name: &String, refcell_borrow_mut: bool) -> String {
     let f = fmt_style(fn_name);
     let x = fmt_style(my_name);
-    if fn_name == "borrow_mut" {
+    if refcell_borrow_mut {
         format!(
             "{0} borrows {1} immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second {0} while this one is live would panic)",
             f, x

@@ -559,6 +559,10 @@ pub enum ExternalEvent {
         from: ResourceTy,
         to: ResourceTy, // must be a function
         implicit: bool,
+        // The callee is `RefCell::borrow_mut`, identified by its
+        // DefId (not its name: a user type may define its own
+        // `borrow_mut(&self)`). Selects the runtime-exclusivity wording.
+        refcell_borrow_mut: bool,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows

@@ -328,6 +328,9 @@ const EXPECTED_OK: &[&str] = &[
     "manually_drop_by_hand",
     // `&self` calls on interior-mutable values aren't "reads" (#203).
     "interior_mut_calls",
+    // The RefCell runtime-check sentence follows the callee's identity,
+    // not the method name `borrow_mut` (#203).
+    "interior_mut_user_borrow_mut",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2975,6 +2978,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "set reads from c",
             "borrow_mut reads from cell",
             "fetch_add reads from hits",
+        ],
+    },
+    TooltipExpect {
+        name: "interior_mut_user_borrow_mut",
+        must_contain: &[
+            "borrow_mut borrows cell immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
+            "borrow_mut borrows counter immutably (a shared borrow); counter has interior mutability, so its contents can change even through a shared borrow",
+        ],
+        must_not_contain: &[
+            "borrow_mut borrows counter immutably (a shared borrow); exclusive access to its contents is checked at runtime",
         ],
     },
 ];

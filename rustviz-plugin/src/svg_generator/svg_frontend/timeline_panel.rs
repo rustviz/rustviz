@@ -2239,7 +2239,9 @@ fn render_arrow (
                     let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: false, .. })
                         && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
                     let title = if interior_mut {
-                        hover_messages::fn_dot_shared_borrow_interior_mut(&function.name, &from_variable.name())
+                        hover_messages::fn_dot_shared_borrow_interior_mut(
+                            &function.name, &from_variable.name(),
+                            matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }))
                     } else {
                         format!("{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix)
                     };
