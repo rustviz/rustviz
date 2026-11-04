@@ -677,6 +677,8 @@ const EXPECTED_OK: &[&str] = &[
     //   temporaries get no column.
     "tuple_destructure_assign",
     "destructure_assign_parts",
+    // A reference read out through a reference stored in an element (#453).
+    "read_ref_through_element_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6966,6 +6968,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "reassign_one_bullet",
         must_contain: &["s acquires ownership of a new resource; its previous resource is dropped"],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "read_ref_through_element_ref",
+        // `let r = *rr[0];` (rr: Vec<&&i32>) used to panic in
+        // find_lender (rr isn't a borrower). It copies the `&i32` the
+        // element points to; rr is a Vec, so "Copy from *rr to r" would
+        // be false.
+        must_contain: &[
+            "Copy from *rr[0] to r",
+            "r is initialized with a copy of *rr[0]",
+            "the resource rr[0] points to is copied",
+            "Copy from *rrr[0][0] to q",
+            "the resource rrr[0][0] points to is copied",
+            "Copy from *b to s",
+        ],
+        must_not_contain: &[
+            "Copy from *rr to r",
+            "*rr's resource is copied",
+            "Copy from *rrr to q",
+        ],
     },
 ];
 
