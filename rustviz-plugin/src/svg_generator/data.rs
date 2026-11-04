@@ -105,6 +105,9 @@ pub struct Owner {
     /// True iff this owner's type is a `union`. Dropping or writing to
     /// a union never drops its fields (#191).
     pub is_union: bool,
+    /// True iff this owner's type is `ManuallyDrop<T>`: it never drops
+    /// the `T` inside it, at scope end or when overwritten (#283).
+    pub is_manually_drop: bool,
 }
 
 // when something is a struct member
@@ -120,6 +123,8 @@ pub struct Struct {
     pub is_copy: bool,
     /// Same as Owner::interior_mut.
     pub interior_mut: bool,
+    /// Same as Owner::is_manually_drop, for a `ManuallyDrop<T>` field.
+    pub is_manually_drop: bool,
 }
 
 // a reference of type &mut T
@@ -313,6 +318,11 @@ impl ResourceAccessPoint {
 
     pub fn is_union(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { is_union: true, .. }))
+    }
+
+    pub fn is_manually_drop(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_manually_drop: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_manually_drop: true, .. }))
     }
 
     pub fn is_copy_owner(&self) -> bool {

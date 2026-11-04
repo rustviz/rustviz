@@ -1095,6 +1095,9 @@ fn render_dot(
                     } else if ro.is_union() && !is_copy {
                         // A union never drops its fields (#191).
                         data.title = hover_messages::event_dot_union_go_out_of_scope(&name);
+                    } else if ro.is_manually_drop() && !is_copy {
+                        // Nor does a ManuallyDrop drop its contents (#283).
+                        data.title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
                     } else if is_copy {
                         // Copy types have no Drop glue — going out of
                         // scope just reclaims storage. Render a plain

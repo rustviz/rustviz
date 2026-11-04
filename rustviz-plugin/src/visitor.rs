@@ -482,7 +482,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let field_name = format!("{}.{}", name.clone(), field.name.as_str());
                 let field_ty = field.ty(self.tcx, generic_args);
                 let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
-                self.add_struct(field_name, owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+                self.add_struct(field_name.clone(), owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+                self.mark_if_manually_drop(&field_name, field_ty);
               }
             }
             rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
@@ -499,6 +500,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         else {
           let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
           self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+          self.mark_if_manually_drop(&name, ty);
         }
         self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id });
         *self.unique_id += 1;
@@ -943,8 +945,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // fields (#191).
         let union_without_drop = lhs_ty.is_union()
           && !lhs_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner));
+        // Nor does overwriting a `ManuallyDrop<T>` drop the old `T` (#283).
+        let lhs_is_manually_drop = lhs_ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
         let drop_target: Option<ResourceAccessPoint> =
-          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop {
+          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop {
             match &lhs_rty {
               ResourceTy::Value(rap) => {
                 // Plain reassign — only emit the drop if y currently
@@ -1798,6 +1802,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       rustc_middle::ty::TypingEnv::post_analysis(self.tcx, user_pat.hir_id.owner),
                       pat_ty);
                     self.add_owner(pat_name.clone(), false, is_copy, self.ty_has_interior_mut(pat_ty, user_pat.hir_id.owner), self.current_scope, false);
+                    self.mark_if_manually_drop(&pat_name, pat_ty);
                   }
                   self.annotate_src(pat_name.clone(), pat_ident.span, false,
                     *self.raps.get(&pat_name).unwrap().rap.hash());
@@ -2131,6 +2136,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             pat_ty,
           );
           self.add_owner(name.clone(), false, is_copy, self.ty_has_interior_mut(pat_ty, hirid.owner), self.current_scope, false);
+          self.mark_if_manually_drop(&name, pat_ty);
         }
         self.annotate_src(name.clone(), ident.span, false,
           *self.raps.get(&name).unwrap().rap.hash());
