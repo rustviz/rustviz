@@ -852,7 +852,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c13_01_closure_param",
         status: Wrong,
-        note: "calling add_one is shown as copying the closure into y (#179)",
+        note: "y gets the closure's return value, but the arrow reads as a copy of add_one; on main it now starts at a function icon, not add_one's column. The call isn't drawn as a borrow of add_one (#299)",
         must_contain: &["Closure add_one is bound"],
         must_not_contain: &["add_one's resource is copied"],
         known_wrong: &[
@@ -891,9 +891,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_05_closure_to_fn",
-        status: Wrong,
-        note: "closure passed as an argument: 'copy from Anonymous resource' at f(1); the capture of k is missing (#179)",
-        must_contain: &["f acquires ownership from the caller", "Copy from apply to r"],
+        status: Missing,
+        note: "closure passed as an argument: the call f(1) isn't drawn as a use of f, and the capture of k is missing (#298)",
+        must_contain: &[
+            "f acquires ownership from the caller",
+            "f goes out of scope. Its resource is dropped.",
+            "Copy from apply to r",
+        ],
         must_not_contain: &["f is initialized by copy from Anonymous resource"],
         ..E
     },
