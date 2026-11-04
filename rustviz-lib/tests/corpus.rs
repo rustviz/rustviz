@@ -4159,16 +4159,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (`&(ref x, y)`) or implicit (`(w, z): &(String, i32)`), do
         // borrow the caller's data.
         must_contain: &[
-            "s is an immutable borrow of the value passed to whole, which whole owns",
-            "a is an immutable borrow of part of the value passed to part, which part owns",
-            "v is a mutable borrow of the value passed to grow, which grow owns",
-            "name is an immutable borrow of part of the value passed to field, which field owns",
+            // The borrowed value has no column, so the tooltip states
+            // its drop (with the parameter, when the function returns;
+            // checked with a Drop-printing program). An i32 has none.
+            "s is an immutable borrow of the value passed to whole, which whole owns; that value is dropped when whole returns",
+            "a is an immutable borrow of part of the value passed to part, which part owns; that part is dropped when part returns",
+            "v is a mutable borrow of the value passed to grow, which grow owns; that value is dropped when grow returns",
+            "name is an immutable borrow of part of the value passed to field, which field owns; that part is dropped when field returns",
+            "n is an immutable borrow of the value passed to small, which small owns",
             "x is an immutable borrow from the caller",
             "w is an immutable borrow from the caller",
             "Move from s1 to whole",
             "Move from t to part",
         ],
         must_not_contain: &[
+            "s is an immutable borrow of the value passed to whole, which whole owns",
+            "a is an immutable borrow of part of the value passed to part, which part owns",
+            "v is a mutable borrow of the value passed to grow, which grow owns",
+            "name is an immutable borrow of part of the value passed to field, which field owns",
+            "n is an immutable borrow of the value passed to small, which small owns; that value is dropped when small returns",
             "s is an immutable borrow from the caller",
             "a is an immutable borrow from the caller",
             "v is a mutable borrow from the caller",

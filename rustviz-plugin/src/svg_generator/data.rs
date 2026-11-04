@@ -965,6 +965,9 @@ pub struct OwnParam {
     /// `ref s: String` (the whole value) rather than `(ref a, b)`
     /// (part of it).
     pub whole: bool,
+    /// The borrowed value's type needs drop: no column shows that drop
+    /// (when `fn_name` returns), so the dot's tooltip states it.
+    pub drops: bool,
 }
 
 
@@ -1310,7 +1313,7 @@ impl Event {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
-                hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)))
+                hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the

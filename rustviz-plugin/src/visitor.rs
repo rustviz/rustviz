@@ -712,6 +712,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       let own_param = own_refs.iter().find(|(id, _)| *id == pat.hir_id).map(|&(_, whole)| OwnParam {
         fn_name: self.tcx.item_name(param.hir_id.owner.to_def_id()).to_string(),
         whole,
+        // The pointee of the `&T` the binding is: dropped with the
+        // parameter when the function returns, if its type needs drop.
+        drops: typeck.pat_ty(pat).builtin_deref(false).is_some_and(|t|
+          t.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, param.hir_id.owner))),
       });
       // add RAP corresponding to parameter type
       let line_num=span_to_line(&param.span, &self.tcx);

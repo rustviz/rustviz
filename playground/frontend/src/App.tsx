@@ -320,7 +320,7 @@ const Description: React.FC = () => (
       </li>
       <li>
         In <code>fn f(ref s: String)</code>, <code>s</code> borrows the String{' '}
-        <code>f</code> owns; that String has no column, so its drop isn&apos;t shown.
+        <code>f</code> owns; that String has no column, so its drop is stated only in the tooltip.
       </li>
     </ul>
     <p>
