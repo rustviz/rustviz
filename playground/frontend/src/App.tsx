@@ -303,8 +303,9 @@ const Description: React.FC = () => (
     <ul>
       <li>
         Loops show one iteration; closures show their captures but not their
-        bodies; method chains show only the first call; match guards and{' '}
-        <code>async</code>/<code>await</code> aren&apos;t visualized.
+        bodies; method chains show only the first call; a match guard&apos;s
+        events appear only in its own arm; <code>async</code>/<code>await</code>{' '}
+        isn&apos;t visualized.
       </li>
       <li>
         Writes to a field through a reference (<code>self.n += 1</code> in a{' '}

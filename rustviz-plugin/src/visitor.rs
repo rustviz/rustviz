@@ -16,6 +16,81 @@ use std::collections::{HashSet, VecDeque};
 
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Visit a match-arm guard. `if let` parts register their bindings
+  /// into `guard_decls` (the caller scopes them to the arm); `&&`
+  /// chains are walked part by part; anything else is visited as an
+  /// ordinary expression.
+  ///
+  /// Every event a guard produces is drawn in its arm's column, which
+  /// is only accurate for effects that end inside the guard: when the
+  /// guard is false, matching continues with later arms in the state
+  /// the guard left behind. So a guard that moves out of, or assigns
+  /// to, a variable that outlives it (`x if consume(s) =>`) is
+  /// refused instead of drawn. The one exception is the bindings of a
+  /// guard that is a lone `if let`: those happen only when the whole
+  /// guard succeeds, i.e. exactly when the arm is taken.
+  fn visit_match_guard(
+    &mut self,
+    expr: &'tcx Expr<'tcx>,
+    whole_guard: bool,
+    outer: &HashSet<ResourceAccessPoint>,
+    guard_decls: &mut HashSet<ResourceAccessPoint>,
+  ) {
+    match expr.kind {
+      ExprKind::DropTemps(inner) => self.visit_match_guard(inner, whole_guard, outer, guard_decls),
+      ExprKind::Binary(op, lhs, rhs) if op.node == rustc_hir::BinOpKind::And => {
+        self.visit_match_guard(lhs, false, outer, guard_decls);
+        self.visit_match_guard(rhs, false, outer, guard_decls);
+      }
+      ExprKind::Let(let_expr) => {
+        let mark = self.preprocessed_events.len();
+        self.visit_expr(let_expr.init);
+        self.refuse_lasting_guard_effects(mark, outer, expr);
+        let mark = self.preprocessed_events.len();
+        let bound = self.register_iflet_let_bindings(let_expr, None);
+        if !whole_guard {
+          self.refuse_lasting_guard_effects(mark, outer, expr);
+        }
+        guard_decls.extend(bound);
+      }
+      _ => {
+        let mark = self.preprocessed_events.len();
+        self.visit_expr(expr);
+        self.refuse_lasting_guard_effects(mark, outer, expr);
+      }
+    }
+  }
+
+  /// Panic (reported as "can't visualize this yet") if any event from
+  /// `preprocessed_events[mark..]` moves out of, or assigns to, a
+  /// variable in `outer`. See `visit_match_guard`.
+  fn refuse_lasting_guard_effects(
+    &self,
+    mark: usize,
+    outer: &HashSet<ResourceAccessPoint>,
+    guard_part: &'tcx Expr<'tcx>,
+  ) {
+    let is_outer = |r: &ResourceTy| r.extract_rap().is_some_and(|rap| outer.contains(rap));
+    for (_, ev) in &self.preprocessed_events[mark..] {
+      let culprit = match ev {
+        ExternalEvent::Move { from, .. } if is_outer(from) => from,
+        ExternalEvent::Bind { to, .. }
+        | ExternalEvent::Copy { to, .. }
+        | ExternalEvent::Move { to, .. }
+        | ExternalEvent::StaticBorrow { to, .. }
+        | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) => to,
+        ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) => {
+          panic!("match guards that assign to an outer variable (`{}`, line {}) aren't supported yet",
+            ro.name(), expr_to_line(guard_part, &self.tcx));
+        }
+        _ => continue,
+      };
+      panic!("match guards that move or assign a variable declared outside the guard (`{}`, line {}) \
+              aren't supported yet: the effect lasts even when the guard is false and a later arm runs",
+        culprit.real_name(), expr_to_line(guard_part, &self.tcx));
+    }
+  }
+
   /// Walk through synthetic macro-expansion scaffolding to find any
   /// user-written subexpressions and dispatch them back through
   /// `visit_expr`. Called from the `from_expansion` guard at the top
@@ -764,10 +839,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if expr.span.from_expansion() {
           return;
         }
-        // A local that was never registered as a RAP, e.g. one bound by
-        // an `if let` guard on a match arm (stable since Rust 1.95; guards
-        // aren't visited, see README Limitations). Skip the use rather
-        // than crash the whole render.
+        // A local that was never registered as a RAP. Match-arm `if let`
+        // guard bindings used to land here; they're registered now (see
+        // `visit_match_guard`). What's left is mostly bindings in `if`
+        // let-chains (`if let A = x && let B = y`), whose condition the If
+        // arm only registers when it is a single `let`. Skip the use
+        // rather than crash the whole render.
         let Some(rap) = self.raps.get(&name) else {
           log::warn!("use of unregistered local `{}`; skipping", name);
           return;
@@ -1247,6 +1324,38 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     }
                   }
                 }
+              }
+
+              // Match guard: `pat if cond =>` / `pat if let p = e =>`.
+              // The guard runs after the pattern matched and before
+              // the body, and only then; if it's false, matching goes
+              // on with the later arms. We show its events in this
+              // arm's own column, next to the pattern's bindings:
+              // "when this arm is taken, this happened" is always true.
+              // What that leaves out is that the guard also ran when
+              // the pattern matched but the guard failed and a later
+              // arm was taken. For borrows and reads that's harmless
+              // (they end inside the guard, so later arms start from
+              // the same state), but a move or an assignment would
+              // still be in effect in those later arms, so
+              // `visit_match_guard` refuses those rather than draw a
+              // later arm with a value it no longer has.
+              //
+              // Bindings introduced by an `if let` guard are registered
+              // like `if let` condition bindings and live until the
+              // end of the arm, like the pattern's own bindings.
+              if let Some(guard) = arm.guard {
+                let outer: HashSet<ResourceAccessPoint> = self.raps.values()
+                  .map(|rd| rd.rap.clone())
+                  .filter(|r| !r.is_fn() && !pat_decls.contains(r))
+                  .collect();
+                let first_guard_ev = self.preprocessed_events.len();
+                let mut guard_decls: HashSet<ResourceAccessPoint> = HashSet::new();
+                self.visit_match_guard(guard, true, &outer, &mut guard_decls);
+                if !inline {
+                  branch_e_data.extend(self.preprocessed_events.drain(first_guard_ev..));
+                }
+                pat_decls.extend(guard_decls);
               }
 
               // visit expr

@@ -238,8 +238,12 @@ rather than listed here.
 - Closures: captures are shown; events inside the closure body aren't.
 - Loops (`for`, `while`, `loop`) show a single iteration.
 - Method chains (`a.get_mut().push(x)`): only the first call renders.
-- Match guards (`pat if cond =>`): the guard expression produces no
-  events.
+- Match guards (`pat if cond =>`, `pat if let … =>`): the guard's events
+  are drawn in its own arm, since it only runs once that arm's pattern
+  has matched. When the guard is false and a later arm runs, the guard
+  still ran first, but the later arm's column doesn't show it.
+- `if let` chains in an `if` condition (`if let Some(a) = x && let
+  Some(b) = y`): the bindings and their uses aren't shown.
 - Assignments to a place that has no column of its own aren't drawn: a
   field through a reference (`self.n += 1` in a `&mut self` method,
   `c.n = …` where `c: &mut T`), an index (`v[i] = …`), or a field of a
