@@ -1467,3 +1467,37 @@ pub fn closure_capture_ends<'tcx>(
     })
     .collect()
 }
+
+/// For an expression expanded from `vec![…]`, the elements the user
+/// wrote: `vec![s, t]` (an array literal inside the expansion) gives
+/// `[s, t]`, `vec![x; n]` (`from_elem(x, n)`) gives `[x]`. `None` for
+/// anything else, including `vec![]`.
+pub fn vec_macro_elems<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>]> {
+  let from_vec = expr.span.macro_backtrace().any(|d| {
+    matches!(d.kind, rustc_span::hygiene::ExpnKind::Macro(_, name) if name.as_str() == "vec")
+  });
+  if !from_vec {
+    return None;
+  }
+  fn find<'tcx>(e: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>]> {
+    if !e.span.from_expansion() {
+      return None;
+    }
+    match e.kind {
+      ExprKind::Array(elems) if elems.iter().all(|x| !x.span.from_expansion()) => Some(elems),
+      ExprKind::Call(f, args) => {
+        let is_from_elem = matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
+          if p.segments.last().map_or(false, |s| s.ident.as_str() == "from_elem"));
+        if is_from_elem && !args.is_empty() && !args[0].span.from_expansion() {
+          Some(&args[..1])
+        } else {
+          args.iter().find_map(find)
+        }
+      }
+      ExprKind::Block(b, _) => b.expr.and_then(find),
+      ExprKind::AddrOf(_, _, inner) | ExprKind::Unary(_, inner) | ExprKind::DropTemps(inner) => find(inner),
+      _ => None,
+    }
+  }
+  find(expr)
+}

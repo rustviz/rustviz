@@ -352,7 +352,9 @@ const Description: React.FC = () => (
         <code>h.r = &amp;s</code> through a reference, or a call that may
         store <code>&amp;s</code>, like{' '}
         <code>point(&amp;mut hold, &amp;s)</code>) is drawn only as a
-        borrow on <code>s</code>&apos;s column. The element value a
+        borrow on <code>s</code>&apos;s column. A copy out of an element{' '}
+        (<code>let first = v[0];</code>) is drawn on <code>v</code>&apos;s
+        column too. The element value a
         write replaces is dropped only in the tooltip&apos;s words, not on a
         column. So is a write through a reference stored in an element (
         <code>*slots[0] += 10</code>), without showing which variable it

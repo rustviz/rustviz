@@ -766,6 +766,25 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
    ... from <Resource Owner 1>
  */
 
+// Copy of one element out of a resource: `let first = v[0];`. The
+// element is copied; `holder` (or, when it is a reference, the resource
+// it points to) still has all of its contents.
+pub fn event_dot_copy_out_of_element(holder: &String, place: &String, holder_is_ref: bool) -> String {
+    if holder_is_ref {
+        format!(
+            "{0} is copied out of the resource {1} points to",
+            fmt_style(place),
+            fmt_style(holder)
+        )
+    } else {
+        format!(
+            "{0} is copied out of {1}'s resource",
+            fmt_style(place),
+            fmt_style(holder)
+        )
+    }
+}
+
 // In-place update of one element of a resource: `a[i] += 1;`. The
 // element lives inside the resource `holder` owns (or, when `holder`
 // is a reference, inside the resource it points to), so `holder`

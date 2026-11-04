@@ -721,6 +721,11 @@ const EXPECTED_OK: &[&str] = &[
     // function there: no merge, no scope-end drops (#515).
     "if_else_both_return",
     "return_value_to_caller",
+    // Array literals, `vec![…]` elements and copies out of an index
+    // (`let first = v[0];`) (#297).
+    "array_literal_moves",
+    "vec_macro_moves",
+    "index_copy_read",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7613,6 +7618,72 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n's value is copied to the caller",
         ],
         must_not_contain: &[],
+    },
+    // ─── Array literals, vec! and index reads (#297) ──────────────────
+    TooltipExpect {
+        name: "array_literal_moves",
+        // `[s, t]` moves both Strings into `a`; `[x, 2, 3]` copies `x`;
+        // `[p]` moves `p` and its field.
+        must_contain: &[
+            "Move from s to a",
+            "Move from t to a",
+            "s goes out of scope. No resource is dropped.",
+            "a goes out of scope. Its resource is dropped.",
+            "Copy from x to nums",
+            "nums is initialized with a copy of x",
+            "zeros is bound to a copyable value",
+            "Move from p to ps",
+            "p.name goes out of scope. No resource is dropped.",
+            "ps goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "a goes out of scope. No resource is dropped.",
+            "p.name goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "vec_macro_moves",
+        must_contain: &[
+            "Move from s to v",
+            "Move from t to v",
+            "s goes out of scope. No resource is dropped.",
+            "t goes out of scope. No resource is dropped.",
+            "Move from w to h",
+            "w goes out of scope. No resource is dropped.",
+            "Move from m to keep",
+            "m goes out of scope. No resource is dropped.",
+            "q's resource is moved to the caller",
+            "q goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped.",
+            "m goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "index_copy_read",
+        // A copy of one element; `v` keeps its whole resource.
+        must_contain: &[
+            "first is initialized with a copy of v[0]",
+            "v[0] is copied out of v's resource",
+            "cell is initialized with a copy of grid[1][0]",
+            // `[[i32; 2]; 2]` has nothing to drop: a value (#484).
+            "grid[1][0] is copied out of grid's value",
+            "h is initialized with a copy of xs[0]",
+            // Known wrong (#549): `xs: &[i32]` points to a slice, which
+            // needs no drop, so this should read "the value xs points to".
+            "xs[0] is copied out of the resource xs points to",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "first goes out of scope. No resource is dropped.",
+            "v's resource is copied",
+            "grid[1][0] is copied out of grid's resource",
+        ],
     },
 ];
 

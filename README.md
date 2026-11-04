@@ -347,6 +347,11 @@ rather than listed here.
   inside an `if`/`match` arm or through a reborrow (`let r2 = &mut *r;`);
   a parameter's struct belongs to the caller, so no column shows it.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
+  tooltip says "its previous resource is dropped"; the field has no
+  column to draw that on.
+- Arrays and `Vec`s are one column each: `let a = [s, t];` and
+  `vec![s, t]` draw `s` and `t` moved into `a`, and `let first =
+  v[0];` draws a copy out of `v[0]` on `v`'s column. Reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await` aren't visualized.
 - User-defined macros (`macro_rules!`) that use a variable are refused
