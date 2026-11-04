@@ -1099,6 +1099,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           self.current_scope = prev_scope;
       }
 
+      // `-x` / `!b` take their operand by value, like `x + y` (#262):
+      // a built-in one on a primitive copies a named operand into
+      // the operator; an overloaded one is a call to `Neg::neg` /
+      // `Not::not` with the operand as its argument.
+      ExprKind::Unary(UnOp::Neg | UnOp::Not, operand) => {
+        self.visit_expr(operand);
+        if let Some((op_name, operand)) = unary_op_operand(expr, &self.tcx, &self.raps) {
+          let fn_name = op_name.to_owned();
+          self.add_fn(fn_name.clone());
+          self.match_arg(operand, fn_name);
+        }
+      }
+
       //unary operator */! <expr>
       ExprKind::Unary(UnOp::Deref, exp) => { self.visit_expr(exp) }
 

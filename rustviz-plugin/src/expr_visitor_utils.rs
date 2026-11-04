@@ -804,15 +804,43 @@ pub fn builtin_binop_copied_operands<'tcx>(
     return None;
   }
   let operands: Vec<&'tcx Expr<'tcx>> = [lhs, rhs].into_iter()
-    .filter(|e| !e.span.from_expansion())
-    .filter(|e| match e.kind {
+    .filter(|e| operand_names_column(e, tcx, raps))
+    .collect();
+  if operands.is_empty() { None } else { Some((op.node.as_str(), operands)) }
+}
+
+/// An operand of a built-in operator that is drawn as copied in: one
+/// that names a column (a local, a struct field, or `*r`). Literals,
+/// calls, nested operators and indexing (`v[i]` copies an element, not
+/// `v`) have no column of their own.
+fn operand_names_column(e: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> bool {
+  !e.span.from_expansion()
+    && match e.kind {
       ExprKind::Path(_) | ExprKind::Field(..) => true,
       ExprKind::Unary(UnOp::Deref, inner) => matches!(inner.kind, ExprKind::Path(_) | ExprKind::Field(..)),
       _ => false,
-    })
-    .filter(|e| !matches!(get_rap(e, tcx, raps), ResourceTy::Anonymous))
-    .collect();
-  if operands.is_empty() { None } else { Some((op.node.as_str(), operands)) }
+    }
+    && !matches!(get_rap(e, tcx, raps), ResourceTy::Anonymous)
+}
+
+/// `-x` / `!b`. Like its trait method (`Neg::neg(self)`,
+/// `Not::not(self)`), a negation takes its operand by value. Returns
+/// the operator's text and the operand when there's something to draw:
+/// - an overloaded operator is a method call, and its operand is an
+///   argument like any other (moved, copied, or borrowed for `-&x`);
+/// - a built-in one on a primitive copies its operand in, which is
+///   drawn when the operand names a column (see `operand_names_column`).
+pub fn unary_op_operand<'tcx>(
+  expr: &'tcx Expr<'tcx>,
+  tcx: &TyCtxt<'tcx>,
+  raps: &HashMap<String, RapData>,
+) -> Option<(&'static str, &'tcx Expr<'tcx>)> {
+  let ExprKind::Unary(op @ (UnOp::Neg | UnOp::Not), operand) = expr.kind else { return None };
+  if tcx.typeck(expr.hir_id.owner).is_method_call(expr) || operand_names_column(operand, tcx, raps) {
+    Some((op.as_str(), operand))
+  } else {
+    None
+  }
 }
 
 pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> ResourceTy {
