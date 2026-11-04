@@ -97,7 +97,8 @@ syntax (e.g. `if let` guards), which the visitor may not handle yet.
    show rustc's message, not "Unexpected output format").
 5. CI's `runner-image` job builds the runner Dockerfile on native arm64
    for PRs touching it; this is the only place the aarch64 LLVM build is
-   exercised (see #182).
+   exercised (see #182). Its amd64 leg also renders one program through
+   the docker backend (`RV_RUNNER=docker`) with the image it built.
 
 ## Practicalities
 

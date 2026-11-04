@@ -163,6 +163,14 @@ jobs:
   # inputs it builds both arches without pushing, so arm64-only breakage
   # (e.g. LLVM crashing at -O3 after a toolchain bump, #182) shows up
   # before merge rather than on main.
+  #
+  # The amd64 leg also smoke-tests the docker backend end to end (#213):
+  # it loads the image it just built and renders one program through
+  # `rustviz svg` with RV_RUNNER=docker, i.e. `run_docker` in rustviz-lib
+  # with its real flags (--network=none, --read-only, tmpfs /work, ...)
+  # against this branch's plugin. The `build` job can't do this: `cargo
+  # xtask setup` pulls main's image from GHCR. It runs when the image's
+  # inputs or rustviz-lib/ change.
   runner-image:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
@@ -201,7 +209,18 @@ jobs:
             -q '.[].filename')
           echo "Changed files:"
           echo "$changed" | sed 's/^/  /'
+          affected=false
           if echo "$changed" | grep -qE '^(playground/runner/|rustviz-plugin/|rust-toolchain\.toml$|Cargo\.lock$|\.github/workflows/build\.yml$)'; then
+            affected=true
+          fi
+          # Docker-backend smoke test (amd64 leg only): also when the
+          # client side (`run_docker` in rustviz-lib) changes.
+          smoke=false
+          if [ "${{ matrix.arch }}" = amd64 ] && { [ "$affected" = true ] || echo "$changed" | grep -qE '^rustviz-lib/'; }; then
+            smoke=true
+          fi
+          echo "smoke=$smoke" >> "$GITHUB_OUTPUT"
+          if [ "$affected" = true ] || [ "$smoke" = true ]; then
             echo "affected=true" >> "$GITHUB_OUTPUT"
           else
             echo "affected=false" >> "$GITHUB_OUTPUT"
@@ -228,8 +247,25 @@ jobs:
           file: playground/runner/Dockerfile
           platforms: ${{ matrix.platform }}
           push: false
+          # Into the local docker daemon only for the smoke test below.
+          load: ${{ steps.changes.outputs.smoke == 'true' }}
+          tags: rustviz-runner:ci
           # Read main's layer cache; never write it from a PR.
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
+
+      - name: Smoke test the docker backend with this branch's image
+        if: github.event_name == 'pull_request' && steps.changes.outputs.smoke == 'true'
+        env:
+          RV_RUNNER: docker
+          RV_RUNNER_IMAGE: rustviz-runner:ci
+        run: |
+          # The CLI only needs rustviz-lib, which builds on stable; this
+          # skips installing the pinned nightly + rustc-dev on this runner.
+          cargo +stable build --locked -p rustviz-cli
+          printf 'fn main() {\n    let s = String::from("hi");\n    let t = s;\n    println!("{}", t);\n}\n' \
+            > "$RUNNER_TEMP/smoke.rs"
+          target/debug/rustviz svg "$RUNNER_TEMP/smoke.rs" -o "$RUNNER_TEMP/smoke-out"
+          grep -q 'Move from' "$RUNNER_TEMP/smoke-out/smoke.timeline.svg"
 
       - name: Build and push by digest
         if: github.event_name == 'push'
