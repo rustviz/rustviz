@@ -258,7 +258,9 @@ rather than listed here.
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
   through `r: &mut Vec<_>`) is drawn on the collection's column as a
   modification of its resource; elements have no columns of their own,
-  and the element value it replaces isn't shown being dropped.
+  so the element value it replaces is dropped only in words (the
+  write's tooltip says "the value previously in v[0] is dropped"), not
+  on a column.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library

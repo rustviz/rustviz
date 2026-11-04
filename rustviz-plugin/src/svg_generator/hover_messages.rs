@@ -517,7 +517,7 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
 // `holder` neither acquires a new resource nor drops its old one.
 // `place` is the element as written (`v[i]`). `source` names the
 // variable the new value was copied or moved from, if any.
-pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: bool, source: Option<(&String, bool)>) -> String {
+pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: bool, source: Option<(&String, bool)>, drops_old: bool) -> String {
     let base = if holder_is_ref {
         format!(
             "the resource {0} points to is modified through {1}",
@@ -531,10 +531,17 @@ pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: b
             fmt_style(place)
         )
     };
-    match source {
+    let base = match source {
         Some((from, true)) => format!("{} (copied from {})", base, fmt_style(from)),
         Some((from, false)) => format!("{} (moved from {})", base, fmt_style(from)),
         None => base,
+    };
+    // The element had a value, and its type needs drop: it is dropped
+    // as the new one is written.
+    if drops_old {
+        format!("{}; the value previously in {} is dropped", base, fmt_style(place))
+    } else {
+        base
     }
 }
 

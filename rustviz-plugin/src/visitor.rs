@@ -1277,7 +1277,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
           // `v[i] += k`: k is an operand, not the element's new
           // value, so don't draw it as copied into v[i].
-          self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
+          let compound = match &lhs_rty {
+            ResourceTy::Index(r, place, _) => ResourceTy::Index(r.clone(), place.clone(), false),
+            other => other.clone(),
+          };
+          self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);
         } else {
           let n_events = self.preprocessed_events.len();
           self.match_rhs(lhs_rty.clone(), rhs_expr, e);

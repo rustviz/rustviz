@@ -416,7 +416,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn event_touches_skipped(&self, event: &ExternalEvent) -> bool {
     let touches_ty = |r: &ResourceTy| -> bool {
       match r {
-        ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::Index(rap, _) => {
+        ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::Index(rap, _, _) => {
           self.skip_raps.contains(rap.name())
         }
         _ => false,
@@ -854,7 +854,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           return None;
         }
         let place = self.place_label(expr, &name);
-        Some(ResourceTy::Index(rap, place))
+        // A plain `=` drops the element's old value when its type needs
+        // drop; the caller turns this off for `op=`, which calls the
+        // operator method and drops nothing.
+        let drops = elem_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner));
+        Some(ResourceTy::Index(rap, place, drops))
       }
       // Any other place expression: not modelled, skipped.
       _ => {
@@ -1166,7 +1170,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if ty.builtin_deref(false).unwrap().is_ref() {
         match &lender {
           ResourceTy::Anonymous | ResourceTy::Caller => { (lender, aliasing) }
-          ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _) => {
+          ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
             aliasing.push_front(x.name().to_owned()); // here the lender is added to the list of aliases 
             (lender, aliasing)
           }

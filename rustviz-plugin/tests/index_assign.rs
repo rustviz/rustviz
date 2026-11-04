@@ -16,6 +16,7 @@ fn main() {
     let s = String::from("x");
     names[0] = s;
     names[0] = String::from("y");
+    names[0] += "!";
     let mut grid = [[0; 2]; 2];
     grid[1][0] = 7;
     let mut ps = vec![P { name: String::new() }];
