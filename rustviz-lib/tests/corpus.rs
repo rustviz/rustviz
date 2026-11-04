@@ -398,6 +398,13 @@ const EXPECTED_OK: &[&str] = &[
     "deref_write_drops_old",
     // `drop(x)` states that it drops x.
     "mem_drop_states_drop",
+    // Method chains: later calls act on temporaries, but their
+    // arguments are still moved / borrowed (#132). Same for a receiver
+    // with no column, like `self.items` (#250, #249).
+    "method_chain_temporaries",
+    "method_chain_args",
+    "method_arg_unnamed_receiver",
+    "method_call_in_unnamed_receiver_arg",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3859,6 +3866,84 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p acquired ownership of a resource (in all branches above)",
             "p.x acquired ownership of a resource (in all branches above)",
             "p.y acquired ownership of a resource (in all branches above)",
+        ],
+    },
+    // ─── Method chains (#132) ────────────────────────────────────────
+    TooltipExpect {
+        name: "method_chain_temporaries",
+        // Only the first call in each chain acts on the variable. The
+        // later calls (`push`, `map`, `collect`, `into_bytes`) act on
+        // temporaries and get no event on `b` / `v` / `s`: in
+        // particular `into_bytes` consumes the clone, not `s`.
+        must_contain: &[
+            "get_mut reads from/writes to b",
+            "iter reads from v",
+            "clone reads from s",
+            "Move from into_bytes to bytes",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "push reads from/writes to b",
+            "map reads from v",
+            "collect reads from v",
+            "into_bytes reads from s",
+            "Move from s to into_bytes",
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "method_chain_args",
+        // The receiver of `push` / `unwrap_or` / `contains` is a
+        // temporary, but their arguments are moved / borrowed. Before,
+        // `n` and `default` were said to drop a String they no longer
+        // own.
+        must_contain: &[
+            "last_mut reads from/writes to names",
+            "Move from n to push",
+            "n's resource is moved",
+            "n goes out of scope. No resource is dropped.",
+            "take reads from/writes to opt",
+            "Move from default to unwrap_or",
+            "default goes out of scope. No resource is dropped.",
+            "opt goes out of scope. Its resource is dropped.",
+            "trim reads from text",
+            "contains reads from needle",
+        ],
+        must_not_contain: &[
+            "n goes out of scope. Its resource is dropped.",
+            "default goes out of scope. Its resource is dropped.",
+            "push reads from/writes to names",
+            "opt's resource is moved",
+            "Move from opt to unwrap_or",
+            "contains reads from text",
+        ],
+    },
+    TooltipExpect {
+        name: "method_arg_unnamed_receiver",
+        // #250: `self.items.push(item)` moves `item` even though
+        // `self.items` has no column.
+        must_contain: &[
+            "Move from item to push",
+            "item's resource is moved",
+            "item goes out of scope. No resource is dropped.",
+            "push_str reads from t",
+        ],
+        must_not_contain: &[
+            "item goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "method_call_in_unnamed_receiver_arg",
+        // #249: used to panic. `s.clone()` / `s.as_str()` in the
+        // arguments only read `s`.
+        must_contain: &[
+            "clone reads from s",
+            "as_str reads from s",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s's resource is moved",
         ],
     },
 ];

@@ -303,10 +303,11 @@ const Description: React.FC = () => (
         Loops show one iteration (and a loop variable like{' '}
         <code>for c in s.chars()</code> has no start or end); closures show
         their captures but not their bodies (for a closure passed straight to
-        a function, only what it moves or copies in); method chains show only
-        the first call; a match guard&apos;s events appear only in its own
-        arm; <code>async</code>/<code>await</code> and your own macros
-        aren&apos;t visualized.
+        a function, only what it moves or copies in); in a method chain only
+        the first call is drawn on the variable (later calls work on temporary
+        results); a match guard&apos;s events appear only in its own arm;{' '}
+        <code>async</code>/<code>await</code> and your own macros aren&apos;t
+        visualized.
       </li>
       <li>
         Writes to a field through a reference (<code>self.n += 1</code> in a{' '}
