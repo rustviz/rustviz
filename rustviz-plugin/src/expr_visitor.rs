@@ -830,6 +830,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(name)
   }
 
+  /// The RAP a closure capture is drawn on: the captured place's own
+  /// column (`p.name` for a disjoint field capture, see
+  /// `capture_rap_name`), or, if that field has no column, the nearest
+  /// enclosing place that does (`p.a` for `p.a.b`, then `p`). A tuple
+  /// element capture (`move || t.0.len()`) falls back to `t`: tuples
+  /// have no element columns yet (#189).
+  fn capture_rap(&self, place: &rustc_middle::hir::place::Place<'tcx>, root: &str) -> Option<ResourceAccessPoint> {
+    let mut name = self.capture_rap_name(place, root).unwrap_or_else(|| root.to_owned());
+    loop {
+      if let Some(rd) = self.raps.get(&name) {
+        return Some(rd.rap.to_owned());
+      }
+      name = name.rsplit_once('.')?.0.to_owned();
+    }
+  }
+
   /// A closure literal passed straight to a call (`thread::spawn(move
   /// || ..)`, `v.into_iter().for_each(move |x| ..)`): each variable it
   /// captures by value is moved (or, if Copy, copied) into the closure,
@@ -855,9 +871,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => continue,
       };
       let root = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
-      let Some(name) = self.capture_rap_name(&capture.place, &root) else { continue };
-      let Some(rd) = self.raps.get(&name) else { continue };
-      let from_rap = rd.rap.to_owned();
+      let Some(from_rap) = self.capture_rap(&capture.place, &root) else { continue };
       self.update_rap(&from_rap, line_num);
       let evt = if self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) { Evt::Copy } else { Evt::Move };
       let mut ev = self.ext_ev_of_evt(evt, to_ro.clone(), ResourceTy::Value(from_rap), *self.unique_id, false);
@@ -1843,11 +1857,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     //   ByUse (`use` capture clause, recent feature) → Move,
     //     same as ByValue for our purposes.
     //
-    // We only handle whole-variable captures here (place.projections
-    // empty); a partial-field capture like `move || x.field`
-    // carries projections we don't have a column for, so we
-    // attribute the event to the root variable's RAP. That matches
-    // what the rest of the plugin does for field accesses today.
+    // Since Rust 2021 a closure captures only the places it uses
+    // (RFC 2229, "disjoint captures"): `move || p.name.len()` takes
+    // `p.name` and leaves `p.nick` with `p`. Each capture is drawn on
+    // the column of the place it captures (`p.name`), or of its
+    // nearest enclosing place that has a column (#328).
     ExprKind::Closure(closure) => {
       let line_num = span_to_line(&rhs.span, &self.tcx);
       // Bind for the closure value itself — gives `f` an "acquires
@@ -1870,29 +1884,20 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
           _ => continue,
         };
-        // Use the registered RAP name for the upvar (covers
-        // `r.a.b`-style nested field captures via expr_to_rap_name's
-        // counterpart on the source side; for now we just take the
-        // root variable's name).
+        // The root variable's name (MIR loans below are keyed on it)
+        // and the captured place's column: `p.name` for a disjoint
+        // field capture, `p` for a whole-variable one.
         let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
         let by_value = matches!(capture.info.capture_kind,
           rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
         // A by-value capture of a Copy place copies it into the
         // closure (#311): `m` is still usable afterwards and the
         // closure has nothing of m's to drop. A Copy field
-        // (`move || p.x`, which captures just `p.x`) is drawn on its
-        // own column when it has one, since `p` itself is untouched.
+        // (`move || p.x`) is drawn on its own column (#328).
         let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, rhs.hir_id.owner);
         let copied = by_value && self.tcx.type_is_copy_modulo_regions(env, capture.place.ty());
-        let rap_name = if copied {
-          self.capture_rap_name(&capture.place, &upvar_name)
-            .filter(|n| self.raps.contains_key(n))
-            .unwrap_or_else(|| upvar_name.clone())
-        } else {
-          upvar_name.clone()
-        };
-        let upvar_rap = match self.raps.get(&rap_name) {
-          Some(rd) => rd.rap.to_owned(),
+        let upvar_rap = match self.capture_rap(&capture.place, &upvar_name) {
+          Some(rap) => rap,
           None => continue,
         };
         // A closure that uses a reference variable through it
