@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -2930,7 +2930,7 @@ fn render_branches(
 ) {
     if rap.is_fn() { return; }
     for (_, ev) in history {
-        let Event::Branch { branch_history, split_point, merge_point, .. } = ev else { continue };
+        let Event::Branch { branch_history, split_point, merge_point, ty, .. } = ev else { continue };
 
         let parent_x = timeline_data.x_val as f64;
         // Branches that share lines (`let s = if c { a } else { b };`)
@@ -2994,9 +2994,24 @@ fn render_branches(
                 (parent_x, split_y), (branch_x, column_top_y),
                 leading_state, visualization_data,
             );
+            // A branch of type `!` (`return`, `panic!()`, `break`,
+            // `continue`) never reaches the merge (#296): its column
+            // stops at the branch's last line instead of running on
+            // to the merge dot, and ends in a short bar (#317).
+            let stop_line = branch.diverges.then(|| {
+                let (lo, hi) = branch_column_rows(*split_point, *merge_point);
+                ty.get_start_end(i).1.clamp(lo, hi.max(lo))
+            });
             let apexes = CollapsedApexes::of(&branch.e_data);
+            let mut stop_y: Option<f64> = None;
             for (top, bot, state) in &branch.states {
-                let Some((y1, y2)) = apexes.segment_ys(*top, *bot) else { continue };
+                let bot = match stop_line {
+                    None => *bot,
+                    Some(stop) if *top >= stop => continue,
+                    Some(stop) => (*bot).min(stop),
+                };
+                let Some((y1, y2)) = apexes.segment_ys(*top, bot) else { continue };
+                if stop_line == Some(bot) { stop_y = Some(y2 as f64); }
                 push_seg_if_renderable(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
@@ -3004,11 +3019,26 @@ fn render_branches(
                     state.clone(), visualization_data,
                 );
             }
-            push_seg_if_renderable(
-                &mut segs, rap,
-                (branch_x, column_bot_y), (parent_x, merge_y),
-                end_state, visualization_data,
-            );
+            let mut stop_bar = String::new();
+            match stop_line {
+                None => push_seg_if_renderable(
+                    &mut segs, rap,
+                    (branch_x, column_bot_y), (parent_x, merge_y),
+                    end_state, visualization_data,
+                ),
+                Some(_) => {
+                    // Only where the column is still drawn: a branch
+                    // that moved the value away ended its column at
+                    // the move already.
+                    if let Some(stop_y) = stop_y.filter(|y| segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
+                        stop_bar = format!(
+                            "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
+                            hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y,
+                            hover_messages::branch_never_reaches_merge(&rap.name().to_string()),
+                        );
+                    }
+                }
+            }
 
             let runs = split_centerline_runs(&segs);
 
@@ -3016,6 +3046,7 @@ fn render_branches(
             for run in &runs {
                 branch_svg.push_str(&render_branch_run(rap, *hash, run));
             }
+            branch_svg.push_str(&stop_bar);
 
             // Wrap in branch-group so any `:hover` inside the
             // strip glows the whole arm via

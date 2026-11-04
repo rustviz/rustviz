@@ -443,6 +443,8 @@ const EXPECTED_OK: &[&str] = &[
     "match_diverging_arm",
     // An arm that calls a `-> !` function diverges too (#296).
     "diverging_call_arm",
+    // A diverging branch's column stops at its end (#317).
+    "diverging_branch_stops",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4359,6 +4361,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquired ownership of a resource (in all branches above)",
         ],
     },
+    TooltipExpect {
+        name: "diverging_branch_stops",
+        // The `return` branch ends in a bar instead of converging into
+        // the merge dot (#317); `branches_that_diverge_stop_short`
+        // checks the geometry.
+        must_contain: &[
+            "This branch stops here: it returns, panics, breaks or continues, so it never \
+             reaches the end of the conditional, and t's column doesn't either",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_diverging_arm",
+        // #317: the `_ => unreachable!()` / `_ => panic!()` arms end in
+        // a bar on `s`'s, `t`'s and `m`'s columns.
+        must_contain: &[
+            "This branch stops here: it returns, panics, breaks or continues, so it never \
+             reaches the end of the conditional, and s's column doesn't either",
+            "This branch stops here: it returns, panics, breaks or continues, so it never \
+             reaches the end of the conditional, and t's column doesn't either",
+            "This branch stops here: it returns, panics, breaks or continues, so it never \
+             reaches the end of the conditional, and m's column doesn't either",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -4737,6 +4764,51 @@ fn arrows_hop_over_dots_they_cross() {
 /// The renderer HTML-escapes the tooltip body and embeds nested
 /// `<span>` markup for the variable-name color spans; both get
 /// stripped here so comparisons are against the plain visible text.
+/// `(x1, y1, x2, y2)` of every `<line>` in a timeline panel.
+fn svg_lines(svg: &str) -> Vec<(f64, f64, f64, f64)> {
+    let num = |tag: &str, name: &str| -> Option<f64> {
+        let key = format!(" {}=\"", name);
+        let start = tag.find(&key)? + key.len();
+        tag[start..start + tag[start..].find('"')?].parse().ok()
+    };
+    svg.match_indices("<line ")
+        .filter_map(|(i, _)| {
+            let tag = &svg[i..i + svg[i..].find('>')?];
+            Some((num(tag, "x1")?, num(tag, "y1")?, num(tag, "x2")?, num(tag, "y2")?))
+        })
+        .collect()
+}
+
+/// #317: a branch of type `!` (`return`, `panic!()`, …) used to be
+/// drawn converging into the merge dot like the others. It now ends in
+/// a short bar, and nothing leaves its column below that bar.
+#[test]
+fn branches_that_diverge_stop_short() {
+    for (name, bars) in [("diverging_branch_stops", 1), ("match_diverging_arm", 3)] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let bar_tags: Vec<&str> = timeline
+            .match_indices("<line ")
+            .map(|(i, _)| &timeline[i..=i + timeline[i..].find('>').unwrap()])
+            .filter(|t| t.contains("This branch stops here"))
+            .collect();
+        assert_eq!(bar_tags.len(), bars, "{}: stop bars", name);
+        for tag in bar_tags {
+            let (x1, y, x2, _) = svg_lines(tag)[0];
+            let x = (x1 + x2) / 2.0;
+            for (ax, ay, bx, by) in svg_lines(&timeline) {
+                for ((nx, _), (fx, fy)) in [((ax, ay), (bx, by)), ((bx, by), (ax, ay))] {
+                    assert!(
+                        !((nx - x).abs() <= 2.0 && (fx - x).abs() > 5.0 && fy > y),
+                        "{}: a line leaves the diverging branch at x={} below its end y={}: ({}, {}) -> ({}, {})",
+                        name, x, y, ax, ay, bx, by
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// `(cx, cy)` of every dot in a timeline panel whose tooltip is
 /// exactly `text` (plain circles, and drop dots: a tooltip `<g>`
 /// around a circle).

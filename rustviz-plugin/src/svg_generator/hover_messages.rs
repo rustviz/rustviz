@@ -1266,6 +1266,18 @@ pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
     )
 }
 
+/// The end of a branch of type `!` (`return`, `panic!()`, `break`,
+/// `continue`, `unreachable!()`) on a variable's column: the path
+/// stops here and never reaches the code after the conditional (#317).
+pub fn branch_never_reaches_merge(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "This branch stops here: it returns, panics, breaks or continues, so it never \
+         reaches the end of the conditional, and {0}'s column doesn't either",
+        my_name_fmt
+    )
+}
+
 /// Every branch above ended without the resource — either by a
 /// direct move/consume or because a nested merge already ended in
 /// an implicit-drop state. Distinct from the "may have been moved"
