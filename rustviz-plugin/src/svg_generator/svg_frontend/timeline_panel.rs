@@ -3,13 +3,17 @@ use crate::svg_generator::data::{branch_state_converter, convert_back, string_of
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Serialize;
 use std::cmp::{self, max};
 
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
 static SPAN_END : &'static str = "&lt;/span&gt;";
+
+/// Centres `(x, y)` of the event dots drawn so far. Ordered, so the
+/// SVG doesn't depend on hash iteration order.
+type DotPositions = BTreeSet<(i64, i64)>;
 static BRANCH_WEIGHT: i64 = 25;
 #[derive(Debug, Clone)]
 pub struct TimelineColumnData {
@@ -210,17 +214,11 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     // render resource owner labels
     render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry); // vertical bars
     render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &registry); // headers
-    render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry); // dot events
+    // Dots are drawn before arrows, and the arrow pass needs to know
+    // where they landed: a straight arrow hops over any dot between
+    // its two ends (see `render_hopping_arrow`).
+    let dot_positions = render_dots_string(&mut output, visualization_data, &resource_owners_layout, &registry); // dot events
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry); // reference lines
-
-    // Build a (x, y)-set of every event-dot position (incl. dots in
-    // branch arms, which use per-branch t_data coordinates that
-    // don't appear in the global `resource_owners_layout`). Arrow
-    // rendering uses this to detect when a horizontal gray arrow
-    // would pass through a dot and route it as a small "hop" over
-    // the dot instead, so the dot stays hoverable.
-    let dot_positions = collect_dot_positions(visualization_data, &resource_owners_layout);
-
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &dot_positions, &registry); // arrows
     render_struct_box(&mut output, &structs_info, &visualization_data.fn_start_lines, &registry); // struct box
 
@@ -687,8 +685,10 @@ fn append_dot(
     dot_data: &EventDotData,
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     timeline_data: &TimelineColumnData,
-    registry: &Handlebars
+    registry: &Handlebars,
+    dots: &mut DotPositions,
 ) {
+    dots.insert((dot_data.dot_x, dot_data.dot_y));
     let column = timeline_data;
     if column.is_struct_group {
         let owner_entry = ensure_owner_entry(output, column.owner as i64);
@@ -710,7 +710,8 @@ fn render_dot(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     registry: &Handlebars,
-    resource_hold: bool
+    resource_hold: bool,
+    dots: &mut DotPositions,
 ) {
     for (line_number, event) in history.iter() {
         // Closure-capture per-upvar dots on the closure's own
@@ -747,7 +748,7 @@ fn render_dot(
                     dot_y: get_y_axis_pos(*line_number),
                     title: event.print_message_with_name(& mut is.real_name())
                 };
-                append_dot(&b_data, output, timeline_data, registry);
+                append_dot(&b_data, output, timeline_data, registry, dots);
 
                 // Each branch column gets its real events rendered.
                 // No "If"/"Else" bookend dots: the per-branch
@@ -760,7 +761,7 @@ fn render_dot(
                 // communicated by column position; the join dot
                 // below speaks for what happened.
                 for branch in branch_history.iter() {
-                    render_dot(hash, &branch.e_data, &branch.t_data, output, visualization_data, registry, false);
+                    render_dot(hash, &branch.e_data, &branch.t_data, output, visualization_data, registry, false, dots);
                 }
 
                 // Per-variable merge dot, on the parent column at
@@ -833,7 +834,7 @@ fn render_dot(
                         dot_y: cy,
                         title: String::new(),
                     };
-                    append_dot(&m_data, output, timeline_data, registry);
+                    append_dot(&m_data, output, timeline_data, registry, dots);
                 } else if mixed_moved {
                     // Mixed: at least one branch moved, at least
                     // one didn't (counting the implicit untouched
@@ -852,7 +853,7 @@ fn render_dot(
                         p2x: cx + 3, p2y: cy - 1,
                         p3x: cx,     p3y: cy + 3,
                     };
-                    append_drop_dot(&drop_data, output, timeline_data, registry);
+                    append_drop_dot(&drop_data, output, timeline_data, registry, dots);
                 } else if all_moved {
                     // Every branch ends without the resource —
                     // either by a direct move or by an implicit
@@ -865,7 +866,7 @@ fn render_dot(
                         dot_y: cy,
                         title,
                     };
-                    append_dot(&m_data, output, timeline_data, registry);
+                    append_dot(&m_data, output, timeline_data, registry, dots);
                 } else {
                     let m_data = EventDotData {
                         hash: *hash as u64,
@@ -873,7 +874,7 @@ fn render_dot(
                         dot_y: cy,
                         title: branch_join_message(branch_history, ty, is),
                     };
-                    append_dot(&m_data, output, timeline_data, registry);
+                    append_dot(&m_data, output, timeline_data, registry, dots);
                 }
                 continue;
             }
@@ -917,7 +918,7 @@ fn render_dot(
                                 p2x: cx + 3, p2y: cy - 1,
                                 p3x: cx,     p3y: cy + 3,
                             };
-                            append_drop_dot(&drop_data, output, timeline_data, registry);
+                            append_drop_dot(&drop_data, output, timeline_data, registry, dots);
                             continue;
                         }
                         data.title = event.print_message_with_name(&mut name);
@@ -953,7 +954,7 @@ fn render_dot(
                             p2x: cx + 3, p2y: cy - 1,
                             p3x: cx,     p3y: cy + 3,
                         };
-                        append_drop_dot(&drop_data, output, timeline_data, registry);
+                        append_drop_dot(&drop_data, output, timeline_data, registry, dots);
                         continue;
                     }
                 },
@@ -974,7 +975,7 @@ fn render_dot(
                         p2x: cx + 3, p2y: cy - 1,
                         p3x: cx,     p3y: cy + 3,
                     };
-                    append_drop_dot(&drop_data, output, timeline_data, registry);
+                    append_drop_dot(&drop_data, output, timeline_data, registry, dots);
                     continue;
                 },
                 _ => {
@@ -998,7 +999,7 @@ fn render_dot(
             }
         }
         // push to individual timelines
-        append_dot(&data, output, timeline_data, registry);
+        append_dot(&data, output, timeline_data, registry, dots);
     }
 }
 
@@ -1231,7 +1232,9 @@ fn append_drop_dot(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     timeline_data: &TimelineColumnData,
     registry: &Handlebars,
+    dots: &mut DotPositions,
 ) {
+    dots.insert((drop_data.dot_x, drop_data.dot_y));
     let column = timeline_data;
     let rendered = registry.render("drop_dot_template", drop_data).unwrap();
     if column.is_struct_group {
@@ -1246,12 +1249,15 @@ fn append_drop_dot(
     }
 }
 
+/// Renders every event dot and returns where they were drawn, so the
+/// arrow pass can route arrows around them (see `render_hopping_arrow`).
 fn render_dots_string(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars
-){
+) -> DotPositions {
+    let mut dots = DotPositions::new();
     let timelines = &visualization_data.timelines;
     for (hash, timeline) in timelines {
         // render just the name of Owners and References
@@ -1285,10 +1291,11 @@ fn render_dots_string(
                         State::FullPrivilege { .. } | State::PartialPrivilege { .. }
                     )
                 } else { false };
-                render_dot(hash, &timeline.history, &resource_owners_layout[hash], output, visualization_data, registry, resource_hold);
+                render_dot(hash, &timeline.history, &resource_owners_layout[hash], output, visualization_data, registry, resource_hold, &mut dots);
             },
         }
     }
+    dots
 }
 
 fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, Event)>, id: usize) -> Option<& 'a TimelineColumnData> {
@@ -1355,93 +1362,36 @@ fn fetch_line_map<'a>(
     }
 }
 
-// render arrow
-/// Collect every event-dot's (x, y) position into a set used by the
-/// arrow renderer to detect "this gray arrow would pass through a dot
-/// on its way to its target" and route it through `render_hopping_arrow`
-/// instead.
+/// Build the SVG markup for a straight horizontal arrow that hops
+/// over any event dot it would otherwise pass through.
 ///
-/// Walks each timeline's history, including recursing into Branch
-/// events so per-arm dots (which sit at the branch's per-arm
-/// `t_data.x_val`, not the global column x) are captured too.
-/// Skips event kinds that don't actually emit a dot (RefDie is
-/// filtered out in `render_dot`; Branch events themselves do emit a
-/// dot at split / merge points which we DO want indexed).
-fn collect_dot_positions(
-    vd: &VisualizationData,
-    ro_layout: &BTreeMap<u64, TimelineColumnData>,
-) -> HashSet<(i64, i64)> {
-    fn walk(
-        history: &Vec<(usize, Event)>,
-        cur_x: i64,
-        out: &mut HashSet<(i64, i64)>,
-    ) {
-        for (line, event) in history {
-            // The dot for the event itself sits at (cur_x,
-            // get_y_axis_pos(line)). RefDie doesn't render a dot.
-            if !matches!(event, Event::RefDie { .. }) {
-                out.insert((cur_x, get_y_axis_pos(*line)));
-            }
-            // Recurse into branch arms; each arm has its own
-            // per-RAP x_val.
-            if let Event::Branch { branch_history, split_point, merge_point, .. } = event {
-                for branch in branch_history {
-                    let arm_x = branch.t_data.x_val;
-                    // The arm's split / merge dots are emitted at
-                    // split_point + 1 and merge_point in render_dot.
-                    out.insert((arm_x, get_y_axis_pos(*split_point + 1)));
-                    out.insert((arm_x, get_y_axis_pos(*merge_point)));
-                    walk(&branch.e_data, arm_x, out);
-                }
-            }
-        }
-    }
-    let mut out = HashSet::new();
-    for (hash, timeline) in vd.timelines.iter() {
-        if matches!(timeline.resource_access_point, ResourceAccessPoint::Function(_)) {
-            continue;
-        }
-        let x = ro_layout.get(hash).map(|t| t.x_val).unwrap_or(0);
-        walk(&timeline.history, x, &mut out);
-    }
-    out
-}
-
-/// Build the SVG markup for a horizontal arrow that "hops" over any
-/// event dot it would otherwise pass through.
+/// Arrows are drawn after dots, so an arrow running straight through
+/// a dot covers it, and the arrow's tooltip wins the hover: the dot's
+/// own tooltip can't be reached. Each dot strictly between the two
+/// ends gets a half-circle hop above it instead.
 ///
-/// `x1`/`x2` are the endpoint and source x positions (matching the
-/// caller's convention: arrowhead lands on x1, source side at x2).
-/// `from_hash` / `to_hash` are excluded from the overlap scan; every
-/// other column whose `x_val` lies strictly between them and that
-/// emits an event dot at `line_number` becomes a hop.
-///
-/// Returns `Some(markup)` if at least one hop is needed, in which
-/// case the caller should bypass the regular polyline pipeline and
-/// push the markup straight into the appropriate output bucket.
-/// Returns `None` if the path is clear — caller falls through to the
-/// existing polyline rendering. Keeping the no-hop path identical
-/// preserves all existing visual tests.
+/// `x1` is where the head lands, `x2` the source column (the caller's
+/// convention). Returns `None` when no dot is in the way; the caller
+/// then draws the usual polyline, so those arrows are unchanged.
 fn render_hopping_arrow(
     x1: i64, y: i64, x2: i64,
     title: &str,
-    dot_positions: &HashSet<(i64, i64)>,
+    dot_positions: &DotPositions,
 ) -> Option<String> {
     let (lo_x, hi_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
 
     // Pull every (x, y) dot position that sits at this arrow's y
     // and strictly between source/target x. Source and target dots
     // (at exactly lo_x or hi_x) aren't intervening — they're the
-    // endpoints we're connecting.
-    let mut overlap_xs: Vec<i64> = dot_positions
+    // endpoints we're connecting. Ascending and duplicate-free,
+    // since `DotPositions` is a set ordered by (x, y).
+    let overlap_xs: Vec<i64> = dot_positions
         .iter()
         .filter_map(|(dx, dy)| {
             if *dy == y && *dx > lo_x && *dx < hi_x { Some(*dx) } else { None }
         })
         .collect();
     if overlap_xs.is_empty() { return None; }
-    overlap_xs.sort();
-    overlap_xs.dedup();
 
     // The arrowhead is 12.75 units long and pulled back 18 from the
     // dot center (matching the polyline path) so the tip lands on
@@ -1461,11 +1411,11 @@ fn render_hopping_arrow(
     } else {
         x1 as f64 + head_offset
     };
-    // SVG arc sweep flag for "arc bulges upward in screen space"
-    // (smaller y) depends on direction of travel: counterclockwise
-    // (sweep=0) bulges up when going left-to-right; clockwise
-    // (sweep=1) bulges up when going right-to-left.
-    let sweep = if goes_right { "0" } else { "1" };
+    // The hop must bulge upward (smaller y). SVG's sweep flag 1 means
+    // increasing angle, which with y pointing down is clockwise on
+    // screen: left -> top -> right. So travelling right needs 1 and
+    // travelling left needs 0.
+    let sweep = if goes_right { "1" } else { "0" };
 
     // Order the hops by path direction so we draw L/A segments in
     // travel order. `overlap_xs` is ascending; reverse when going
@@ -1481,8 +1431,8 @@ fn render_hopping_arrow(
         let oxf = *ox as f64;
         let near = if goes_right { oxf - r } else { oxf + r };
         let far  = if goes_right { oxf + r } else { oxf - r };
-        // Straight up to just before the hop, then a half-circle arc
-        // over the dot, then continue.
+        // Straight on to just before the dot, then a half-circle
+        // arc over it, then continue.
         d.push_str(&format!(" L {} {}", near, y_f));
         d.push_str(&format!(" A {} {} 0 0 {} {} {}", r, r, sweep, far, y_f));
     }
@@ -1508,13 +1458,14 @@ fn render_hopping_arrow(
     ))
 }
 
+// render arrow
 fn render_arrow (
     line_number : &usize,
     external_event: &ExternalEvent,
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
-    dot_positions: &HashSet<(i64, i64)>,
+    dot_positions: &DotPositions,
     registry: &Handlebars
 ) {
     match external_event {
@@ -2080,7 +2031,7 @@ fn render_arrows_string_external_events_version(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
-    dot_positions: &HashSet<(i64, i64)>,
+    dot_positions: &DotPositions,
     registry: &Handlebars
 ){
     for (line_number, external_event) in &visualization_data.external_events {
