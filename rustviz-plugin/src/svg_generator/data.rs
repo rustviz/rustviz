@@ -1318,6 +1318,8 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         },
         ExternalEvent::StaticBorrow{ is_partial, is_reborrow, to, .. } => {
             if *is_partial { String::from("Partial immutable borrow") }
+            // A closure capturing `*r` through a reference r (#277).
+            else if to.is_closure() && *is_reborrow { String::from("Closure capture (immutable reborrow)") }
             else if to.is_closure() { String::from("Closure capture (immutable borrow)") }
             else if *is_reborrow { String::from("Immutable reborrow") }
             else { String::from("Immutable borrow") }
@@ -1327,6 +1329,7 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         },
         ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, .. } => {
             if *is_partial { String::from("Partial Mutable borrow") }
+            else if to.is_closure() && *is_reborrow { String::from("Closure capture (mutable reborrow)") }
             else if to.is_closure() { String::from("Closure capture (mutable borrow)") }
             // Reborrow: `let r2 = &mut *r;` with r: `&mut T` borrows
             // *through* r — r can't be used while r2 is live and usable
