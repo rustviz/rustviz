@@ -98,12 +98,19 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
 // A struct whose fields were partly moved out goes out of scope. Rust
 // drops only the fields that still hold a value (`dropped`); the
 // moved-out ones (`moved`) are already gone, and the struct as a whole
-// isn't dropped because it no longer holds a complete value. `moved` is
-// never empty; `dropped` lists only non-Copy fields (a Copy field has
-// nothing to drop).
+// isn't dropped because it no longer holds a complete value. `dropped`
+// lists only non-Copy fields (a Copy field has nothing to drop).
+//
+// `maybe_moved` (#395): fields moved out in some branches of a
+// conditional above and not in others (a struct pattern in one `match`
+// arm, a field moved in one branch of an `if`). Whether they're
+// dropped here depends on the path, which Rust tracks with a runtime
+// drop flag (same wording as `event_dot_go_out_of_scope_maybe_moved`).
+// At least one of `moved` / `maybe_moved` is non-empty.
 pub fn event_dot_struct_partial_go_out_of_scope(
     my_name: &String,
     moved: &[String],
+    maybe_moved: &[String],
     dropped: &[String],
 ) -> String {
     fn join(names: &[String]) -> (String, bool) {
@@ -113,6 +120,32 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
         };
         (s, names.len() > 1)
+    }
+    if !maybe_moved.is_empty() {
+        let mut out = format!("{} goes out of scope.", fmt_style(my_name));
+        if !moved.is_empty() {
+            let (moved_s, moved_plural) = join(moved);
+            out.push_str(&format!(" {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
+        }
+        let (maybe_s, maybe_plural) = join(maybe_moved);
+        if maybe_plural {
+            out.push_str(&format!(
+                " {} were moved out in some of the branches above; each is dropped here only if no \
+                 branch above moved it (Rust tracks this with runtime drop flags).",
+                maybe_s
+            ));
+        } else {
+            out.push_str(&format!(
+                " {} was moved out in at least one branch above, so it's dropped here only if no \
+                 branch above moved it (Rust tracks this with a runtime drop flag).",
+                maybe_s
+            ));
+        }
+        if !dropped.is_empty() {
+            let (dropped_s, dropped_plural) = join(dropped);
+            out.push_str(&format!(" {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
+        }
+        return out;
     }
     let (moved_s, moved_plural) = join(moved);
     let rest = if dropped.is_empty() {

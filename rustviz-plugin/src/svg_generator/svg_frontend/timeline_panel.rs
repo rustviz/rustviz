@@ -1138,11 +1138,14 @@ fn render_dot(
                         let resource_info: &str = ". No resource is dropped.";
                         data.title = event.print_message_with_name(& mut name);
                         data.title.push_str(resource_info);
-                    } else if let Some((moved, dropped)) = struct_partial_move_split(visualization_data, *hash) {
+                    } else if let Some(split) = struct_partial_move_split(visualization_data, *hash) {
                         // Partially moved struct (#207): only the
-                        // fields still holding a value are dropped.
-                        let title = hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &moved, &dropped);
-                        if dropped.is_empty() {
+                        // fields still holding a value are dropped,
+                        // and those moved on some paths only maybe
+                        // (#395).
+                        let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
+                            &name, &split.moved, &split.maybe_moved, &split.dropped);
+                        if split.dropped.is_empty() && split.maybe_moved.is_empty() {
                             data.title = title;
                         } else {
                             let cx = timeline_data.x_val;
@@ -1701,17 +1704,28 @@ fn holds_resource_at_scope_end(timeline: &Timeline) -> bool {
     )
 }
 
+// What a partially moved struct drops at scope end (#207), by field
+// name, each list in declaration order (timelines are keyed by
+// declaration-ordered hashes).
+struct PartialMoveSplit {
+    // Moved out on every path that reaches the scope end.
+    moved: Vec<String>,
+    // Moved out in some branches of a conditional only (#395): dropped
+    // here only if the path taken didn't move it (a runtime drop flag).
+    maybe_moved: Vec<String>,
+    // Non-Copy leaf fields that still hold a value on every path.
+    dropped: Vec<String>,
+}
+
 // For a struct column (or a struct-typed field column such as
-// `o.inner`) whose fields were partly moved out (#207): the names of
-// the moved-out fields, and of the non-Copy leaf fields that still hold
-// a value at scope end, both in declaration order (timelines are keyed
-// by declaration-ordered hashes). A nested field counts under its
-// ancestors: `o.inner.x` moved out leaves `o.inner.y` and `o.z` to be
-// dropped. None when no field below `hash` was moved out.
+// `o.inner`) whose fields were partly moved out (#207), on some paths
+// or all (#395). A nested field counts under its ancestors:
+// `o.inner.x` moved out leaves `o.inner.y` and `o.z` to be dropped.
+// None when no field below `hash` was moved out.
 fn struct_partial_move_split(
     visualization_data: &VisualizationData,
     hash: u64,
-) -> Option<(Vec<String>, Vec<String>)> {
+) -> Option<PartialMoveSplit> {
     let rap = &visualization_data.timelines.get(&hash)?.resource_access_point;
     let ResourceAccessPoint::Struct(Struct { owner, .. }) = rap else { return None };
     let root = if rap.is_member() { *owner } else { hash };
@@ -1726,21 +1740,32 @@ fn struct_partial_move_split(
         })
         .collect();
     let mut moved: Vec<String> = Vec::new();
+    let mut maybe_moved: Vec<String> = Vec::new();
     let mut dropped = Vec::new();
     for (timeline, name, is_copy) in &fields {
         // Fields of an already-listed moved-out field went with it.
-        if moved.iter().any(|m| name.starts_with(&format!("{}.", m))) {
+        if moved.iter().chain(maybe_moved.iter()).any(|m| name.starts_with(&format!("{}.", m))) {
             continue;
         }
         let child_prefix = format!("{}.", name);
         let is_leaf = !fields.iter().any(|(_, n, _)| n.starts_with(&child_prefix));
         if !holds_resource_at_scope_end(timeline) {
-            moved.push((*name).clone());
+            // Moved in one arm of a `match` on the struct, or one
+            // branch of an `if`, and not in the others (#395).
+            if maybe_moved_at_end(&timeline.history) {
+                maybe_moved.push((*name).clone());
+            } else {
+                moved.push((*name).clone());
+            }
         } else if is_leaf && !is_copy {
             dropped.push((*name).clone());
         }
     }
-    if moved.is_empty() { None } else { Some((moved, dropped)) }
+    if moved.is_empty() && maybe_moved.is_empty() {
+        None
+    } else {
+        Some(PartialMoveSplit { moved, maybe_moved, dropped })
+    }
 }
 
 // Smallest id among the events that give a column its value (Acquire /
