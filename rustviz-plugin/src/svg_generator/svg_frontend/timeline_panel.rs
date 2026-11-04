@@ -669,6 +669,16 @@ fn update_timeline_data(events: & mut Vec<(usize, Event)>, parent_data: &Timelin
     }
 }
 
+// Header labels are monospace at 0.875em (14px); a glyph is about
+// 0.6em wide. Round up so the estimate errs towards more room.
+const LABEL_CHAR_PX: i64 = 9;
+// Minimum blank space between two neighbouring header labels.
+const LABEL_GAP: i64 = 10;
+
+fn label_half_width(chars: i64) -> i64 {
+    (chars * LABEL_CHAR_PX + 1) / 2
+}
+
 // Returns: a binary tree map from the hash of the ResourceOwner to its Column information
 fn compute_column_layout<'a>(
     visualization_data: &'a mut VisualizationData,
@@ -706,6 +716,9 @@ fn compute_column_layout<'a>(
         let mut owner: i64 = -1;
         let mut owner_x: i64 = 0;
         let mut last_x: i64 = 0;
+        // Half the header-label width of the previous column in this
+        // fn, so the next column can keep clear of it (#361).
+        let mut prev_label: Option<(i64, i64)> = None; // (centre x, half width)
 
         for hash in hashes {
             let timeline = &visualization_data.timelines[hash];
@@ -725,13 +738,33 @@ fn compute_column_layout<'a>(
             let mut ref_bool = false;
 
             // render reference label
-            if timeline.resource_access_point.is_ref() {
+            let label_len = if timeline.resource_access_point.is_ref() {
                 let temp_name = name.clone() + "|*" + &name;
                 x = x - x_space;
                 x_space = cmp::max(90, (&(temp_name.len() as i64) - 1) * 7);
                 x = x + x_space;
                 ref_bool = true;
+                temp_name.chars().count() as i64
+            } else {
+                name.chars().count() as i64
+            };
+
+            // Labels are centred on their column, so the previous
+            // label's right half and this label's left half share the
+            // gap between the two columns. The spacing above only
+            // looks at this column's own name, so a long label on the
+            // left (`h.e.part|*h.e.part`) ran into a short one on its
+            // right (#361). Widen the gap just enough when that would
+            // happen; columns that already fit keep their position.
+            let label_half = label_half_width(label_len);
+            if let Some((prev_x, prev_half)) = prev_label {
+                let needed = prev_half + label_half + LABEL_GAP;
+                if x - prev_x < needed {
+                    x = prev_x + needed;
+                }
             }
+            prev_label = Some((x, label_half));
+            let label_x = x;
 
             let styled_name = styled_name_html(&name);
 
@@ -772,6 +805,9 @@ fn compute_column_layout<'a>(
                     owner: timeline.resource_access_point.get_owner(),
                 });
             x += right_px;
+            // Keep the rightmost label inside the panel (its width is
+            // max_x + 100).
+            max_x = cmp::max(max_x, label_x + label_half + LABEL_GAP - 100);
         }
         // Finalize any open struct group at the end of this fn
         // (same trailing-struct fix as before, scoped per-fn).
