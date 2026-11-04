@@ -781,13 +781,14 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_01_largest_generic",
         status: Wrong,
-        note: "result isn't linked to number_list, so number_list's borrow ends at L13 though result borrows it until L14 (#171); `largest = item` reassigns a reference but reads \"initialized by copy\" (#414)",
+        note: "result isn't linked to number_list, so number_list's borrow ends at L13 though result borrows it until L14 (#171)",
         must_contain: &[
             "list is an immutable borrow from the caller",
             "Immutable borrow from list to largest",
             "a reference from largest is returned to the caller; the data it points to is not copied",
             "largest reads from number_list",
             "item's reference is copied (not the resource it points to)",
+            "L5 largest is assigned a copy of item's reference",
             "result holds an immutable reference; it can read the borrowed value",
             "L14 result's immutable borrow ends (what it borrows from isn't shown)",
             "number_list goes out of scope. Its resource is dropped.",
@@ -796,10 +797,10 @@ const BOOK: &[Snippet] = &[
             "result is the owner of the resource",
             "item's resource is copied",
             "Return immutably borrowed resource from result to *result",
+            "L5 largest is initialized by copy from item",
         ],
         known_wrong: &[
             "L13 number_list's resource is no longer immutably borrowed",
-            "L5 largest is initialized by copy from item",
         ],
         ..E
     },
@@ -1097,7 +1098,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "m_01_shadow_type_change",
         status: Wrong,
-        note: "both `spaces` share one column (#173), so the &str's borrow is shown ending at L4, where `spaces` is the usize",
+        note: "both `spaces` share one column (#173), so the &str's borrow is shown ending at L4, where `spaces` is the usize, and the second `let` reads as an assignment to the first binding",
         must_contain: &["spaces is bound to an immutable reference", "len reads from spaces"],
         must_not_contain: &[
             "spaces is the owner of the resource",
@@ -1107,6 +1108,7 @@ const BOOK: &[Snippet] = &[
         known_wrong: &[
             "L4 spaces's borrow of the string literal ends (string literals live for the whole program)",
             "L4 spaces's immutable borrow ends",
+            "L3 spaces is assigned the result of len",
         ],
         ..E
     },

@@ -1,3 +1,6 @@
+use crate::svg_generator::data::ResourceAccessPoint;
+
+
 /* Event Dot messages: shows up when someone hovers over a dot */
 
 use crate::svg_generator::data::StaticLender;
@@ -531,6 +534,34 @@ pub fn event_dot_copyable_assign_copy(my_name: &String, from_name: &String) -> S
         fmt_style(my_name),
         fmt_style(from_name)
     )
+}
+
+// A reference variable that already holds a reference is assigned
+// another one (#414): r was initialized earlier, so this is not an
+// initialization. `from` is where the new value comes from, `copied`
+// whether it was copied (`&T` is Copy) or moved (`&mut T`).
+// - `r = s;`, s: `&T`: the reference in s is copied; what it points
+//   to isn't (the counterpart of "s's reference is copied (not the
+//   resource it points to)" on s's column).
+// - `r = s;`, s: `&mut T`: the reference is moved out of s.
+// - `r = first(..);`: the call's result. Not "the reference first
+//   returns": while shadowing bindings share a column (#173), the
+//   result can be a new binding's non-reference value
+//   (`let spaces = "  "; let spaces = spaces.len();`).
+// None for any other source; the caller keeps its usual wording.
+pub fn event_dot_ref_assign(my_name: &String, from: &ResourceAccessPoint, copied: bool, is_mut: bool) -> Option<String> {
+    let r = fmt_style(my_name);
+    let f = fmt_style(from.name());
+    let kind = if is_mut { "mutable" } else { "immutable" };
+    if from.is_fn() {
+        Some(format!("{0} is assigned the result of {1}", r, f))
+    } else if from.is_ref() && copied {
+        Some(format!("{0} is assigned a copy of {1}'s reference", r, f))
+    } else if from.is_ref() {
+        Some(format!("{0} is assigned {1}'s {2} reference (moved out of {1})", r, f, kind))
+    } else {
+        None
+    }
 }
 
 // Acquire whose destination column is a reference variable

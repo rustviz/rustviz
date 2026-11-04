@@ -1191,7 +1191,21 @@ fn render_dot(
                     // tooltip would mask the rest).
                     let rap = &visualization_data.timelines[hash].resource_access_point;
                     let copyable_assign = held_at_event && rap.is_copy_owner() && !rap.is_closure();
+                    // A reference variable that already holds a
+                    // reference is reassigned (`r = s;`), not
+                    // initialized: the reference is copied (`&T`) or
+                    // moved (`&mut T`) into it (#414).
+                    let ref_assign = held_at_event && rap.is_ref();
+                    let ref_assign_title = match (ref_assign, event) {
+                        (true, Event::Copy { from: ResourceTy::Value(f), is: ResourceTy::Value(_), .. }) =>
+                            hover_messages::event_dot_ref_assign(&name, f, true, rap.is_mutref()),
+                        (true, Event::Acquire { from: ResourceTy::Value(f), is: ResourceTy::Value(_), .. }) =>
+                            hover_messages::event_dot_ref_assign(&name, f, false, rap.is_mutref()),
+                        _ => None,
+                    };
                     if let Some(title) = union_write_title(event, rap, &name, visualization_data, *hash) {
+                        data.title = title;
+                    } else if let Some(title) = ref_assign_title {
                         data.title = title;
                     } else if let (true, Event::Acquire { is: ResourceTy::Value(_), .. }) = (copyable_assign, event) {
                         data.title = hover_messages::event_dot_copyable_assign(&name);
@@ -1716,6 +1730,11 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
     match event {
         Event::Acquire { is: ResourceTy::Value(_), .. }
         | Event::Copy { is: ResourceTy::Value(_), .. }
+        // A reference variable bound by a borrow (`let mut r = &a;`)
+        // holds a reference from then on, also after that borrow
+        // ends: the end is drawn where r is reassigned (#414).
+        | Event::StaticBorrow { is: ResourceTy::Value(_), .. }
+        | Event::MutableBorrow { is: ResourceTy::Value(_), .. }
         | Event::InitRefParam { .. } => true,
         Event::Move { .. } => false,
         Event::Branch { branch_history, .. } => {
