@@ -417,6 +417,8 @@ const EXPECTED_OK: &[&str] = &[
     "fn_item_local",
     "fn_pointer_local_call",
     "closure_call_result",
+    // A struct bound from an overloaded operator's result (#314).
+    "operator_result_struct_fields",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4075,6 +4077,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "add_one's value is copied",
+        ],
+    },
+    TooltipExpect {
+        name: "operator_result_struct_fields",
+        // `let c = a + b;` (impl Add) and `let flipped = -wave;` (impl
+        // Neg) bind a struct from an operator's result. Its fields hold
+        // their parts of that value: `c.label` owns the concatenated
+        // String and drops it at the end of main (#314).
+        must_contain: &[
+            "c.label acquires ownership of a resource",
+            "c.label goes out of scope. Its resource is dropped.",
+            "flipped.samples acquires ownership of a resource",
+            "flipped.samples goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c.label goes out of scope. No resource is dropped.",
+            "flipped.samples goes out of scope. No resource is dropped.",
         ],
     },
 ];

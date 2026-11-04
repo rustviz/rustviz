@@ -596,6 +596,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// `lhs` gets a new value that has no column of its own (a literal,
+  /// an operator's result, a macro expansion, a `const`). When `lhs`
+  /// is a struct, each of its fields gets its part of that value too,
+  /// the same as `let x = make();` (`propagate_struct_transfer`).
+  pub fn bind_from_anonymous(&mut self, line_num: usize, lhs: ResourceTy) {
+    let struct_name = match &lhs {
+      ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => Some(rap.name().clone()),
+      _ => None,
+    };
+    self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+    if let Some(name) = struct_name {
+      self.bind_struct_fields(line_num, &name);
+    }
+  }
+
   /// Non-Copy fields of `parent` (recursively) that currently own a
   /// resource, i.e. what dropping `parent` right now would drop.
   pub fn struct_fields_holding_resource(&self, parent: &str) -> Vec<ResourceAccessPoint> {
@@ -1459,7 +1474,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // drop. `source_callsite` resolves to the user's `let` line.
     let user_span = rhs.span.source_callsite();
     let line_num = span_to_line(&user_span, &self.tcx);
-    self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+    self.bind_from_anonymous(line_num, lhs);
     return;
   }
   match rhs.kind {
@@ -1488,7 +1503,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         )
       ) {
         let line_num = span_to_line(&p.span, &self.tcx);
-        self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+        self.bind_from_anonymous(line_num, lhs);
         return;
       }
       let line_num = span_to_line(&p.span, &self.tcx);
@@ -1602,8 +1617,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     ExprKind::Unary(UnOp::Neg, _) | // ~<expr>
     ExprKind::Unary(UnOp::Not, _) // !<expr>
     => {
+      // An overloaded operator (`a + b` with `impl Add for Tag`,
+      // `-wave` with `impl Neg`) can return a struct; its fields
+      // hold their parts of that new value (#314).
       let line_num = span_to_line(&rhs.span, &self.tcx);
-      self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+      self.bind_from_anonymous(line_num, lhs);
     }
     // ex : &<expr> or &mut <expr>
     ExprKind::AddrOf(_, _,expr) => {
