@@ -101,6 +101,17 @@ pub enum ResourceAccessPoint {
     Struct(Struct),
 }
 
+/// Marks the copy of a RAP carried by a move event (`drop(x)`) whose
+/// argument is dropped by the call: the argument's type needs drop. Not
+/// part of the RAP's identity: it compares equal and hashes to nothing,
+/// so a flagged copy is still the same RAP as the one in the table.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct DropsOld(pub bool);
+
+impl PartialEq for DropsOld { fn eq(&self, _: &Self) -> bool { true } }
+impl Eq for DropsOld {}
+impl Hash for DropsOld { fn hash<H: Hasher>(&self, _: &mut H) {} }
+
 /// What a write through a place (`*r = e`) does to the place's old
 /// value. Carried on the copy of the RAP a write event holds, and used
 /// only to pick the dot's tooltip (2026-11-05 decision: a place
@@ -209,6 +220,10 @@ pub struct StaticRef {                // let (mut) r1 = & a;
 pub struct Function {
     pub name: String,
     pub hash: u64,
+    /// Set only on the copy a move event carries when the callee is
+    /// `std::mem::drop` and the argument's type needs drop (see
+    /// `DropsOld`): the call is where the value is dropped.
+    pub drops_arg: DropsOld,
 }
 
 // ResourceTy is a wrapper for ResourceAccessPoints
@@ -306,6 +321,16 @@ pub fn place_assign_copy_message(place: &String, from: &ResourceTy) -> String {
 }
 
 impl ResourceAccessPoint {
+    /// A copy of this function RAP marked as `std::mem::drop` called on
+    /// a value that needs drop.
+    pub fn with_drops_arg(&self) -> ResourceAccessPoint {
+        let mut rap = self.clone();
+        if let ResourceAccessPoint::Function(f) = &mut rap {
+            f.drops_arg = DropsOld(true);
+        }
+        rap
+    }
+
     /// A copy of this RAP marked as the target of a place write `*r = e`
     /// (see `PlaceWrite`). Only owners (a `Box`) and `&mut` references
     /// can be written through.
@@ -1315,6 +1340,8 @@ impl Event {
             Event::Move{ to ,..} => {
                 match to {
                     ResourceTy::Caller => safe_message(hover_messages::event_dot_move_to_caller, &self.deref_name(my_name), to),
+                    ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
+                        hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name),
                     _ if to.is_closure() => safe_message(hover_messages::event_dot_capture_move_to_closure, &self.deref_name(my_name), to),
                     _ => safe_message(hover_messages::event_dot_move_to, &self.deref_name(my_name), to),
                 }

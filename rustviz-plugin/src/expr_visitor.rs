@@ -371,7 +371,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds a function RAP
   pub fn add_fn(&mut self, name: String) {
-    self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64 }), self.current_scope, true);
+    self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64, drops_arg: Default::default() }), self.current_scope, true);
   }
 
   // Adds a struct RAP
@@ -885,6 +885,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     drew_any
   }
 
+  /// Is `arg` the argument of a call to `std::mem::drop`?
+  fn is_mem_drop_arg(&self, arg: &Expr<'tcx>) -> bool {
+    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return false };
+    let ExprKind::Call(callee, _) = call.kind else { return false };
+    let ExprKind::Path(ref qpath) = callee.kind else { return false };
+    let res = self.tcx.typeck(callee.hir_id.owner).qpath_res(qpath, callee.hir_id);
+    matches!(res, rustc_hir::def::Res::Def(_, def_id) if self.tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def_id))
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     self.add_fn(fn_name.clone());
@@ -910,7 +919,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) = &from_ro {
       self.update_rap(rap, line_num);
     }
-    let to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
+    let mut to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
+    // `drop(x)` is where x's value is dropped: say so on the move,
+    // unless its type has nothing to drop.
+    if !arg_ty.is_ref() && !is_copyable && self.is_mem_drop_arg(arg)
+      && arg_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner))
+    {
+      if let ResourceTy::Value(rap) = &to_ro {
+        to_ro = ResourceTy::Value(rap.with_drops_arg());
+      }
+    }
     // type-check the arg and add event accordingly
     if arg_ty.is_ref() {
       match arg_ty.ref_mutability().unwrap() {

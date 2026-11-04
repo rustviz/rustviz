@@ -289,6 +289,15 @@ pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> Str
     )
 }
 
+// `drop(s);`: the value is moved into `std::mem::drop`, which drops it.
+pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String) -> String {
+    format!(
+        "{0}'s resource is moved into {1}, which drops it",
+        fmt_style(my_name),
+        fmt_style(fn_name)
+    )
+}
+
 // def fn(p):
 //  p
 //  |
