@@ -330,12 +330,7 @@ const Description: React.FC = () => (
         macro that only forwards a variable to <code>println!</code> and
         friends is shown as that read.
       </li>
-      <li>
-        A value a <code>loop</code> hands out with <code>break k</code> reaches
-        the variable only in <code>let r = loop {'{'} … {'}'};</code>, not in an
-        assignment, a tuple pattern or an argument.
-      </li>
-      <li>
+     <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}
         <code>break</code>/<code>continue</code> are drawn when it&apos;s in an{' '}
         <code>if</code>/<code>else</code> branch or a <code>match</code> arm, but not

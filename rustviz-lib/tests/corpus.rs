@@ -790,6 +790,7 @@ const EXPECTED_OK: &[&str] = &[
     "loop_break_value_moved",
     "loop_break_value_outer_var",
     "loop_break_value_labelled",
+    "loop_break_value_receivers",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8528,6 +8529,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["w goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "loop_break_value_receivers",
+        must_contain: &[
+            "Move from k to r",
+            "Move from x to a",
+            "Move from y to b",
+            "Move from z to take",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+        ],
     },
 ];
 
