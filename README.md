@@ -221,11 +221,11 @@ panic.
   columns are right).
 - `Rc`: clones are shown as independent owners that each drop the value;
   reference counting isn't modelled.
-- Tuples: creating one (`let t = (1, String::new());`) and reading a
-  field (`let a = t.0;`) produce no events, so a tuple that holds a
-  `String`, or a `String` moved out of one, is shown as "No resource is
-  dropped". Tuple structs (`struct Color(u8, u8, u8)`) render with a
-  column per field.
+- Tuples: creating one (`let t = (1, String::new());`), reading a
+  field (`let a = t.0;`) and writing one (`t.0 = 5;`) produce no events,
+  so a tuple that holds a `String`, or a `String` moved out of one, is
+  shown as "No resource is dropped". Tuple structs (`struct Color(u8,
+  u8, u8)`) render with a column per field.
 - Tuple destructuring assignment (`(a, b) = (b, a);`) draws an extra
   `lhs` column for the compiler's temporary.
 
