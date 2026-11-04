@@ -519,8 +519,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// "from p"), where marking every field moved would be wrong.
   fn propagate_struct_transfer(&mut self, line_num: usize, event: &ExternalEvent) {
     let (from, to, is_copy, id) = match event {
-      ExternalEvent::Move { from, to, id, is_partial: false } => (from, to, false, *id),
-      ExternalEvent::Copy { from, to, id, is_partial: false } => (from, to, true, *id),
+      ExternalEvent::Move { from, to, id, is_partial: false, .. } => (from, to, false, *id),
+      ExternalEvent::Copy { from, to, id, is_partial: false, .. } => (from, to, true, *id),
       _ => return,
     };
     let struct_name = |r: &ResourceTy| match r {
@@ -564,9 +564,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev_id = *self.unique_id;
         *self.unique_id += 1;
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         };
         self.add_external_event(line_num, ev);
       }
@@ -619,8 +619,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
-      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial },
+      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false },
@@ -809,7 +809,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let from_rap = rd.rap.to_owned();
       self.update_rap(&from_rap, line_num);
       let evt = if self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) { Evt::Copy } else { Evt::Move };
-      self.add_ev(line_num, evt, to_ro.clone(), ResourceTy::Value(from_rap), false);
+      let mut ev = self.ext_ev_of_evt(evt, to_ro.clone(), ResourceTy::Value(from_rap), *self.unique_id, false);
+      if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut ev {
+        *into_closure = true;
+      }
+      self.add_external_event(line_num, ev);
+      *self.unique_id += 1;
       drew_any = true;
     }
     drew_any

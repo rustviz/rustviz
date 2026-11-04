@@ -246,6 +246,25 @@ pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
     )
 }
 
+// Source dot for a by-value capture of a closure literal passed to a
+// call (`thread::spawn(move || ..v..)`). The resource goes into the
+// closure, and is dropped when the closure is, not when the call returns.
+pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String) -> String {
+    format!(
+        "{0}'s resource is moved into a closure passed to {1}; it's dropped when that closure is dropped",
+        fmt_style(my_name),
+        fmt_style(callee)
+    )
+}
+
+pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> String {
+    format!(
+        "{0}'s value is copied into a closure passed to {1}",
+        fmt_style(my_name),
+        fmt_style(callee)
+    )
+}
+
 // def fn(p):
 //  p
 //  |

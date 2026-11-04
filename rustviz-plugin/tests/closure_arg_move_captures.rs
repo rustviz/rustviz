@@ -10,6 +10,10 @@ struct P {
     age: u32,
 }
 
+fn apply<F: FnOnce() -> usize>(f: F) -> usize {
+    f()
+}
+
 fn main() {
     let v = vec![1, 2, 3];
     let n = 5;
@@ -26,4 +30,11 @@ fn main() {
     let h3 = thread::spawn(move || p.name.len());
     h3.join().unwrap();
     println!("{} {}", n, p.age);
+
+    let w = String::from("w");
+    let len = apply(move || w.len());
+    let o = Some(1);
+    let t = String::from("t");
+    let o2 = o.map(move |x| x + t.len());
+    println!("{} {:?}", len, o2);
 }
