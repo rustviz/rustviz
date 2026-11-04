@@ -102,6 +102,9 @@ pub struct Owner {
     /// (Move/StaticBorrow/MutableBorrow into `f`) and `f`'s scope-end
     /// to closure-flavoured tooltip text.
     pub is_closure: bool,
+    /// True iff this owner's type is a `union`. Dropping or writing to
+    /// a union never drops its fields (#191).
+    pub is_union: bool,
 }
 
 // when something is a struct member
@@ -306,6 +309,10 @@ impl ResourceAccessPoint {
     pub fn has_interior_mut(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { interior_mut: true, .. })
                      | ResourceAccessPoint::Struct(Struct { interior_mut: true, .. }))
+    }
+
+    pub fn is_union(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_union: true, .. }))
     }
 
     pub fn is_copy_owner(&self) -> bool {

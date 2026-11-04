@@ -1092,6 +1092,9 @@ fn render_dot(
                             append_drop_dot(drop_data, timeline_data, dots);
                             continue;
                         }
+                    } else if ro.is_union() && !is_copy {
+                        // A union never drops its fields (#191).
+                        data.title = hover_messages::event_dot_union_go_out_of_scope(&name);
                     } else if is_copy {
                         // Copy types have no Drop glue — going out of
                         // scope just reclaims storage. Render a plain
@@ -1148,7 +1151,10 @@ fn render_dot(
                     // per-capture target-side dots are suppressed
                     // (they'd stack on this one and the topmost
                     // tooltip would mask the rest).
-                    if let Event::Acquire { from: ResourceTy::Anonymous, is, .. } = event {
+                    let rap = &visualization_data.timelines[hash].resource_access_point;
+                    if let Some(title) = union_write_title(event, rap, &name, visualization_data, *hash) {
+                        data.title = title;
+                    } else if let Event::Acquire { from: ResourceTy::Anonymous, is, .. } = event {
                         if is.is_closure() {
                             let captures = collect_closure_captures(visualization_data, *hash, *line_number);
                             data.title = hover_messages::event_dot_closure_bind_with_captures(&name, &captures);
@@ -1496,6 +1502,49 @@ fn struct_partial_move_split(
         }
     }
     if moved.is_empty() { None } else { Some((moved, dropped)) }
+}
+
+// Smallest id among the events that give a column its value (Acquire /
+// Copy into it), searching branches too. Event ids follow source order,
+// so a later one is a write to a column that already holds a value.
+fn first_value_event_id(history: &[(usize, Event)]) -> Option<usize> {
+    history.iter().filter_map(|(_, e)| match e {
+        Event::Acquire { is: ResourceTy::Value(_), id, .. }
+        | Event::Copy { is: ResourceTy::Value(_), id, .. } => Some(*id),
+        Event::Branch { branch_history, .. } => branch_history.iter()
+            .filter_map(|b| first_value_event_id(&b.e_data)).min(),
+        _ => None,
+    }).min()
+}
+
+// Tooltip for a write to a union column that already holds a value
+// (`u.a = 5;`, `u.a = y;`): the union isn't (re)acquired or
+// initialized, and its old contents aren't dropped (#191).
+fn union_write_title(
+    event: &Event,
+    rap: &ResourceAccessPoint,
+    name: &String,
+    visualization_data: &VisualizationData,
+    hash: u64,
+) -> Option<String> {
+    if !rap.is_union() {
+        return None;
+    }
+    let (from, id, is_copy) = match event {
+        Event::Acquire { from, is: ResourceTy::Value(_), id } => (from, *id, false),
+        Event::Copy { from, is: ResourceTy::Value(_), id } => (from, *id, true),
+        _ => return None,
+    };
+    let first = first_value_event_id(&visualization_data.timelines.get(&hash)?.history)?;
+    if id <= first {
+        return None;
+    }
+    let source = match from {
+        ResourceTy::Value(r) | ResourceTy::Deref(r) if !matches!(r, ResourceAccessPoint::Function(_)) =>
+            Some((r.name(), is_copy)),
+        _ => None,
+    };
+    Some(hover_messages::event_dot_union_write(name, source))
 }
 
 fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, Event)>, id: usize) -> Option<& 'a TimelineColumnData> {

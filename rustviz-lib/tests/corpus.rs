@@ -309,6 +309,9 @@ const EXPECTED_OK: &[&str] = &[
     // A partially moved struct drops only its remaining fields (#207).
     "struct_partial_move_all",
     "struct_partial_move_nested",
+    // Union writes and scope end don't drop fields (#191).
+    "union_manually_drop",
+    "union_whole_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1692,9 +1695,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // have a statically-known active field.
         must_contain: &[
             "u acquires ownership of a resource",
-            // `u._a = y;` — the field write lands on u's column.
+            // `u._a = y;` — the field write lands on u's column. It's
+            // a write, not an initialization (#191).
             "Copy from y to u",
-            "u is initialized by copy from y",
+            "u is written to (copied from y); writing to a union never drops its old contents",
             // `let x = unsafe { u._a };` — a copy out of u.
             "Copy from u to x",
             "x is initialized by copy from u",
@@ -1718,6 +1722,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u._b, mutable",
             // The read / borrow must not lose their source.
             "x is bound to a value",
+            "u is initialized by copy from y",
             "Return immutably borrowed resource from r to *r",
         ],
     },
@@ -2677,6 +2682,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o goes out of scope. Its resource is dropped.",
             "o.inner goes out of scope. Its resource is dropped.",
             "q goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // ─── Unions never drop their fields (#191) ──────────────────────
+    TooltipExpect {
+        name: "union_manually_drop",
+        must_contain: &[
+            "slot acquires ownership of a resource",
+            "slot is written to; writing to a union never drops its old contents",
+            "slot goes out of scope. A union's fields are never dropped automatically.",
+        ],
+        must_not_contain: &[
+            "slot goes out of scope. Its resource is dropped.",
+            "slot acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "union_whole_assign",
+        must_contain: &[
+            "u is written to (copied from y); writing to a union never drops its old contents",
+            "u is written to; writing to a union never drops its old contents",
+            "u goes out of scope. A union's fields are never dropped automatically.",
+        ],
+        must_not_contain: &[
+            "u is initialized by copy from y",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "u goes out of scope. Its resource is dropped.",
         ],
     },
 ];
