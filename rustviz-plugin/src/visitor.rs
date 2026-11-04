@@ -1734,23 +1734,32 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let else_diverges = else_expr.is_some_and(|e| typeck.expr_ty(e).is_never());
         liveness.extend(self.keep_exit_drops(&mut if_ev, if_diverges));
         liveness.extend(self.keep_exit_drops(&mut else_ev, else_diverges));
+        // Variables declared inside a loop in a branch already go out
+        // of scope there (see scoped_in_events). A `return`'s drops
+        // (#363) are not that: they leave the enclosing scope.
+        let if_scoped = scoped_in_events(&if_ev, &self.exit_drops);
+        let else_scoped = scoped_in_events(&else_ev, &self.exit_drops);
         // Variables declared inside a branch (let-stmts within the
         // body, plus if-let pattern bindings) live only for that
         // branch — they're not pre-existing variables that need a
         // branched timeline. Subtract them out.
-        let declared_in_branches: HashSet<ResourceAccessPoint> = &if_decl | &else_decl;
+        let declared_in_branches: HashSet<ResourceAccessPoint> =
+          &(&if_decl | &else_decl) | &(&if_scoped | &else_scoped);
         liveness = &liveness - &declared_in_branches;
 
         // add gos events for variables declared in each block
-        for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
+        for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v)) {
           if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
 
-        for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v)) {
+        for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v)) {
           else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
+        if_decl.extend(if_scoped);
+        let mut else_decl = else_decl;
+        else_decl.extend(else_scoped);
 
         
         let if_map = create_line_map(&if_ev);
@@ -1855,6 +1864,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.inside_branch = true;
                 self.visit_expr(then_body);
                 self.inside_branch = prev;
+                // The body's `let`s go out of scope at its closing
+                // brace (#256); nothing else emits that for them.
+                let body_end = self.tcx.sess.source_map()
+                  .lookup_char_pos(then_body.span.hi()).line;
+                let decls = get_decl_of_expr(then_body, &self.tcx, &self.raps);
+                self.emit_scope_end(decls, body_end);
                 return;
               }
             }
@@ -1874,6 +1889,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.inside_branch = true;
             self.visit_block(block);
             self.inside_branch = prev;
+            // Same as the while arm: the body's `let`s end at its
+            // closing brace (#256).
+            let body_end = self.tcx.sess.source_map()
+              .lookup_char_pos(block.span.hi()).line;
+            let decls = get_decl_of_block(block, &self.tcx, &self.raps);
+            self.emit_scope_end(decls, body_end);
           }
           rustc_hir::LoopSource::ForLoop => {
             // For-loops are entered via the outer Match(ForLoopDesugar)
@@ -2164,7 +2185,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.inside_branch = false;
 
               all_pat_decls = &all_pat_decls | &pat_decls;
-              let arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
+              let mut arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
+              // Variables declared inside a loop in this arm already go
+              // out of scope there (see scoped_in_events).
+              let mut arm_scoped: HashSet<ResourceAccessPoint> = HashSet::new();
 
 
               // get events that occured in the arm: those handed out
@@ -2182,6 +2206,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // Values dropped at a `return` in the arm (#363).
                 let arm_diverges = self.tcx.typeck(arm.body.hir_id.owner).expr_ty(arm.body).is_never();
                 liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
+                arm_scoped = scoped_in_events(&branch_e_data, &self.exit_drops);
+                all_pat_decls = &all_pat_decls | &arm_scoped;
               }
 
               // add callback events - events that need to happen at the end of an arm block
@@ -2200,7 +2226,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
 
               // add gos events
-              for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v)) {
+              for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v)) {
                 let id = *self.unique_id;
                 *self.unique_id += 1;
                 let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
@@ -2211,6 +2237,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
               }
 
+              arm_decls.extend(arm_scoped);
               if !inline {
                 let branch_line_map = create_line_map(&branch_e_data);
                 // An arm of type `!` (`_ => unreachable!()`) never
@@ -2305,7 +2332,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 //   &v       ⇒ SBorrow from v
                 //   &mut v   ⇒ MBorrow from v
                 //   v (owned, non-Copy) ⇒ Move from v
-                //   anything else (Range, call result, …) ⇒ skip
+                //   anything else (Range, call result, …) ⇒ Bind (below)
                 let for_line = self.tcx.sess.source_map()
                   .lookup_char_pos(expr.span.lo()).line;
                 let iterand_evt = match head_arg.kind {
@@ -2412,15 +2439,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     *self.raps.get(&pat_name).unwrap().rap.hash());
 
                   // Emit the iterand event into the user's pattern binding.
+                  let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
                   if head_is_iterator {
                     // The iterator is moved into the loop; nothing is
                     // moved into (or borrowed by) the loop variable.
                     self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
-                    let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
                     self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
                   } else if let Some(e) = iterand_evt {
-                    let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
                     self.add_ev(for_line, e, to_rty, head_rty, false);
+                  } else {
+                    // A Range or a call result (`0..n`, `s.chars()`) has
+                    // no place to borrow or move from: each iteration's
+                    // value comes out of the iterator's `next()`. Give the
+                    // binding a plain Bind so its column starts at the
+                    // `for` line (#205).
+                    self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
                   }
                 } else {
                   // Composite patterns: bind every name in the pattern
@@ -2443,6 +2476,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // Visit body — events flow into the global timeline.
                 self.visit_expr(body_expr);
                 self.inside_branch = prev_inside_branch;
+
+                // The pattern bindings are fresh each iteration and,
+                // like the body's own `let`s, go out of scope at the
+                // body's closing brace (#205, #256). They're registered
+                // with is_global = false, so print_out_of_scope won't
+                // emit this for them.
+                let body_end = self.tcx.sess.source_map()
+                  .lookup_char_pos(body_expr.span.hi()).line;
+                let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
+                collect_pat_bindings(user_pat, &self.raps, &mut loop_decls);
+                self.emit_scope_end(loop_decls, body_end);
               }
             }
           }

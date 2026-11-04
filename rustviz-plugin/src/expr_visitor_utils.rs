@@ -272,7 +272,7 @@ pub fn num_derefs(expr: &Expr) -> usize{
 /// introduce, not just simple `let x = …;` shapes. Skips bindings
 /// that haven't been registered yet (e.g. names skipped by
 /// `visit_local`'s from_expansion guard).
-fn collect_pat_bindings(
+pub fn collect_pat_bindings(
   pat: &Pat,
   raps: &HashMap<String, RapData>,
   out: &mut HashSet<ResourceAccessPoint>,
@@ -610,6 +610,22 @@ pub fn borrow_span_of(expr: &Expr) -> Option<rustc_span::Span> {
     ExprKind::DropTemps(inner) => borrow_span_of(inner),
     _ => None,
   }
+}
+
+/// Variables whose scope already ends inside a branch's events: a
+/// `for` / `while` / `loop` body's `let`s, a `for` loop's pattern
+/// bindings and a `while let` binding all get their GoOutOfScope at the
+/// loop body's closing brace (`emit_scope_end`, `register_iflet_let_bindings`).
+/// A conditional containing such a loop treats them as declared in that
+/// branch: they're not live across it, and they need no second
+/// GoOutOfScope at the branch's end. The drops a `return` makes (#363,
+/// `exit_drops`, by event id) are excluded: they end variables of the
+/// enclosing scope too, which stay live in the branch.
+pub fn scoped_in_events(events: &[(usize, ExternalEvent)], exit_drops: &HashSet<usize>) -> HashSet<ResourceAccessPoint> {
+  events.iter()
+    .filter(|(_, ev)| !exit_drops.contains(&ev.get_id()))
+    .filter_map(|(_, ev)| ev.is_gos_ev().cloned())
+    .collect()
 }
 
 // Used for filtering events from the main event container
