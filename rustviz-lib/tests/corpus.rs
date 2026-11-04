@@ -6437,10 +6437,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // through `*w` drops the fields' old values too (#268).
         must_contain: &[
             "Move from String::from to r.a",
-            "the resource r points to is modified through r.a",
+            "the resource r points to is modified through r.a; its previous value is dropped",
+            // (r.n: an integer, nothing to drop.)
             "the resource r points to is modified through r.n",
-            "the resource r points to is modified through r.inner.v",
-            "the resource q points to is modified through q.v",
+            "the resource r points to is modified through r.inner.v; its previous value is dropped",
+            "the resource q points to is modified through q.v; its previous value is dropped",
             "s.a acquires ownership of a new resource; its previous resource is dropped",
             "s.inner.v acquires ownership of a new resource; its previous resource is dropped",
             "s.inner acquires ownership of a new resource; its previous resource is dropped",
