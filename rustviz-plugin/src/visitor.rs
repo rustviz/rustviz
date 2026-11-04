@@ -417,6 +417,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.visit_expr(&arg);
               self.match_arg(&arg, fn_name.clone());
             }
+            // `f(..)` with `f` a local closure: its body runs now,
+            // after the arguments are evaluated (#133).
+            self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
           }
         }
       }

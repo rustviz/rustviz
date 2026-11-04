@@ -531,6 +531,14 @@ pub fn collect_event_live_vars(
             // conditional's liveness set.
             ExternalEvent::GoOutOfScope { .. }
             | ExternalEvent::InitRefParam { .. } => {}
+            // A call of a closure inside the branch: the closure and
+            // the variables its body uses get the call's dots there.
+            ExternalEvent::ClosureCall { closure, uses, .. } => {
+                if let ResourceTy::Value(rap) = closure {
+                    out.insert(rap.clone());
+                }
+                out.extend(uses.iter().map(|(rap, _)| rap.clone()));
+            }
             _ => {
                 let (from, to) = ResourceAccessPoint_extract(ev);
                 for rty in [from, to] {

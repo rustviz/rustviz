@@ -235,7 +235,13 @@ rather than listed here.
   `RefCell`'s runtime borrows aren't shown, and a write through one
   (`*cell.borrow_mut() += 1`) shows only the `borrow_mut` call, as a
   read of `cell`.
-- Closures: captures are shown; events inside the closure body aren't.
+- Closures: captures are shown, and each call `f()` of a closure held
+  in a variable marks its body running there, on `f` and on each
+  variable `f` borrowed (whether the body reads it or can modify it).
+  The body's individual steps (the functions it calls, its own local
+  variables) aren't drawn, and neither are calls made elsewhere: a
+  closure passed to a function and called inside it, or one called
+  from another closure's body.
 - Loops (`for`, `while`, `loop`) show a single iteration.
 - Method chains (`a.get_mut().push(x)`): only the first call renders.
 - Match guards (`pat if cond =>`, `pat if let … =>`): the guard's events

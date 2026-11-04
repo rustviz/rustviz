@@ -707,9 +707,51 @@ fn render_dot(
         if is_closure_capture_event {
             continue;
         }
+        // A closure's capture borrow ending on the line of a call to
+        // it (the call is its last use) is folded into the call's dot
+        // below, which would otherwise be drawn on top of this one.
+        if closure_borrow_end_folded_into_call(history, *line_number, event) {
+            continue;
+        }
         //matching the event
         match event {
             Event::RefDie { .. } => {
+                continue;
+            }
+            Event::ClosureCall { is, borrowed, consumes, .. } => {
+                let ended = closure_borrows_ending_at(history, *line_number, is, borrowed);
+                let title = hover_messages::event_dot_closure_called(&is.real_name(), *consumes, &ended);
+                let data = EventDotData {
+                    hash: *hash as u64,
+                    dot_x: timeline_data.x_val,
+                    dot_y: get_y_axis_pos(*line_number),
+                    title,
+                };
+                append_dot(&data, output, timeline_data, registry);
+                continue;
+            }
+            Event::ClosureBodyUse { closure, is, kind, .. } => {
+                let borrow_ends = history.iter().find_map(|(l, e)| match e {
+                    Event::StaticReacquire { from, .. } if l == line_number && from == closure => Some(false),
+                    Event::MutableReacquire { from, .. } if l == line_number && from == closure => Some(true),
+                    _ => None,
+                });
+                let rap = is.extract_rap();
+                let title = hover_messages::event_dot_closure_body_use(
+                    &is.real_name(),
+                    &closure.name(),
+                    *kind,
+                    rap.map_or(false, |r| r.is_closure()),
+                    rap.map_or(false, |r| r.has_interior_mut()),
+                    borrow_ends,
+                );
+                let data = EventDotData {
+                    hash: *hash as u64,
+                    dot_x: timeline_data.x_val,
+                    dot_y: get_y_axis_pos(*line_number),
+                    title,
+                };
+                append_dot(&data, output, timeline_data, registry);
                 continue;
             }
             Event::Branch { is, branch_history, ty, merge_point, .. } => {
@@ -860,8 +902,12 @@ fn render_dot(
                         // render a plain OOS dot like a Copy type
                         // with the standard "f goes out of scope"
                         // message.
+                        // ...and only if the closure still holds them:
+                        // not after an `FnOnce` call used it up or it
+                        // was moved away (`let g = f;`); then there's
+                        // nothing left to drop.
                         let move_count = closure_move_capture_count(visualization_data, *hash);
-                        if move_count > 0 {
+                        if move_count > 0 && resource_hold {
                             let cx = timeline_data.x_val;
                             let cy = get_y_axis_pos(*line_number);
                             let title = hover_messages::event_dot_closure_go_out_of_scope(&name, move_count);
@@ -878,6 +924,9 @@ fn render_dot(
                             continue;
                         }
                         data.title = event.print_message_with_name(&mut name);
+                        if move_count > 0 {
+                            data.title.push_str(". No resource is dropped.");
+                        }
                     } else if !resource_hold {
                         // Resource was already moved out — same copy
                         // for both Copy and non-Copy types: just note
@@ -1107,6 +1156,40 @@ fn collect_closure_captures(
     out
 }
 
+// Names of the captured variables (`borrowed`) whose capture borrow
+// by `closure` ends (StaticDie / MutableDie on the closure's own
+// column) at `line`, in capture order.
+fn closure_borrows_ending_at(history: &Vec<(usize, Event)>, line: usize, closure: &ResourceTy, borrowed: &[ResourceTy]) -> Vec<String> {
+    borrowed.iter()
+        .filter(|b| history.iter().any(|(l, e)| match e {
+            Event::StaticDie { is, to, .. } | Event::MutableDie { is, to, .. } =>
+                *l == line && is == closure && to == *b,
+            _ => false,
+        }))
+        .map(|b| b.real_name())
+        .collect()
+}
+
+// True for a capture borrow's end, on either side (the closure's
+// StaticDie/MutableDie or the lender's Static/MutableReacquire), at a
+// line where the same column also has the matching closure-call dot
+// (ClosureCall / ClosureBodyUse). That dot's tooltip already says the
+// borrow ends, so this one isn't drawn.
+fn closure_borrow_end_folded_into_call(history: &Vec<(usize, Event)>, line: usize, event: &Event) -> bool {
+    match event {
+        // On the closure's column: only borrows it took as captures
+        // (not, e.g., a `&mut` argument passed at a call).
+        Event::StaticDie { is, to, .. } | Event::MutableDie { is, to, .. } if is.is_closure() =>
+            history.iter().any(|(l, e)| *l == line && matches!(e,
+                Event::ClosureCall { is: c, borrowed, .. } if c == is && borrowed.contains(to))),
+        // On the captured variable's column.
+        Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. } if from.is_closure() =>
+            history.iter().any(|(l, e)| *l == line && matches!(e,
+                Event::ClosureBodyUse { closure: c, .. } if c == from)),
+        _ => false,
+    }
+}
+
 // Count of upvars move-captured by the closure identified by
 // `closure_hash`. Zero ⇒ borrow-only or capture-less closure;
 // distinguishes the scope-end "captured resources are dropped"
@@ -1326,7 +1409,7 @@ fn render_arrow (
                     // somewhat redundant but have to filter out external events here
                     match e {
                         ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..} | ExternalEvent::InitRefParam { .. }
-                        | ExternalEvent::RefDie {..} => {}
+                        | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
                         _ => {
                             render_arrow(l, e,  output, visualization_data, resource_owners_layout, registry);
                         }
@@ -1847,7 +1930,7 @@ fn render_arrows_string_external_events_version(
         match external_event {
             // events that should be skipped (we don't render arrows for them)
             ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..}
-            | ExternalEvent::RefDie {..} => {}
+            | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
             // InitRefParam falls into render_arrow because owned-param
             // initializations get an L-shaped "ownership from caller"
             // arrow there. Ref params are filtered out inside

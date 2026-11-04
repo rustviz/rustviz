@@ -444,6 +444,77 @@ pub fn event_dot_closure_bind_with_captures(
     )
 }
 
+// A call `f(..)` of a closure binding, on `f`'s own column (#133).
+// The body runs at the call, not where the closure was written.
+// `consumes`: `f` is `FnOnce`, so the call uses it up.
+// `ended_borrows` names the variables whose capture borrow ends at
+// this call (NLL: the closure's last use), folding in the "f's
+// borrow ends" dot that would otherwise sit under this one. No "f
+// isn't used again": a call in a loop body is used again next
+// iteration, and loops are drawn as a single iteration.
+pub fn event_dot_closure_called(my_name: &String, consumes: bool, ended_borrows: &[String]) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let mut msg = format!("Closure {0} is called here, so its body runs now", my_name_fmt);
+    if consumes {
+        // `FnOnce`: the body moves a captured value out, so the
+        // closure can run only once and the call consumes it.
+        msg.push_str(&format!(
+            ". Its body moves out a value {0} captured, so {0} can only be called once; this call uses {0} up",
+            my_name_fmt));
+    }
+    match ended_borrows {
+        [] => {}
+        [one] => msg.push_str(&format!(
+            ". Its borrow of {0} ends after this call", fmt_style(one))),
+        many => {
+            let names: Vec<String> = many.iter().map(fmt_style).collect();
+            let (last, rest) = names.split_last().unwrap();
+            msg.push_str(&format!(
+                ". Its borrows of {0} and {1} end after this call",
+                rest.join(", "), last));
+        }
+    }
+    msg
+}
+
+// A call `f(..)` of a closure, on the column of a variable `f`
+// captured by reference (#133): the body that runs now uses it.
+// The capture kind is what rustc inferred from the whole body, so a
+// mutable capture says "can modify" (the write may sit in a branch
+// that doesn't run). `upvar_is_closure` / `interior_mut` avoid
+// "reads" where it would be misleading (calling a captured closure;
+// a `Cell`/`RefCell` modified through `&`). `borrow_ends` is
+// Some(is_mutable) when the capture borrow also ends at this call
+// (folding in the dot that would sit under this one).
+pub fn event_dot_closure_body_use(
+    my_name: &String,
+    closure_name: &String,
+    kind: crate::svg_generator::data::CaptureUse,
+    upvar_is_closure: bool,
+    interior_mut: bool,
+    borrow_ends: Option<bool>,
+) -> String {
+    use crate::svg_generator::data::CaptureUse;
+    let me = fmt_style(my_name);
+    let f = fmt_style(closure_name);
+    let mut msg = match kind {
+        CaptureUse::Read if upvar_is_closure || interior_mut => format!(
+            "Calling {0} runs its body, which uses {1} through {0}'s immutable borrow", f, me),
+        CaptureUse::Read => format!(
+            "Calling {0} runs its body, which reads {1} through {0}'s immutable borrow", f, me),
+        CaptureUse::Modify => format!(
+            "Calling {0} runs its body, which can modify {1} through {0}'s mutable borrow", f, me),
+        CaptureUse::ModifyThroughRef => format!(
+            "Calling {0} runs its body, which can modify the value {1} refers to", f, me),
+    };
+    if let Some(is_mut) = borrow_ends {
+        msg.push_str(&format!(
+            ". {0}'s {2} borrow of {1} ends after this call",
+            f, me, if is_mut { "mutable" } else { "immutable" }));
+    }
+    msg
+}
+
 // Closure-side dot when a `move`-captured upvar lands on `f`'s
 // timeline. Mirrors event_dot_acquire.
 pub fn event_dot_closure_capture_acquire(my_name: &String, from_name: &String) -> String {

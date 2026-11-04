@@ -369,6 +369,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExternalEvent::InitRefParam { param, .. } => {
         self.skip_raps.contains(param.name())
       }
+      // Skipped upvars are already left out of `uses` (see
+      // closure_call_events); only the closure itself matters here.
+      ExternalEvent::ClosureCall { closure, .. } => touches_ty(closure),
       // Branch events bundle child events; we don't recurse into
       // them here. A skipped variable that only appears inside a
       // branch could still leak through — fix when the need arises.
@@ -637,6 +640,93 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       from: arg, to: func, id, is_reborrow, result_has_lifetime,
     });
     *self.unique_id += 1;
+  }
+
+  /// After a call `callee(args)`: if `callee` names a local closure
+  /// binding (`let f = |..| ..; f(..)`), record that the closure's
+  /// body runs here (#133). The closure literal only captured its
+  /// variables; the body's reads and writes of them happen at each
+  /// call, so a closure called twice uses them twice and one that's
+  /// never called never does.
+  ///
+  /// We don't replay the body's individual events here. Doing so put
+  /// `show(&s)` arrows on the `f()` line as if `s` itself were being
+  /// lent again while already lent to `f` (which confused the
+  /// renderer's state tracking into "No resource is dropped"), gave
+  /// the body's own locals a column, and duplicated events from both
+  /// arms of an `if` in the body. Instead, each call gets one event
+  /// listing the variables captured by reference and how rustc's
+  /// capture analysis says the body uses them (read, or modify); the
+  /// renderer draws one dot per column. Variables captured by value
+  /// belong to the closure and get nothing here.
+  pub fn closure_call_events(&mut self, callee: &'tcx Expr<'tcx>, line_num: usize) {
+    let ExprKind::Path(QPath::Resolved(None, path)) = callee.kind else { return };
+    if !matches!(path.res, Res::Local(_)) {
+      return;
+    }
+    let typeck = self.tcx.typeck(callee.hir_id.owner);
+    let rustc_middle::ty::Closure(closure_def_id, closure_args) = typeck.expr_ty(callee).kind() else { return };
+    let Some(closure_local) = closure_def_id.as_local() else { return };
+    // The capture list names variables of the fn the closure was
+    // written in; only that fn's RAPs can stand for them.
+    if self.tcx.typeck_root_def_id(*closure_def_id) != callee.hir_id.owner.to_def_id() {
+      return;
+    }
+    let name = self.tcx.hir_name(path.segments[0].hir_id).as_str().to_owned();
+    let closure_rap = match self.raps.get(&name) {
+      Some(rd) if rd.rap.is_closure() => rd.rap.to_owned(),
+      _ => return,
+    };
+    // One entry per captured variable, in rustc's capture order
+    // (deterministic). Field captures (`|| p.x`) are attributed to the
+    // root variable like the capture events are; if several places of
+    // one variable are captured, the strongest use wins.
+    let mut uses: Vec<(ResourceAccessPoint, CaptureUse)> = Vec::new();
+    let closure_typeck = self.tcx.typeck(closure_local);
+    for capture in closure_typeck.closure_min_captures_flattened(closure_local) {
+      let upvar_hir_id = match capture.place.base {
+        rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
+        _ => continue,
+      };
+      // A write through a captured `&mut` reference (`|| r.push('a')`
+      // with `r: &mut String`) captures the place `*r`: mutably, or by
+      // a "unique immutable" borrow in older capture modes. Either way
+      // the body changes what `r` refers to, not `r`.
+      let through_deref = capture.place.projections.iter()
+        .any(|p| matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
+      let kind = match capture.info.capture_kind {
+        rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::Immutable) => CaptureUse::Read,
+        rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::Mutable) if !through_deref => CaptureUse::Modify,
+        rustc_middle::ty::UpvarCapture::ByRef(_) => CaptureUse::ModifyThroughRef,
+        // Owned by the closure since its definition.
+        rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse => continue,
+      };
+      let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+      if self.skip_raps.contains(&upvar_name) {
+        continue;
+      }
+      let Some(rd) = self.raps.get(&upvar_name) else { continue };
+      let rank = |k: CaptureUse| match k {
+        CaptureUse::Read => 0,
+        CaptureUse::ModifyThroughRef => 1,
+        CaptureUse::Modify => 2,
+      };
+      match uses.iter_mut().find(|(r, _)| r.name() == &upvar_name) {
+        Some((_, k)) => if rank(kind) > rank(*k) { *k = kind },
+        None => uses.push((rd.rap.to_owned(), kind)),
+      }
+    }
+    // An `FnOnce` closure's body moves a captured value out
+    // (`|| drop(s)`, `move || s`), so calling it consumes the closure.
+    let consumes = closure_args.as_closure().kind() == rustc_middle::ty::ClosureKind::FnOnce;
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line_num, ExternalEvent::ClosureCall {
+      closure: ResourceTy::Value(closure_rap),
+      uses,
+      consumes,
+      id,
+    });
   }
 
   // Return the ResourceTy that corresponds to the LHS of an assignment.

@@ -302,10 +302,11 @@ const Description: React.FC = () => (
     <p><strong>Simplified or not shown:</strong></p>
     <ul>
       <li>
-        Loops show one iteration; closures show their captures but not their
-        bodies; method chains show only the first call; a match guard&apos;s
-        events appear only in its own arm; <code>async</code>/<code>await</code>{' '}
-        isn&apos;t visualized.
+        Loops show one iteration; calling a closure shows which captured
+        variables its body reads or can change, but not the body&apos;s
+        individual steps; method chains show only the first call; a match
+        guard&apos;s events appear only in its own arm;{' '}
+        <code>async</code>/<code>await</code> isn&apos;t visualized.
       </li>
       <li>
         Writes to a field through a reference (<code>self.n += 1</code> in a{' '}

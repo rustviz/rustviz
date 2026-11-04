@@ -247,6 +247,20 @@ const EXPECTED_OK: &[&str] = &[
     "match_guard_borrow",
     "match_guard_reads_binding",
     "match_guard_let_chain",
+    // A closure's body runs at each call: the closure and the
+    // variables it borrowed get a dot per call (#133).
+    "closure_call_twice",
+    "closure_call_fnmut",
+    "closure_call_move",
+    "closure_call_never",
+    "closure_call_in_match_arm",
+    "closure_call_two_captures",
+    "closure_call_through_mut_ref",
+    "closure_call_cell",
+    // Calling an `FnOnce` closure uses it up (#271).
+    "closure_call_fnonce_drop",
+    "closure_call_fnonce_return",
+    "closure_moved_to_binding",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1038,13 +1052,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // OOS message — there are no resources to drop. The borrow
         // returns at f's NLL last use (the call on the line after
         // the closure literal), not at the closure's lexical scope.
+        // That line is the call `f()`, whose dots say so (#133); the
+        // separate "borrow ends" dots would sit hidden under them.
         must_contain: &[
             "Move from String::from to s",
             "Closure capture (immutable borrow) from s to f",
             "Closure f captures: s (immutably borrowed)",
             "Return immutably borrowed resource from f to s",
-            "f's immutable borrow ends",
-            "s's resource is no longer immutably borrowed",
+            "Closure f is called here, so its body runs now. Its borrow of s ends after this call",
+            "Calling f runs its body, which reads s through f's immutable borrow. f's immutable borrow of s ends after this call",
             "f goes out of scope",
             // Borrow-only closure → f owns the closure value but
             // not any captured resource.
@@ -1100,13 +1116,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Same as the immutable case for scope-end: no resources
         // are dropped at the closure binding's OOS, and the
         // borrow returns at the closure's NLL last use.
+        // The borrow ends at the call `f()` (#133; see
+        // closure_borrow_imm).
         must_contain: &[
             "Move from String::from to s",
             "Closure capture (mutable borrow) from s to f",
             "Closure f captures: s (mutably borrowed)",
             "Return mutably borrowed resource from f to s",
-            "f's mutable borrow ends",
-            "s's resource is no longer mutably borrowed",
+            "Closure f is called here, so its body runs now. Its borrow of s ends after this call",
+            "Calling f runs its body, which can modify s through f's mutable borrow. f's mutable borrow of s ends after this call",
             "f goes out of scope",
             "f owns a closure",
         ],
@@ -2184,6 +2202,165 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "words's resource is moved",
             "s's resource is moved",
+        ],
+    },
+    // ─── A closure's body runs at each call (#133) ──────────────────
+    // Each call `f()` of a local closure gets a dot on `f`'s column
+    // and one on each variable `f` captured by reference, saying how
+    // the body uses it (from rustc's capture kind). When the capture
+    // borrow ends at that call (NLL: f's last use), the call's dots
+    // say so too, instead of separate "borrow ends" dots that would
+    // be drawn underneath them.
+    TooltipExpect {
+        name: "closure_call_twice",
+        // Two calls: the body reads `s` at each of them, not at the
+        // closure's definition.
+        must_contain: &[
+            "Calling f runs its body, which reads s through f's immutable borrow",
+            "Closure f is called here, so its body runs now",
+            "Calling f runs its body, which reads s through f's immutable borrow. f's immutable borrow of s ends after this call",
+            "Closure f is called here, so its body runs now. Its borrow of s ends after this call",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            // Folded into the call's dots.
+            "f's immutable borrow ends",
+            "s's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_fnmut",
+        // The body can modify `s` through the closure's mutable
+        // borrow; `s` keeps owning (and finally drops) its String.
+        // Replaying the body's `push_str(&mut s)` on `s`'s column
+        // while `s` was lent to the closure (#158's first version)
+        // ended with "No resource is dropped".
+        must_contain: &[
+            "Calling push runs its body, which can modify s through push's mutable borrow",
+            "Closure push is called here, so its body runs now",
+            "Calling push runs its body, which can modify s through push's mutable borrow. push's mutable borrow of s ends after this call",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped.",
+            "s's resource is mutably borrowed by push_str",
+            "push's mutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_move",
+        // `move`: `f` owns its own `s`, so the calls are marked on
+        // `f` only; the variable `s` gave its String away at the
+        // capture. A `Fn` closure isn't used up by calling it, so it
+        // still drops its captured String at scope end.
+        must_contain: &[
+            "Closure f is called here, so its body runs now",
+            "s's resource is captured (moved) by closure f",
+            "s goes out of scope. No resource is dropped.",
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Calling f runs its body, which reads s",
+            "through f's immutable borrow",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_never",
+        // Never called → the body never runs.
+        must_contain: &[
+            "s's resource is captured (immutably borrowed) by closure _f",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "is called here",
+            "runs its body",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_in_match_arm",
+        // The call sits in a match arm: its dots go in that arm's
+        // column on the call's line (where the borrow also ends).
+        must_contain: &[
+            "Calling f runs its body, which reads s through f's immutable borrow. f's immutable borrow of s ends after this call",
+            "Closure f is called here, so its body runs now. Its borrow of s ends after this call",
+        ],
+        must_not_contain: &[
+            "f's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_two_captures",
+        must_contain: &[
+            "Calling f runs its body, which can modify a through f's mutable borrow. f's mutable borrow of a ends after this call",
+            "Calling f runs its body, which reads b through f's immutable borrow. f's immutable borrow of b ends after this call",
+            "Closure f is called here, so its body runs now. Its borrows of a and b end after this call",
+        ],
+        must_not_contain: &[
+            "f's mutable borrow ends",
+            "f's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_through_mut_ref",
+        // `r.push('a')` in the body changes the String r refers to;
+        // r itself isn't reassigned.
+        must_contain: &[
+            "Calling f runs its body, which can modify the value r refers to. f's mutable borrow of r ends after this call",
+        ],
+        must_not_contain: &[
+            "which can modify r through",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_cell",
+        // A Cell captured by immutable borrow can still be changed
+        // (`c.set(2)`), so the body "uses" it rather than "reads" it.
+        must_contain: &[
+            "Calling f runs its body, which uses c through f's immutable borrow. f's immutable borrow of c ends after this call",
+        ],
+        must_not_contain: &[
+            "which reads c",
+        ],
+    },
+    // ─── Calling an FnOnce closure uses it up (#271) ────────────────
+    TooltipExpect {
+        name: "closure_call_fnonce_drop",
+        // `|| drop(s)` moves its capture out, so it's FnOnce: the
+        // call consumes `f`, and `s`'s String is dropped inside the
+        // call, not when `f` goes out of scope.
+        must_contain: &[
+            "Closure f is called here, so its body runs now. Its body moves out a value f captured, so f can only be called once; this call uses f up",
+            "f goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_fnonce_return",
+        // The call hands the captured String to `t`.
+        must_contain: &[
+            "Closure f is called here, so its body runs now. Its body moves out a value f captured, so f can only be called once; this call uses f up",
+            "f goes out of scope. No resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_moved_to_binding",
+        // `let g = f;` moves the closure (and the String it owns) to
+        // `g`; only `g` drops it. Calling `g` (a `Fn` closure)
+        // doesn't use it up.
+        must_contain: &[
+            "Closure g is called here, so its body runs now",
+            "f goes out of scope. No resource is dropped.",
+            "g goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "this call uses g up",
         ],
     },
 ];
