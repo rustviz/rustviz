@@ -778,6 +778,9 @@ const EXPECTED_OK: &[&str] = &[
     //   borrows (#391); tooltips pinned below.
     "holder_match_pattern",
     "holder_iflet_call",
+    // A `let` inside a `match` arm lives in that arm only (#425).
+    "match_arm_let_local",
+    "match_arm_let_owned_move",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8404,6 +8407,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from x to *x",
             "Return immutably borrowed resource from n to *n",
             "Return immutably borrowed resource from y to get",
+        ],
+    },
+    TooltipExpect {
+        name: "match_arm_let_local",
+        // `first` is declared in the `_` arm: no branched column, no
+        // "no value yet" strips, no split dot, no false merge text (#425).
+        must_contain: &[
+            "first immutably borrows a resource",
+            "first goes out of scope",
+        ],
+        must_not_contain: &[
+            "first is live in a conditional expression ",
+            "first holds an immutable reference; it can read the borrowed resource",
+            "first was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when first goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_arm_let_owned_move",
+        // `s` is moved in one arm, so its merge dot may say so; `t` lives
+        // in the other arm only, so it never does, and it is dropped there.
+        must_contain: &[
+            "s is live in a conditional expression ",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "t is live in a conditional expression ",
+            "t was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when t goes out of scope.",
+            "t goes out of scope. No resource is dropped.",
         ],
     },
 ];
