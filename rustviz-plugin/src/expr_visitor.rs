@@ -3183,14 +3183,13 @@ pub fn print_out_of_scope(&mut self){
           let ev = self.preprocessed_events.remove(i);
           if path[0].0 > i { path[0].0 -= 1; }
           // Arrows listed together on a line are drawn one below the
-          // other, with a blank row added per extra arrow. At the top
-          // level that count comes from `event_line_map`, which holds
-          // arrows between two variables only. An arm's `line_map`
-          // holds every arrow, a call's borrow of the reference too
-          // (`r.push(…)`; #419), so listing the event there would add
-          // a blank row the top level didn't. List it only when it was
-          // stacked with other arrows at the top level; otherwise it's
-          // drawn as the first arrow on its line, as it was.
+          // other, with a blank row added per extra arrow. List this
+          // event in the arm's line map only when it was stacked with
+          // other arrows at the top level (`event_line_map`, which holds
+          // arrows between two variables); otherwise it's drawn as the
+          // first arrow on its line. Listing it always would add a blank
+          // row beside arm-only arrows the top level never counted, e.g.
+          // a pattern's own copy (Book `c8_03_vec_get_match`).
           let stacked = self.event_line_map.get(&ev.0).is_some_and(|evs| evs.len() > 1);
           insert_in_arm(self.preprocessed_events, &path, ev, stacked);
         }
@@ -3653,7 +3652,7 @@ fn insert_in_arm(
     return insert_in_arm(&mut arm.e_data, rest, ev, in_line_map);
   }
   let at = arm.e_data.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
-  if in_line_map && ev.1.is_arrow_ev() {
+  if in_line_map && ev.1.is_var_arrow_ev() {
     arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
   }
   arm.e_data.insert(at, ev);

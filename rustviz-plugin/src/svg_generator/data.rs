@@ -697,7 +697,7 @@ pub fn string_of_branch(b: &BranchType, index: usize) -> String {
 pub fn create_line_map(v: &Vec<(usize, ExternalEvent)>) -> BTreeMap<usize, Vec<ExternalEvent>> {
     let mut res: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     for (l, e) in v {
-        if e.is_arrow_ev() {
+        if e.is_var_arrow_ev() {
             res.entry(*l).and_modify(|v| {v.push(e.clone())}).or_insert(vec![e.clone()]);
         }
     }
@@ -993,6 +993,23 @@ impl ExternalEvent {
             &ExternalEvent::MutableBorrow {..} | &ExternalEvent::MutableDie {..} => true,
             _ => false
         }
+    }
+
+    /// An arrow between two variables, the only arrows the line maps
+    /// hold: `ExprVisitor::add_external_event` keeps arrows to and from
+    /// functions, to the caller and between anonymous values out of
+    /// `event_line_map`, and an arm's line map must agree with it, since
+    /// the renderer adds a blank row per extra arrow on a line (#419).
+    pub fn is_var_arrow_ev(&self) -> bool {
+        if !self.is_arrow_ev() {
+            return false;
+        }
+        let (from, to) = ResourceAccessPoint_extract(self);
+        let plain = |t: &ResourceTy| matches!(
+            t,
+            ResourceTy::Value(r) if !matches!(r, ResourceAccessPoint::Function(_))
+        ) || matches!(t, ResourceTy::Deref(_));
+        plain(from) && plain(to)
     }
 
     pub fn is_gos_ev(&self) -> Option<&ResourceAccessPoint> {
