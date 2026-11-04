@@ -423,6 +423,8 @@ const EXPECTED_OK: &[&str] = &[
     "ref_reassign_wording",
     "long_ref_field_label",
     "long_ref_label_then_short",
+    // Element / slice borrows through a reference are reborrows (#407).
+    "index_reborrow_through_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4117,6 +4119,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r is initialized by copy from s",
             "m is bound to a mutable reference",
             "t is initialized by copy from first",
+        ],
+    },
+    // ─── Element / slice borrows through a reference (#407) ─────────
+    TooltipExpect {
+        name: "index_reborrow_through_ref",
+        // `&mut rv[0]`, `add(&mut rv[0])`, `rv[0].push(..)` and
+        // `&r[1..]` borrow through the reference; `&mut w[0]` borrows
+        // the owner w.
+        must_contain: &[
+            "Mutable reborrow from rv to e",
+            "add reads from/writes to rv (mutable reborrow — rv can't be used until add returns)",
+            "push reads from/writes to rv (mutable reborrow — rv can't be used until push returns)",
+            "Mutable borrow from w to f",
+            "Immutable reborrow from r to sl",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from rv to e",
+            "add reads from/writes to rv",
+            "push reads from/writes to rv",
+            "Mutable reborrow from w to f",
+            "Immutable borrow from r to sl",
         ],
     },
 ];

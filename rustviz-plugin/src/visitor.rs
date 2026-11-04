@@ -155,9 +155,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   // r; decide by the `&mut` operand, as match_arg
                   // does for `f(&mut s)` (#367).
                   let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
+                  // `rv[0].push(..)` / `p.name.push(..)` with rv / p
+                  // a `&mut`: the autoref'd place is reached through
+                  // the reference, so this reborrows it too (#407).
                   let is_reborrow = match rcvr.kind {
                     ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, typeck),
-                    _ => is_implicit_mut_reborrow(rcvr, typeck),
+                    _ => is_implicit_mut_reborrow(rcvr, typeck) || is_explicit_reborrow(rcvr, typeck),
                   };
                   let result_has_lifetime = call_result_has_lifetime(expr, typeck);
                   self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref);

@@ -622,12 +622,30 @@ pub fn innermost_addr_of_operand<'tcx>(expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tc
   }
 }
 
-/// True iff `operand` (the expression under a `&` / `&mut`) is `*e`
-/// with `e` a reference — i.e. the borrow is an explicit reborrow.
-/// `*b` for a `Box` or `*s` via an overloaded `Deref` impl is not.
+/// True iff `operand` (the expression under a `&` / `&mut`, or a
+/// method receiver) is a place reached through a reference, so that
+/// borrowing it is a reborrow:
+/// - `*e` with `e` a reference (`&mut *r`). `*b` for a `Box` or `*s`
+///   via an overloaded `Deref` impl is not.
+/// - an index or field whose base is a reference, which rustc
+///   auto-dereferences (#407): `&mut rv[0]` is
+///   `IndexMut::index_mut(&mut *rv, 0)`, `&r[1..]` borrows through r,
+///   and `&p.name` is `&(*p).name`. Also when the base is itself such
+///   a place (`&mut rv[0].name`, `&(*r).name`).
+/// `&mut v[0]` / `&s.name` on an owner `v` / `s` are plain borrows, and
+/// so is `&(&r).s`: the reference there is a temporary made on the
+/// spot, so the borrow is of r.s itself, not through a reference
+/// variable.
 pub fn is_explicit_reborrow(operand: &Expr, typeck: &TypeckResults) -> bool {
   match operand.kind {
     ExprKind::Unary(UnOp::Deref, inner) => typeck.expr_ty(inner).is_ref(),
+    ExprKind::Index(base, _, _) | ExprKind::Field(base, _) => {
+      let base_is_ref_place = typeck.expr_ty(base).is_ref() && matches!(
+        base.kind,
+        ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)
+      );
+      base_is_ref_place || is_explicit_reborrow(base, typeck)
+    }
     _ => false,
   }
 }
