@@ -637,6 +637,83 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 }
 
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Emit a GoOutOfScope at a `return` for each local that is in
+  /// scope there and still owns a resource (#363): Rust drops them
+  /// when the function returns. Copy values and references own
+  /// nothing to drop. A local named in the returned expression is
+  /// left out: it may be what's returned (moved to the caller).
+  /// Locals declared inside a branch already get their own
+  /// GoOutOfScope at the branch's end.
+  fn drop_locals_on_return(&mut self, ret_expr: &'tcx Expr<'tcx>, ret: Option<&'tcx Expr<'tcx>>) {
+    struct LocalNames<'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, names: HashSet<String> }
+    impl<'tcx> Visitor<'tcx> for LocalNames<'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Path(QPath::Resolved(_, p)) = e.kind {
+          if let Res::Local(id) = p.res {
+            self.names.insert(self.tcx.hir_name(id).to_string());
+          }
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let mut returned = LocalNames { tcx: self.tcx, names: HashSet::new() };
+    if let Some(e) = ret {
+      returned.visit_expr(e);
+    }
+    let line = expr_to_line(ret_expr, &self.tcx);
+    // Sorted, so the events' order (and ids) don't depend on HashMap
+    // iteration order.
+    let mut owned: Vec<(String, ResourceAccessPoint)> = self.raps.iter()
+      .filter(|(name, rd)| {
+        let base = name.split('.').next().unwrap_or(name);
+        !rd.rap.is_copy() && rd.is_global && rd.scope >= line
+          && !returned.names.contains(base) && !self.skip_raps.contains(*name)
+      })
+      .map(|(name, rd)| (name.clone(), rd.rap.clone()))
+      .collect();
+    owned.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, rap) in owned {
+      if !self.rap_holds_resource_now(&name) && !self.param_never_moved(&name) {
+        continue;
+      }
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.exit_drops.insert(id);
+      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id });
+    }
+  }
+
+  /// A by-value parameter that nothing has moved out of yet. Its
+  /// ownership starts with an `InitRefParam`, which
+  /// `rap_holds_resource_now` doesn't count.
+  fn param_never_moved(&self, name: &str) -> bool {
+    fn moved_from(events: &[(usize, ExternalEvent)], name: &str) -> bool {
+      events.iter().any(|(_, e)| match e {
+        ExternalEvent::Move { from, .. } => from.extract_rap().map_or(false, |r| r.name() == name),
+        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| moved_from(&b.e_data, name)),
+        _ => false,
+      })
+    }
+    let is_param = self.preprocessed_events.iter().any(|(_, e)| matches!(e,
+      ExternalEvent::InitRefParam { param, .. } if param.name() == name));
+    is_param && !moved_from(self.preprocessed_events, name)
+  }
+
+  /// Keep a `return`'s drops (`drop_locals_on_return`) only in a
+  /// branch that diverges, i.e. one that always leaves through them;
+  /// in one that doesn't (the `return` is in a nested `if` without
+  /// `else`), they'd end the branch's columns for the paths that go
+  /// on. Returns the variables they make live in the branch.
+  pub fn keep_exit_drops(&self, events: &mut Vec<(usize, ExternalEvent)>, diverges: bool) -> HashSet<ResourceAccessPoint> {
+    events.retain(|(_, e)| diverges || !self.exit_drops.contains(&e.get_id()));
+    events.iter()
+      .filter(|(_, e)| self.exit_drops.contains(&e.get_id()))
+      .filter_map(|(_, e)| e.is_gos_ev().cloned())
+      .collect()
+  }
+}
+
 impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
   // A fn body
   fn visit_body(&mut self, body: &rustc_hir::Body<'tcx>) -> Self::Result {
@@ -1545,6 +1622,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
         collect_event_live_vars(&if_ev, &mut liveness);
         collect_event_live_vars(&else_ev, &mut liveness);
+        // A branch of type `!` (`return`, `panic!()`) never reaches
+        // the merge (#296). Values dropped at a `return` in it (#363)
+        // are live in it.
+        let typeck = self.tcx.typeck(expr.hir_id.owner);
+        let if_diverges = typeck.expr_ty(if_expr).is_never();
+        let else_diverges = else_expr.is_some_and(|e| typeck.expr_ty(e).is_never());
+        liveness.extend(self.keep_exit_drops(&mut if_ev, if_diverges));
+        liveness.extend(self.keep_exit_drops(&mut else_ev, else_diverges));
         // Variables declared inside a branch (let-stmts within the
         // body, plus if-let pattern bindings) live only for that
         // branch — they're not pre-existing variables that need a
@@ -1599,11 +1684,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           _ if collapsed => (if_end, merge),
           _ => (if_end, merge_minus_one),
         };
-        // A branch of type `!` (`return`, `panic!()`) never reaches
-        // the merge (#296).
-        let typeck = self.tcx.typeck(expr.hir_id.owner);
-        let if_diverges = typeck.expr_ty(if_expr).is_never();
-        let else_diverges = else_expr.is_some_and(|e| typeck.expr_ty(e).is_never());
         let (b_labels, b_slices, b_branches) = match else_expr {
           Some(_) => {
             let else_map = create_line_map(&else_ev);
@@ -1947,6 +2027,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // contribute events-touched variables to liveness; the
                 // arm's own pat-decls are subtracted at the end.
                 collect_event_live_vars(&branch_e_data, &mut liveness);
+                // Values dropped at a `return` in the arm (#363).
+                let arm_diverges = self.tcx.typeck(arm.body.hir_id.owner).expr_ty(arm.body).is_never();
+                liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
               }
 
               // add callback events - events that need to happen at the end of an arm block
@@ -2177,6 +2260,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         }
       }
       
+      // `return e`: leaving the function drops every value it still
+      // owns (#363). Inside a branch, those drops are drawn on the
+      // branch's columns, at the `return`.
+      ExprKind::Ret(ret) => {
+        intravisit::walk_expr(self, expr);
+        if self.inside_branch {
+          self.drop_locals_on_return(expr, ret);
+        }
+      }
+
       _ => {
         intravisit::walk_expr(self, expr);
       }

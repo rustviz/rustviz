@@ -313,6 +313,13 @@ const Description: React.FC = () => (
         visualized.
       </li>
       <li>
+        Values dropped when a function leaves early are drawn for a{' '}
+        <code>return</code> that ends an <code>if</code>/<code>else</code>{' '}
+        branch or a <code>match</code> arm, but not for <code>panic!()</code>,{' '}
+        <code>break</code>/<code>continue</code>, or a <code>return</code> in an{' '}
+        <code>if</code> without <code>else</code>.
+      </li>
+      <li>
         Writes to a field through a reference (<code>self.n += 1</code> in a{' '}
         <code>&amp;mut self</code> method) aren&apos;t drawn. A write to an
         element (<code>v[i] = x</code>) is drawn on <code>v</code>&apos;s column,

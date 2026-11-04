@@ -239,6 +239,13 @@ rather than listed here.
   …)`), what it captures by value is drawn as moved / copied into the
   call; what it captures by reference (`apply(|x| x + k)`) isn't drawn.
 - Loops (`for`, `while`, `loop`) show a single iteration.
+- Leaving a function early drops every value it still owns, where it
+  leaves. That's drawn for a `return` that ends an `if`/`else` branch
+  or a `match` arm, but not for `panic!()` / `unreachable!()` (the
+  values are dropped while the panic unwinds), `break` / `continue`
+  (locals declared inside the loop are dropped), a `return` in an `if`
+  without `else`, or a variable used in the returned expression
+  (`return s.len()` drops `s`).
 - Method chains (`v.iter().map(f).collect()`): only the first call
   has `v` as its receiver and is drawn on `v`'s column. Each later
   call's receiver is the previous call's result, a temporary with no

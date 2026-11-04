@@ -185,6 +185,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // the If / Match arm of `visit_expr` can put those events in the
   // right branch (`branch_ids`).
   pub rhs_arm_ids: HashMap<rustc_hir::HirId, (usize, usize)>,
+
+  // Ids of the GoOutOfScope events emitted at a `return` inside a
+  // branch for the values still owned there (#363). They make their
+  // variables live in that branch (an ordinary scope-end GoOutOfScope
+  // doesn't), and are kept only in a branch that diverges: see
+  // `keep_exit_drops`.
+  pub exit_drops: std::collections::HashSet<usize>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -2170,6 +2177,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
 
 // add GOS events for RAPs in the current scope  
 pub fn print_out_of_scope(&mut self){
+  // A `return` whose drops never got folded into a diverging branch
+  // (a bare `return` in a loop body, an `if` without `else`, a
+  // single-arm match) is drawn as before, without them: on the
+  // function's own column they'd cut it short for the other paths.
+  let exit_drops = std::mem::take(&mut self.exit_drops);
+  self.preprocessed_events.retain(|(_, e)| !exit_drops.contains(&e.get_id()));
   // Visit RAPs in declaration order, not `self.raps`' hash order, so
   // the GoOutOfScope events (and their ids) come out the same on
   // every run (#211).

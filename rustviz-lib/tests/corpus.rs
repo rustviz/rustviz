@@ -453,6 +453,10 @@ const EXPECTED_OK: &[&str] = &[
     // columns (#239); a struct param's reference field borrows from
     // the caller (#351).
     "nested_fields_params_patterns",
+    // Values still owned at a `return` in a branch are dropped there
+    // (#363); a `let` in a match arm is dropped at the arm's end (#409).
+    "return_in_arm_drops",
+    "match_arm_with_let",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4371,14 +4375,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "diverging_branch_stops",
-        // The `return` branch ends in a bar instead of converging into
-        // the merge dot (#317); `branches_that_diverge_stop_short`
-        // checks the geometry.
+        // The `return` branch doesn't converge into the merge dot
+        // (#317): `t`'s and `s`'s columns in it end at the `return`,
+        // where both are dropped (#363), so there's no bar.
+        // `return_drops_what_the_branch_owns` counts the drops.
         must_contain: &[
+            "t goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
             "This branch stops here: it returns, panics, breaks or continues, so it never \
              reaches the end of the conditional, and t's column doesn't either",
         ],
-        must_not_contain: &[],
     },
     TooltipExpect {
         name: "match_diverging_arm",
@@ -4519,6 +4527,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e.part acquires ownership of a resource",
             "e.part is the owner of the resource",
         ],
+    },
+    // #363: leaving the function from a match arm drops what it
+    // still owns, at the `return`.
+    TooltipExpect {
+        name: "return_in_arm_drops",
+        must_contain: &["v goes out of scope. Its resource is dropped."],
+        // w was moved into `keep` before the `return`.
+        must_not_contain: &["w goes out of scope. No resource is dropped."],
+    },
+    // #409: the arm-local `s` owns its String until the arm's end.
+    TooltipExpect {
+        name: "match_arm_with_let",
+        must_contain: &["s goes out of scope. Its resource is dropped."],
+        must_not_contain: &["s goes out of scope. No resource is dropped."],
     },
 ];
 
@@ -4918,7 +4940,9 @@ fn svg_lines(svg: &str) -> Vec<(f64, f64, f64, f64)> {
 /// a short bar, and nothing leaves its column below that bar.
 #[test]
 fn branches_that_diverge_stop_short() {
-    for (name, bars) in [("diverging_branch_stops", 1), ("match_diverging_arm", 3)] {
+    // `diverging_branch_stops` has no bar since #363: its returning
+    // branch's columns end with drops at the `return`.
+    for (name, bars) in [("diverging_branch_stops", 0), ("match_diverging_arm", 3)] {
         let rv = run_with_local_backend(name);
         let timeline = rv.timeline_panel_string();
         let bar_tags: Vec<&str> = timeline
@@ -5535,6 +5559,30 @@ fn guard_that_moves_is_refused() {
     let msg = err.to_string();
     assert!(msg.contains("match guards that move or assign a variable declared outside the guard (`s`"),
         "expected the guard-move refusal, got:\n{}", msg);
+}
+
+/// A `return` inside a branch drops every value the function still owns
+/// right there (#363), so those values get a second drop dot, on the
+/// returning branch, besides the one at the end of the function. A
+/// value moved away before the `return` gets none there.
+#[test]
+fn return_drops_what_the_branch_owns() {
+    for (name, expected) in [
+        ("diverging_branch_stops", &[("s", 2), ("t", 1)][..]),
+        ("return_in_arm_drops", &[("v", 2), ("w", 1)][..]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let tooltips = timeline_tooltips(&rv.timeline_panel_string());
+        for (var, count) in expected {
+            let drop = format!("{} goes out of scope. Its resource is dropped.", var);
+            assert_eq!(
+                tooltips.iter().filter(|t| **t == drop).count(),
+                *count,
+                "{}: expected {:?} {} time(s), tooltips were:\n  {}",
+                name, drop, count, tooltips.join("\n  ")
+            );
+        }
+    }
 }
 
 /// Column header labels in one row as (x, visible text), left to right.
