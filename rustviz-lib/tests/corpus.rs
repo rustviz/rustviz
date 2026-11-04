@@ -462,6 +462,8 @@ const EXPECTED_OK: &[&str] = &[
     // A pattern-bound struct's fields live and die with it, inside its
     // `if let` / match arm / `while let` (#405).
     "pattern_struct_fields_scope",
+    // A write to a place with no column states the old value's drop (#458).
+    "place_without_column",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4601,6 +4603,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y.n has no value yet",
             "z.part has no value yet",
             "z.k has no value yet",
+        ],
+    },
+    // ─── Writes to places with no column (#458) ──────────────────────
+    TooltipExpect {
+        name: "place_without_column",
+        // `t.0 = …` and `v.last_mut().unwrap().name = …` overwrite a
+        // String: the old one is dropped, and the tooltip on the
+        // variable's column says so. `t.1 = 2` overwrites an integer,
+        // which has nothing to drop.
+        must_contain: &[
+            "t's resource is modified through t.0; the value previously in t.0 is dropped",
+            "t's resource is modified through t.1",
+            "v's resource is modified through v.last_mut().unwrap().name; the value previously in v.last_mut().unwrap().name is dropped",
+            "u's resource is modified through u.0 (moved from s); the value previously in u.0 is dropped",
+            "Move from String::from to t.0",
+            "Move from s to u.0",
+        ],
+        must_not_contain: &[
+            "the value previously in t.1 is dropped",
         ],
     },
 ];

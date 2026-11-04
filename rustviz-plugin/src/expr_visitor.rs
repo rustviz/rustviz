@@ -874,8 +874,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             return self.raps.get(&name).map(|rd| ResourceTy::Value(rd.rap.to_owned()));
           }
         }
-        let name = expr_to_rap_name(expr, &self.tcx)?;
-        self.raps.get(&name).map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+        match expr_to_rap_name(expr, &self.tcx).and_then(|name| self.raps.get(&name)) {
+          Some(rd) => Some(ResourceTy::Value(rd.rap.to_owned())),
+          // A field with no column of its own (`t.0` of a tuple).
+          None => self.place_without_column(expr),
+        }
       }
       ExprKind::Unary(UnOp::Deref, exp) => {
         let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
@@ -900,8 +903,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if elem_ty.is_ref() {
           return None;
         }
-        let name = expr_to_rap_name(expr, &self.tcx)?;
-        let rap = self.raps.get(&name)?.rap.to_owned();
+        let Some(name) = expr_to_rap_name(expr, &self.tcx) else { return self.place_without_column(expr) };
+        let Some(rap) = self.raps.get(&name).map(|rd| rd.rap.to_owned()) else { return self.place_without_column(expr) };
         if rap.is_fn() {
           return None;
         }
@@ -921,11 +924,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         };
         Some(ResourceTy::Index(rap, place, write))
       }
-      // Any other place expression: not modelled, skipped.
-      _ => {
-        warn!("unsupported assignment LHS shape; skipping assignment at this location");
-        None
-      }
+      // Any other place expression (`v.last_mut().unwrap().name`, ...).
+      _ => self.place_without_column(expr),
     }
   }
 
@@ -1026,6 +1026,56 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let ExprKind::Path(ref qpath) = callee.kind else { return false };
     let res = self.tcx.typeck(callee.hir_id.owner).qpath_res(qpath, callee.hir_id);
     matches!(res, rustc_hir::def::Res::Def(_, def_id) if self.tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def_id))
+  }
+
+  /// A write to a place that has no column of its own (`t.0 = …` on a
+  /// tuple, `v.last_mut().unwrap().name = …`): the write goes on the
+  /// column of the variable the place is reached from, like an element
+  /// write `v[i] = …` (#458), so a tooltip there can say the old value
+  /// is dropped. None when the place isn't reached from a local with a
+  /// column, or holds a reference (overwriting one drops nothing and
+  /// would start a borrow we don't track).
+  fn place_without_column(&mut self, expr: &'tcx Expr) -> Option<ResourceTy> {
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let ty = typeck.node_type(expr.hir_id);
+    if ty.is_ref() {
+      warn!("unsupported assignment LHS shape; skipping assignment at this location");
+      return None;
+    }
+    // Walk down to the variable the place is reached from. Through a
+    // method call (`v.last_mut().unwrap()`) the result must borrow
+    // from something, or the place may not be v's at all.
+    let mut cur = expr;
+    let rap = loop {
+      match cur.kind {
+        ExprKind::Field(base, _) | ExprKind::Index(base, _, _) | ExprKind::Unary(UnOp::Deref, base) => cur = base,
+        ExprKind::MethodCall(_, rcvr, _, _) if call_result_has_lifetime(cur, typeck) => cur = rcvr,
+        ExprKind::Path(_) => {
+          let name = expr_to_rap_name(cur, &self.tcx)?;
+          break self.raps.get(&name)?.rap.to_owned();
+        }
+        _ => return None,
+      }
+    };
+    if rap.is_fn() {
+      return None;
+    }
+    let place = match self.tcx.sess.source_map().span_to_snippet(expr.span) {
+      Ok(text) if !expr.span.from_expansion() && text.chars().count() <= 32
+        && !text.contains(|c: char| matches!(c, '<' | '>' | '&' | '"' | '\'' | '\n' | '\r')) => text,
+      _ => format!("{}.…", rap.name()),
+    };
+    // A plain `=` over a value that needs drop drops it; the caller
+    // turns this into `Update` for `op=`.
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+    let write = if self.tcx.type_is_copy_modulo_regions(env, ty) {
+      PlaceWrite::AssignCopy
+    } else if ty.needs_drop(self.tcx, env) {
+      PlaceWrite::AssignDropsOld
+    } else {
+      PlaceWrite::AssignOwned
+    };
+    Some(ResourceTy::Index(rap, place, write))
   }
 
   /// How an element place (`v[i]`) is named in tooltips: its source

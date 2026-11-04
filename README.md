@@ -257,13 +257,19 @@ rather than listed here.
   still ran first, but the later arm's column doesn't show it.
 - `if let` chains in an `if` condition (`if let Some(a) = x && let
   Some(b) = y`): the bindings and their uses aren't shown.
-- Assignments to a place that has no column of its own aren't drawn: a
-  field through a reference (`self.n += 1` in a `&mut self` method,
-  `c.n = …` where `c: &mut T`), a field of a method's result
-  (`v.last_mut().unwrap().n = 5`), or an element that is itself a
-  reference (`v[i] = &s`). A value moved into such a place is still
-  shown as moved. Fields of a local struct, including chained ones
-  (`o.inner.x = …`), are drawn.
+- Assignments to a place that has no column of its own are drawn on
+  the column of the variable the place is reached from, as a
+  modification of its resource, like an element write: a tuple field
+  (`t.0 = …`), a field of a method's result
+  (`v.last_mut().unwrap().n = 5`). The tooltip says the old value is
+  dropped when its type needs drop, but the drop is not drawn on a
+  column. Not drawn: a field through a reference (`self.n += 1` in a
+  `&mut self` method, `c.n = …` where `c: &mut T`), a place that holds
+  a reference (`v[i] = &s`, `h.r = &x`: overwriting a reference drops
+  nothing), and a place not reached from a local variable. A value
+  moved into such a place is still shown as moved. Fields of a local
+  struct, including chained ones (`o.inner.x = …`), have columns of
+  their own.
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
   through `r: &mut Vec<_>`) is drawn on the collection's column as a
   modification of its resource; elements have no columns of their own,
