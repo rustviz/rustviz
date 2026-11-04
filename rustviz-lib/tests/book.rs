@@ -303,8 +303,6 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c5_04_struct_update",
-        status: Wrong,
-        note: "`..user1` partially moves user1 (user1.username goes to user2), but user1's own column still says its resource is dropped; only user1.email is (#207)",
         must_contain: &[
             "Move from String::from to user2.email",
             "Move from user1.username to user2.username",
@@ -312,12 +310,13 @@ const BOOK: &[Snippet] = &[
             "user2.username goes out of scope. Its resource is dropped.",
             "user1.email goes out of scope. Its resource is dropped.",
             "user2.email goes out of scope. Its resource is dropped.",
+            "user1 goes out of scope. user1.username was moved out earlier, so only user1.email is dropped.",
         ],
         must_not_contain: &[
             "user1.username goes out of scope. Its resource is dropped.",
             "user2.username goes out of scope. No resource is dropped.",
+            "user1 goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["user1 goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -345,8 +344,6 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c5_07_method_self_consume",
-        status: Wrong,
-        note: "into_name moves self.name out, so nothing of self is left to drop at L8, but self's column says its resource is dropped (#207)",
         must_contain: &[
             "self acquires ownership from the caller",
             "self.name's resource is moved to the caller",
@@ -355,12 +352,13 @@ const BOOK: &[Snippet] = &[
             "Move from into_name to n",
             "p goes out of scope. No resource is dropped.",
             "p.name goes out of scope. No resource is dropped.",
+            "self goes out of scope. self.name was moved out earlier, so no resource is dropped.",
         ],
         must_not_contain: &[
             "p goes out of scope. Its resource is dropped.",
             "p.name goes out of scope. Its resource is dropped.",
+            "self goes out of scope. Its resource is dropped.",
         ],
-        known_wrong: &["self goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
