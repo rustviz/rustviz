@@ -777,6 +777,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 }
 
+/// Whether `loop_expr` (a `loop`) has a `break value` that leaves it.
+fn loop_has_break_value<'tcx>(loop_expr: &'tcx Expr<'tcx>) -> bool {
+  struct Find { id: HirId, found: bool }
+  impl<'tcx> Visitor<'tcx> for Find {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Break(dest, Some(_)) = e.kind {
+        if dest.target_id == Ok(self.id) {
+          self.found = true;
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find { id: loop_expr.hir_id, found: false };
+  intravisit::walk_expr(&mut f, loop_expr);
+  f.found
+}
+
 /// Names of the locals that evaluating `e` for its value may move out
 /// of, wholly or in part (a field), so a `return e` / `break e` may
 /// hand them on rather than drop them. One that `e` only borrows
@@ -3182,6 +3200,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // (no loop) drops nothing drawn here.
       ExprKind::Break(dest, value) => {
         intravisit::walk_expr(self, expr);
+        // `let r = loop { break k; }`: `r` gets `k` (#431).
+        if let (Ok(target), Some(value)) = (dest.target_id, value) {
+          if let Some((_, lhs, evt)) = self.break_binds.iter().rev().find(|(id, ..)| *id == target).cloned() {
+            self.match_rhs(lhs, value, evt);
+          }
+        }
         if let Ok(target) = dest.target_id {
           self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), "break");
         }
@@ -3771,6 +3795,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let init_is_branching = !is_skipped
       && match init.kind {
         ExprKind::If(..) => true,
+        // `let r = loop { … break k; }`: the `break`s hand `r` its
+        // value as they're visited (#431), so `r` is bound first.
+        ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => loop_has_break_value(init),
         ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) => false,
         ExprKind::Match(..) => true,
         _ => false,
@@ -3783,6 +3810,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
         self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), init);
       }
+      self.break_binds.retain(|(id, ..)| *id != init.hir_id);
     } else {
       if !is_skipped {
         self.visit_expr(init);

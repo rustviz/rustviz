@@ -277,6 +277,9 @@ rather than listed here.
   loop's variable is drawn bound at the `for` line and going out of
   scope at the body's closing brace, like the body's own `let`s; Rust
   creates it afresh each iteration.
+- The value a `loop` hands out with `break k` is given to the variable in
+  `let r = loop { … };` only: an assignment (`r = loop { … }`), a tuple
+  pattern or an argument still show `k` as unmoved.
 - Leaving early drops what is left behind, right there: a `return` or
   a panic (`panic!()`, `unreachable!()`, `todo!()`, which unwind) drops
   every value the function still owns, a `break` / `continue` the

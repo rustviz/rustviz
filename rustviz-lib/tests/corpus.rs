@@ -786,6 +786,10 @@ const EXPECTED_OK: &[&str] = &[
     // An exit drops an unbound temporary (#457) only while its
     // statement is running.
     "exit_temporary_drops",
+    // `let r = loop { … break k; }` gives `r` the value (#431).
+    "loop_break_value_moved",
+    "loop_break_value_outer_var",
+    "loop_break_value_labelled",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8492,6 +8496,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This branch stops here: it returns, panics, breaks or continues, so it never \
              reaches the end of the conditional, and (temporary)'s column doesn't either",
         ],
+    },
+    // ─── `let r = loop { … break k; }` (#431) ───────────────────────
+    TooltipExpect {
+        name: "loop_break_value_moved",
+        must_contain: &[
+            "Move from k to r",
+            "r acquires ownership of a resource",
+            "r goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["r goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "loop_break_value_outer_var",
+        // `break s` moves `s`; `break n * 2` copies.
+        must_contain: &[
+            "Move from s to r",
+            "r goes out of scope. Its resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+            "doubled is bound to a value",
+        ],
+        must_not_contain: &[
+            "r goes out of scope. No resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_value_labelled",
+        must_contain: &[
+            "Move from String::from to w",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["w goes out of scope. No resource is dropped."],
     },
 ];
 
