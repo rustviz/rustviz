@@ -284,6 +284,9 @@ const EXPECTED_OK: &[&str] = &[
     // A Copy result of a method chain on a reference is a plain Copy
     // binding, also on the line where the reference's borrow ends (#190).
     "method_chain_ref_copy_result",
+    // Straight arrows hop over the dots they cross (#252); the
+    // crossing check itself runs on every snippet in this list.
+    "arrow_hops_over_dots",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2535,6 +2538,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "arrow_hops_over_dots",
+        // The arrows and the dots they cross (#252). Tooltip text is
+        // unchanged by the hop; `arrows_hop_over_dots_they_cross`
+        // checks the geometry. Listed so the fixture keeps
+        // exercising a crossing: if a dot disappears, this fails.
+        must_contain: &[
+            "Return mutably borrowed resource from r to x",
+            "y's resource is copied",
+            "Move from p to q",
+            "p.name's resource is moved",
+            "p.email's resource is moved",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -2593,6 +2611,13 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         timeline.contains("tooltip-trigger"),
         "{}: timeline has no tooltip-trigger elements (annotations missing)",
         name
+    );
+    let crossed = arrows_crossing_dots(&timeline);
+    assert!(
+        crossed.is_empty(),
+        "{}: straight arrow(s) drawn across event dots, hiding their tooltips: {:?}",
+        name,
+        crossed
     );
     for (panel, svg) in [("code", &code), ("timeline", &timeline)] {
         let off = off_canvas_ys(svg);
@@ -2667,6 +2692,106 @@ fn off_canvas_ys(svg: &str) -> Vec<String> {
         rest = &after[end.min(after.len())..];
     }
     out
+}
+
+/// Value of attribute `name` in the start tag `tag` (`<circle cx=".." ..`).
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!(" {}=\"", name);
+    let start = tag.find(&key)? + key.len();
+    let len = tag[start..].find('"')?;
+    Some(&tag[start..start + len])
+}
+
+/// Start tags of every `<kind ...>` element in `svg`.
+fn start_tags<'a>(svg: &'a str, kind: &str) -> Vec<&'a str> {
+    let open = format!("<{} ", kind);
+    svg.match_indices(&open)
+        .map(|(i, _)| &svg[i..i + svg[i..].find('>').unwrap_or(svg.len() - i)])
+        .collect()
+}
+
+/// Centres of the event dots in a timeline panel (every `<circle>`;
+/// drop dots are a circle plus a triangle).
+fn dot_centres(svg: &str) -> Vec<(f64, f64)> {
+    start_tags(svg, "circle")
+        .into_iter()
+        .filter_map(|t| Some((attr(t, "cx")?.parse().ok()?, attr(t, "cy")?.parse().ok()?)))
+        .collect()
+}
+
+/// Straight horizontal arrows (gray two-point `<polyline>` shafts) that
+/// run through the centre of an event dot strictly between their two
+/// ends. Arrows are drawn after dots, so such an arrow covers the dot
+/// and steals its hover: the dot's tooltip can't be read (#252).
+fn arrows_crossing_dots(svg: &str) -> Vec<String> {
+    let dots = dot_centres(svg);
+    let mut out = Vec::new();
+    for t in start_tags(svg, "polyline") {
+        if attr(t, "stroke") != Some("gray") {
+            continue;
+        }
+        let pts: Vec<f64> = attr(t, "points")
+            .unwrap_or("")
+            .split(|c: char| c == ' ' || c == ',')
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        if pts.len() != 4 || pts[1] != pts[3] {
+            continue;
+        }
+        let (lo, hi, y) = (pts[0].min(pts[2]), pts[0].max(pts[2]), pts[1]);
+        for &(cx, cy) in &dots {
+            if cy == y && lo < cx && cx < hi {
+                out.push(format!("arrow {}..{} at y={} crosses dot at x={}", lo, hi, y, cx));
+            }
+        }
+    }
+    out
+}
+
+/// A straight arrow that would cross event dots is drawn as a `<path>`
+/// with a half-circle hop over each of them (#252). The hops must sit
+/// on the crossed dots and bulge upward, whichever way the arrow runs.
+#[test]
+fn arrows_hop_over_dots_they_cross() {
+    let rv = run_with_local_backend("arrow_hops_over_dots");
+    let timeline = rv.timeline_panel_string();
+    assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new());
+    let dots = dot_centres(&timeline);
+    let hop_paths: Vec<&str> = start_tags(&timeline, "path")
+        .into_iter()
+        .filter(|t| attr(t, "stroke") == Some("gray"))
+        .filter_map(|t| attr(t, "d"))
+        .filter(|d| d.contains(" A "))
+        .collect();
+    // `*r = y;` runs leftwards over one dot; `let q = p;` runs
+    // rightwards over two.
+    let (mut left, mut right) = (0, 0);
+    for d in &hop_paths {
+        let tok: Vec<&str> = d.split_whitespace().collect();
+        let num = |i: usize| tok[i].parse::<f64>().unwrap();
+        let (mut x, mut y) = (num(1), num(2));
+        let mut i = 3;
+        while i < tok.len() {
+            match tok[i] {
+                "L" => { x = num(i + 1); y = num(i + 2); i += 3; }
+                "A" => {
+                    // A rx ry rotation large-arc sweep x y
+                    let (sweep, end_x) = (tok[i + 5], num(i + 6));
+                    let rightwards = end_x > x;
+                    if rightwards { right += 1 } else { left += 1 }
+                    // SVG's y axis points down: sweep 1 is clockwise, so
+                    // left -> top -> right bulges up when going right.
+                    assert_eq!(sweep, if rightwards { "1" } else { "0" }, "hop bulges downward: {}", d);
+                    let mid = (x + end_x) / 2.0;
+                    assert!(dots.contains(&(mid, y)), "hop at x={} y={} isn't over a dot: {}", mid, y, d);
+                    x = end_x;
+                    i += 8;
+                }
+                other => panic!("unexpected path command {:?} in {}", other, d),
+            }
+        }
+    }
+    assert_eq!((left, right), (1, 2), "hops (leftwards, rightwards) in {:?}", hop_paths);
 }
 
 /// Extract every tooltip text from a rendered timeline panel.
