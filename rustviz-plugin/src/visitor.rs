@@ -664,6 +664,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let line = expr_to_line(ret_expr, &self.tcx);
     // Sorted, so the events' order (and ids) don't depend on HashMap
     // iteration order.
+    #[expect(clippy::disallowed_methods, reason = "sorted by name below")]
     let mut owned: Vec<(String, ResourceAccessPoint)> = self.raps.iter()
       .filter(|(name, rd)| {
         let base = name.split('.').next().unwrap_or(name);
