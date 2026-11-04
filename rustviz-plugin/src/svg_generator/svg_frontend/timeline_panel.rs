@@ -1089,7 +1089,7 @@ fn render_dot(
                                 p2x: cx + 3, p2y: cy - 1,
                                 p3x: cx,     p3y: cy + 3,
                             };
-                            append_drop_dot(&drop_data, output, timeline_data, registry);
+                            append_drop_dot(drop_data, timeline_data, dots);
                             continue;
                         }
                     } else if is_copy {
