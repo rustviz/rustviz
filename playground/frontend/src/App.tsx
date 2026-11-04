@@ -313,7 +313,8 @@ const Description: React.FC = () => (
         drawn from the <code>for</code> line to the body&apos;s closing
         brace); closures show
         their captures but not their bodies (for a closure passed straight to
-        a function, only what it moves or copies in); in a method chain only
+        a function, what it moves or copies in, and what it borrows only if
+        that borrow ends with the call); in a method chain only
         the first call is drawn on the variable (later calls work on temporary
         results); a match guard&apos;s events appear only in its own arm;{' '}
         <code>async</code>/<code>await</code> aren&apos;t visualized.

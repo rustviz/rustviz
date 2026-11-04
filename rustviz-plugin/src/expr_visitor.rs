@@ -1190,37 +1190,73 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// || ..)`, `v.into_iter().for_each(move |x| ..)`): each variable it
   /// captures by value is moved (or, if Copy, copied) into the closure,
   /// which is handed to the callee, so draw it as moved / copied into
-  /// the call (#230). The closure itself has no column. By-reference
-  /// captures aren't drawn: whether their borrow ends with the call
-  /// depends on whether the callee keeps the closure (`map(|x| x + k)`
-  /// returns an iterator that still borrows `k`). Returns false if the
-  /// closure captures nothing by value, so the caller falls back to the
-  /// plain argument handling.
-  fn match_closure_arg(&mut self, closure: &'tcx rustc_hir::Closure<'tcx>, arg: &'tcx Expr, to_ro: &ResourceTy) -> bool {
+  /// the call (#230). The closure itself has no column.
+  ///
+  /// A by-reference capture borrows the variable for as long as the
+  /// closure (or whatever the callee keeps it in) is alive. When that
+  /// borrow is over by the closure's last line (`apply(|x| x + k)`,
+  /// `o.map(|x| x + k)`), it lasts only for the call, and is drawn
+  /// like a `&k` argument, as borrowed by "the closure passed to
+  /// apply" (#298). When it outlives the line (`let it =
+  /// v.iter().map(|x| x + k);`, consumed later), the plugin can't say
+  /// where the borrow went, so it isn't drawn. The end comes from the
+  /// MIR loan for the capture, as for `let f = || ...`.
+  ///
+  /// Returns false if nothing was drawn, so the caller falls back to
+  /// the plain argument handling.
+  fn match_closure_arg(&mut self, closure: &'tcx rustc_hir::Closure<'tcx>, arg: &'tcx Expr, to_ro: &ResourceTy, fn_name: &str) -> bool {
     let line_num = expr_to_line(&arg, &self.tcx);
+    let last_line = self.tcx.sess.source_map().lookup_char_pos(arg.span.hi()).line;
     let typeck = self.tcx.typeck(closure.def_id);
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner);
+    let mut mir_b_data = None;
     let mut drew_any = false;
     for capture in typeck.closure_min_captures_flattened(closure.def_id) {
-      if !matches!(capture.info.capture_kind,
-        rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse) {
-        continue;
-      }
       let upvar_hir_id = match capture.place.base {
         rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
         _ => continue,
       };
       let root = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
       let Some(from_rap) = self.capture_rap(&capture.place, &root) else { continue };
-      self.update_rap(&from_rap, line_num);
-      let evt = if self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) { Evt::Copy } else { Evt::Move };
-      let mut ev = self.ext_ev_of_evt(evt, to_ro.clone(), ResourceTy::Value(from_rap), *self.unique_id, false);
-      if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut ev {
-        *into_closure = true;
+      match capture.info.capture_kind {
+        rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse => {
+          self.update_rap(&from_rap, line_num);
+          let evt = if self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) { Evt::Copy } else { Evt::Move };
+          let mut ev = self.ext_ev_of_evt(evt, to_ro.clone(), ResourceTy::Value(from_rap), *self.unique_id, false);
+          if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut ev {
+            *into_closure = true;
+          }
+          self.add_external_event(line_num, ev);
+          *self.unique_id += 1;
+          drew_any = true;
+        }
+        rustc_middle::ty::UpvarCapture::ByRef(kind) => {
+          // The capture's loan is issued within the closure literal's
+          // lines and borrows the root variable; region.1 is the
+          // last line it's live on.
+          let loans = mir_b_data.get_or_insert_with(|| self.gather_borrow_data(self.bwf));
+          let last_live = loans.iter()
+            .filter(|b| (line_num..=last_line).contains(&b.region.0)
+              && b.borrowed_place.as_deref() == Some(root.as_str()))
+            .map(|b| b.region.1)
+            .max();
+          if !matches!(last_live, Some(l) if l <= last_line) {
+            continue;
+          }
+          let target_name = format!("the closure passed to {}", fn_name);
+          if !self.raps.contains_key(&fn_key(&target_name)) {
+            self.add_fn(target_name.clone());
+          }
+          let target = ResourceTy::Value(self.raps.get(&fn_key(&target_name)).unwrap().rap.to_owned());
+          self.update_rap(&from_rap, line_num);
+          match kind {
+            rustc_middle::ty::BorrowKind::Mutable =>
+              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No),
+            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), ImplicitRef::No, false),
+          }
+          drew_any = true;
+        }
       }
-      self.add_external_event(line_num, ev);
-      *self.unique_id += 1;
-      drew_any = true;
     }
     drew_any
   }
@@ -1569,7 +1605,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.add_fn(fn_name.clone());
     if let ExprKind::Closure(closure) = arg.kind {
       let to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
-      if self.match_closure_arg(closure, arg, &to_ro) {
+      if self.match_closure_arg(closure, arg, &to_ro, &fn_name) {
         return;
       }
     }
