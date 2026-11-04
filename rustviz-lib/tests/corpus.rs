@@ -292,6 +292,11 @@ const EXPECTED_OK: &[&str] = &[
     "arrow_tail_off_source_dot",
     // A borrow of a temporary whose borrow ends on the same line (#204).
     "borrow_of_temporary_same_line",
+    // Odd arm counts are laid out symmetrically, the middle arm on the
+    // column (#119); the layout itself is pinned by unit tests in
+    // timeline_panel.rs, these keep the shapes rendering on-canvas.
+    "match_five_arms",
+    "match_three_arms_nested_middle",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to

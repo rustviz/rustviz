@@ -397,10 +397,51 @@ fn compute_width(events: & mut Vec<(usize, Event)>) -> usize {
     max_width
 }
 
+// Centre x of each arm of a branch, in BRANCH_WEIGHT units relative to
+// the parent column. Shared by `compute_extent` (column reservation) and
+// `update_timeline_data` (actual placement) so the two can't drift.
+//
+// Even N: arms `[0, N/2)` fan out to the left of the parent and
+// `[N/2, N)` to the right, each pair of neighbours 2 units apart plus
+// the outer arm's width (2 arms: -1, +1; 4 arms: -3, -1, +1, +3).
+// Odd N >= 3: the middle arm sits on the parent's centreline and the
+// others fan out from its left/right extent the same way (3 arms: -2, 0,
+// +2), so the layout is symmetric (#119). A lone arm (`if` without
+// `else`) stays offset to the right (+1) so it doesn't sit on top of the
+// parent. Requires `branch.width` to already be populated by
+// `compute_width`.
+fn branch_centers(branch_history: &[BranchData]) -> Vec<i64> {
+    let n = branch_history.len();
+    let halfway = n / 2;
+    let mut centers: Vec<i64> = vec![0; n];
+    // Where each side starts, which arm is first on the right, and the
+    // extra unit of clearance the arms next to the parent get when no
+    // middle arm sits between them.
+    let (mut left_run, mut right_run, right_start, inner_pad) = if n % 2 == 1 && n > 1 {
+        let (mid_left, mid_right) = compute_extent(&branch_history[halfway].e_data);
+        (-mid_left - 2, mid_right + 2, halfway + 1, 0)
+    } else {
+        (0, 0, halfway, 1)
+    };
+    for i in (0..halfway).rev() {
+        let padding = if i + 1 == halfway { inner_pad } else { 0 };
+        left_run -= branch_history[i].width as i64 + padding;
+        centers[i] = left_run;
+        left_run -= 2;
+    }
+    for i in right_start..n {
+        let padding = if i == right_start { inner_pad } else { 0 };
+        right_run += branch_history[i].width as i64 + padding;
+        centers[i] = right_run;
+        right_run += 2;
+    }
+    centers
+}
+
 // Returns (max_left, max_right) extent in BRANCH_WEIGHT units that any
-// nested branch leaf reaches from the timeline's center x. Mirrors the
-// halfway-style placement formula in `update_timeline_data`, then walks
-// each branch's recursive extent and maxes both sides separately.
+// nested branch leaf reaches from the timeline's center x. Uses the
+// placement in `branch_centers`, then walks each branch's recursive
+// extent and maxes both sides separately.
 //
 // `compute_width` returns a single sum-of-children value that's adequate
 // when the layout is symmetric, but nesting (e.g. an inner if/else inside
@@ -414,25 +455,7 @@ fn compute_extent(events: &Vec<(usize, Event)>) -> (i64, i64) {
     let mut max_right: i64 = 0;
     for (_, ev) in events {
         if let Event::Branch { branch_history, .. } = ev {
-            let n = branch_history.len();
-            let halfway = n / 2;
-            let mut centers: Vec<i64> = vec![0; n];
-
-            let mut running: i64 = 0;
-            for i in (0..halfway).rev() {
-                let padding = if i == halfway - 1 { 1 } else { 0 };
-                running += -(branch_history[i].width as i64 + padding);
-                centers[i] = running;
-                running -= 2;
-            }
-            running = 0;
-            for i in halfway..n {
-                let padding = if i == halfway { 1 } else { 0 };
-                running += branch_history[i].width as i64 + padding;
-                centers[i] = running;
-                running += 2;
-            }
-
+            let centers = branch_centers(branch_history);
             for (i, center) in centers.iter().enumerate() {
                 let (cl, cr) = compute_extent(&branch_history[i].e_data);
                 let left_leaf = -center + cl;
@@ -461,35 +484,11 @@ fn update_timeline_data(events: & mut Vec<(usize, Event)>, parent_data: &Timelin
                 // Math reduces to the same x-values as the old If
                 // layout for N=2, so use the generic path for every
                 // BranchType.
-                let mut parent_branch_data: Vec<TimelineColumnData> = Vec::new();
                 let _ = ty; // BranchType doesn't affect x-positioning
-                let halfway = branch_history.len() / 2;
-                let mut running_x = parent_data.x_val;
-                for i in (0..halfway).rev() {
-                    let b_data = branch_history.get_mut(i).unwrap();
-                    let b_width = b_data.width;
-                    let padding = if i == halfway - 1 { 1 } else { 0 };
-                    let left_side_coefficient = -1 * (b_width + padding) as i64;
-                    let x = left_side_coefficient * BRANCH_WEIGHT;
-                    running_x += x;
-                    b_data.t_data.x_val = running_x;
-                    running_x -= 2 * BRANCH_WEIGHT;
-                }
-                for i in 0..halfway {
-                    let b_data = branch_history.get(i).unwrap();
-                    parent_branch_data.push(b_data.t_data.clone());
-                }
-
-                running_x = parent_data.x_val;
-                for i in halfway..branch_history.len() {
-                    let b_data = branch_history.get_mut(i).unwrap();
-                    let b_width = b_data.width;
-                    let padding = if i == halfway { 1 } else { 0 };
-                    let right_side_coefficient = (b_width + padding) as i64;
-                    let x = right_side_coefficient * BRANCH_WEIGHT;
-                    running_x += x;
-                    b_data.t_data.x_val = running_x;
-                    running_x += 2 * BRANCH_WEIGHT;
+                let centers = branch_centers(branch_history);
+                let mut parent_branch_data: Vec<TimelineColumnData> = Vec::new();
+                for (b_data, center) in branch_history.iter_mut().zip(&centers) {
+                    b_data.t_data.x_val = parent_data.x_val + center * BRANCH_WEIGHT;
                     parent_branch_data.push(b_data.t_data.clone());
                 }
 
@@ -2856,4 +2855,73 @@ fn render_struct_box(
 
 fn get_y_axis_pos(line_number : usize) -> i64 {
     85 - LINE_SPACE + LINE_SPACE * line_number as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arm(e_data: Vec<(usize, Event)>) -> BranchData {
+        BranchData {
+            t_data: TimelineColumnData {
+                name: String::new(),
+                x_val: 0,
+                title: String::new(),
+                is_ref: false,
+                is_struct_group: false,
+                is_member: false,
+                owner: 0,
+            },
+            e_data,
+            width: 0,
+            states: Vec::new(),
+        }
+    }
+
+    /// A `Branch` event with `n` empty arms, its widths populated.
+    fn branch(arms: Vec<BranchData>) -> Vec<(usize, Event)> {
+        let mut events = vec![(0, Event::Branch {
+            is: ResourceTy::Anonymous,
+            branch_history: arms,
+            ty: BranchType::Match(Vec::new(), Vec::new()),
+            split_point: 0,
+            merge_point: 0,
+            id: 0,
+        })];
+        compute_width(&mut events);
+        events
+    }
+
+    fn centers_of(events: &[(usize, Event)]) -> Vec<i64> {
+        match &events[0].1 {
+            Event::Branch { branch_history, .. } => branch_centers(branch_history),
+            _ => unreachable!(),
+        }
+    }
+
+    fn leaves(n: usize) -> Vec<(usize, Event)> {
+        branch((0..n).map(|_| arm(Vec::new())).collect())
+    }
+
+    #[test]
+    fn arms_are_placed_symmetrically() {
+        // A lone arm (`if` without `else`) sits to the right.
+        assert_eq!(centers_of(&leaves(1)), vec![1]);
+        assert_eq!(centers_of(&leaves(2)), vec![-1, 1]);
+        // Odd counts used to skew right: [-1, 1, 3] (#119).
+        assert_eq!(centers_of(&leaves(3)), vec![-2, 0, 2]);
+        assert_eq!(centers_of(&leaves(4)), vec![-3, -1, 1, 3]);
+        assert_eq!(centers_of(&leaves(5)), vec![-4, -2, 0, 2, 4]);
+        assert_eq!(compute_extent(&leaves(3)), (2, 2));
+        assert_eq!(compute_extent(&leaves(5)), (4, 4));
+    }
+
+    #[test]
+    fn middle_arm_with_nested_branch_pushes_neighbours_out() {
+        // 3 arms, the middle one holding an if/else (leaves at -1, +1
+        // around it): the outer arms clear its leaves by 2 units.
+        let events = branch(vec![arm(Vec::new()), arm(leaves(2)), arm(Vec::new())]);
+        assert_eq!(centers_of(&events), vec![-3, 0, 3]);
+        assert_eq!(compute_extent(&events), (3, 3));
+    }
 }
