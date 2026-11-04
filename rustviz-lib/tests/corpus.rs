@@ -492,6 +492,9 @@ const EXPECTED_OK: &[&str] = &[
     "move_into_call_same_line_borrow_end",
     // A call's result nothing takes is a temporary, dropped at the end of its statement (#457).
     "unbound_temporary",
+    // A reference parameter's borrow end on a line shared with another
+    // arrow (#416).
+    "ref_param_end_shared_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5077,6 +5080,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from Some to (temporary 11)",
             "Move from String::from to (temporary 11)",
         ],
+    },
+    TooltipExpect {
+        name: "ref_param_end_shared_line",
+        // `r`'s last use is also `v`'s last use. The end event (from the
+        // parameter to the caller) isn't an arrow, so it used to be
+        // dropped when another arrow shared the line (#416).
+        must_contain: &[
+            "v's immutable borrow ends",
+            "v's mutable borrow ends",
+        ],
+        must_not_contain: &[],
     },
 ];
 
