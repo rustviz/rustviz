@@ -745,6 +745,10 @@ const EXPECTED_OK: &[&str] = &[
     // `take(p.x)`, `p.name.len()`, a returned `self.x`) are drawn on
     // the reference's column (#266).
     "field_read_through_ref",
+    // Mutable borrows of fields through a `&mut` (`&mut r.a`,
+    // `r.a.push_str(..)`) are reborrows on the reference's column, and
+    // a write through them drops the owner's field (#202, #323).
+    "field_mut_borrow_through_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7871,6 +7875,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "self's resource is copied to the caller",
             "p.x acquires ownership of a resource",
             "p.x is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "field_mut_borrow_through_ref",
+        // `&mut r.a` with r a `&mut S` reborrows the field through r.
+        // Before #202 nothing was drawn and f returned its borrow to
+        // itself (`*f`). A write through f (or through a reborrow
+        // chain) drops the old String on the owner's column `s.a`;
+        // before #323 a write through `r2 = &mut *r1` said the
+        // reference r1 "acquires ownership".
+        must_contain: &[
+            "Mutable reborrow from r.a to f",
+            "r.a's resource is mutably borrowed by f; r.a can't be used while the borrow is live",
+            "Return mutably borrowed resource from f to r.a",
+            "s.a acquires ownership of a new resource; its previous resource is dropped",
+            "push_str reads from/writes to r.a (mutable reborrow — r.a can't be used until push_str returns)",
+            "push reads from/writes to r.inner.v (mutable reborrow — r.inner.v can't be used until push returns)",
+            "Mutable reborrow from r.inner to q",
+            "Mutable reborrow from q.v to g",
+            "s.inner.v acquires ownership of a new resource; its previous resource is dropped",
+            "Mutable reborrow from p.a to f",
+            "push_str reads from/writes to p.a (mutable reborrow — p.a can't be used until push_str returns)",
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "u.a acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from f to *f",
+            "Return mutably borrowed resource from g to *g",
+            "r acquires ownership of a new resource; its previous resource is dropped",
+            "r1 acquires ownership of a new resource; its previous resource is dropped",
+            "q acquires ownership of a new resource; its previous resource is dropped",
+            "w acquires ownership of a new resource; its previous resource is dropped",
+            "r.a acquires ownership of a resource",
         ],
     },
 ];

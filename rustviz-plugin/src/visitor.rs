@@ -197,9 +197,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           match a.kind {
             Adjust::Borrow(AutoBorrow::Ref(m)) => {
               match m {
-                // `p.name.push_str(..)` through a reference is a
-                // mutable reborrow of the field, not drawn yet (#202).
-                AutoBorrowMutability::Mut{..} if matches!(rcvr_rty, ResourceTy::DerefField(..)) => {}
+                // `r.a.push_str(..)` with r a `&mut S`: a mutable
+                // reborrow of the field through r (#202).
+                AutoBorrowMutability::Mut{..} if matches!(rcvr_rty, ResourceTy::DerefField(..)) => {
+                  let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
+                  let result_has_lifetime = call_result_has_lifetime(expr, typeck);
+                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), true, result_has_lifetime, autoref);
+                }
                 AutoBorrowMutability::Mut{allow_two_phase_borrow: AllowTwoPhase::Yes} => {
                   // `r.push_str(..)` with r: `&mut String` is
                   // `String::push_str(&mut *r, ..)` — an implicit
@@ -1681,13 +1685,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
               }
               ResourceTy::Deref(p_rap) => {
-                // Deref reassign through a &mut — the lender is what
-                // holds the resource being overwritten. Borrow checker
-                // guarantees the lender currently holds (otherwise *p
+                // Deref reassign through a &mut — the owner p points to
+                // (found through its lender, and through reborrows:
+                // `let f = &mut r.a; *f = …` overwrites `s.a`) holds
+                // the resource being overwritten. Borrow checker
+                // guarantees it currently holds (otherwise *p
                 // wouldn't be a valid place to write to), so we don't
                 // need rap_holds_resource_now here.
-                self.borrow_map.get(p_rap.name())
-                  .and_then(|rd| rd.lender.extract_rap().cloned())
+                self.owner_behind_ref(p_rap, "")
               }
               ResourceTy::DerefField(p_rap, _, _) => {
                 // `r.a = v` after `let r = &mut s;`: the field being
@@ -1695,20 +1700,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // the old value is dropped (#152). Only when the lender
                 // is a local with per-field columns; a parameter's
                 // lender is the caller, which has no column here.
-                let lender = self.borrow_map.get(p_rap.name())
-                  .and_then(|rd| match &rd.lender {
-                    ResourceTy::Value(l) => Some(l.name().clone()),
-                    _ => None,
-                  });
-                let suffix = expr_to_rap_name(lhs_expr, &self.tcx)
+                expr_to_rap_name(lhs_expr, &self.tcx)
                   .and_then(|full| full.strip_prefix(p_rap.name().as_str()).map(str::to_owned))
-                  .filter(|sfx| sfx.starts_with('.'));
-                match (lender, suffix) {
-                  (Some(l), Some(sfx)) => self.raps.get(&format!("{}{}", l, sfx))
-                    .map(|rd| rd.rap.clone())
-                    .filter(|r| matches!(r, ResourceAccessPoint::Struct(_))),
-                  _ => None,
-                }
+                  .filter(|sfx| sfx.starts_with('.'))
+                  .and_then(|sfx| self.owner_behind_ref(p_rap, &sfx))
               }
               _ => None,
             }
