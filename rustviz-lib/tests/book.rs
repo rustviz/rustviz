@@ -570,12 +570,12 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_03_vec_get_match",
-        status: Wrong,
-        note: "the arm's `third` is a second variable, `third₂` (#173): a `&i32` copied out of the outer `third`; its borrow of `v` isn't shown (#171, #336)",
+        status: Correct,
         must_contain: &[
             "get reads from v (implicitly borrowed)",
             "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
             "L5 third₂ is initialized with a copy of third",
+            "L5 Immutable borrow from v to third₂: third₂ is a reference copied out of third",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -584,8 +584,8 @@ const BOOK: &[Snippet] = &[
             "=L5 Partial copy from third to third",
             "L5 third goes out of scope. No resource is dropped.",
             "L8 third goes out of scope. No resource is dropped.",
+            "L5 third₂'s immutable borrow ends (what it borrows from isn't shown)",
         ],
-        known_wrong: &["L5 third₂'s immutable borrow ends (what it borrows from isn't shown)"],
         ..E
     },
     Snippet {

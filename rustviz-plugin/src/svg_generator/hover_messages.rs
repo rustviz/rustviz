@@ -1313,13 +1313,23 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             func_fmt, list, either, kept, to_fmt
         );
     }
+    if let ViaCarrier::PatternBinding { from_call, moved } = carrier {
+        // `Some(x)` on `third` / on `v.get(2)` (#391): x is the
+        // reference stored in that value (copied, or moved for `&mut`).
+        let how = if moved { "moved" } else { "copied" };
+        return if from_call {
+            format!(": {0} is a reference {1} out of the value {2} returned", to_fmt, how, func_fmt)
+        } else {
+            format!(": {0} is a reference {1} out of {2}", to_fmt, how, func_fmt)
+        };
+    }
     // A value that isn't a reference (`let it = v.iter();`) or a
     // struct with a reference field can carry the borrow too (#336).
     let (noun, not_ref) = match carrier {
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
