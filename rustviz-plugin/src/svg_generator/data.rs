@@ -588,6 +588,12 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
+    // by hand. `md` itself stays in scope but must not be used again.
+    ManuallyDropByHand {
+        ro: ResourceAccessPoint,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -636,6 +642,7 @@ impl ExternalEvent {
             &ExternalEvent::MutableBorrow {id, ..} | &ExternalEvent::MutableDie {id,..} |
             &ExternalEvent::Branch { id, .. } | &ExternalEvent::GoOutOfScope { id , ..} |
             &ExternalEvent::OwnerDropAtReassign { id, .. } |
+            &ExternalEvent::ManuallyDropByHand { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. }=> id
@@ -782,6 +789,9 @@ pub enum Event {
     // rhs lands on the same line and immediately re-establishes
     // FullPrivilege.
     OwnerDropAtReassign,
+    // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
+    // hand. The owner is left in a moved-out-like state.
+    ManuallyDropByHand,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     InitRefParam {
@@ -813,7 +823,10 @@ pub enum State {
     // thus it is impossible to access this variable anymore.
     ResourceMoved {
         move_to: ResourceTy,
-        move_at_line: usize
+        move_at_line: usize,
+        // The value was dropped by `ManuallyDrop::drop` rather than
+        // moved anywhere (`move_to` is then Anonymous).
+        dropped_by_hand: bool
     },
     // This ResourceAccessPoint is the unique object that holds the ownership to the underlying resource.
     FullPrivilege {
@@ -847,7 +860,7 @@ impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result {
         match self {
             State::OutOfScope => write!(f, "OutOfScope"),
-            State::ResourceMoved { move_to: _, move_at_line: _ } => write!(f, "ResourceMoved"),
+            State::ResourceMoved { .. } => write!(f, "ResourceMoved"),
             State::FullPrivilege { .. } => write!(f, "FullPrivilege"),
             State::PartialPrivilege { .. } => write!(f, "PartialPrivilege"),
             State::RevokedPrivilege { .. } => write!(f, "RevokedPrivilege"),
@@ -881,7 +894,10 @@ impl State {
             State::OutOfScope => {
                 hover_messages::state_out_of_scope(my_name)
             }
-            State::ResourceMoved{ move_to , move_at_line: _ } => {
+            State::ResourceMoved{ dropped_by_hand: true, .. } => {
+                hover_messages::state_dropped_by_hand(my_name)
+            }
+            State::ResourceMoved{ move_to , move_at_line: _, .. } => {
                 safe_message(hover_messages::state_resource_moved, my_name, move_to)
             }
             State::FullPrivilege { s: LineState::Uninit } => {
@@ -1021,6 +1037,9 @@ impl Display for Event {
             Event::OwnerDropAtReassign => {
                 write!(f, "Previous resource is dropped at reassignment")
             },
+            Event::ManuallyDropByHand => {
+                write!(f, "Value is dropped by hand")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -1092,6 +1111,9 @@ impl Event {
             }
             Event::OwnerDropAtReassign => {
                 hover_messages::event_dot_owner_drop_at_reassign(my_name)
+            }
+            Event::ManuallyDropByHand => {
+                hover_messages::event_dot_manually_drop_by_hand(my_name)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -1473,7 +1495,7 @@ impl Visualizable for VisualizationData {
 
             // The current RAP's resource is moved
             (State::FullPrivilege{..}, Event::Move{to: to_ro,..}) =>
-                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line },
+                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
 
             // The current RAP reaquires a resource 
             (State::ResourceMoved{ .. }, Event::Acquire{ .. }) => {
@@ -1603,6 +1625,11 @@ impl Visualizable for VisualizationData {
             // preserve the previous state for any input — the dot is
             // a visual annotation, not an ownership transition.
             (_, Event::OwnerDropAtReassign) => (*previous_state).clone(),
+
+            // `ManuallyDrop::drop(&mut md)`: no resource left, and md
+            // must not be used again.
+            (_, Event::ManuallyDropByHand) =>
+                State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: true },
 
 
             (_, _) => State::Invalid,
@@ -1919,6 +1946,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::OwnerDropAtReassign{..} => {
           vec![(line_num, Event::OwnerDropAtReassign)]
         },
+        ExternalEvent::ManuallyDropByHand{..} => {
+          vec![(line_num, Event::ManuallyDropByHand)]
+        },
 
         _ => panic!("should not be calling this on branches")
       }
@@ -2164,6 +2194,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::OwnerDropAtReassign{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign, line_number);
+            },
+            ExternalEvent::ManuallyDropByHand{ro, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
             },
         }
     }

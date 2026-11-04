@@ -415,6 +415,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         touches_ty(from) || touches_ty(to)
       }
       ExternalEvent::GoOutOfScope { ro, .. }
+      | ExternalEvent::ManuallyDropByHand { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. } => {
         self.skip_raps.contains(ro.name())
       }
@@ -1887,6 +1888,9 @@ fn holds_resource_after(events: &[(usize, ExternalEvent)], rap_name: &str) -> Op
   let is_rap = |r: &ResourceTy| r.extract_rap().map_or(false, |r| r.name() == rap_name);
   for (_, ev) in events.iter().rev() {
     match ev {
+      ExternalEvent::ManuallyDropByHand { ro, .. } if ro.name() == rap_name => {
+        return Some(false);
+      }
       ExternalEvent::Move { from, to, .. } => {
         if is_rap(to) {
           return Some(true);

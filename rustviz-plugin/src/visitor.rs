@@ -370,6 +370,67 @@ fn place_rap(expr: &Expr, tcx: &rustc_middle::ty::TyCtxt, raps: &std::collection
   }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ManuallyDropFn { Drop, Take }
+
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// If `fn_expr` names the inherent `ManuallyDrop::drop` or
+  /// `ManuallyDrop::take` (resolved through the callee's DefId, not
+  /// its spelling), which of the two.
+  fn manually_drop_assoc_fn(&self, fn_expr: &'tcx Expr<'tcx>) -> Option<ManuallyDropFn> {
+    let def_id = self.tcx.typeck(fn_expr.hir_id.owner).type_dependent_def_id(fn_expr.hir_id)?;
+    if !matches!(self.tcx.def_kind(def_id), DefKind::AssocFn) {
+      return None;
+    }
+    let imp = self.tcx.impl_of_assoc(def_id)?;
+    if self.tcx.impl_opt_trait_ref(imp).is_some()
+      || !self.tcx.type_of(imp).skip_binder().ty_adt_def().map_or(false, |d| d.is_manually_drop())
+    {
+      return None;
+    }
+    match self.tcx.item_name(def_id).as_str() {
+      "drop" => Some(ManuallyDropFn::Drop),
+      "take" => Some(ManuallyDropFn::Take),
+      _ => None,
+    }
+  }
+
+  /// `ManuallyDrop::drop(&mut md)` drops the value inside `md` by
+  /// hand; `ManuallyDrop::take(&mut md)` moves it out into the
+  /// result. Returns false (nothing emitted) when the argument isn't
+  /// `&mut` of a tracked ManuallyDrop place, so the generic call
+  /// handling runs instead.
+  fn manually_drop_by_hand(&mut self, fn_expr: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>], which: ManuallyDropFn) -> bool {
+    let [arg] = args else { return false };
+    let ExprKind::AddrOf(_, Mutability::Mut, inner) = arg.kind else { return false };
+    let Some(from) = place_rap(inner, &self.tcx, &self.raps) else { return false };
+    let ResourceTy::Value(rap) = from.clone() else { return false };
+    if !rap.is_manually_drop() {
+      return false;
+    }
+    let Some(fn_name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) else { return false };
+    self.add_fn(fn_name.clone());
+    self.visit_expr(arg);
+    let line_num = expr_to_line(arg, &self.tcx);
+    match which {
+      ManuallyDropFn::Drop => {
+        // Keep the usual call-site events (the `&mut` borrow), then
+        // mark the value as dropped.
+        self.match_arg(arg, fn_name);
+        self.add_external_event(line_num, ExternalEvent::ManuallyDropByHand { ro: rap, id: *self.unique_id });
+        *self.unique_id += 1;
+      }
+      ManuallyDropFn::Take => {
+        // The value moves out of `md` into the call (and on into the
+        // result), like passing an owner by value.
+        let to = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
+        self.add_ev(line_num, Evt::Move, to, from, false);
+      }
+    }
+    true
+  }
+}
+
 impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
   // A fn body
   fn visit_body(&mut self, body: &rustc_hir::Body<'tcx>) -> Self::Result {
@@ -556,6 +617,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     match expr.kind {
       // fn call <expr>[<expr>]
       ExprKind::Call(fn_expr, args) => {
+        // `ManuallyDrop::drop(&mut md)` / `ManuallyDrop::take(&mut md)`
+        // on a tracked ManuallyDrop place (#283).
+        if let Some(which) = self.manually_drop_assoc_fn(fn_expr) {
+          if self.manually_drop_by_hand(fn_expr, args, which) {
+            return;
+          }
+        }
 
         // need to specifically handle println! macro because it's common
         // note that other macros will need to be resolved similarly (vec![], assert!, etc)

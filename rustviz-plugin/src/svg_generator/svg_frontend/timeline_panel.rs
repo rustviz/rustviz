@@ -1048,6 +1048,12 @@ fn render_dot(
                             continue;
                         }
                         data.title = event.print_message_with_name(&mut name);
+                    } else if ro.is_manually_drop() && !is_copy
+                        && visualization_data.timelines[hash].history.iter()
+                            .any(|(_, e)| matches!(e, Event::ManuallyDropByHand)) {
+                        // Dropped by hand earlier: still nothing is
+                        // dropped here (#283).
+                        data.title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
                     } else if !resource_hold && maybe_moved_at_end(history) {
                         // Moved in some branches of a conditional but
                         // not others (#179): the drop flag decides here.
@@ -1131,6 +1137,22 @@ fn render_dot(
                 // OwnerGoOutOfScope (resource is dropped at this line),
                 // but the owner stays in scope — there's always a
                 // resource to drop here, so no `if !resource_hold` branch.
+                Event::ManuallyDropByHand => {
+                    let cx = timeline_data.x_val;
+                    let cy = get_y_axis_pos(*line_number);
+                    let title = event.print_message_with_name(&mut name);
+                    let drop_data = DropDotData {
+                        hash: *hash as u64,
+                        dot_x: cx,
+                        dot_y: cy,
+                        title,
+                        p1x: cx - 3, p1y: cy - 1,
+                        p2x: cx + 3, p2y: cy - 1,
+                        p3x: cx,     p3y: cy + 3,
+                    };
+                    append_drop_dot(drop_data, timeline_data, dots);
+                    continue;
+                },
                 Event::OwnerDropAtReassign => {
                     let cx = timeline_data.x_val;
                     let cy = get_y_axis_pos(*line_number);
@@ -3296,5 +3318,19 @@ mod tests {
         let events = branch(vec![arm(Vec::new()), arm(leaves(2)), arm(Vec::new())]);
         assert_eq!(centers_of(&events), vec![-3, 0, 3]);
         assert_eq!(compute_extent(&events), (3, 3));
+    }
+
+    // The state after `ManuallyDrop::drop(&mut md)` isn't drawn (like
+    // any moved-out state, it has no line), so check its text here.
+    #[test]
+    fn dropped_by_hand_state_message() {
+        let st = State::ResourceMoved {
+            move_to: ResourceTy::Anonymous,
+            move_at_line: 3,
+            dropped_by_hand: true,
+        };
+        let msg = st.print_message_with_name(&"md".to_owned());
+        assert!(msg.contains("'s value was dropped by hand; it must not be used again"), "{msg}");
+        assert!(!msg.contains("moved"), "{msg}");
     }
 }

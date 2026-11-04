@@ -324,6 +324,8 @@ const EXPECTED_OK: &[&str] = &[
     "closure_capture_through_ref",
     // A ManuallyDrop local / field / param never drops its value (#283).
     "manually_drop_local",
+    // `ManuallyDrop::drop` / `take` by hand (#283).
+    "manually_drop_by_hand",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2915,6 +2917,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h.a goes out of scope. Its resource is dropped.",
             // `md = ManuallyDrop::new(..)` leaks the old String.
             "md acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    // ─── Dropping a ManuallyDrop by hand (#283) ──────────────────────
+    TooltipExpect {
+        name: "manually_drop_by_hand",
+        must_contain: &[
+            "ManuallyDrop::drop drops the value inside md (by hand)",
+            "ManuallyDrop::drop drops the value inside h.a (by hand)",
+            // The borrow information stays.
+            "md's resource is mutably borrowed by ManuallyDrop::drop; md can't be used while the borrow is live",
+            // Still nothing dropped at scope end.
+            "md goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "h.a goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "h.b goes out of scope. Its resource is dropped.",
+            // `take` moves the value out into the result.
+            "Move from m2 to ManuallyDrop::take",
+            "Move from ManuallyDrop::take to s",
+            "m2 goes out of scope. No resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "md goes out of scope. Its resource is dropped.",
+            // `take` is a move out of m2, not a borrow.
+            "m2's resource is mutably borrowed by ManuallyDrop::take",
+            "ManuallyDrop::take reads from/writes to m2",
+            "m2 goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
         ],
     },
 ];
