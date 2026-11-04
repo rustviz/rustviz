@@ -2486,6 +2486,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ) {
     let tycheck_results = self.tcx.typeck(hirid.owner);
     let lhs_ty = tycheck_results.node_type(hirid);
+    // `let ref r = s;` is `let r = &s;`: a borrow, not a copy (#380).
+    if let Some(mutbl) = self.own_ref_binding(hirid) {
+      self.bind_ref_binding(name, annotation, hirid, init, is_skipped, mutbl, lhs_ty);
+      return;
+    }
     let is_copyable = self.tcx.type_is_copy_modulo_regions(
       rustc_middle::ty::TypingEnv::post_analysis(self.tcx, hirid.owner),
       lhs_ty,
@@ -2565,5 +2570,193 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let rap = self.raps.get(&name).unwrap().rap.to_owned();
       self.match_rhs(ResourceTy::Value(rap), rhs, evt);
     }
+  }
+
+  /// The mutability of the reference a `let` pattern's binding `hirid`
+  /// makes when it's an explicit `ref` / `ref mut` on a value that
+  /// isn't behind a reference (`let ref r = s;`, `let P { ref name, ..
+  /// } = p;`), so it borrows the matched place itself. `None` for a
+  /// by-value binding, and for one bound by reference because the
+  /// pattern goes through a reference, written (`let &(ref a, _) =
+  /// &t;`) or implicit (`let (a, _) = &t;`): those bind a reference
+  /// the initializer already holds, which `match_rhs` draws.
+  fn own_ref_binding(&self, hirid: HirId) -> Option<Mutability> {
+    let typeck = self.tcx.typeck(hirid.owner);
+    let mutbl = match typeck.pat_binding_modes().get(hirid)?.0 {
+      rustc_hir::ByRef::Yes(_, m) => m,
+      rustc_hir::ByRef::No => return None,
+    };
+    let mut id = hirid;
+    loop {
+      if typeck.pat_adjustments().get(id).is_some_and(|a| !a.is_empty()) {
+        return None;
+      }
+      match self.tcx.parent_hir_node(id) {
+        rustc_hir::Node::Pat(p) => {
+          if matches!(p.kind, PatKind::Ref(..)) {
+            return None;
+          }
+          id = p.hir_id;
+        }
+        rustc_hir::Node::PatField(f) => id = f.hir_id,
+        _ => return Some(mutbl),
+      }
+    }
+  }
+
+  /// The field path from a `let` pattern's root to the binding
+  /// `hirid`: `["name"]` for `let P { ref name, .. } = p;`, `["1"]`
+  /// for `let (_, ref b) = t;`, `[]` for `let ref r = s;`. `None`
+  /// when a step isn't a field (`x @ …`, a slice, an or-pattern).
+  fn let_binding_field_path(&self, hirid: HirId) -> Option<Vec<String>> {
+    let typeck = self.tcx.typeck(hirid.owner);
+    let mut path = Vec::new();
+    let mut id = hirid;
+    loop {
+      match self.tcx.parent_hir_node(id) {
+        rustc_hir::Node::PatField(f) => {
+          path.push(f.ident.to_string());
+          // A PatField's parent is its struct pattern.
+          match self.tcx.parent_hir_node(f.hir_id) {
+            rustc_hir::Node::Pat(p) => id = p.hir_id,
+            _ => return None,
+          }
+        }
+        rustc_hir::Node::Pat(p) => match p.kind {
+          PatKind::Tuple(ps, ddpos) | PatKind::TupleStruct(_, ps, ddpos) => {
+            let k = ps.iter().position(|sp| sp.hir_id == id)?;
+            let arity = match typeck.pat_ty(p).kind() {
+              rustc_middle::ty::TyKind::Tuple(tys) => tys.len(),
+              rustc_middle::ty::TyKind::Adt(def, _) => {
+                let res = typeck.qpath_res(match p.kind {
+                  PatKind::TupleStruct(ref q, ..) => q,
+                  _ => return None,
+                }, p.hir_id);
+                def.variant_of_res(res).fields.len()
+              }
+              _ => return None,
+            };
+            // `(a, .., z)`: sub-patterns after `..` line up with the
+            // last fields.
+            let i = match ddpos.as_opt_usize() {
+              Some(d) if k >= d => k + arity.saturating_sub(ps.len()),
+              _ => k,
+            };
+            path.push(i.to_string());
+            id = p.hir_id;
+          }
+          _ => return None,
+        },
+        rustc_hir::Node::LetStmt(_) => break,
+        _ => return None,
+      }
+    }
+    path.reverse();
+    Some(path)
+  }
+
+  /// Register an explicit `ref` / `ref mut` binding of a `let` (see
+  /// [`own_ref_binding`]) as the borrow it is, the same way `let r =
+  /// &s;` is drawn (#380):
+  /// - against a place, `let ref r = s;` borrows `s`, and `let P {
+  ///   ref name, .. } = p;` borrows `p.name` (or, when that part has
+  ///   no column, partially borrows `p`);
+  /// - against a value (`let ref r = String::from("hi");`), it borrows
+  ///   a temporary, which has no column;
+  /// - against an element of a literal the pattern is paired with
+  ///   (`let (ref a, b) = (s, 1);`), `s` is moved (or copied) into the
+  ///   literal's temporary, and `a` borrows that, not `s`.
+  #[allow(clippy::too_many_arguments)]
+  fn bind_ref_binding(
+    &mut self,
+    name: String,
+    annotation: BindingMode,
+    hirid: HirId,
+    init: &'tcx Expr<'tcx>,
+    is_skipped: bool,
+    mutbl: Mutability,
+    lhs_ty: rustc_middle::ty::Ty<'tcx>,
+  ) {
+    let typeck = self.tcx.typeck(hirid.owner);
+    let line_num = expr_to_line(init, &self.tcx);
+    let evt = if bool_of_mut(mutbl) { Evt::MBorrow } else { Evt::SBorrow };
+    let whole_init = matches!(self.tcx.parent_hir_node(init.hir_id), rustc_hir::Node::LetStmt(_));
+    let is_place = matches!(
+      init.kind,
+      ExprKind::Path(QPath::Resolved(_, rustc_hir::Path { res: Res::Local(_), .. }))
+        | ExprKind::Field(..)
+        | ExprKind::Index(..)
+        | ExprKind::Unary(UnOp::Deref, _)
+    ) && !init.span.from_expansion();
+    let (lender, is_partial) = if whole_init && is_place {
+      let path = self.let_binding_field_path(hirid);
+      let base = match init.kind {
+        ExprKind::Path(..) | ExprKind::Field(..) => expr_to_rap_name(init, &self.tcx)
+          .filter(|n| self.raps.contains_key(n)),
+        _ => None,
+      };
+      match (base, path) {
+        // The longest prefix of the field path that has a column.
+        (Some(base), Some(path)) => {
+          let mut best = base.clone();
+          let mut matched = 0;
+          for (k, f) in path.iter().enumerate() {
+            let cand = format!("{}.{}", best, f);
+            if !self.raps.contains_key(&cand) {
+              break;
+            }
+            best = cand;
+            matched = k + 1;
+          }
+          let rap = self.raps.get(&best).unwrap().rap.to_owned();
+          (ResourceTy::Value(rap), matched < path.len())
+        }
+        (Some(base), None) => {
+          (ResourceTy::Value(self.raps.get(&base).unwrap().rap.to_owned()), true)
+        }
+        (None, path) => {
+          (get_rap(init, &self.tcx, &self.raps), path.is_none_or(|p| !p.is_empty()))
+        }
+      }
+    } else {
+      // A literal's element moves (or copies) into the literal's
+      // temporary; the binding borrows the temporary.
+      if !whole_init && is_place && !is_skipped {
+        if let Some(src) = fetch_rap(init, &self.tcx, &self.raps) {
+          let src_ty = typeck.node_type(init.hir_id);
+          let e = if src_ty.is_ref() || self.ty_is_copy(src_ty, hirid.owner) { Evt::Copy } else { Evt::Move };
+          self.update_rap(&src, line_num);
+          self.add_ev(line_num, e, ResourceTy::Anonymous, ResourceTy::Value(src), false);
+        }
+      }
+      (ResourceTy::Anonymous, false)
+    };
+    // Registered like `define_lhs` registers `let r = &init;`, with the
+    // lender and aliasing `get_ref_data` gives `&init` (define_lhs
+    // itself would treat `init` as copied into the binding).
+    let mut aliasing = get_aliasing_data(&lender, &self.borrow_map);
+    if lhs_ty.builtin_deref(false).is_some_and(|t| t.is_ref()) {
+      if let ResourceTy::Value(x) | ResourceTy::Deref(x) = &lender {
+        aliasing.push_front(x.name().to_owned());
+      }
+    }
+    let pointee_copy = self.ref_pointee_is_copy(lhs_ty, hirid.owner);
+    self.add_ref(name.clone(), bool_of_mut(mutbl), bool_of_mut(annotation.1), line_num,
+      lender.clone(), aliasing, self.current_scope, !self.inside_branch, pointee_copy);
+    if is_skipped {
+      self.skip_raps.insert(name);
+      return;
+    }
+    if let ResourceTy::Value(r) | ResourceTy::Deref(r) = &lender {
+      self.update_rap(r, line_num);
+    }
+    let rap = self.raps.get(&name).unwrap().rap.to_owned();
+    let mut ev = self.ext_ev_of_evt(evt, ResourceTy::Value(rap), lender, *self.unique_id, is_partial);
+    if let ExternalEvent::StaticBorrow { is_reborrow, .. }
+         | ExternalEvent::MutableBorrow { is_reborrow, .. } = &mut ev {
+      *is_reborrow = is_explicit_reborrow(init, typeck);
+    }
+    self.add_external_event(line_num, ev);
+    *self.unique_id += 1;
   }
 }
