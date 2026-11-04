@@ -156,7 +156,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.add_fn(name.clone());
             let to = ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
             let line_num = expr_to_line(recv, &self.tcx);
-            self.add_ev(line_num, Evt::PassByMRef, to, from, false);
+            let id = *self.unique_id;
+            self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
+              from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: true,
+            });
+            *self.unique_id += 1;
           }
         } else {
           self.descend_through_expansion(recv);
@@ -249,7 +253,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if *f == from && *t == to)
     });
     if !already {
-      self.add_ev(line_num, Evt::PassBySRef, to, from, false);
+      // format_args! takes `&arg`; the user didn't write the `&`.
+      let id = *self.unique_id;
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: true });
+      *self.unique_id += 1;
     }
   }
 }

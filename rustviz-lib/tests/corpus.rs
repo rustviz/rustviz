@@ -2202,12 +2202,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "macro_format_args_borrow",
         must_contain: &[
-            "println! reads from s",
-            "println! reads from n",   // inline `{n}`
-            "format! reads from s",
-            "eprintln! reads from t",
-            "println! reads from r",   // `r.w` through a reference
-            "println! reads from p",   // `*p`
+            "println! reads from s through an implicit reference, so s isn't moved",
+            "println! reads from n through an implicit reference, so n isn't moved",   // inline `{n}`
+            "format! reads from s through an implicit reference, so s isn't moved",
+            "eprintln! reads from t through an implicit reference, so t isn't moved",
+            "println! reads from r through an implicit reference, so r isn't moved",   // `r.w` through a reference
+            "println! reads from p through an implicit reference, so p isn't moved",   // `*p`
         ],
         must_not_contain: &[
             // println! only borrows; it never takes ownership.
@@ -2217,7 +2217,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*p's resource is immutably borrowed",
             // `assert!(cond, "{}", t)` formats t only if the assertion
             // fails, so t isn't shown as read unconditionally.
-            "assert! reads from t",
+            "assert! reads from t through an implicit reference, so t isn't moved",
         ],
     },
     // `dbg!(e)` takes e by value and returns it: `dbg!(&a)` lends a,
@@ -2238,12 +2238,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c goes out of scope. No resource is dropped.",
             // `write!(f, …)` inside the Debug impl: f is borrowed
             // mutably by write_fmt, self.w is read.
-            "write! reads from/writes to f",
-            "write! reads from self",
+            "write! reads from/writes to f through an implicit mutable reference, so f isn't moved",
+            "write! reads from self through an implicit reference, so self isn't moved",
         ],
         must_not_contain: &[
             "r acquires ownership of a resource",
             "Return immutably borrowed resource from r to *r",
+            // `dbg!(&a)`: the user wrote the `&`, so no "implicit" note.
+            "dbg! reads from a through an implicit reference, so a isn't moved",
             "c goes out of scope. Its resource is dropped.",
             "a goes out of scope. Its resource is dropped.",
         ],
@@ -2256,7 +2258,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "macro_match_arm_body",
         must_contain: &[
-            "println! reads from s",
+            "println! reads from s through an implicit reference, so s isn't moved",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -2266,17 +2268,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "macro_write_assert_eq",
         must_contain: &[
-            "write! reads from/writes to out",
-            "write! reads from v",
-            "assert_eq! reads from v",
-            "assert_eq! reads from w",
-            "panic! reads from msg",
+            "write! reads from/writes to out through an implicit mutable reference, so out isn't moved",
+            "write! reads from v through an implicit reference, so v isn't moved",
+            "assert_eq! reads from v through an implicit reference, so v isn't moved",
+            "assert_eq! reads from w through an implicit reference, so w isn't moved",
+            "panic! reads from msg through an implicit reference, so msg isn't moved",
         ],
         must_not_contain: &[
             // `v.len()` is a call, not a place: its own event ("len
             // reads from v") is the read, not a read of `len`.
-            "panic! reads from len",
-            "assert_eq! reads from len",
+            "panic! reads from len through an implicit reference, so len isn't moved",
+            "assert_eq! reads from len through an implicit reference, so len isn't moved",
         ],
     },];
 

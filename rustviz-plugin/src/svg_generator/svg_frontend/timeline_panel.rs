@@ -1640,11 +1640,21 @@ fn render_arrow (
                         ),
                         _ => String::new(),
                     };
+                    // The `&` / `&mut` was inserted by Rust, not written
+                    // (`println!("{}", s)` takes `&s`): say so, or the
+                    // call reads like it moves s.
+                    let implicit_suffix: String = match external_event {
+                        ExternalEvent::PassByStaticReference { implicit: true, .. } => format!(
+                            " through an implicit reference, so {} isn't moved", styled_from_name),
+                        ExternalEvent::PassByMutableReference { implicit: true, .. } => format!(
+                            " through an implicit mutable reference, so {} isn't moved", styled_from_name),
+                        _ => String::new(),
+                    };
 
                     let function_dot_data = FunctionDotData {
                         x: from_timeline.x_val,
                         y: get_y_axis_pos(*line_number),
-                        title: format!("{}{}{}{}", styled_fn_name, title_fn, styled_from_name, reborrow_suffix),
+                        title: format!("{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix),
                         hash: from_variable.hash().to_owned() as u64,
                     };
 
