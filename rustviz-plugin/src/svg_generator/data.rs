@@ -188,6 +188,13 @@ pub struct Owner {
     pub unbound_temp: bool,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
+    /// True iff this owner isn't a reference but its value holds a
+    /// borrow of another variable: `let it = v.iter();` (an
+    /// `Iter<'_, i32>`), `let third = v.get(2);` (an `Option<&i32>`).
+    /// Such a column receives a borrow arrow from what it borrows and
+    /// gives it back at the borrow's end, like a reference, while
+    /// still owning its own value (#336).
+    pub holds_borrow: bool,
 }
 
 // when something is a struct member
@@ -329,6 +336,12 @@ impl ResourceTy {
             ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.is_closure(),
             _ => false
         }
+    }
+
+    /// A non-reference owner whose value holds a borrow (#336). Only
+    /// the `Value` form: `*h` isn't the holder itself.
+    pub fn holds_borrow(&self) -> bool {
+        matches!(self, ResourceTy::Value(r) if r.holds_borrow())
     }
 
     pub fn extract_rap(&self) -> Option<&ResourceAccessPoint> {
@@ -512,6 +525,12 @@ impl ResourceAccessPoint {
     /// events that flow into or out of a closure.
     pub fn is_closure(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { is_closure: true, .. }))
+    }
+
+    /// True iff this RAP is a non-reference owner whose value holds a
+    /// borrow (see `Owner::holds_borrow`).
+    pub fn holds_borrow(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { holds_borrow: true, .. }))
     }
 
     /// True iff this RAP is an owner of a Copy type (i32 etc.). The
@@ -793,6 +812,8 @@ pub struct BorrowVia {
     pub also_unnamed: bool,
     /// Which of the call's arguments the signature ties the result to.
     pub tie: ArgTie,
+    /// What the call returned that carries the borrow.
+    pub carrier: ViaCarrier,
 }
 
 /// Which arguments of a call a returned reference's lifetime is tied
@@ -810,6 +831,18 @@ pub struct ArgTie {
     /// How many of the tied arguments have no column to draw (a
     /// literal, a value that isn't tracked).
     pub unnamed: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViaCarrier {
+    /// The borrower is the reference the call returned (#171).
+    Reference,
+    /// The borrower isn't a reference but a value that holds one
+    /// (`let it = v.iter();`, an `Iter<'_, i32>`; #336).
+    Value,
+    /// The borrower is a reference field of the struct the call
+    /// returned (`Excerpt::new(&novel)` → `ex.part`; #336).
+    StructField,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1752,6 +1785,10 @@ impl Event {
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     }
+                } else if is.holds_borrow() && matches!(from, ResourceTy::Value(r) if !r.is_fn()) {
+                    // `let it2 = it;`: the value moves, and the borrow
+                    // it holds moves with it (#336).
+                    hover_messages::event_dot_holder_acquire(&self.deref_name(my_name), &from.name())
                 } else if let Some(r) = is.deref_rap() {
                     // `*r += 1;` / `r.f += 1;` modify the resource r
                     // points to in place. `*r = v;` / `r.f = v;` are
@@ -1832,6 +1869,8 @@ impl Event {
             Event::MutableBorrow{ from, is, ..} => {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
+                } else if is.holds_borrow() {
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true)
                 } else {
                     hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }
@@ -1839,6 +1878,8 @@ impl Event {
             Event::StaticBorrow{ from, is, ..} => {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
+                } else if is.holds_borrow() {
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false)
                 } else {
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }
@@ -2048,9 +2089,39 @@ impl Visualizable for VisualizationData {
         }
         if event_invalid(event) { return State::Invalid; }
 
+        // A value that holds a borrow without being a reference
+        // (`let it = v.iter();`, #336) owns its own value: borrowing
+        // through it, and the end of that borrow, don't change what
+        // the holder itself can do.
+        let holder = self.timelines.get(hash)
+            .is_some_and(|t| t.resource_access_point.holds_borrow());
+
         match (previous_state, event) {
             // propogate invalid states
             (State::Invalid, _) => State::Invalid,
+
+            (State::OutOfScope, Event::StaticBorrow { .. })
+            | (State::OutOfScope, Event::MutableBorrow { .. }) if holder =>
+                State::FullPrivilege { s: LineState::Full },
+            (State::FullPrivilege { .. }, Event::StaticBorrow { .. })
+            | (State::FullPrivilege { .. }, Event::MutableBorrow { .. })
+            | (State::FullPrivilege { .. }, Event::StaticDie { .. })
+            | (State::FullPrivilege { .. }, Event::MutableDie { .. })
+            | (State::FullPrivilege { .. }, Event::RefDie { .. }) if holder =>
+                (*previous_state).clone(),
+            // The holder was moved (`let total: i32 = it.sum();`) on
+            // the line its borrow ends, or lent out: the end of the
+            // borrow it held doesn't change that.
+            (State::ResourceMoved { .. }, Event::StaticDie { .. })
+            | (State::ResourceMoved { .. }, Event::MutableDie { .. })
+            | (State::ResourceMoved { .. }, Event::RefDie { .. })
+            | (State::RevokedPrivilege { .. }, Event::StaticDie { .. })
+            | (State::RevokedPrivilege { .. }, Event::MutableDie { .. })
+            | (State::RevokedPrivilege { .. }, Event::RefDie { .. })
+            | (State::PartialPrivilege { .. }, Event::StaticDie { .. })
+            | (State::PartialPrivilege { .. }, Event::MutableDie { .. })
+            | (State::PartialPrivilege { .. }, Event::RefDie { .. }) if holder =>
+                (*previous_state).clone(),
 
             // A variable is initialized through a Move
             (State::OutOfScope, Event::Acquire{ .. }) => State::FullPrivilege {s: LineState::Full},

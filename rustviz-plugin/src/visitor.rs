@@ -1578,6 +1578,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
           .collect();
 
+        // `it = b.iter();` where `it` holds a borrow (#336).
+        if let ResourceTy::Value(rap) = &lhs_rty {
+          if rap.holds_borrow() && !lhs_is_union_field && matches!(expr.kind, ExprKind::Assign(..)) {
+            let rap = rap.clone();
+            self.reassign_holder(&rap, rhs_expr, lhs_ty, line_num);
+          }
+        }
         if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
           // `v[i] += k`: k is an operand, not the element's new
           // value, so don't draw it as copied into v[i].

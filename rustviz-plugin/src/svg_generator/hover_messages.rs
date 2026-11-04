@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, ResourceAccessPoint};
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, StaticLender};
+use crate::svg_generator::data::{ArgTie, StaticLender, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -1157,8 +1157,19 @@ pub fn arrow_static_lend_val_to_val(from_name: &String, to_name: &String) -> Str
 // result to several arguments (`longest(&a, &b)`): the borrow checker
 // can't know which one it points into, so all of them stay borrowed
 // for as long as the result is used.
-pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie) -> String {
+pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier) -> String {
     let func_fmt = fmt_style(func);
+    let to_fmt = fmt_style(to_name);
+    // A value that isn't a reference (`let it = v.iter();`) or a
+    // struct with a reference field can carry the borrow too (#336).
+    let (noun, not_ref) = match carrier {
+        ViaCarrier::Reference => ("reference", String::new()),
+        ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
+        ViaCarrier::StructField => ("struct", String::new()),
+    };
+    // A value can hold borrows of several of them at once (`map` over
+    // `v.iter()` with a closure that borrows `extra`).
+    let point = if carrier == ViaCarrier::Value { "borrow from" } else { "point into" };
     fn join(items: &[String]) -> String {
         match items.len() {
             0 => String::new(),
@@ -1218,13 +1229,13 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             (_, false) => "all of them stay borrowed".to_owned(),
             (_, true) => format!("{} stay borrowed", join(&names)),
         };
-        format!(", so it may point into {}, and {} while {} is in use", either, kept, fmt_style(to_name))
+        format!(", so it may {} {}, and {} while {} is in use", point, either, kept, to_fmt)
     } else if names.len() == 1 && (tied_count >= 2 || also_unnamed) {
         format!(", so {} stays borrowed while {} is in use", names[0], fmt_style(to_name))
     } else {
         String::new()
     };
-    format!(": {0}'s signature gives the reference it returns the same lifetime as {1}{2}", func_fmt, tied, tail)
+    format!(": {0}'s signature gives the {1} it returns the same lifetime as {2}{3}{4}", func_fmt, noun, tied, tail, not_ref)
 }
 
 // 1   0
@@ -1508,6 +1519,42 @@ pub fn state_closure_full_privilege_with_resource(my_name: &String, move_capture
         "{0} owns a closure which owns {1} {2} via capture",
         my_name_fmt, move_capture_count, noun
     )
+}
+
+// A non-reference variable whose value holds a borrow (`let it =
+// v.iter();`, `let third = v.get(2);`; #336). It owns that value (an
+// iterator, an Option), but not the data the value borrows, so the
+// generic "is the owner of the resource" is avoided.
+pub fn state_holder_full_privilege(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    format!(
+        "{0} holds a value that contains a reference ({0} isn't a reference itself)",
+        my_name_fmt
+    )
+}
+
+// The holder's dot where its value starts borrowing `from`.
+pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool) -> String {
+    format!(
+        "{0} holds a value that {1} borrows {2}'s resource ({0} isn't a reference itself)",
+        fmt_style(my_name),
+        if is_mut { "mutably" } else { "immutably" },
+        fmt_style(from_name)
+    )
+}
+
+// `let it2 = it;` where `it` holds a borrow: it2 takes over the value
+// and, with it, the borrow.
+pub fn event_dot_holder_acquire(my_name: &String, from_name: &String) -> String {
+    format!(
+        "{0} takes over {1}'s value, and the borrow it holds",
+        fmt_style(my_name), fmt_style(from_name)
+    )
+}
+
+// Scope end of a holder that still holds its (non-Copy) value.
+pub fn event_dot_holder_drop_suffix() -> String {
+    ". Its value is dropped, but not the data it borrowed.".to_owned()
 }
 
 pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
