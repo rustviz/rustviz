@@ -224,6 +224,22 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // Calls whose temporary result's drop has been stated (#457), so a
   // call the visitor reaches twice says it once.
   pub temp_drops_noted: HashSet<rustc_hir::HirId>,
+
+  // Variables moved in a branch that then `break`s out of a loop
+  // (#344), recorded when the branch is built; the loop turns them
+  // into `LoopExitMove` events at its end.
+  pub break_moves: Vec<BreakMove>,
+}
+
+/// `rap` was moved in a branch that leaves through the `break` `brk`
+/// out of the loop (or labeled block) `target`. `definite`: on every
+/// path to `brk`.
+#[derive(Debug, Clone)]
+pub struct BreakMove {
+  pub target: rustc_hir::HirId,
+  pub brk: rustc_hir::HirId,
+  pub rap: ResourceAccessPoint,
+  pub definite: bool,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -546,6 +562,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       ExternalEvent::GoOutOfScope { ro, .. }
       | ExternalEvent::ManuallyDropByHand { ro, .. }
+      | ExternalEvent::LoopExitMove { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. } => {
         self.skip_raps.contains(ro.name())
@@ -3541,6 +3558,14 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
   for (i, (_, ev)) in events.iter().enumerate().rev() {
     match ev {
       ExternalEvent::ManuallyDropByHand { ro, .. } if ro.name() == rap_name => {
+        return Some(Ownership::None);
+      }
+      // Moved before every `break` out of the loop: gone after it. If
+      // only some ways out moved it, it's maybe-moved, which (like a
+      // conditional that moved it on some paths) doesn't decide here:
+      // the `if` that moved it before the `break` is in the loop body's
+      // events above, and makes it `Maybe` (#335).
+      ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro.name() == rap_name => {
         return Some(Ownership::None);
       }
       ExternalEvent::Move { from, to, .. } => {

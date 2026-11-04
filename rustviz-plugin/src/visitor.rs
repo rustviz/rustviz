@@ -16,6 +16,48 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// `e` is the value the function returns (its tail expression, or
+  /// the operand of a `return`): record it moving (or, for a Copy
+  /// type or a shared reference, being copied) to the caller.
+  fn return_to_caller(&mut self, e: &'tcx Expr<'tcx>) {
+    let tycheck_results = self.tcx.typeck(e.hir_id.owner);
+    let lhs_ty = tycheck_results.node_type(e.hir_id);
+    let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner), lhs_ty);
+    let evt = if lhs_ty.is_ref() {
+      match lhs_ty.ref_mutability().unwrap() {
+        Mutability::Not => Evt::Copy,
+        Mutability::Mut => Evt::Move,
+      }
+    } else {
+      match is_copyable {
+        true => Evt::Copy,
+        false => Evt::Move
+      }
+    };
+
+    let to_ro = ResourceTy::Caller;
+    let from_ro = match fetch_rap(e, &self.tcx, &self.raps) {
+      // A unit struct / enum constructor (`Marker`) or a fn item
+      // named as the returned value has no column of its own, and
+      // neither has the caller: an arrow between the two can't be
+      // drawn (it used to panic in the renderer, #136). Treat the
+      // value like a literal.
+      Some(r) if r.is_fn() => ResourceTy::Anonymous,
+      Some(r) => ResourceTy::Value(r), // todo, technically need to check for deref here
+      None => ResourceTy::Anonymous
+    };
+
+    let line_num = expr_to_line(e, &self.tcx);
+    if matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..)) && !e.span.from_expansion() {
+      // `User { email, .. }` / `(s, 1)` as the returned value: the
+      // literal's field initialisers move/copy their sources into
+      // the returned value.
+      self.match_rhs(to_ro, e, evt);
+    } else {
+      self.add_ev(line_num, evt, to_ro, from_ro, false);
+    }
+  }
+
   /// Visit a match-arm guard. `if let` parts register their bindings
   /// into `guard_decls` (the caller scopes them to the arm); `&&`
   /// chains are walked part by part; anything else is visited as an
@@ -728,45 +770,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     match body.value { // handle return expression if there is one
       Expr{kind: ExprKind::Block(b, _), ..} => {
         match b.expr {
+          // A tail `return v` is handled by visit_expr's `Ret` arm.
+          Some(Expr{kind: ExprKind::Ret(_), ..}) => {}
           Some(e) => {
             if self.fn_ret { // only append this event if parent fn ctxt doesn't return void
-              // currently this logic would not be able to handle functions with multiple return points
-              let tycheck_results = self.tcx.typeck(e.hir_id.owner);
-              let lhs_ty = tycheck_results.node_type(e.hir_id);
-              let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner), lhs_ty);
-              let evt = if lhs_ty.is_ref() {
-                match lhs_ty.ref_mutability().unwrap() {
-                  Mutability::Not => Evt::Copy,
-                  Mutability::Mut => Evt::Move,
-                }
-              } else {
-                match is_copyable {
-                  true => Evt::Copy, 
-                  false => Evt::Move
-                }
-              };
-
-              let to_ro = ResourceTy::Caller;
-              let from_ro = match fetch_rap(e, &self.tcx, &self.raps) {
-                // A unit struct / enum constructor (`Marker`) or a fn
-                // item named as the tail expression has no column of
-                // its own, and neither has the caller: an arrow
-                // between the two can't be drawn (it used to panic in
-                // the renderer, #136). Treat the value like a literal.
-                Some(r) if r.is_fn() => ResourceTy::Anonymous,
-                Some(r) => ResourceTy::Value(r), // todo, technically need to check for deref here
-                None => ResourceTy::Anonymous
-              };
-              
-              let line_num = expr_to_line(e, &self.tcx);
-              if matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..)) && !e.span.from_expansion() {
-                // `User { email, .. }` / `(s, 1)` as the tail
-                // expression: the literal's field initialisers
-                // move/copy their sources into the returned value.
-                self.match_rhs(to_ro, e, evt);
-              } else {
-                self.add_ev(line_num, evt, to_ro, from_ro, false);
-              }
+              self.return_to_caller(e);
             }
           }
           _ => {}
@@ -1518,14 +1526,41 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         }
       }
 
+      // `return v`: like a tail expression, `v` goes to the caller
+      // (#318). The path through the `return` never reaches the end
+      // of the function, so `v` isn't dropped there on that path;
+      // when the `return` sits in a branch, that branch has type `!`
+      // and doesn't count at the merge (#296), so code after the
+      // conditional still sees `v` as owned.
+      ExprKind::Ret(ret) => {
+        if let Some(e) = ret {
+          self.visit_expr(e);
+          if self.fn_ret {
+            self.return_to_caller(e);
+          }
+        }
+        // Leaving the function also drops every value it still owns
+        // (#363). Inside a branch, those drops are drawn on the
+        // branch's columns, at the `return`.
+        if self.inside_branch {
+          self.drop_locals_on_return(expr, ret);
+        }
+      }
+
       // a block eg: {}
-      ExprKind::Block(block, _) => {
+      ExprKind::Block(block, label) => {
         // this scoping logic isn't necessary except for when defining functions inside of functions
         let prev_scope = self.current_scope;
         let new_scope = self.tcx.sess.source_map().lookup_char_pos(expr.span.hi()).line;
         self.current_scope = new_scope;
+        let before = label.map(|_| self.rap_names());
         self.visit_block(block); // visit all the statements in the block
           self.current_scope = prev_scope;
+        // A labeled block (`'a: { … break 'a; … }`) can also end by
+        // running to its end.
+        if let Some(before) = before {
+          self.emit_loop_exit_moves(expr, Some(block.hir_id), &before, true);
+        }
       }
 
       // `-x` / `!b` take their operand by value, like `x + y` (#262):
@@ -1820,6 +1855,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           _ if collapsed => (if_end, merge),
           _ => (if_end, merge_minus_one),
         };
+        // A branch of type `!` (`return`, `panic!()`) never reaches
+        // the merge (#296).
+        let (if_diverges, if_exits) = self.branch_divergence(if_expr, &if_ev, &if_decl);
+        let (else_diverges, else_exits) = match else_expr {
+          Some(e) => self.branch_divergence(e, &else_ev, &else_decl),
+          None => (false, Vec::new()),
+        };
         let (b_labels, b_slices, b_branches) = match else_expr {
           Some(_) => {
             let else_map = create_line_map(&else_ev);
@@ -1827,8 +1869,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               vec!["If".to_owned(), "Else".to_owned()],
               vec![if_slice, else_slice],
               vec![
-                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges   },
-                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges },
+                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits   },
+                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits },
               ],
             )
           }
@@ -1839,8 +1881,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             vec!["If".to_owned(), "Else".to_owned()],
             vec![if_slice, else_slice],
             vec![
-              ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges },
-              ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(), diverges: false },
+              ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits },
+              ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
             ],
           ),
         };
@@ -1891,6 +1933,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 } else {
                   self.visit_expr(cond);
                 }
+                let before = self.rap_names();
                 self.inside_branch = true;
                 self.visit_expr(then_body);
                 self.inside_branch = prev;
@@ -1900,6 +1943,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   .lookup_char_pos(then_body.span.hi()).line;
                 let decls = get_decl_of_expr(then_body, &self.tcx, &self.raps);
                 self.emit_scope_end(decls, body_end);
+                // A `while` also ends when its condition is false.
+                self.emit_loop_exit_moves(expr, None, &before, true);
                 return;
               }
             }
@@ -1916,6 +1961,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // once, but we don't yet have a vocabulary for "always
             // runs vs. may run", so use the same shape as while/for.)
             let prev = self.inside_branch;
+            let before = self.rap_names();
             self.inside_branch = true;
             self.visit_block(block);
             self.inside_branch = prev;
@@ -1925,6 +1971,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .lookup_char_pos(block.span.hi()).line;
             let decls = get_decl_of_block(block, &self.tcx, &self.raps);
             self.emit_scope_end(decls, body_end);
+            // A bare `loop` ends only through a `break`.
+            self.emit_loop_exit_moves(expr, None, &before, false);
           }
           rustc_hir::LoopSource::ForLoop => {
             // For-loops are entered via the outer Match(ForLoopDesugar)
@@ -2272,8 +2320,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let branch_line_map = create_line_map(&branch_e_data);
                 // An arm of type `!` (`_ => unreachable!()`) never
                 // reaches the merge (#296).
-                let diverges = self.tcx.typeck(arm.body.hir_id.owner).expr_ty(arm.body).is_never();
-                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges });
+                let (diverges, exits) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
+                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits });
               }
             }
             self.join_uninit_locals(uninit_ends);
@@ -2504,6 +2552,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
 
                 // Visit body — events flow into the global timeline.
+                let before = self.rap_names();
                 self.visit_expr(body_expr);
                 self.inside_branch = prev_inside_branch;
 
@@ -2517,23 +2566,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
                 collect_pat_bindings(user_pat, &self.raps, &mut loop_decls);
                 self.emit_scope_end(loop_decls, body_end);
+                // `break`s in the body target the desugared `loop`
+                // (the outer arm's body), which also ends when the
+                // iterator runs out.
+                if let Some(loop_expr) = arms.first().map(|a| a.body) {
+                  self.emit_loop_exit_moves(loop_expr, None, &before, true);
+                }
               }
             }
           }
           _ => {}
         }
       }
-      
-      // `return e`: leaving the function drops every value it still
-      // owns (#363). Inside a branch, those drops are drawn on the
-      // branch's columns, at the `return`.
-      ExprKind::Ret(ret) => {
-        intravisit::walk_expr(self, expr);
-        if self.inside_branch {
-          self.drop_locals_on_return(expr, ret);
-        }
-      }
-
       _ => {
         intravisit::walk_expr(self, expr);
       }
@@ -3549,4 +3593,226 @@ fn strip_module_paths(ty: &str) -> String {
   }
   out.push_str(&word);
   out
+}
+/// What a branch of type `!` does on its way out (see `BranchExit`).
+struct BranchLeaves {
+  /// How it leaves, sorted; never empty.
+  exits: Vec<BranchExit>,
+  /// Its `break`s out of an enclosing loop or labeled block: (the
+  /// `break`, its target).
+  loop_breaks: Vec<(HirId, HirId)>,
+  /// Its only way out is one `break`, the branch's last expression.
+  ends_in_its_only_break: bool,
+}
+
+fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tcx>) -> BranchLeaves {
+  struct Finder<'tcx> {
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    // Loops and labeled blocks inside the branch: a `break` /
+    // `continue` targeting one of them doesn't leave the branch.
+    inner: HashSet<HirId>,
+    control: Vec<BranchExit>,
+    loop_breaks: Vec<(HirId, HirId)>,
+    panics: bool,
+  }
+  impl<'tcx> Visitor<'tcx> for Finder<'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      match e.kind {
+        // A closure's body is a different function.
+        ExprKind::Closure(..) => return,
+        ExprKind::Loop(..) => { self.inner.insert(e.hir_id); }
+        ExprKind::Block(b, Some(_)) => { self.inner.insert(e.hir_id); self.inner.insert(b.hir_id); }
+        // `?`'s desugaring returns too, but only on the error path.
+        ExprKind::Ret(_) if !e.span.from_expansion() => self.control.push(BranchExit::Return),
+        ExprKind::Break(dest, _) => if let Ok(t) = dest.target_id {
+          if !self.inner.contains(&t) {
+            let is_loop = matches!(self.tcx.hir_node(t), rustc_hir::Node::Expr(Expr { kind: ExprKind::Loop(..), .. }));
+            self.control.push(if is_loop { BranchExit::Break } else { BranchExit::BreakBlock });
+            self.loop_breaks.push((e.hir_id, t));
+          }
+        },
+        ExprKind::Continue(dest) => if let Ok(t) = dest.target_id {
+          if !self.inner.contains(&t) {
+            self.control.push(BranchExit::Continue);
+          }
+        },
+        // `panic!()`, `unreachable!()`, `todo!()`, a failed `assert!`
+        // call a never-returning panic function of core / std.
+        ExprKind::Call(f, _) => {
+          let typeck = self.tcx.typeck(e.hir_id.owner);
+          if typeck.expr_ty(e).is_never() {
+            if let ExprKind::Path(ref qp) = f.kind {
+              if let Res::Def(_, def_id) = typeck.qpath_res(qp, f.hir_id) {
+                if !def_id.is_local() && self.tcx.def_path_str(def_id).contains("panic") {
+                  self.panics = true;
+                }
+              }
+            }
+          }
+        }
+        _ => {}
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Finder {
+    tcx, inner: HashSet::new(), control: Vec::new(), loop_breaks: Vec::new(), panics: false,
+  };
+  f.visit_expr(body);
+  let last = match body.kind {
+    ExprKind::Block(b, _) => b.expr.or_else(|| match b.stmts.last().map(|s| &s.kind) {
+      Some(StmtKind::Semi(e)) | Some(StmtKind::Expr(e)) => Some(*e),
+      _ => None,
+    }),
+    _ => Some(body),
+  };
+  let ends_in_its_only_break = f.control == [BranchExit::Break]
+    && f.loop_breaks.len() == 1
+    && last.is_some_and(|l| l.hir_id == f.loop_breaks[0].0);
+  let mut exits = f.control;
+  exits.sort();
+  exits.dedup();
+  // Only a call that never returns (or an endless loop) leaves it.
+  if exits.is_empty() {
+    exits.push(if f.panics { BranchExit::Panic } else { BranchExit::Other });
+  }
+  BranchLeaves { exits, loop_breaks: f.loop_breaks, ends_in_its_only_break }
+}
+
+/// The variables declared outside a branch (not in `decls`) that its
+/// `events` move out of and don't give a new value afterwards, in the
+/// order they're first moved. `true`: moved by the branch itself, on
+/// every path through it; `false`: only in a conditional nested in it.
+fn moved_out_of_outer(
+  events: &[(usize, ExternalEvent)],
+  decls: &HashSet<ResourceAccessPoint>,
+) -> Vec<(ResourceAccessPoint, bool)> {
+  let mut out: Vec<(ResourceAccessPoint, bool)> = Vec::new();
+  let outer = |r: &ResourceAccessPoint| !r.is_fn() && !decls.contains(r);
+  for (_, ev) in events {
+    match ev {
+      ExternalEvent::Move { from: ResourceTy::Value(rap), .. } if outer(rap) => {
+        match out.iter_mut().find(|(r, _)| r == rap) {
+          Some(e) => e.1 = true,
+          None => out.push((rap.clone(), true)),
+        }
+      }
+      ExternalEvent::Branch { branches, .. } => {
+        for b in branches {
+          let inner: HashSet<ResourceAccessPoint> = decls | &b.decl_vars;
+          for (rap, _) in moved_out_of_outer(&b.e_data, &inner) {
+            if !out.iter().any(|(r, _)| *r == rap) {
+              out.push((rap, false));
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+    // A new value moved or copied in after the move.
+    if let ExternalEvent::Move { to: ResourceTy::Value(to), .. }
+         | ExternalEvent::Copy { to: ResourceTy::Value(to), .. }
+         | ExternalEvent::Bind { to: ResourceTy::Value(to), .. } = ev {
+      out.retain(|(r, _)| r != to);
+    }
+  }
+  out
+}
+
+/// How many `break`s inside `loop_expr` target it.
+fn breaks_out_of(loop_expr: &Expr<'_>) -> usize {
+  struct Count(HirId, usize);
+  impl<'tcx> Visitor<'tcx> for Count {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      match e.kind {
+        ExprKind::Closure(..) => return,
+        ExprKind::Break(dest, _) if dest.target_id == Ok(self.0) => self.1 += 1,
+        _ => {}
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut c = Count(loop_expr.hir_id, 0);
+  intravisit::walk_expr(&mut c, loop_expr);
+  c.1
+}
+
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Whether a branch (`body`, with its `events` and the variables
+  /// `decls` it declares) has type `!` and so never reaches the merge
+  /// after its conditional (#296), and if so how it leaves. A `break`
+  /// out of a loop after a move is recorded for the loop, which then
+  /// marks the moved variables as (maybe) moved where it ends (#344).
+  fn branch_divergence(
+    &mut self,
+    body: &'tcx Expr<'tcx>,
+    events: &[(usize, ExternalEvent)],
+    decls: &HashSet<ResourceAccessPoint>,
+  ) -> (bool, Vec<BranchExit>) {
+    if !self.tcx.typeck(body.hir_id.owner).expr_ty(body).is_never() {
+      return (false, Vec::new());
+    }
+    let leaves = branch_leaves(self.tcx, body);
+    let moved = moved_out_of_outer(events, decls);
+    for (brk, target) in &leaves.loop_breaks {
+      for (rap, every_path) in &moved {
+        self.break_moves.push(BreakMove {
+          target: *target,
+          brk: *brk,
+          rap: rap.clone(),
+          definite: *every_path && leaves.ends_in_its_only_break,
+        });
+      }
+    }
+    (true, leaves.exits)
+  }
+
+  /// The names of the variables registered so far.
+  fn rap_names(&self) -> HashSet<String> {
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let names = self.raps.keys().cloned().collect();
+    names
+  }
+
+  /// At the end of `loop_expr`: a variable declared before the loop
+  /// (in `before`) that a branch moved before a `break` out of it may
+  /// have been moved once the loop is over (#344). It has been when
+  /// every way out of the loop is such a `break` (`ends_otherwise`:
+  /// a `while` / `for` also ends when its condition / iterator does).
+  /// Also used for a labeled block (`block`: its HirId, which a `break`
+  /// may target instead of the block expression's).
+  fn emit_loop_exit_moves(&mut self, loop_expr: &'tcx Expr<'tcx>, block: Option<HirId>, before: &HashSet<String>, ends_otherwise: bool) {
+    let (mine, rest): (Vec<BreakMove>, Vec<BreakMove>) =
+      std::mem::take(&mut self.break_moves).into_iter()
+        .partition(|m| m.target == loop_expr.hir_id || Some(m.target) == block);
+    self.break_moves = rest;
+    if mine.is_empty() {
+      return;
+    }
+    let all_breaks = breaks_out_of(loop_expr);
+    let line = span_end_line(&loop_expr.span, &self.tcx);
+    let mut done: Vec<&ResourceAccessPoint> = Vec::new();
+    for m in &mine {
+      if done.contains(&&m.rap) {
+        continue;
+      }
+      done.push(&m.rap);
+      let declared_before = before.contains(m.rap.name())
+        && self.raps.get(m.rap.name()).is_some_and(|d| d.rap == m.rap);
+      if !declared_before {
+        continue;
+      }
+      let mut definite_breaks: Vec<HirId> = Vec::new();
+      for o in mine.iter().filter(|o| o.rap == m.rap && o.definite) {
+        if !definite_breaks.contains(&o.brk) {
+          definite_breaks.push(o.brk);
+        }
+      }
+      let definite = !ends_otherwise && definite_breaks.len() == all_breaks;
+      self.add_external_event(line, ExternalEvent::LoopExitMove {
+        ro: m.rap.clone(), definite, labeled_block: block.is_some(), id: *self.unique_id,
+      });
+      *self.unique_id += 1;
+    }
+  }
 }

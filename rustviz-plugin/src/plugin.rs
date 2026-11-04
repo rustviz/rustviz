@@ -199,6 +199,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               unlent_refs: HashSet::new(),
               temp_count: 0,
               temp_drops_noted: HashSet::new(),
+              break_moves: Vec::new(),
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
@@ -279,6 +280,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           unlent_refs: HashSet::new(),
           temp_count: 0,
               temp_drops_noted: HashSet::new(),
+          break_moves: Vec::new(),
         };
         visitor.visit_body(hir_body);
         visitor.print_lifetimes();

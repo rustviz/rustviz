@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1406,7 +1406,9 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
     let mut acquired = false;
     for (_, e) in events {
         match e {
-            Event::Move { .. } => { moved = true; acquired = false; }
+            // After a loop that may have been left through a `break`
+            // following a move, it may have been moved too.
+            Event::Move { .. } | Event::LoopExitMove { .. } => { moved = true; acquired = false; }
             Event::Acquire { .. } => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
                 let mut nested_any_moved = false;
@@ -1495,6 +1497,9 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
                     maybe = false;
                 }
             }
+            // A loop left through a `break` after a move (or another
+            // way): maybe-moved; through such `break`s only: moved.
+            Event::LoopExitMove { definite, .. } => maybe = !*definite,
             Event::Acquire { is: ResourceTy::Value(_), .. }
             | Event::Copy { is: ResourceTy::Value(_), .. }
             | Event::Move { .. } => maybe = false,
@@ -1548,23 +1553,68 @@ fn any_diverges(branch_history: &[BranchData]) -> bool {
 
 fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &ResourceTy) -> String {
     let var_name = &is.real_name();
-    let some_diverge = any_diverges(branch_history);
+    // The branches that never get here, by name, with how they left.
+    let diverged: Vec<(String, Vec<BranchExit>)> = branch_history.iter().enumerate()
+        .filter(|(_, b)| b.diverges)
+        .map(|(i, b)| (ty.string_of_branch(i), b.exits.clone()))
+        .collect();
     match compute_branch_join(branch_history, ty) {
         BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
         // A reference bound in every arm (`let msg = match n { .. => "a", .. }`)
         // holds a borrow, not ownership.
         BranchJoin::BoundHere => match is.extract_rap() {
             Some(rap) if rap.is_ref() =>
-                hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref(), some_diverge),
+                hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref(), &diverged),
             // A Copy value (`let n = match x { 0 => 1, _ => 2 };`) isn't
             // a resource anyone owns (#316).
             Some(rap) if rap.is_copy() || rap.is_plain_value() =>
-                hover_messages::event_dot_branch_merge_bound_copy(var_name, some_diverge),
-            _ => hover_messages::event_dot_branch_merge_bound(var_name, some_diverge),
+                hover_messages::event_dot_branch_merge_bound_copy(var_name, &diverged),
+            _ => hover_messages::event_dot_branch_merge_bound(var_name, &diverged),
         },
-        // No branch moved it (#179: this used to be an empty tooltip).
-        BranchJoin::Unchanged => hover_messages::event_dot_branch_merge_unchanged(var_name),
+        // No branch that gets here moved it. One that never gets here
+        // (`return s;`, #318) may have: then it still holds its value
+        // on every path that does.
+        BranchJoin::Unchanged => {
+            let mut leavers = Vec::new();
+            moved_by_leavers(branch_history, &mut leavers);
+            if leavers.is_empty() {
+                // #179: this used to be an empty tooltip.
+                hover_messages::event_dot_branch_merge_unchanged(var_name)
+            } else {
+                let is_ref = is.extract_rap().filter(|r| r.is_ref()).map(|r| r.is_mutref());
+                hover_messages::event_dot_branch_merge_kept(
+                    var_name, is_ref, is.extract_rap().map_or(false, |r| r.holds_value()), &leavers)
+            }
+        }
     }
+}
+
+// How each branch of type `!` that moved the variable left (`if c {
+// take(s); return; }`), also ones nested in branches that get here.
+fn moved_by_leavers(branch_history: &[BranchData], out: &mut Vec<Vec<BranchExit>>) {
+    for b in branch_history {
+        if b.diverges {
+            if moves_somewhere(&b.e_data) {
+                out.push(b.exits.clone());
+            }
+        } else {
+            for (_, e) in &b.e_data {
+                if let Event::Branch { branch_history, .. } = e {
+                    moved_by_leavers(branch_history, out);
+                }
+            }
+        }
+    }
+}
+
+// Whether the variable is moved anywhere in `events`, nested branches
+// included.
+fn moves_somewhere(events: &[(usize, Event)]) -> bool {
+    events.iter().any(|(_, e)| match e {
+        Event::Move { .. } | Event::LoopExitMove { .. } => true,
+        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moves_somewhere(&b.e_data)),
+        _ => false,
+    })
 }
 
 // Walk the original ExternalEvents to find every capture (Move /
@@ -1934,7 +1984,7 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         | Event::StaticBorrow { is: ResourceTy::Value(_), .. }
         | Event::MutableBorrow { is: ResourceTy::Value(_), .. }
         | Event::InitRefParam { .. } => true,
-        Event::Move { .. } => false,
+        Event::Move { .. } | Event::LoopExitMove { definite: true, .. } => false,
         Event::Branch { branch_history, .. } => {
             held || branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| holds_value_after(false, e)))
         }
@@ -3893,6 +3943,7 @@ mod tests {
             width: 0,
             states: Vec::new(),
             diverges: false,
+            exits: Vec::new(),
         }
     }
 

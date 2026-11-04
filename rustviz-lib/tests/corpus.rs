@@ -593,6 +593,16 @@ const EXPECTED_OK: &[&str] = &[
     "fn_ret_ref_reassign",
     "fn_ret_ref_struct_field",
     "fn_ret_ref_arg_lists",
+    // An explicit `return v` moves `v` to the caller (#318).
+    "return_early_in_if",
+    "return_explicit_last",
+    "return_in_match_arm",
+    // A branch that moves a value and then `break`s (#344).
+    "loop_break_after_move",
+    // The merge after branches that moved a value and left early.
+    "join_after_early_exit",
+    // The same, for a value with nothing to drop (#484).
+    "return_early_no_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4528,17 +4538,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #296: `_ => unreachable!()` never produces a value, so it
         // doesn't bind `s` (was "s acquires ownership of a resource"
         // on that arm's line), and the merge speaks of the arms that
-        // reach it. `t` is moved in the only arm that reaches the
+        // reach it, naming the one that doesn't and how it left (#350).
+        // `t` is moved in the only arm that reaches the
         // merge; the `panic!` arm never gets there, so this isn't the
         // "moved in some branches, dropped in the others" case.
         must_contain: &[
-            "s acquired ownership of a resource (in all branches above that reach this point)",
+            "s acquired ownership of a resource in every branch that reaches this point (the _ arm panicked)",
             "t was moved or dropped in every branch above that reaches this point",
             "t goes out of scope. No resource is dropped.",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "s acquired ownership of a resource (in all branches above)",
+            "s acquired ownership of a resource (in all branches above that reach this point)",
             "t was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "m is bound to a value",
         ],
@@ -4547,11 +4559,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "diverging_call_arm",
         // `fail()` has type `!` (a call to a `-> !` function), so like
         // `panic!()` that arm binds nothing and doesn't reach the merge.
+        // Whether `fail` panics or exits isn't looked at: the merge says
+        // only that the arm never finishes (#350).
         must_contain: &[
-            "s acquired ownership of a resource (in all branches above that reach this point)",
+            "s acquired ownership of a resource in every branch that reaches this point (the _ arm never finishes)",
         ],
         must_not_contain: &[
             "s acquired ownership of a resource (in all branches above)",
+            "s acquired ownership of a resource (in all branches above that reach this point)",
+            "the _ arm panicked",
         ],
     },
     TooltipExpect {
@@ -6007,6 +6023,168 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from o to r1",
             "Immutable borrow from b to r5",
             ", through the reference",
+        ],
+    },
+    // ─── Explicit `return` (#318) and the merge after a branch that
+    // leaves early (#344, #350) ──────────────────────────────────────
+    TooltipExpect {
+        name: "return_early_in_if",
+        // `if n > 0 { return s; }`: `s` goes to the caller on that
+        // path, which never reaches the end of `pick`; on the path
+        // that does, `s` is still owned and dropped there. The merge
+        // says why `s` is still owned after a branch that moved it
+        // (was "isn't moved in any of the branches above [that reach
+        // this point]", which reads as if no branch moved it).
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "s still owns its resource here: the branch that moved s returned before reaching this point",
+            "s goes out of scope. Its resource is dropped.",
+            "t's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            "s isn't moved in any of the branches above",
+            "s isn't moved in any of the branches above that reach this point",
+            "s goes out of scope. No resource is dropped.",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "return_explicit_last",
+        // `return s;` / `return n` / `return User { name, age };` as
+        // the last statement behave like a tail expression.
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "s goes out of scope. No resource is dropped.",
+            "n's value is copied to the caller",
+            "name's resource is moved to the caller",
+            "age's value is copied to the caller",
+            "name goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "name goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "return_in_match_arm",
+        // `0 => return s` moves `s` to the caller in that arm; the
+        // other arm reaches the code after the match with `s` owned,
+        // and the tail `s` moves it to the caller there. `k` is bound
+        // in the one arm that reaches the merge.
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "s still owns its resource here: the branch that moved s returned before reaching this point",
+            "k is bound to a value in every branch that reaches this point (the 0 arm returned)",
+            "n isn't moved in any of the branches above",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s isn't moved in any of the branches above",
+            "s isn't moved in any of the branches above that reach this point",
+            "n isn't moved in any of the branches above that reach this point",
+            "k is bound to a value (in all branches above that reach this point)",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_after_move",
+        // `if … { take(s); break; }` in a loop: that branch never
+        // reaches the merge after its `if`, so there `s` is still
+        // owned (was "s was moved in at least one branch above, so it
+        // can't be used after the branches …", false inside the loop,
+        // and on main "s isn't moved in any of the branches above" and
+        // a plain drop at scope end). The move counts where the loop
+        // ends: `s`, `t` (a bare `loop` whose only way out is that
+        // `break`) are moved after it, so nothing is dropped and there
+        // is no drop flag; `u` (a `while`) and `w` (a second `break`)
+        // only may have been moved.
+        must_contain: &[
+            "s still owns its resource here: the branch that moved s broke out of the loop before reaching this point",
+            "s was moved before the loop ended: the only way out of the loop is a break that \
+             comes after s is moved, so s can't be used after the loop",
+            "s goes out of scope. No resource is dropped.",
+            "t still owns its resource here: the branch that moved t broke out of the loop before reaching this point",
+            "t was moved before the loop ended: the only way out of the loop is a break that \
+             comes after t is moved, so t can't be used after the loop",
+            "t goes out of scope. No resource is dropped.",
+            "u still owns its resource here: the branch that moved u broke out of the loop before reaching this point",
+            "u may have been moved: the loop can end through a break that comes after u is \
+             moved, so u can't be used after the loop",
+            "u goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "w still owns its resource here: the branch that moved w broke out of the loop before reaching this point",
+            "w may have been moved: the loop can end through a break that comes after w is \
+             moved, so w can't be used after the loop",
+            "w goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "t was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when t goes out of scope.",
+            "u was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when u goes out of scope.",
+            "w was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when w goes out of scope.",
+            "s isn't moved in any of the branches above",
+            "t isn't moved in any of the branches above",
+            "u isn't moved in any of the branches above",
+            "w isn't moved in any of the branches above",
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped.",
+            "u goes out of scope. No resource is dropped.",
+            "w goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "join_after_early_exit",
+        // The merge after branches that moved a value and then left
+        // early says how they left: panicked, continued, returned
+        // (two arms), return and break mixed; a `&mut` that was
+        // returned is still held. All were "isn't moved in any of the
+        // branches above", as if nothing had moved it.
+        must_contain: &[
+            "s still owns its resource here: the branch that moved s panicked before reaching this point",
+            "c still owns its resource here: the branch that moved c continued to the next iteration before reaching this point",
+            "t still owns its resource here: the branches that moved t returned before reaching this point",
+            "m still owns its resource here: the branches that moved m left early (return, break) before reaching this point",
+            "r still holds its mutable reference here: the branch that moved r returned before \
+             reaching this point",
+            "s goes out of scope. Its resource is dropped.",
+            "total isn't moved in any of the branches above",
+        ],
+        must_not_contain: &[
+            "s isn't moved in any of the branches above",
+            "c isn't moved in any of the branches above",
+            "t isn't moved in any of the branches above",
+            "m isn't moved in any of the branches above",
+            "r isn't moved in any of the branches above",
+            "r still owns its resource here: the branch that moved r returned before reaching this point",
+            "m was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when m goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "return_early_no_drop",
+        // `Pt` isn't Copy but has no drop glue: a value, not a resource (#484).
+        must_contain: &[
+            "p still owns its value here: the branch that moved p returned before reaching this point",
+        ],
+        must_not_contain: &[
+            "p still owns its resource here",
         ],
     },
 ];
