@@ -189,6 +189,24 @@ function displayTooltip(tooltip, classname) {
             else if (e.currentTarget.tagName === 'use') {
                 begin = end = parseInt(e.currentTarget.getAttribute('y')) + 5;
             }
+            else if (e.currentTarget.tagName === 'g') {
+                // A group: a drop dot (circle + triangle), a merged call dot,
+                // or an arrow (shaft + head). It has no y attribute of its
+                // own: use its circle's centre, else the arrow's first point,
+                // else (a hop arrow's path) the lines its box spans.
+                let c = e.currentTarget.querySelector('circle');
+                let pl = e.currentTarget.querySelector('polyline');
+                if (c) {
+                    begin = end = parseInt(c.getAttribute('cy')) + 5;
+                } else if (pl) {
+                    let arr = pl.getAttribute('points').split(' ');
+                    begin = end = parseInt(arr[1]) + 5;
+                } else {
+                    let bb = e.currentTarget.getBBox();
+                    begin = bb.y;
+                    end = bb.y + bb.height + 5;
+                }
+            }
             else if (e.currentTarget.tagName === 'polyline') {
                 let arr = e.currentTarget.getAttribute('points').split(' ');
                 begin = end = parseInt(arr[1]) + 5;
@@ -206,13 +224,18 @@ function displayTooltip(tooltip, classname) {
         for (let i=0; i<len; ++i) {
             let ly = parseInt(lines[i].getAttribute('y'));
             if (ly >= begin && ly <= end) {
-                let emph = code_root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'text');
+                // Underline the whole line: one SVG line across the line's own
+                // measured box. (It used to be a row of '_' sized by assuming
+                // 8px per character, which fell short with the rendered font.)
+                let box = lines[i].getBBox();
+                let emph = code_root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'line');
                 emph.setAttribute('class', 'code emph');
-                emph.setAttribute('x', '25');
-                emph.setAttribute('y', ly + 3);
-                emph.innerHTML = new Array(
-                    Math.floor(lines[i].getBBox().width/8)
-                ).join('_');
+                emph.setAttribute('x1', box.x);
+                emph.setAttribute('x2', box.x + box.width);
+                emph.setAttribute('y1', ly + 4);
+                emph.setAttribute('y2', ly + 4);
+                emph.setAttribute('stroke', 'currentColor');
+                emph.setAttribute('stroke-width', '1');
                 code_g.appendChild(emph);
             }
         }
