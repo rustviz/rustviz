@@ -1195,16 +1195,26 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // but isn't in `self.raps` yet. Register it on the fly so the
       // Move/Copy arrow has a labeled source instead of falling back
       // to Anonymous.
-      let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-        Some(n) => {
-          if !self.raps.contains_key(&n) {
-            self.add_fn(n.clone());
+      //
+      // Calling a local variable (`let y = add_one(5);` with a closure
+      // `add_one`, or a generic `F: Fn` parameter `f`): the result
+      // comes from the call, not out of the variable's own column.
+      // Using the variable as the source read as copying (or moving)
+      // the closure itself into `y` (#299). The call has its own
+      // Function target, the same one its arguments are sent to.
+      let from = match self.local_callee_target(fn_expr) {
+        Some(key) => ResourceTy::Value(self.raps[&key].rap.to_owned()),
+        None => match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+          Some(n) => {
+            if !self.raps.contains_key(&n) {
+              self.add_fn(n.clone());
+            }
+            self.raps.get(&n)
+              .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+              .unwrap_or(ResourceTy::Anonymous)
           }
-          self.raps.get(&n)
-            .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
-            .unwrap_or(ResourceTy::Anonymous)
-        }
-        None => ResourceTy::Anonymous,
+          None => ResourceTy::Anonymous,
+        },
       };
       self.add_ev(line_num, evt, lhs, from, false);
     },

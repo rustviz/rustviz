@@ -256,6 +256,9 @@ const EXPECTED_OK: &[&str] = &[
     "closure_call_copy_arg",
     "closure_call_move_arg",
     "generic_fn_param_call",
+    // The result of calling a local closure comes from the call, not
+    // out of the closure's column (#299).
+    "closure_call_result",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2273,6 +2276,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "f is initialized by copy from Anonymous resource",
+        ],
+    },
+    // ─── The result of a closure call comes from the call (#299) ────
+    // `let y = add_one(5);` used `add_one`'s own column as the source
+    // of `y`'s value: "add_one's resource is copied", "Copy from
+    // add_one to y", read as the closure itself being copied into
+    // `y`. `y` gets the closure's return value; calling a `Fn`
+    // closure only borrows it. Same for a closure returning a String
+    // (`make`) and a generic `F: Fn` parameter (`f`).
+    TooltipExpect {
+        name: "closure_call_result",
+        must_contain: &[
+            "y is initialized by copy from add_one",
+            "Move from make to t",
+            "r is initialized by copy from f",
+            "add_one goes out of scope",
+            "make goes out of scope",
+        ],
+        must_not_contain: &[
+            "add_one's resource is copied",
+            "make's resource is moved",
+            "f's resource is copied",
         ],
     },
 ];
