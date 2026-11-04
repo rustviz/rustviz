@@ -746,7 +746,12 @@ pub enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LineState {
     Full,
-    Gray
+    Gray,
+    // Dashed segment of a variable that has no value yet on this
+    // path: `let s;` before a branch assigns it, or the
+    // `let s = if … { … }` binding before its branch produces a value
+    // (#234). Converts back to OutOfScope.
+    Uninit,
 }
 
 // A State is a description of a ResourceAccessPoint IMMEDIATELY AFTER a specific line.
@@ -830,6 +835,9 @@ impl State {
             State::ResourceMoved{ move_to , move_at_line: _ } => {
                 safe_message(hover_messages::state_resource_moved, my_name, move_to)
             }
+            State::FullPrivilege { s: LineState::Uninit } => {
+                hover_messages::state_uninitialized(my_name)
+            }
             State::FullPrivilege {..}=> {
                 hover_messages::state_full_privilege(my_name)
             }
@@ -858,6 +866,7 @@ impl Ord for State {
         
         fn rank(s: &State) -> u8 {
             match s {
+                FullPrivilege { s: LineState::Uninit } => 3,
                 ResourceMoved { .. } | RevokedPrivilege { .. } => 0,
                 PartialPrivilege { .. } => 1,
                 FullPrivilege {..} => 2,
@@ -896,18 +905,22 @@ impl Eq for State {}
 /// doesn't exist before the conditional) still get a visible
 /// passive column on their inactive branch — without this, the
 /// pre-event segment of every let-as-rhs branch rendered as
-/// nothing at all.
+/// nothing at all. It becomes the `Uninit` flavour, not `Gray`, so
+/// its tooltip says the variable has no value yet instead of calling
+/// it the owner (#234).
 pub fn branch_state_converter(s: &State) -> State {
     match s {
+        State::FullPrivilege { s: LineState::Uninit } => s.clone(),
         State::FullPrivilege { .. } => State::FullPrivilege { s: LineState::Gray },
         State::PartialPrivilege { .. } => State::PartialPrivilege { s: LineState::Gray },
-        State::OutOfScope => State::FullPrivilege { s: LineState::Gray },
+        State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
         _ => s.clone()
     }
 }
 
 pub fn convert_back(s: &State) -> State {
     match s {
+        State::FullPrivilege { s: LineState::Uninit } => State::OutOfScope,
         State::FullPrivilege { .. } => State::FullPrivilege { s: LineState::Full },
         State::PartialPrivilege { .. } => State::PartialPrivilege { s: LineState::Full },
         _ => s.clone() 
@@ -1554,6 +1567,13 @@ impl Visualizable for VisualizationData {
         // entirely dashed even though else is the active path on
         // its own body lines.
         if history.is_empty() {
+            // No value before the branch and none assigned in it
+            // (`let s;` initialized only in another branch, #234):
+            // the whole column is "no value yet".
+            if let State::OutOfScope = previous_state {
+                states.push((branch_start, branch_end, branch_state_converter(&previous_state)));
+                return previous_state;
+            }
             if begin > branch_start {
                 states.push((branch_start, begin, branch_state_converter(&previous_state)));
             }

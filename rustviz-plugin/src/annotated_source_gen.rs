@@ -295,7 +295,10 @@ pub fn annotate_local(&mut self, loc: &'tcx LetStmt<'tcx>) {
   match loc.pat.kind {
     rustc_hir::PatKind::Binding(_, _, ident, _) => {
       let lhs_var:String = ident.to_string();
-      self.annotate_src(lhs_var.clone(), ident.span, false, *self.raps.get(&lhs_var).unwrap().rap.hash());
+      // A `let x;` that is never assigned has no RAP (#234).
+      if let Some(rd) = self.raps.get(&lhs_var) {
+        self.annotate_src(lhs_var.clone(), ident.span, false, *rd.rap.hash());
+      }
       match loc.init {
         Some(exp) => {
           self.annotate_expr(exp);

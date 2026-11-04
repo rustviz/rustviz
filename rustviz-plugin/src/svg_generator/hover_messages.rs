@@ -737,6 +737,18 @@ pub fn state_full_privilege(my_name: &String) -> String {
     )
 }
 
+// Dashed segment of a variable that has no value yet on this path:
+// before a `let s;` is assigned in a branch, or before the branch of
+// a `let s = if …` produces the value (#234).
+pub fn state_uninitialized(my_name: &String) -> String {
+    let my_name_fmt = fmt_style(my_name);
+
+    format!(
+        "{0} has no value yet",
+        my_name_fmt
+    )
+}
+
 // FullPrivilege but the owner is a Copy type (i32 etc.), so the
 // "owner of the resource" framing doesn't fit — primitives are
 // values, not heap-backed resources. Used for the timeline-stripe

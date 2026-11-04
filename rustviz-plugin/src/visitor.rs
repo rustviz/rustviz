@@ -12,7 +12,7 @@ use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_middle::ty::adjustment::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
@@ -753,6 +753,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
 
+        // `x = rhs` where x came from `let x;` and is still
+        // uninitialized here: this initializes x (#234).
+        if let (ExprKind::Assign(..), ExprKind::Path(QPath::Resolved(None, path))) = (expr.kind, lhs_expr.kind) {
+          if let Res::Local(hirid) = path.res {
+            if let Some(decl) = self.uninit_locals.remove(&hirid) {
+              self.init_deferred_local(hirid, decl, rhs_expr);
+              return;
+            }
+          }
+        }
+
         // typecheck to figure out what type of event is going to occur
         let line_num = expr_to_line(&lhs_expr, &self.tcx);
         // `u._a = …` on a union: resource_of_lhs maps it to the
@@ -1087,7 +1098,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             HashSet::new()
           };
         self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
+        // Both branches start from the same set of uninitialized
+        // `let x;` locals (#234); see join_uninit_locals.
+        let uninit_before = self.uninit_locals.clone();
         self.visit_expr(&if_expr);
+        let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before);
         let else_decl = match else_expr {
           Some(e) => {
             self.visit_expr(e);
@@ -1095,6 +1110,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
           None => HashSet::new(),
         };
+        let uninit_after_else = std::mem::take(&mut self.uninit_locals);
+        self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if), (else_expr, uninit_after_else)]);
         self.inside_branch = false;
 
         // compute split and merge points
@@ -1411,6 +1428,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // events are already in preprocessed_events from the
             // arm's visit_expr below.
             let inline = arms.len() == 1;
+            // Every arm starts from the same uninitialized `let x;`
+            // locals (#234); see join_uninit_locals.
+            let uninit_before = self.uninit_locals.clone();
+            let mut uninit_ends = Vec::new();
             for arm in arms.iter() {
               let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
               let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
@@ -1549,7 +1570,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
               // visit expr
               self.inside_branch = true;
+              self.uninit_locals = uninit_before.clone();
               self.visit_expr(arm.body);
+              uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
               self.inside_branch = false;
 
               all_pat_decls.extend(pat_decls.iter().cloned());
@@ -1609,6 +1632,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls });
               }
             }
+            self.join_uninit_locals(uninit_ends);
             // Single-arm: events already routed through
             // add_external_event during the loop, nothing else
             // to do — bail out of the Normal arm before the
@@ -1830,10 +1854,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     let is_skipped = self.skip_lines.contains(&local_line);
     if let Some(init) = local.init {
       self.process_let_binding(local.pat, init, is_skipped);
+    } else {
+      // `let x;` (deferred initialization, #234): x owns nothing yet,
+      // so register no RAP and emit no event here. Remember each
+      // binding; its first assignment registers the RAP with this
+      // `let`'s scope and reads as initialization (see the Assign arm).
+      let (scope, inside_branch) = (self.current_scope, self.inside_branch);
+      local.pat.each_binding(|annotation, hir_id, _, _| {
+        self.uninit_locals.insert(hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped });
+      });
     }
-    // `let x;` (no init) — nothing to bind from. The variable still
-    // gets its column on its first assignment downstream, same as
-    // pre-fix behaviour.
 
     if let Some(els) = local.els {
       self.visit_block(els);
@@ -2156,6 +2186,64 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       let rap = self.raps.get(&name).unwrap().rap.to_owned();
       self.match_rhs(ResourceTy::Value(rap), init, evt);
+    }
+  }
+
+  /// Move vs. Copy for binding a value of type `ty` (a `&T` is Copy,
+  /// a `&mut T` moves); same choice as bind_one.
+  fn bind_evt(&self, ty: rustc_middle::ty::Ty<'tcx>, hirid: HirId) -> Evt {
+    if ty.is_ref() {
+      match ty.ref_mutability().unwrap() {
+        Mutability::Not => Evt::Copy,
+        Mutability::Mut => Evt::Move,
+      }
+    } else if self.ty_is_copy(ty, hirid.owner) {
+      Evt::Copy
+    } else {
+      Evt::Move
+    }
+  }
+
+  /// Set the uninitialized-locals state after a branch construct from
+  /// the state at the end of each branch (`None` = the implicit empty
+  /// else of an `if`). A `let x;` local is still definitely
+  /// uninitialized after the join iff it is so at the end of every
+  /// branch that reaches the join; branches of type `!` (`return`,
+  /// `panic!()`) don't. If x is initialized on only some paths, a later
+  /// `x = …` is treated as a reassignment.
+  fn join_uninit_locals(&mut self, ends: Vec<(Option<&'tcx Expr<'tcx>>, HashMap<HirId, DeferredLet>)>) {
+    let diverges = |e: &Option<&'tcx Expr<'tcx>>| {
+      e.is_some_and(|e| self.tcx.typeck(e.hir_id.owner).expr_ty(e).is_never())
+    };
+    let mut reaching: Vec<HashMap<HirId, DeferredLet>> =
+      ends.iter().filter(|(e, _)| !diverges(e)).map(|(_, m)| m.clone()).collect();
+    if reaching.is_empty() {
+      reaching = ends.into_iter().map(|(_, m)| m).collect();
+    }
+    let mut joined = reaching.pop().unwrap_or_default();
+    joined.retain(|id, _| reaching.iter().all(|m| m.contains_key(id)));
+    self.uninit_locals = joined;
+  }
+
+  /// The first assignment `x = rhs` to a `let x;` binding (#234). It
+  /// initializes x exactly as `let x = rhs;` would: register the RAP
+  /// (with the `let`'s scope, so x lives to the end of its block),
+  /// then emit the move/copy/borrow into it. No drop and no ref-die,
+  /// since x held nothing before. In a later sibling branch the RAP
+  /// already exists and only the event is emitted.
+  fn init_deferred_local(&mut self, hirid: HirId, decl: DeferredLet, rhs: &'tcx Expr<'tcx>) {
+    let name = self.tcx.hir_name(hirid).to_string();
+    let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
+    let evt = self.bind_evt(lhs_ty, hirid);
+    let saved = (self.current_scope, self.inside_branch);
+    (self.current_scope, self.inside_branch) = (decl.scope, decl.inside_branch);
+    self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), rhs, lhs_ty);
+    (self.current_scope, self.inside_branch) = saved;
+    if decl.is_skipped {
+      self.skip_raps.insert(name);
+    } else {
+      let rap = self.raps.get(&name).unwrap().rap.to_owned();
+      self.match_rhs(ResourceTy::Value(rap), rhs, evt);
     }
   }
 }
