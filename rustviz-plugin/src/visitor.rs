@@ -154,7 +154,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             (place_rap(recv, &self.tcx, &self.raps), user_macro_name(expr.span))
           {
             self.add_fn(name.clone());
-            let to = ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
+            let to = ResourceTy::Value(self.raps.get(&fn_key(&name)).unwrap().rap.to_owned());
             let line_num = expr_to_line(recv, &self.tcx);
             let id = *self.unique_id;
             self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
@@ -246,7 +246,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let ResourceTy::Value(rap) = &from {
       self.update_rap(rap, line_num);
     }
-    let to = ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
+    let to = ResourceTy::Value(self.raps.get(&fn_key(&name)).unwrap().rap.to_owned());
     let already = self.preprocessed_events.iter().any(|(l, e)| {
       *l == line_num
         && matches!(e, ExternalEvent::PassByStaticReference { from: f, to: t, .. }
@@ -643,7 +643,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           None => return,
         };
         self.update_rap(&rcvr_rap, line_num);
-        let fn_rap = self.raps.get(&fn_name).unwrap().rap.to_owned();
+        let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
         // typecheck
         // Annotate passByRef event, can check the type of borrow by looking at adjusments (usually borrows that are not explicit)
         // for example, in rust you don't have to dereference a reference to access members
@@ -1025,6 +1025,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             return;
           }
           _ => ()
+        }
+        // Only a local binding can be a variable RAP. Other paths (fn
+        // items, statics, consts) have nothing to update, and looking
+        // their name up among the variables would update a variable
+        // that merely shares the name (#232).
+        if !matches!(p.res, Res::Local(_)) {
+          return;
         }
         let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
         // Skip path-expression references whose span is from a macro
