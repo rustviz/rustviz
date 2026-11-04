@@ -103,6 +103,35 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     )
 }
 
+// A union goes out of scope (#191). Rust never drops a union's fields:
+// it can't know which field holds a value, so whatever is in a
+// `ManuallyDrop` field is left alone (leaked unless dropped by hand).
+// True even for a union with its own `Drop` impl, which runs but still
+// doesn't drop the fields.
+pub fn event_dot_union_go_out_of_scope(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. A union's fields are never dropped automatically.",
+        fmt_style(my_name)
+    )
+}
+
+// A union that already holds a value is written to again (#191):
+// `u.a = 5;`, `u.a = y;`, `u = U { .. };`. Nothing is acquired and the
+// old contents aren't dropped. `from` names the variable the new
+// value was copied / moved from, if any.
+pub fn event_dot_union_write(my_name: &String, from: Option<(&String, bool)>) -> String {
+    let source = match from {
+        Some((name, true)) => format!(" (copied from {})", fmt_style(name)),
+        Some((name, false)) => format!(" (moved from {})", fmt_style(name)),
+        None => String::new(),
+    };
+    format!(
+        "{0} is written to{1}; writing to a union never drops its old contents",
+        fmt_style(my_name),
+        source
+    )
+}
+
 // An owned (non-ref) function parameter receives its resource from
 // whatever the caller passed. The L-shaped arrow on the param's
 // timeline visually anchors that "from outside this scope" origin;

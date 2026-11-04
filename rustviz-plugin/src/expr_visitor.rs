@@ -248,14 +248,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: false}), scope, is_global);
+  }
+
+  // Adds an owner RAP for a `union`-typed binding (one opaque column;
+  // see the AdtKind::Union arms).
+  pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: true}), scope, is_global);
   }
 
   // Adds an owner RAP that binds a closure literal. Routed through
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true, is_union: false}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -810,7 +816,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // would be lying about which field is "the" field.
         AdtKind::Union | AdtKind::Enum => {
           let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
-          self.add_owner(name, mutability, is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
+          let interior_mut = self.ty_has_interior_mut(ty, expr.hir_id.owner);
+          if ty.is_union() {
+            self.add_union_owner(name, mutability, is_copy, interior_mut, self.current_scope, !self.inside_branch);
+          } else {
+            self.add_owner(name, mutability, is_copy, interior_mut, self.current_scope, !self.inside_branch);
+          }
         }
       }
     }
@@ -978,7 +989,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                     // see the matching note on the LHS-of-expr arm.
                     AdtKind::Union | AdtKind::Enum => {
                         let is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
-                        self.add_owner(name.clone(), muta, is_copy, self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
+                        let interior_mut = self.ty_has_interior_mut(ty, pat.hir_id.owner);
+                        if ty.is_union() {
+                            self.add_union_owner(name.clone(), muta, is_copy, interior_mut, scope, false);
+                        } else {
+                            self.add_owner(name.clone(), muta, is_copy, interior_mut, scope, false);
+                        }
                     }
                 }
             } else {

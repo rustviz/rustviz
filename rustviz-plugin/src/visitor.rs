@@ -487,7 +487,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             }
             rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
               let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-              self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+              let interior_mut = self.ty_has_interior_mut(ty, param.hir_id.owner);
+              if ty.is_union() {
+                self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
+              } else {
+                self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
+              }
             }
           }
         }
@@ -937,8 +942,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // (x, y) — otherwise the colored Acquire circle paints over
         // the white down-arrow triangle and the drop becomes
         // invisible.
+        // Assigning a whole union (`u = U { .. }`) drops nothing unless
+        // the union has its own `Drop` impl: a union never drops its
+        // fields (#191).
+        let union_without_drop = lhs_ty.is_union()
+          && !lhs_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner));
         let drop_target: Option<ResourceAccessPoint> =
-          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field {
+          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop {
             match &lhs_rty {
               ResourceTy::Value(rap) => {
                 // Plain reassign — only emit the drop if y currently
