@@ -473,6 +473,10 @@ const EXPECTED_OK: &[&str] = &[
     // A borrow stored in an element or other column-less place names
     // its borrower and ends (#282).
     "borrow_into_element",
+    // Destructuring a struct variable moves each field into its own
+    // name, not all of the struct (#326).
+    "struct_destructure_let",
+    "struct_destructure_match",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4807,6 +4811,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c's resource is mutably borrowed by Anonymous resource; c can't be used while the borrow is live",
             "y's resource is immutably borrowed by Anonymous resource",
             "c goes out of scope. No resource is dropped.",
+        ],
+    },
+    // ─── Destructuring a struct variable (#326) ─────────────────────
+    TooltipExpect {
+        name: "struct_destructure_let",
+        // `let User { name, age, .. } = user;` moves `user.name` into
+        // `name` and copies `user.age` into `age`; `user.email` stays in
+        // `user` (still usable, and dropped with it). `let Pair(left,
+        // right) = pair;` moves `pair.0` and `pair.1`. The field columns
+        // that were moved out drop nothing.
+        must_contain: &[
+            "Move from user.name to name",
+            "Copy from user.age to age",
+            "user goes out of scope. user.name was moved out earlier, so only user.email is dropped.",
+            "user.name goes out of scope. No resource is dropped.",
+            "Move from pair.0 to left",
+            "Move from pair.1 to right",
+            "pair goes out of scope. pair.0 and pair.1 were moved out earlier, so no resource is dropped.",
+            "pair.0 goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from user to name",
+            "Copy from user to age",
+            "user.name goes out of scope. Its resource is dropped.",
+            "Move from pair to left",
+            "Move from pair to right",
+            "pair.0 goes out of scope. Its resource is dropped.",
+            "pair.1 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_destructure_match",
+        // A struct pattern in a match arm, nested: each name takes its
+        // own (nested) field of `o`.
+        must_contain: &[
+            "Move from o.inner.x to x",
+            "Copy from o.inner.y to y",
+            "Move from o.tag to tag",
+            "o goes out of scope. o.inner.x and o.tag were moved out earlier, so no resource is dropped.",
+            "o.inner.x goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from o to x",
+            "Copy from o to y",
+            "Move from o to tag",
+            "o.inner.x goes out of scope. Its resource is dropped.",
         ],
     },
 ];

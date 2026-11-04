@@ -286,9 +286,7 @@ const Description: React.FC = () => (
         the move as conditional.
       </li>
       <li>
-        Destructuring a struct (<code>let P {'{'} a, b {'}'} = p;</code>) is
-        drawn as moving all of <code>p</code>; an <code>if let</code> with a
-        tuple pattern shows no bindings.
+        An <code>if let</code> with a tuple pattern shows no bindings.
       </li>
     </ul>
     <p>

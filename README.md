@@ -212,10 +212,6 @@ panic.
   o` with `x.part: &str`) is drawn as owning a resource.
 - `Rc`: clones are shown as independent owners that each drop the value;
   reference counting isn't modelled.
-- Destructuring a struct variable (`let P { a, b } = p;`, `match p {
-  P(x, y) => … }`) is drawn as moving all of `p` into each name, and
-  `p`'s field columns still drop their values at the end. (Tuples are
-  paired element by element: `let (a, b) = t;` moves `t.0` into `a`.)
 - `if let` with a tuple pattern (`if let (Some(a), Some(b)) = (x, y)`)
   shows no bindings, and `x` / `y` as still owning their values.
 - A closure that uses one field or element (`move || p.name.len()`,
