@@ -201,13 +201,17 @@ function displayTooltip(tooltip, classname) {
         for (let i=0; i<len; ++i) {
             let ly = parseInt(lines[i].getAttribute('y'));
             if (ly >= begin && ly <= end) { // only underline relevant code
-                let emph = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+                // One SVG line across the code line's measured box (was a row of '_'
+                // sized by assuming 8px per character, which fell short).
+                let box = lines[i].getBBox();
+                let emph = doc.createElementNS('http://www.w3.org/2000/svg', 'line');
                 emph.setAttribute('class', 'code emph');
-                emph.setAttribute('x', '25');
-                emph.setAttribute('y', ly + 3); // +3 to hang just under text
-                emph.innerHTML = new Array(
-                    Math.floor(lines[i].getBBox().width/8) // size of '_' = 8
-                ).join('_'); // string with all underscores
+                emph.setAttribute('x1', box.x);
+                emph.setAttribute('x2', box.x + box.width);
+                emph.setAttribute('y1', ly + 4);
+                emph.setAttribute('y2', ly + 4);
+                emph.setAttribute('stroke', 'currentColor');
+                emph.setAttribute('stroke-width', '1');
                 doc.getElementById('code').appendChild(emph);
             }
         }

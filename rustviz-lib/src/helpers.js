@@ -206,13 +206,18 @@ function displayTooltip(tooltip, classname) {
         for (let i=0; i<len; ++i) {
             let ly = parseInt(lines[i].getAttribute('y'));
             if (ly >= begin && ly <= end) {
-                let emph = code_root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'text');
+                // Underline the whole line: one SVG line across the line's own
+                // measured box. (It used to be a row of '_' sized by assuming
+                // 8px per character, which fell short with the rendered font.)
+                let box = lines[i].getBBox();
+                let emph = code_root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'line');
                 emph.setAttribute('class', 'code emph');
-                emph.setAttribute('x', '25');
-                emph.setAttribute('y', ly + 3);
-                emph.innerHTML = new Array(
-                    Math.floor(lines[i].getBBox().width/8)
-                ).join('_');
+                emph.setAttribute('x1', box.x);
+                emph.setAttribute('x2', box.x + box.width);
+                emph.setAttribute('y1', ly + 4);
+                emph.setAttribute('y2', ly + 4);
+                emph.setAttribute('stroke', 'currentColor');
+                emph.setAttribute('stroke-width', '1');
                 code_g.appendChild(emph);
             }
         }
