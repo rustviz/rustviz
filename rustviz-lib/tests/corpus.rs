@@ -25,6 +25,7 @@
 //! `cargo install --path rustviz-plugin --locked` to have been run first.
 //! `setup.sh` does this for you. CI runs `setup.sh` before `cargo test`.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -300,6 +301,9 @@ const EXPECTED_OK: &[&str] = &[
     // More columns than the 12-colour palette: every column still gets
     // a stroke colour (#279).
     "many_columns_palette",
+    // Events on one line of one column share one dot (#309); the
+    // shared-point check runs on every snippet in this list.
+    "same_line_events_one_dot",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2601,6 +2605,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "add_one is initialized by copy from Anonymous resource",
         ],
     },
+    TooltipExpect {
+        name: "same_line_events_one_dot",
+        // Each event on a shared dot (#309) is still listed; the text
+        // was right before, but only the top dot could be hovered.
+        // `same_line_events_share_one_dot` checks they share one dot,
+        // in order.
+        must_contain: &[
+            "a's resource is immutably borrowed by b; a is read-only while the borrow is live",
+            "a's resource is immutably borrowed by c; a is read-only while the borrow is live",
+            "the resource r points to is modified through *r (copied from y)",
+            "r's mutable borrow ends",
+            "s's resource is immutably borrowed by show; s is read-only while the borrow is live",
+            "show reads from s",
+            "s's resource is no longer immutably borrowed",
+            "t acquires ownership of a resource",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -2666,6 +2689,13 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         "{}: straight arrow(s) drawn across event dots, hiding their tooltips: {:?}",
         name,
         crossed
+    );
+    let shared = shared_dot_points(&timeline);
+    assert!(
+        shared.is_empty(),
+        "{}: several dots drawn at one point, only the top one can be hovered: {:?}",
+        name,
+        shared
     );
     let covered = arrow_tails_on_dots(&timeline);
     assert!(
@@ -2972,7 +3002,16 @@ fn arrows_hop_over_dots_they_cross() {
 /// The renderer HTML-escapes the tooltip body and embeds nested
 /// `<span>` markup for the variable-name color spans; both get
 /// stripped here so comparisons are against the plain visible text.
+///
+/// A dot shared by several events on one line (#309) lists them as
+/// `• event<br>• event`; each event is returned as its own tooltip.
 fn timeline_tooltips(timeline_svg: &str) -> Vec<String> {
+    tooltip_lines(timeline_svg).into_iter().flatten().collect()
+}
+
+/// Every tooltip in a timeline panel, as its list of lines (one line
+/// unless several events share a dot).
+fn tooltip_lines(timeline_svg: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     for chunk in timeline_svg.split("data-tooltip-text=\"").skip(1) {
         let raw = match chunk.find('"') {
@@ -2984,16 +3023,96 @@ fn timeline_tooltips(timeline_svg: &str) -> Vec<String> {
             .replace("&gt;", ">")
             .replace("&quot;", "\"")
             .replace("&amp;", "&");
-        let mut clean = String::with_capacity(unescaped.len());
-        let mut in_tag = false;
-        for ch in unescaped.chars() {
-            if ch == '<' { in_tag = true; continue; }
-            if ch == '>' { in_tag = false; continue; }
-            if !in_tag { clean.push(ch); }
-        }
-        out.push(clean);
+        let lines = unescaped
+            .split("<br>")
+            .map(|line| {
+                let mut clean = String::with_capacity(line.len());
+                let mut in_tag = false;
+                for ch in line.chars() {
+                    if ch == '<' { in_tag = true; continue; }
+                    if ch == '>' { in_tag = false; continue; }
+                    if !in_tag { clean.push(ch); }
+                }
+                clean.strip_prefix("• ").map(str::to_owned).unwrap_or(clean)
+            })
+            .collect();
+        out.push(lines);
     }
     out
+}
+
+/// Points where more than one hoverable dot is drawn (a `<circle>` or
+/// call icon `<use>` with a tooltip, or a tooltip `<g>` around a
+/// circle). Only the top one can be hovered, so the others' tooltips
+/// can't be read (#309).
+fn shared_dot_points(svg: &str) -> Vec<String> {
+    let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for (i, _) in svg.match_indices(" data-tooltip-text=\"") {
+        let start = match svg[..i].rfind('<') {
+            Some(s) => s,
+            None => continue,
+        };
+        let tag = &svg[start..start + svg[start..].find('>').unwrap_or(svg.len() - start)];
+        let centre = if tag.starts_with("<circle ") {
+            attr(tag, "cx").zip(attr(tag, "cy"))
+        } else if tag.starts_with("<use ") {
+            attr(tag, "x").zip(attr(tag, "y"))
+        } else if tag.starts_with("<g ") {
+            let body = &svg[start..start + svg[start..].find("</g>").unwrap_or(svg.len() - start)];
+            start_tags(body, "circle").first().and_then(|c| attr(c, "cx").zip(attr(c, "cy")))
+        } else {
+            None
+        };
+        if let Some((x, y)) = centre {
+            *seen.entry((x.to_string(), y.to_string())).or_default() += 1;
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|((x, y), n)| format!("{} dots at ({}, {})", n, x, y))
+        .collect()
+}
+
+/// #309: two events on one line of a variable's column used to get two
+/// dots at the same point, so only the top one's tooltip showed. They
+/// now share one dot that lists every event, in order.
+#[test]
+fn same_line_events_share_one_dot() {
+    let rv = run_with_local_backend("same_line_events_one_dot");
+    let timeline = rv.timeline_panel_string();
+    assert_eq!(shared_dot_points(&timeline), Vec::<String>::new());
+    let tooltips = tooltip_lines(&timeline);
+    for want in [
+        &[
+            "a's resource is immutably borrowed by b; a is read-only while the borrow is live",
+            "a's resource is immutably borrowed by c; a is read-only while the borrow is live",
+        ][..],
+        &[
+            "the resource r points to is modified through *r (copied from y)",
+            "r's mutable borrow ends",
+        ],
+        // The call icon's line goes between the borrow and its end.
+        &[
+            "s's resource is immutably borrowed by show; s is read-only while the borrow is live",
+            "show reads from s",
+            "s's resource is no longer immutably borrowed",
+        ],
+        &[
+            "t acquires ownership of a resource",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+    ] {
+        assert!(
+            tooltips.iter().any(|t| t == want),
+            "no dot lists {:?}; multi-line tooltips: {:?}",
+            want,
+            tooltips.iter().filter(|t| t.len() > 1).collect::<Vec<_>>()
+        );
+    }
+    // The shared call dot keeps its call icon, and t's keeps the drop
+    // triangle.
+    assert!(timeline.contains("<use xlink:href=\"#functionDot\""));
+    assert!(timeline.contains("pointer-events: none;\"/>"));
 }
 
 #[test]
