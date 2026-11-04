@@ -3423,13 +3423,18 @@ fn render_branches(
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
-                Some(_) => {
+                Some(stop) => {
                     // Only where the column is still drawn: a branch
                     // that moved the value away ended its column at
                     // the move already.
+                    // Nor where it ends in a drop on that line (a
+                    // one-line `0 => panic!()` arm, #410): the drop
+                    // dot ends it.
+                    let dropped_at_stop = branch.e_data.iter().any(|(l, e)| *l == stop
+                        && matches!(e, Event::OwnerGoOutOfScope | Event::RefGoOutOfScope | Event::TemporaryDrop { .. }));
                     // The bar is a marker, not a line of code: hovering it
                     // underlines nothing (#369), like the dashed columns.
-                    if let Some(stop_y) = stop_y.filter(|y| segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
+                    if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_at = Some((branch_x, stop_y));
                         let title = hover_messages::branch_never_reaches_merge(&rap.name().to_string());
                         stop_bar = format!(
