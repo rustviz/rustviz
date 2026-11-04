@@ -148,10 +148,14 @@ fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
         return registry.render("dot_template", &data).unwrap();
     }
     // An event dot with a call icon on it: one hover target for both.
+    // The `f` glyph covers the dot, so a drop on this dot can't use the
+    // usual white triangle inside it (it would be hidden). Draw the drop
+    // mark just below the dot instead, in the column's colour: a
+    // downward triangle where the column ends.
     let triangle = if dot.drop {
         format!(
-            "            <polygon points=\"{},{} {},{} {},{}\" style=\"fill: white; stroke: none; pointer-events: none;\"/>\n",
-            cx - 3, cy - 1, cx + 3, cy - 1, cx, cy + 3,
+            "            <polygon class=\"drop-mark\" data-hash=\"{}\" points=\"{},{} {},{} {},{}\"/>\n",
+            dot.hash, cx - 4, cy + 12, cx + 4, cy + 12, cx, cy + 17,
         )
     } else {
         String::new()

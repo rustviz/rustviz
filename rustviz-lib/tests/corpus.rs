@@ -304,6 +304,8 @@ const EXPECTED_OK: &[&str] = &[
     // Events on one line of one column share one dot (#309); the
     // shared-point check runs on every snippet in this list.
     "same_line_events_one_dot",
+    // A drop and a call on one merged dot: the drop mark sits below it.
+    "drop_and_call_one_dot",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3113,6 +3115,21 @@ fn same_line_events_share_one_dot() {
     // triangle.
     assert!(timeline.contains("<use xlink:href=\"#functionDot\""));
     assert!(timeline.contains("pointer-events: none;\"/>"));
+}
+
+#[test]
+fn drop_on_a_call_dot_is_marked_below_it() {
+    // `{ let s = String::from("a"); show(&s); }`: s's one dot has the
+    // call icon (which covers the dot) and a drop, so the drop mark is a
+    // separate triangle below the dot, inside the same hover group.
+    let rv = run_with_local_backend("drop_and_call_one_dot");
+    let timeline = rv.timeline_panel_string();
+    let group = timeline
+        .split("<g class=\"tooltip-trigger\"")
+        .find(|g| g.contains("#functionDot") && g.contains("Its resource is dropped"))
+        .expect("a call dot whose tooltip includes the drop");
+    let group = &group[..group.find("</g>").unwrap_or(group.len())];
+    assert!(group.contains("class=\"drop-mark\""), "no drop mark below the call dot: {}", group);
 }
 
 #[test]
