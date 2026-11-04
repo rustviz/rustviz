@@ -414,6 +414,9 @@ const EXPECTED_OK: &[&str] = &[
     "closure_call_copy_arg",
     "closure_call_move_arg",
     "generic_fn_param_call",
+    "fn_item_local",
+    "fn_pointer_local_call",
+    "closure_call_result",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4033,6 +4036,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "f is initialized by copy from Anonymous resource",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_item_local",
+        must_contain: &[
+            "f is bound to a copyable value",
+            "f goes out of scope",
+            "a's resource is copied",
+            "Copy from a to f",
+        ],
+        must_not_contain: &[
+            "f is initialized by copy from a",
+            "f is initialized by copy from helper",
+        ],
+    },
+    TooltipExpect {
+        name: "fn_pointer_local_call",
+        must_contain: &[
+            "f is bound to a copyable value",
+            "s's resource is moved",
+            "Move from s to f",
+            "t acquires ownership of a resource",
+            "Move from f to t",
+        ],
+        must_not_contain: &[
+            "f's resource is moved",
+            "f's resource is copied",
+            "f acquires ownership",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_result",
+        must_contain: &[
+            "Closure add_one is bound",
+            "y is initialized by copy from add_one",
+            "Copy from add_one to y",
+        ],
+        must_not_contain: &[
+            "add_one's resource is copied",
         ],
     },
 ];
