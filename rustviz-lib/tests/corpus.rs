@@ -262,6 +262,8 @@ const EXPECTED_OK: &[&str] = &[
     "while_let_pop_string",
     "struct_box_adjacent",
     "if_let_struct_fields_unused",
+    // Unit / empty structs get a label-only box each (#348).
+    "unit_struct_box",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
