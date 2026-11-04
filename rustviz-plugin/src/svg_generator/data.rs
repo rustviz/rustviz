@@ -20,6 +20,27 @@ use crate::svg_generator::{
  * Basic Data Structure Needed by Lifetime Visualization
  */
 pub static LINE_SPACE: i64 = 30;
+
+/// A conditional whose branches share source lines: all on one line
+/// (`let s = if c { a } else { b };`), or with the join one line below
+/// the split. There's no row between split and merge for the branch
+/// columns, so they are drawn on the split..merge rows themselves (a
+/// small diamond around them, see `render_branches`) instead of
+/// between them (#117).
+pub fn branch_is_collapsed(split_point: usize, merge_point: usize) -> bool {
+    merge_point < split_point + 2
+}
+
+/// First and last row of a conditional's branch columns: the rows
+/// strictly between the split and the join, or the split..join rows
+/// themselves when there are none (`branch_is_collapsed`).
+pub fn branch_column_rows(split_point: usize, merge_point: usize) -> (usize, usize) {
+    if branch_is_collapsed(split_point, merge_point) {
+        (split_point, merge_point.max(split_point))
+    } else {
+        (split_point + 1, merge_point - 1)
+    }
+}
 // Top level Api that the Timeline object supports
 pub trait Visualizable {
     // Function that computes states for variables inside of branches
@@ -27,8 +48,7 @@ pub trait Visualizable {
                             states: &mut Vec<(usize, usize, State)>, 
                             hash: &u64, 
                             valid_range: (usize, usize), 
-                            branch_start: usize, 
-                            branch_end: usize, 
+                            column_rows: (usize, usize), 
                             previous_state: State) -> State;
 
     // Computes states for variables outside of branches (ie global events)
@@ -1809,8 +1829,7 @@ impl Visualizable for VisualizationData {
     states: & mut Vec<(usize, usize, State)>,
     hash: &u64,
     valid_range: (usize, usize),
-    branch_start: usize,
-    branch_end: usize,
+    (branch_start, branch_end): (usize, usize),
     mut previous_state: State) -> State{
         // Clamp valid_range to [branch_start, branch_end]. With the
         // convergence-one-line-earlier work, callers now pass
@@ -1822,6 +1841,9 @@ impl Visualizable for VisualizationData {
         let (begin, end) = valid_range;
         let begin = begin.clamp(branch_start, branch_end);
         let end = end.clamp(branch_start, branch_end);
+        // A branch on one line can be handed a range that ends before
+        // it begins (`(split + 1, if_end)` with `if_end == split`).
+        let begin = begin.min(end);
 
         // Empty branches still render: dashed leading segment from
         // branch_start to begin (the OTHER branch's territory),
@@ -1898,13 +1920,11 @@ impl Visualizable for VisualizationData {
                             & mut branch.states,
                             hash,
                             ty.get_start_end(i),
-                            *split_point + 1,
                             // Branch column ends one line above the
                             // join dot — the convergence diagonal
-                            // bridges that last row. saturating_sub
-                            // guards against the (in practice
-                            // unreachable) merge_point = 0 case.
-                            merge_point.saturating_sub(1),
+                            // bridges that last row — unless the
+                            // branches share lines (#117).
+                            branch_column_rows(*split_point, *merge_point),
                             previous_state.clone()));
                     }
 
@@ -1923,10 +1943,13 @@ impl Visualizable for VisualizationData {
                 }
             }
         }
+        // `max`: an event below the branch's active range (possible
+        // when branches share lines) mustn't make the range run upwards.
+        let end = end.max(previous_line);
         states.push((previous_line, end, previous_state.clone()));
 
         // Render opaque line if branch does not end at merge point
-        if end != branch_end {
+        if end < branch_end {
             states.push((end, branch_end, branch_state_converter(&previous_state)));
         }
 
@@ -1952,13 +1975,11 @@ impl Visualizable for VisualizationData {
                             & mut branch.states,
                             hash,
                             ty.get_start_end(i),
-                            *split_point + 1,
                             // Branch column ends one line above the
                             // join dot — the convergence diagonal
-                            // bridges that last row. saturating_sub
-                            // guards against the (in practice
-                            // unreachable) merge_point = 0 case.
-                            merge_point.saturating_sub(1),
+                            // bridges that last row — unless the
+                            // branches share lines (#117).
+                            branch_column_rows(*split_point, *merge_point),
                             previous_state.clone()));
                     }
 

@@ -373,6 +373,12 @@ const EXPECTED_OK: &[&str] = &[
     "comparison_operand_borrows",
     "comparison_ref_operands",
     "operator_name_escaped",
+    // Conditionals whose branches share lines (#117, #333, #354) and
+    // an `else if` chain (#355).
+    "if_one_line_move",
+    "match_one_line",
+    "if_else_next_line",
+    "else_if_chain",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1065,9 +1071,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "if_as_let_rhs",
         // `let s = if cond { String::from(..) } else { String::from(..) };`
         // Both branches' moves into `s` show up; `s` ends up the
-        // owner regardless of branch.
+        // owner regardless of branch. On one line, the branches used
+        // to be drawn inline, with no merge (#117).
         must_contain: &[
             "Move from String::from to s",
+            "s is live in a conditional expression ",
+            "s acquired ownership of a resource (in all branches above)",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[],
@@ -3589,6 +3598,56 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "&amp; reads from a",
         ],
     },
+    TooltipExpect {
+        name: "if_one_line_move",
+        // `if c { take(s); }` and `if c { take(t); } else { … }`, each
+        // on one line (#333): the moves are conditional. They used to
+        // be drawn inline, as unconditional moves.
+        must_contain: &[
+            "s is live in a conditional expression ",
+            "s's resource is moved",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "t is live in a conditional expression ",
+            "t's resource is moved",
+            "t was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped.",
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_one_line",
+        // Every arm of a one-line `match` binds `s` (#117). The first
+        // arm used to get all three binds and the others none, so the
+        // merge said `s` was moved in some branch.
+        must_contain: &[
+            "s is live in a conditional expression ",
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "if_else_next_line",
+        // Used to panic (#354).
+        must_contain: &[
+            "s is live in a conditional expression ",
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -3967,6 +4026,81 @@ fn arrows_hop_over_dots_they_cross() {
 /// The renderer HTML-escapes the tooltip body and embeds nested
 /// `<span>` markup for the variable-name color spans; both get
 /// stripped here so comparisons are against the plain visible text.
+/// `(cx, cy)` of every dot in a timeline panel whose tooltip is
+/// exactly `text` (plain circles, and drop dots: a tooltip `<g>`
+/// around a circle).
+fn dots_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
+    let num = |tag: &str, name: &str| -> Option<f64> {
+        let key = format!(" {}=\"", name);
+        let start = tag.find(&key)? + key.len();
+        tag[start..start + tag[start..].find('"')?].parse().ok()
+    };
+    let mut out = Vec::new();
+    for (i, _) in svg.match_indices(" data-tooltip-text=\"") {
+        let Some(start) = svg[..i].rfind('<') else { continue };
+        let rest = &svg[start..];
+        let circle = if rest.starts_with("<circle ") {
+            rest
+        } else if rest.starts_with("<g ") {
+            match rest.find("<circle ") {
+                Some(c) if c < rest.find("</g>").unwrap_or(usize::MAX) => &rest[c..],
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+        let tag = &circle[..circle.find('>').unwrap_or(circle.len())];
+        if timeline_tooltips(&svg[start..start + svg[start..].find('>').unwrap_or(0) + 1]) != [text] {
+            continue;
+        }
+        if let (Some(x), Some(y)) = (num(tag, "cx"), num(tag, "cy")) {
+            out.push((x, y));
+        }
+    }
+    out
+}
+
+/// #117: a conditional whose branches share lines used to draw its
+/// arms crossing into an X, with the split, the arms and the join all
+/// on one row. Now the split is above every arm's dot and the join
+/// below, like a conditional spread over several lines.
+#[test]
+fn branches_on_shared_lines_open_and_close_around_their_dots() {
+    for (name, arm_text, arms) in [
+        ("match_one_line", "s acquires ownership of a resource", 3),
+        ("if_else_next_line", "s acquires ownership of a resource", 2),
+        ("if_as_let_rhs", "s acquires ownership of a resource", 2),
+    ] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let split = dots_with_tooltip(&timeline, "s is live in a conditional expression ");
+        let join = dots_with_tooltip(&timeline, "s acquired ownership of a resource (in all branches above)");
+        let arm_dots = dots_with_tooltip(&timeline, arm_text);
+        assert_eq!((split.len(), join.len(), arm_dots.len()), (1, 1, arms), "{}: dots", name);
+        for (x, y) in &arm_dots {
+            assert!(split[0].1 < *y && *y < join[0].1,
+                "{}: arm dot ({}, {}) not between split {:?} and join {:?}", name, x, y, split[0], join[0]);
+        }
+        let mut xs: Vec<f64> = arm_dots.iter().map(|d| d.0).collect();
+        xs.dedup();
+        assert_eq!(xs.len(), arms, "{}: arms share a column: {:?}", name, arm_dots);
+    }
+}
+
+/// #355: the inner `if` of an `else if` belongs to the outer `else`
+/// branch, which is drawn to the right of the parent column. It used
+/// to be drawn in the outer `if` branch, on the left.
+#[test]
+fn else_if_is_drawn_in_the_else_branch() {
+    let rv = run_with_local_backend("else_if_chain");
+    let timeline = rv.timeline_panel_string();
+    let mut splits = dots_with_tooltip(&timeline, "s is live in a conditional expression ");
+    splits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    assert_eq!(splits.len(), 2, "{:?}", splits);
+    let (outer, inner) = (splits[0], splits[1]);
+    assert!(inner.0 > outer.0, "inner `if` at x={} is not right of the parent column x={}", inner.0, outer.0);
+}
+
 ///
 /// A dot shared by several events on one line (#309) lists them as
 /// `• event<br>• event`; each event is returned as its own tooltip.
