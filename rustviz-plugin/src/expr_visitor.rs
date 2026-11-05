@@ -252,13 +252,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: false, is_manually_drop: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, write: Default::default()}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: true, is_manually_drop: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, write: Default::default()}), scope, is_global);
   }
 
   // Marks the owner (or struct field) just registered as `name` as a
@@ -283,7 +283,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, write: Default::default()}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -349,6 +349,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         is_mut: mutability,
         pointee_copy,
         member_of,
+        write: Default::default(),
       }),
       scope, is_global,
     );

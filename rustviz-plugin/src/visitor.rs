@@ -904,6 +904,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             return;
           }
         };
+        // `*r = v` assigns to the place `*r`: say so (2026-11-05
+        // decision, place assignments read like plain assignment).
+        // `*r += v` is an in-place update and keeps its wording.
+        let lhs_rty = match lhs_rty {
+          ResourceTy::Deref(rap) if matches!(expr.kind, ExprKind::Assign(..)) && !lhs_ty.is_ref() => {
+            let write = if is_copyable {
+              PlaceWrite::AssignCopy
+            } else if lhs_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner)) {
+              PlaceWrite::AssignDropsOld
+            } else {
+              PlaceWrite::AssignOwned
+            };
+            ResourceTy::Deref(rap.with_place_write(write))
+          }
+          other => other,
+        };
         // if we are pointing at a new piece of data
         //
         // `resource_of_lhs` returns Anonymous when the LHS is a deref

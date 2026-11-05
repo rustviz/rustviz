@@ -81,6 +81,29 @@ pub enum ResourceAccessPoint {
     Struct(Struct),
 }
 
+/// What a write through a place (`*r = e`) does to the place's old
+/// value. Carried on the copy of the RAP a write event holds, and used
+/// only to pick the dot's tooltip (2026-11-05 decision: a place
+/// assignment reads like a plain assignment). It is not part of the
+/// RAP's identity: it compares equal and hashes to nothing, so a
+/// flagged copy is still the same RAP as the one in the table.
+#[derive(Clone, Copy, Default, Debug)]
+pub enum PlaceWrite {
+    /// An in-place update (`*r += 1`), or not an assignment at all.
+    #[default]
+    Update,
+    /// `*r = e` with a Copy value.
+    AssignCopy,
+    /// `*r = e` with an owned value over an old value that needs drop.
+    AssignDropsOld,
+    /// `*r = e` with an owned value over an old value with nothing to drop.
+    AssignOwned,
+}
+
+impl PartialEq for PlaceWrite { fn eq(&self, _: &Self) -> bool { true } }
+impl Eq for PlaceWrite {}
+impl Hash for PlaceWrite { fn hash<H: Hasher>(&self, _: &mut H) {} }
+
 // when something is not a reference
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Owner {
@@ -108,6 +131,8 @@ pub struct Owner {
     /// True iff this owner's type is `ManuallyDrop<T>`: it never drops
     /// the `T` inside it, at scope end or when overwritten (#283).
     pub is_manually_drop: bool,
+    /// Set only on the copy a write event carries (see `PlaceWrite`).
+    pub write: PlaceWrite,
 }
 
 // when something is a struct member
@@ -142,6 +167,8 @@ pub struct MutRef {         // let (mut) r1 = &mut a;
     /// (e.g. `Excerpt { p: &mut x }` makes p a MutRef whose
     /// member_of is Excerpt's hash). None for free-standing refs.
     pub member_of: Option<u64>,
+    /// Set only on the copy a write event carries (see `PlaceWrite`).
+    pub write: PlaceWrite,
 }
 
 // a reference of type & T
@@ -248,6 +275,27 @@ impl Hash for ResourceTy {
 }
 
 impl ResourceAccessPoint {
+    /// A copy of this RAP marked as the target of a place write `*r = e`
+    /// (see `PlaceWrite`). Only owners (a `Box`) and `&mut` references
+    /// can be written through.
+    pub fn with_place_write(&self, write: PlaceWrite) -> ResourceAccessPoint {
+        let mut rap = self.clone();
+        match &mut rap {
+            ResourceAccessPoint::Owner(o) => o.write = write,
+            ResourceAccessPoint::MutRef(m) => m.write = write,
+            _ => {}
+        }
+        rap
+    }
+
+    pub fn place_write(&self) -> PlaceWrite {
+        match self {
+            ResourceAccessPoint::Owner(o) => o.write,
+            ResourceAccessPoint::MutRef(m) => m.write,
+            _ => PlaceWrite::Update,
+        }
+    }
+
     // get the attribute hash
     pub fn hash(&self) -> &u64 {
         match self {
@@ -1259,9 +1307,15 @@ impl Event {
                     // upvar to name on the closure side yet.
                     safe_message(hover_messages::event_dot_closure_capture_acquire, &self.deref_name(my_name), from)
                 } else if let ResourceTy::Deref(r) = is {
-                    // `*r = v;` / `*r += 1;` writes to the resource r
-                    // points to; *r doesn't acquire anything.
-                    hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy())
+                    // `*r += 1;` modifies what r points to in place.
+                    // `*r = v;` is an assignment to the place `*r`: it
+                    // reads like a plain assignment.
+                    match r.place_write() {
+                        PlaceWrite::AssignCopy => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
+                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name)),
+                        PlaceWrite::AssignOwned => safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from),
+                        PlaceWrite::Update => hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy()),
+                    }
                 } else if let Some(rap) = is.extract_rap().filter(|rap| rap.is_ref()) {
                     // `let s: &str = "hi";`, `let r2 = r;` — the
                     // variable is bound to a reference, which never
@@ -1283,7 +1337,10 @@ impl Event {
                 // `*r = y;` with y: Copy overwrites the resource r
                 // points to; it isn't an initialization of *r.
                 let deref = self.deref_name(my_name).clone();
-                hover_messages::event_dot_copy_through_deref(r.name(), &deref, &from.name())
+                match r.place_write() {
+                    PlaceWrite::AssignCopy => hover_messages::event_dot_copyable_assign(&deref),
+                    _ => hover_messages::event_dot_copy_through_deref(r.name(), &deref, &from.name()),
+                }
             }
             Event::Copy{ from ,..} => {
                 safe_message(hover_messages::event_dot_copy_from, &self.deref_name(my_name), from)

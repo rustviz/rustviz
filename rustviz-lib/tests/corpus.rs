@@ -565,10 +565,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // initialized.
         must_contain: &[
             "Copy from y to *r",
-            "the value r points to is modified through *r (copied from y)",
+            "*r is assigned a new value",
             "r holds a mutable reference; it can read and write the borrowed value",
         ],
         must_not_contain: &[
+            "(copied from",
+            "(moved from",
+            "the value r points to is modified through *r",
             "the resource r points to is modified through *r (copied from y)",
             "*r is initialized by copy from y",
             "r is the owner of the resource",
@@ -1749,8 +1752,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // that). Mainly guards against a future change panicking on
         // raw pointers; update these strings when #194 is fixed.
         must_contain: &[
-            "x is bound to a copyable value",
-            "the resource p points to is modified through *p",
+            "x is bound to a value",
+            "*p is assigned a new value",
         ],
         must_not_contain: &["*p is bound to a copyable value"],
     },
@@ -3448,7 +3451,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "k holds an immutable reference; it can read the borrowed value",
             "the value n points to is modified through *n (copied from *k)",
             "s holds a mutable reference; it can read and write the borrowed resource",
-            "the resource s points to is modified through *s",
+            "*s acquires ownership of a new resource; its previous resource is dropped",
             "q holds a mutable reference; it can read and write the borrowed resource",
         ],
         must_not_contain: &[
@@ -3458,6 +3461,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n holds a mutable reference; it can read and write the borrowed resource",
             "k holds an immutable reference; it can read the borrowed resource",
             "the resource n points to is modified through *n (copied from *k)",
+            "the resource s points to is modified through *s",
+            "(moved from",
         ],
     },
 ];

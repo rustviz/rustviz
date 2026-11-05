@@ -2,7 +2,10 @@
 // value" / "the value y points to", like the i32 column it borrows
 // from ("x holds a value"; #312). References to a String keep
 // "resource". The wording follows the reference's type, so it holds
-// for parameters too.
+// for parameters too. A write `*s = ...` is an assignment and reads like
+// a plain one (2026-11-05 decision: "*s acquires ownership of a new
+// resource; its previous resource is dropped"); the in-place update
+// `*n += *k` keeps "modified through".
 
 fn bump(n: &mut i32, k: &i32, s: &mut String) {
     *n += *k;
