@@ -331,6 +331,8 @@ const EXPECTED_OK: &[&str] = &[
     // The RefCell runtime-check sentence follows the callee's identity,
     // not the method name `borrow_mut` (#203).
     "interior_mut_user_borrow_mut",
+    // Operands of built-in arithmetic operators are copied in (#241).
+    "binop_operand_copies",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2988,6 +2990,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "borrow_mut borrows counter immutably (a shared borrow); exclusive access to its contents is checked at runtime",
+        ],
+    },
+    TooltipExpect {
+        name: "binop_operand_copies",
+        // `x + y` on i32 is `Add::add(x, y)`: both operands are taken
+        // by value, i.e. copied, and stay usable. Field operands
+        // (`a.x + a.y`) are copied out of their own columns. A
+        // comparison (`x < y`) reads through references (`lt(&x, &y)`)
+        // and isn't drawn as a copy; a literal operand has no column.
+        must_contain: &[
+            "Copy from x to +",
+            "Copy from y to +",
+            "Copy from a.x to +",
+            "Copy from a.y to +",
+            "Copy from x to *",
+            "x's resource is copied",
+            "a.y's resource is copied",
+            "Copy from a.x to d",
+        ],
+        must_not_contain: &[
+            "Move from x to +",
+            "x's resource is moved",
+            "Copy from x to z",
+            "Copy from x to <",
+            "Copy from y to <",
         ],
     },
 ];

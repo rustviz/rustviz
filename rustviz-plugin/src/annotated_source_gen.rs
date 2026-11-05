@@ -5,7 +5,7 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{expr_to_rap_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, span_to_line}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, span_to_line}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
 use rustc_span::Span;
 
@@ -158,7 +158,9 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
       self.annotate_expr(exp2);
       // Overloaded by-value operators get a function RAP named after
       // the operator (see the visitor's Binary arm); highlight it.
-      if let Some(op_name) = overloaded_by_value_binop(expr, &self.tcx) {
+      let op_name = overloaded_by_value_binop(expr, &self.tcx)
+        .or_else(|| builtin_binop_copied_operands(expr, &self.tcx, &self.raps).map(|(op, _)| op));
+      if let Some(op_name) = op_name {
         if let Some(rd) = self.raps.get(op_name) {
           let hash = *rd.rap.hash();
           self.annotate_src(op_name.to_owned(), op.span, true, hash);

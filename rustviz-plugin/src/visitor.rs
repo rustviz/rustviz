@@ -797,14 +797,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         self.visit_expr(exprb);
         // An overloaded by-value operator is a call to the trait
         // method (`s1 + &s2` is `Add::add(s1, &s2)`), so its operands
-        // are arguments: `s1` is moved, `&s2` is borrowed. Built-in
-        // operators on primitives aren't method calls and emit
-        // nothing, as before.
+        // are arguments: `s1` is moved, `&s2` is borrowed.
         if let Some(op_name) = overloaded_by_value_binop(expr, &self.tcx) {
           let fn_name = op_name.to_owned();
           self.add_fn(fn_name.clone());
           self.match_arg(expra, fn_name.clone());
           self.match_arg(exprb, fn_name);
+        } else if let Some((op_name, operands)) = builtin_binop_copied_operands(expr, &self.tcx, &self.raps) {
+          // A built-in arithmetic / bitwise operator on primitives
+          // (`x + y` on i32) reads its operands the same way: each
+          // one that names a column is copied into the operator
+          // (#241). Comparisons read through a reference and aren't
+          // drawn.
+          let fn_name = op_name.to_owned();
+          self.add_fn(fn_name.clone());
+          for operand in operands {
+            self.match_arg(operand, fn_name.clone());
+          }
         }
       }
 

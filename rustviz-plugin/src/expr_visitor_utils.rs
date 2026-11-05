@@ -760,6 +760,36 @@ pub fn overloaded_by_value_binop<'tcx>(expr: &Expr<'tcx>, tcx: &TyCtxt<'tcx>) ->
   }
 }
 
+/// `a <op> b` where `<op>` is a built-in arithmetic / bitwise operator
+/// on primitives (`x + y`, `a.x * 2`, `n % 2` with i32 operands), i.e.
+/// not a method call. Like its trait method (`Add::add(self, rhs)`),
+/// it takes both operands by value, and since every primitive is
+/// `Copy` each operand is copied in. Returns the operator's text plus
+/// the operands that name a column (a local, a struct field, or `*r`),
+/// in source order; literals, calls, nested operators and indexing
+/// (`v[i]` copies an element, not `v`) are left out. Comparisons and
+/// the short-circuiting `&&` / `||` return `None`.
+pub fn builtin_binop_copied_operands<'tcx>(
+  expr: &'tcx Expr<'tcx>,
+  tcx: &TyCtxt<'tcx>,
+  raps: &HashMap<String, RapData>,
+) -> Option<(&'static str, Vec<&'tcx Expr<'tcx>>)> {
+  let ExprKind::Binary(op, lhs, rhs) = expr.kind else { return None };
+  if !op.node.is_by_value() || op.node.is_lazy() || tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
+    return None;
+  }
+  let operands: Vec<&'tcx Expr<'tcx>> = [lhs, rhs].into_iter()
+    .filter(|e| !e.span.from_expansion())
+    .filter(|e| match e.kind {
+      ExprKind::Path(_) | ExprKind::Field(..) => true,
+      ExprKind::Unary(UnOp::Deref, inner) => matches!(inner.kind, ExprKind::Path(_) | ExprKind::Field(..)),
+      _ => false,
+    })
+    .filter(|e| !matches!(get_rap(e, tcx, raps), ResourceTy::Anonymous))
+    .collect();
+  if operands.is_empty() { None } else { Some((op.node.as_str(), operands)) }
+}
+
 pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> ResourceTy {
   match expr.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
