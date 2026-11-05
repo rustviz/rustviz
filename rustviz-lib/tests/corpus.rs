@@ -1755,7 +1755,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // that). Mainly guards against a future change panicking on
         // raw pointers; update these strings when #194 is fixed.
         must_contain: &[
-            "x is bound to a value",
+            "x is bound to a copyable value",
             "*p is assigned a new value",
         ],
         must_not_contain: &["*p is bound to a copyable value"],
@@ -2718,7 +2718,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "a's resource is immutably borrowed by b; a is read-only while the borrow is live",
             "a's resource is immutably borrowed by c; a is read-only while the borrow is live",
-            "the resource r points to is modified through *r (copied from y)",
+            "*r is assigned a new value",
             "r's mutable borrow ends",
             "s's resource is immutably borrowed by show; s is read-only while the borrow is live",
             "show reads from s",
@@ -3934,7 +3934,7 @@ fn same_line_events_share_one_dot() {
             "a's resource is immutably borrowed by c; a is read-only while the borrow is live",
         ][..],
         &[
-            "the resource r points to is modified through *r (copied from y)",
+            "*r is assigned a new value",
             "r's mutable borrow ends",
         ],
         // The call icon's line goes between the borrow and its end.
