@@ -326,6 +326,11 @@ const EXPECTED_OK: &[&str] = &[
     "manually_drop_local",
     // `ManuallyDrop::drop` / `take` by hand (#283).
     "manually_drop_by_hand",
+    // `&self` calls on interior-mutable values aren't "reads" (#203).
+    "interior_mut_calls",
+    // The RefCell runtime-check sentence follows the callee's identity,
+    // not the method name `borrow_mut` (#203).
+    "interior_mut_user_borrow_mut",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1802,7 +1807,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `c` keeps its resource.
         must_contain: &[
             "Move from RefCell::new to c",
-            "borrow_mut reads from c",
+            "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)", // #203
             "c goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -1815,7 +1820,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `*cell.borrow_mut() = v` moves `v` into the cell; `cell`
         // itself is only borrowed by the call.
         must_contain: &[
-            "borrow_mut reads from cell",
+            "borrow_mut borrows cell immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)", // #203
             "v's resource is moved",
             "v goes out of scope. No resource is dropped.",
             "cell goes out of scope. Its resource is dropped.",
@@ -1829,9 +1834,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "rc_refcell_deref_assign",
         // Book ch15 Rc<RefCell<T>>: `*value.borrow_mut() += 10`.
         must_contain: &[
-            "Rc::clone reads from value",
+            "Rc::clone borrows value immutably (a shared borrow); value has interior mutability, so its contents can change even through a shared borrow", // #203
             "Move from Rc::clone to a",
-            "borrow_mut reads from value",
+            "borrow_mut borrows value immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)", // #203
             "value goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -2943,6 +2948,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m2's resource is mutably borrowed by ManuallyDrop::take",
             "ManuallyDrop::take reads from/writes to m2",
             "m2 goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+        ],
+    },
+    // ─── Interior mutability: call dots (#203) ──────────────────────
+    TooltipExpect {
+        name: "interior_mut_lend",
+        must_contain: &[
+            "set borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
+            "borrow_mut borrows r immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
+            "lock borrows m immutably (a shared borrow); m has interior mutability, so its contents can change even through a shared borrow",
+            "len reads from s",
+        ],
+        must_not_contain: &[
+            "set reads from c",
+            "borrow_mut reads from r",
+            "lock reads from m",
+        ],
+    },
+    TooltipExpect {
+        name: "interior_mut_calls",
+        must_contain: &[
+            "get borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
+            "set borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
+            "borrow_mut borrows cell immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
+            "fetch_add borrows hits immutably (a shared borrow); hits has interior mutability, so its contents can change even through a shared borrow",
+            "len reads from s",
+        ],
+        must_not_contain: &[
+            "set reads from c",
+            "borrow_mut reads from cell",
+            "fetch_add reads from hits",
+        ],
+    },
+    TooltipExpect {
+        name: "interior_mut_user_borrow_mut",
+        must_contain: &[
+            "borrow_mut borrows cell immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
+            "borrow_mut borrows counter immutably (a shared borrow); counter has interior mutability, so its contents can change even through a shared borrow",
+        ],
+        must_not_contain: &[
+            "borrow_mut borrows counter immutably (a shared borrow); exclusive access to its contents is checked at runtime",
         ],
     },
 ];
