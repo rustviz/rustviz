@@ -11,6 +11,8 @@ fn main() {
     let mut t = (String::from("a"), 1);
     t.0 = String::from("b");
     t.1 = 2;
+    let n = 3;
+    t.1 = n;
     let mut v = vec![Q { name: String::from("a") }];
     v.last_mut().unwrap().name = String::from("b");
     let s = String::from("s");

@@ -4615,6 +4615,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "t.0 acquires ownership of a new resource; its previous resource is dropped",
             "t.1 is assigned a new value",
+            // A named Copy source is named (`t.1 = n`).
+            "t.1 is assigned a copy of n",
             "v.last_mut().unwrap().name acquires ownership of a new resource; its previous resource is dropped",
             "u.0 acquires ownership of a new resource; its previous resource is dropped",
             "Move from String::from to t.0",
@@ -4622,6 +4624,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "the value previously in t.1 is dropped",
+            "t.0 is assigned a copy of",
             // An assignment reads like a plain assignment (2026-11-05).
             "t's resource is modified through t.0",
             "t's resource is modified through t.1",
