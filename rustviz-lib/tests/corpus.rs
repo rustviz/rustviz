@@ -2530,11 +2530,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // some runs c "returned" the borrow while b still held it, and
         // x read as "no longer immutably borrowed" one line early.
         must_contain: &[
-            "Return immutably borrowed resource from b to x",
+            "Return immutably borrowed value from b to x",
         ],
         must_not_contain: &[
-            "Return immutably borrowed resource from c to x",
-            "Return immutably borrowed resource from a to x",
+            "Return immutably borrowed value from c to x",
+            "Return immutably borrowed value from a to x",
         ],
     },
 
@@ -2645,8 +2645,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // checks the geometry. Listed so the fixture keeps
         // exercising a crossing: if a dot disappears, this fails.
         must_contain: &[
-            "Return mutably borrowed resource from r to x",
-            "y's resource is copied",
+            "Return mutably borrowed value from r to x",
+            "y's value is copied",
             "Move from p to q",
             "p.name's resource is moved",
             "p.email's resource is moved",
@@ -3037,8 +3037,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from a.x to +",
             "Copy from a.y to +",
             "Copy from x to *",
-            "x's resource is copied",
-            "a.y's resource is copied",
+            "x's value is copied",
+            "a.y's value is copied",
             "Copy from a.x to d",
         ],
         must_not_contain: &[
@@ -3953,14 +3953,14 @@ fn same_line_return_arrows_follow_source_order() {
     let rv = run_with_local_backend("basic_deref3");
     let returns: Vec<String> = timeline_tooltips(&rv.timeline_panel_string())
         .into_iter()
-        .filter(|t| t.starts_with("Return immutably borrowed resource from"))
+        .filter(|t| t.starts_with("Return immutably borrowed value from"))
         .collect();
     assert_eq!(
         returns,
         [
-            "Return immutably borrowed resource from y to x",
-            "Return immutably borrowed resource from z to x",
-            "Return immutably borrowed resource from a to x",
+            "Return immutably borrowed value from y to x",
+            "Return immutably borrowed value from z to x",
+            "Return immutably borrowed value from a to x",
         ],
     );
 }
