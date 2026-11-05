@@ -158,7 +158,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let line_num = expr_to_line(recv, &self.tcx);
             let id = *self.unique_id;
             self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-              from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: true,
+              from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
             });
             *self.unique_id += 1;
           }
@@ -255,7 +255,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: true, refcell_borrow_mut: false });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false });
       *self.unique_id += 1;
     }
   }
@@ -724,6 +724,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // for example, in rust you don't have to dereference a reference to access members
         // https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/adjustment/struct.Adjustment.html
         let adjustment_map = self.tcx.typeck(name_and_generic_args.hir_id.owner).adjustments();
+        // `s.len()` borrows `s` without a written `&` (rustc inserts
+        // it); `r.len()` with `r: &String` and `(&s).len()` don't.
+        let autoref = if is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) {
+          ImplicitRef::Autoref
+        } else {
+          ImplicitRef::No
+        };
         match adjustment_map.get(rcvr.hir_id) {
           Some(adj_vec) => { 
             for a in adj_vec.iter() {
@@ -738,16 +745,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
                       let is_reborrow = is_implicit_mut_reborrow(rcvr, typeck);
                       let result_has_lifetime = call_result_has_lifetime(expr, typeck);
-                      self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime);
+                      self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref);
                     },
                     AutoBorrowMutability::Not => {
                       let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
-                      let id = *self.unique_id;
-                      self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
-                        from: ResourceTy::Value(rcvr_rap.clone()), to: ResourceTy::Value(fn_rap.clone()),
-                        id, implicit: false, refcell_borrow_mut,
-                      });
-                      *self.unique_id += 1;
+                      self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), autoref, refcell_borrow_mut);
                     }
                     _ => {}
                   }
