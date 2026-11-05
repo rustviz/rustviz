@@ -6437,20 +6437,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // through `*w` drops the fields' old values too (#268).
         must_contain: &[
             "Move from String::from to r.a",
-            "the resource r points to is modified through r.a; its previous value is dropped",
-            // (r.n: an integer, nothing to drop.)
-            "the resource r points to is modified through r.n",
-            "the resource r points to is modified through r.inner.v; its previous value is dropped",
-            "the resource q points to is modified through q.v; its previous value is dropped",
+            "r.a acquires ownership of a new resource; its previous resource is dropped",
+            // (r.n: a Copy integer, nothing to drop.)
+            "r.n is assigned a new value",
+            "r.inner.v acquires ownership of a new resource; its previous resource is dropped",
+            "q.v acquires ownership of a new resource; its previous resource is dropped",
             "s.a acquires ownership of a new resource; its previous resource is dropped",
             "s.inner.v acquires ownership of a new resource; its previous resource is dropped",
             "s.inner acquires ownership of a new resource; its previous resource is dropped",
-            "the resource w points to is modified through *w",
+            "*w acquires ownership of a new resource; its previous resource is dropped",
         ],
         must_not_contain: &[
             "r.a acquires ownership of a resource",
             "r.a is the owner of the resource",
             "r.n acquires ownership of a resource",
+            "the resource r points to is modified through r.a",
+            "the resource r points to is modified through r.n",
+            "the resource q points to is modified through q.v",
+            "the resource w points to is modified through *w",
+            "its previous value is dropped",
+            "(copied from",
+            "(moved from",
             "s.n acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
