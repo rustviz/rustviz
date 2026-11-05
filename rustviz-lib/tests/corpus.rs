@@ -4401,9 +4401,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `+=` modifies the element in place and keeps "modified
         // through".
         must_contain: &[
+            // A literal has no source to name; a named place does.
             "v[0] is assigned a new value",
             "v's resource is modified through v[1]",
+            // `v[2] = v[0]`: an element read is not a modelled source
+            // (no arrow), so there is nothing to name.
             "v[2] is assigned a new value",
+            "v[0] is assigned a copy of *z",
             "Move from s to names[0]",
             "names[0] acquires ownership of a new resource; its previous resource is dropped",
             // `+=` on a String calls `add_assign`: nothing is overwritten.
@@ -4426,6 +4430,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `v[1] += k`: k is an operand, not the element's new value.
             "Copy from k to v[1]",
             "v[1] is assigned a new value",
+            "v[2] is assigned a copy of",
             "p.name goes out of scope. Its resource is dropped.",
             // An assignment is not "modified through", and the arrow
             // carries the move / copy.
@@ -4449,7 +4454,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // arrow on that line used to hide that event).
         must_contain: &[
             "Copy from x to xs[i]",
-            "xs[i] is assigned a new value",
+            "xs[i] is assigned a copy of x",
             "xs's mutable borrow ends",
             "Move from s to dst[0]",
             "dst[0] acquires ownership of a new resource; its previous resource is dropped",
@@ -4460,6 +4465,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from r to v",
         ],
         must_not_contain: &[
+            "xs[i] is assigned a new value",
             "xs acquires ownership of a resource",
             "dst acquires ownership of a resource",
             "dst acquires ownership of a new resource; its previous resource is dropped",

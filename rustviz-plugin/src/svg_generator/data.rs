@@ -1460,7 +1460,7 @@ impl Event {
                     // doesn't acquire anything. `v[i] += k` modifies
                     // the element in place.
                     match write {
-                        PlaceWrite::AssignCopy => hover_messages::event_dot_copyable_assign(place),
+                        PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place),
                         PlaceWrite::AssignOwned => safe_message(hover_messages::event_dot_acquire, place, from),
                         PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref()),
@@ -1492,12 +1492,12 @@ impl Event {
                     safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
                 }
             }
-            Event::Copy{ is: ResourceTy::Index(r, place, write), ..} => {
+            Event::Copy{ from, is: ResourceTy::Index(r, place, write), ..} => {
                 // `v[i] = y;` with y: Copy assigns a new value to the
                 // place `v[i]`.
                 match write {
                     PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref()),
-                    _ => hover_messages::event_dot_copyable_assign(place),
+                    _ => place_assign_copy_message(place, from),
                 }
             }
             Event::Copy{ from, is: ResourceTy::Deref(r), ..} => {

@@ -12,6 +12,8 @@ fn main() {
     v[0] = 9;
     v[1] += k;
     v[2] = v[0];
+    let z = &k;
+    v[0] = *z;
     let mut names = vec![String::new()];
     let s = String::from("x");
     names[0] = s;
