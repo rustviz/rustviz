@@ -923,6 +923,19 @@ pub fn state_resource_moved(my_name: &String, _to_name: &String) -> String {
     )
 }
 
+// `state_resource_moved` for a reference variable whose reference was
+// moved out (`let q2 = q;` with q: `&mut T`). A reference never had
+// ownership, so there is none to lose; what's gone is the reference
+// itself. Only shown for `let mut` bindings (the segment isn't drawn
+// otherwise), which can be assigned a new reference (#292).
+pub fn state_ref_moved(my_name: &String, is_mut: bool) -> String {
+    format!(
+        "{0}'s {1} was moved out, so {0} can't be used until it's assigned again",
+        fmt_style(my_name),
+        if is_mut { "mutable reference" } else { "reference" }
+    )
+}
+
 // temporarily no read or write access right to the resource, but eventually
 // the privilege will come back. Occurs when mutably borrowed. This is an invisible line in the timeline.
 pub fn state_resource_revoked(my_name: &String, _to_name: &String) -> String {

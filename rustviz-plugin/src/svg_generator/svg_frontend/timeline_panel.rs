@@ -1506,6 +1506,10 @@ fn timeline_segment_title(
             _ => {}
         }
     }
+    // A reference that was moved out never had ownership to lose (#292).
+    if let (State::ResourceMoved { .. }, true) = (state, rap.is_ref()) {
+        return hover_messages::state_ref_moved(rap.name(), rap.is_mutref());
+    }
     state.print_message_with_name(rap.name())
 }
 
@@ -2662,7 +2666,6 @@ fn create_reference_line_string(
         },
         (State::ResourceMoved{ .. }, true) => {
             data.line_class = String::from("extend");
-            data.title += "; cannot access data.";
             registry.render("vertical_line_template", &data).unwrap()
         }
         // do nothing when the case is (RevokedPrivilege, _), (OutofScope, _), (ResourceMoved, false)
