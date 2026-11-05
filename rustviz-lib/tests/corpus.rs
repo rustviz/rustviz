@@ -7899,8 +7899,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push_str reads from/writes to p.a (mutable reborrow — p.a can't be used until push_str returns)",
             "t acquires ownership of a new resource; its previous resource is dropped",
             "u.a acquires ownership of a new resource; its previous resource is dropped",
+            // `*f = String::from("b")` reads like a plain assignment on
+            // f's column too (2026-11-05 decision).
+            "*f acquires ownership of a new resource; its previous resource is dropped",
         ],
         must_not_contain: &[
+            "the resource f points to is modified through *f",
+            "(copied from",
+            "(moved from",
             "Return mutably borrowed resource from f to *f",
             "Return mutably borrowed resource from g to *g",
             "r acquires ownership of a new resource; its previous resource is dropped",
