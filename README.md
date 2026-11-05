@@ -258,11 +258,12 @@ rather than listed here.
 - `if let` chains in an `if` condition (`if let Some(a) = x && let
   Some(b) = y`): the bindings and their uses aren't shown.
 - Assignments to a place that has no column of its own are drawn on
-  the column of the variable the place is reached from, as a
-  modification of its resource, like an element write: a tuple field
+  the column of the variable the place is reached from, like an
+  element write: a tuple field
   (`t.0 = …`), a field of a method's result
-  (`v.last_mut().unwrap().n = 5`). The tooltip says the old value is
-  dropped when its type needs drop, but the drop is not drawn on a
+  (`v.last_mut().unwrap().n = 5`). The tooltip reads like a plain
+  assignment (the place is the subject) and says the previous resource
+  is dropped when its type needs drop, but the drop is not drawn on a
   column. Not drawn: a field through a reference (`self.n += 1` in a
   `&mut self` method, `c.n = …` where `c: &mut T`), a place that holds
   a reference (`v[i] = &s`, `h.r = &x`: overwriting a reference drops
@@ -271,11 +272,13 @@ rather than listed here.
   struct, including chained ones (`o.inner.x = …`), have columns of
   their own.
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
-  through `r: &mut Vec<_>`) is drawn on the collection's column as a
-  modification of its resource; elements have no columns of their own,
-  so the element value it replaces is dropped only in words (the
-  write's tooltip says "the value previously in v[0] is dropped"), not
-  on a column.
+  through `r: &mut Vec<_>`) is drawn on the collection's column; an
+  assignment reads like a plain assignment with the element as the
+  subject, an in-place update (`+=`) as a modification of the
+  collection's resource. Elements have no columns of their own, so the
+  element value an assignment replaces is dropped only in words (the
+  tooltip says "v[0] acquires ownership of a new resource; its previous
+  resource is dropped"), not on a column.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library

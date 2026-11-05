@@ -1065,8 +1065,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         && !text.contains(|c: char| matches!(c, '<' | '>' | '&' | '"' | '\'' | '\n' | '\r')) => text,
       _ => format!("{}.…", rap.name()),
     };
-    // A plain `=` over a value that needs drop drops it; the caller
-    // turns this into `Update` for `op=`.
+    // A plain `=` assigns to the place (Copy: "assigned a new value";
+    // owned over a value that needs drop: drops it; owned with nothing
+    // to drop: acquires). The caller turns this into `Update` for `op=`.
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
     let write = if self.tcx.type_is_copy_modulo_regions(env, ty) {
       PlaceWrite::AssignCopy

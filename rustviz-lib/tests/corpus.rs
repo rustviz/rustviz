@@ -4613,15 +4613,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // variable's column says so. `t.1 = 2` overwrites an integer,
         // which has nothing to drop.
         must_contain: &[
-            "t's resource is modified through t.0; the value previously in t.0 is dropped",
-            "t's resource is modified through t.1",
-            "v's resource is modified through v.last_mut().unwrap().name; the value previously in v.last_mut().unwrap().name is dropped",
-            "u's resource is modified through u.0 (moved from s); the value previously in u.0 is dropped",
+            "t.0 acquires ownership of a new resource; its previous resource is dropped",
+            "t.1 is assigned a new value",
+            "v.last_mut().unwrap().name acquires ownership of a new resource; its previous resource is dropped",
+            "u.0 acquires ownership of a new resource; its previous resource is dropped",
             "Move from String::from to t.0",
             "Move from s to u.0",
         ],
         must_not_contain: &[
             "the value previously in t.1 is dropped",
+            // An assignment reads like a plain assignment (2026-11-05).
+            "t's resource is modified through t.0",
+            "t's resource is modified through t.1",
+            "v's resource is modified through v.last_mut().unwrap().name",
+            "u's resource is modified through u.0",
+            "the value previously in",
+            "(moved from",
+            "(copied from",
         ],
     },
 ];
