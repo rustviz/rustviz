@@ -4396,22 +4396,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `grid[1][0] = 7`, `ps[0] = p`: one element is overwritten;
         // the collection keeps its resource. Before #144 these writes
         // weren't drawn, and `p.name` still dropped a String that had
-        // moved into `ps[0]` with `p`.
+        // moved into `ps[0]` with `p`. An assignment reads like a plain
+        // assignment with the place as subject (2026-11-05 decision);
+        // `+=` modifies the element in place and keeps "modified
+        // through".
         must_contain: &[
-            "v's resource is modified through v[0]",
+            "v[0] is assigned a new value",
             "v's resource is modified through v[1]",
-            "v's resource is modified through v[2]",
+            "v[2] is assigned a new value",
             "Move from s to names[0]",
-            "names's resource is modified through names[0] (moved from s); the value previously in names[0] is dropped",
-            "names's resource is modified through names[0]; the value previously in names[0] is dropped",
+            "names[0] acquires ownership of a new resource; its previous resource is dropped",
             // `+=` on a String calls `add_assign`: nothing is overwritten.
             "names's resource is modified through names[0]",
             "s's resource is moved",
             "s goes out of scope. No resource is dropped.",
             "Move from String::from to names[0]",
-            "grid's resource is modified through grid[1][0]",
+            "grid[1][0] is assigned a new value",
             "Move from p to ps[0]",
-            "ps's resource is modified through ps[0] (moved from p); the value previously in ps[0] is dropped",
+            "ps[0] acquires ownership of a new resource; its previous resource is dropped",
             "p.name's resource is moved",
             "p.name goes out of scope. No resource is dropped.",
         ],
@@ -4422,31 +4424,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "names acquires ownership of a new resource; its previous resource is dropped",
             "v acquires ownership of a new resource; its previous resource is dropped",
             // `v[1] += k`: k is an operand, not the element's new value.
-            "v's resource is modified through v[1] (copied from k)",
             "Copy from k to v[1]",
+            "v[1] is assigned a new value",
             "p.name goes out of scope. Its resource is dropped.",
+            // An assignment is not "modified through", and the arrow
+            // carries the move / copy.
+            "(copied from",
+            "(moved from",
+            "v's resource is modified through v[0]",
+            "v's resource is modified through v[2]",
+            "grid's resource is modified through grid[1][0]",
+            "ps's resource is modified through ps[0]",
+            "the value previously in",
             // Integers have nothing to drop.
-            "v's resource is modified through v[0]; the value previously in v[0] is dropped",
-            "v's resource is modified through v[1]; the value previously in v[1] is dropped",
+            "v[0] acquires ownership",
         ],
     },
     TooltipExpect {
         name: "index_assign_through_ref",
         // `xs[i] = x` (xs: &mut [i32]), `dst[0] = s` (dst: &mut Vec),
-        // `r[0] = …` (r = &mut v): the write modifies the resource the
-        // reference points to. The parameters' borrows still end on
-        // the write's line (another arrow on that line used to hide
-        // that event).
+        // `r[0] = …` (r = &mut v): the write assigns to the place, which
+        // reads like a plain assignment with the place as subject. The
+        // parameters' borrows still end on the write's line (another
+        // arrow on that line used to hide that event).
         must_contain: &[
             "Copy from x to xs[i]",
-            "the resource xs points to is modified through xs[i] (copied from x)",
+            "xs[i] is assigned a new value",
             "xs's mutable borrow ends",
             "Move from s to dst[0]",
-            "the resource dst points to is modified through dst[0] (moved from s); the value previously in dst[0] is dropped",
+            "dst[0] acquires ownership of a new resource; its previous resource is dropped",
             "dst's mutable borrow ends",
             "s goes out of scope. No resource is dropped.",
             "Move from String::from to r[0]",
-            "the resource r points to is modified through r[0]; the value previously in r[0] is dropped",
+            "r[0] acquires ownership of a new resource; its previous resource is dropped",
             "Return mutably borrowed resource from r to v",
         ],
         must_not_contain: &[
@@ -4455,6 +4465,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "dst acquires ownership of a new resource; its previous resource is dropped",
             "r acquires ownership of a resource",
             "s goes out of scope. Its resource is dropped.",
+            "(copied from",
+            "(moved from",
+            "the resource xs points to is modified through xs[i]",
+            "the resource dst points to is modified through dst[0]",
+            "the resource r points to is modified through r[0]",
+            "the value previously in",
         ],
     },
 ];

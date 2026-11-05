@@ -854,11 +854,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           return None;
         }
         let place = self.place_label(expr, &name);
-        // A plain `=` drops the element's old value when its type needs
-        // drop; the caller turns this off for `op=`, which calls the
-        // operator method and drops nothing.
-        let drops = elem_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner));
-        Some(ResourceTy::Index(rap, place, drops))
+        // A plain `=` assigns to the place: a Copy value is "assigned a
+        // new value", an owned value over one that needs drop drops it,
+        // and an owned value with nothing to drop just acquires the
+        // new one. The caller turns this into `Update` for `op=`, which
+        // calls the operator method and overwrites nothing.
+        let typing_env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+        let write = if self.tcx.type_is_copy_modulo_regions(typing_env, elem_ty) {
+          PlaceWrite::AssignCopy
+        } else if elem_ty.needs_drop(self.tcx, typing_env) {
+          PlaceWrite::AssignDropsOld
+        } else {
+          PlaceWrite::AssignOwned
+        };
+        Some(ResourceTy::Index(rap, place, write))
       }
       // Any other place expression: not modelled, skipped.
       _ => {

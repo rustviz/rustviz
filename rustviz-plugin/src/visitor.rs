@@ -1278,7 +1278,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // `v[i] += k`: k is an operand, not the element's new
           // value, so don't draw it as copied into v[i].
           let compound = match &lhs_rty {
-            ResourceTy::Index(r, place, _) => ResourceTy::Index(r.clone(), place.clone(), false),
+            ResourceTy::Index(r, place, _) => ResourceTy::Index(r.clone(), place.clone(), PlaceWrite::Update),
             other => other.clone(),
           };
           self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);

@@ -226,6 +226,23 @@ pub struct Function {
     pub drops_arg: DropsOld,
 }
 
+/// What a write to a place that is not a plain local (`v[i] = e`) does to
+/// the place's old value. It only picks the dot's tooltip: a place
+/// assignment reads like a plain assignment `y = e` (2026-11-05
+/// decision), an in-place update keeps "modified through".
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
+pub enum PlaceWrite {
+    /// An in-place update (`v[i] += k`), or not an assignment at all.
+    #[default]
+    Update,
+    /// `v[i] = e` with a Copy value.
+    AssignCopy,
+    /// `v[i] = e` with an owned value over an old value that needs drop.
+    AssignDropsOld,
+    /// `v[i] = e` with an owned value over an old value with nothing to drop.
+    AssignOwned,
+}
+
 // ResourceTy is a wrapper for ResourceAccessPoints
 // and what we use to populate an ExternalEvent. The wrapper is 
 // necessary because it allows us to distinguish between the RAP being used as a
@@ -241,11 +258,11 @@ pub enum ResourceTy {
     // column (elements have none of their own), but the RAP neither
     // acquires a new resource nor drops its old one; one element is
     // overwritten. The String is the place as written (`v[i]`), used
-    // in tooltips and arrow labels. The bool is true for a plain `=`
-    // that overwrites an element whose type needs drop: the old value
-    // is dropped, and the tooltip must say so (the element has no
-    // column to draw it on).
-    Index(ResourceAccessPoint, String, bool)
+    // in tooltips and arrow labels. The PlaceWrite says whether this is
+    // an assignment (and what it does to the old element: the element has
+    // no column to draw a drop on, so the tooltip states it) or an
+    // in-place update.
+    Index(ResourceAccessPoint, String, PlaceWrite)
 }
 
 impl ResourceTy {
@@ -1437,14 +1454,17 @@ impl Event {
                     // generic message because there's no captured
                     // upvar to name on the closure side yet.
                     safe_message(hover_messages::event_dot_closure_capture_acquire, &self.deref_name(my_name), from)
-                } else if let ResourceTy::Index(r, place, drops) = is {
-                    // `v[i] = s;` / `v[i] = 5;` overwrites one element
-                    // of the resource v owns (or points to); v
-                    // doesn't acquire anything. Name the source only
-                    // when it's a variable: a call's result or a
-                    // literal has no name worth repeating.
-                    let src_name = from.extract_rap().filter(|f| !f.is_fn()).map(|_| from.name());
-                    hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), src_name.as_ref().map(|n| (n, false)), *drops)
+                } else if let ResourceTy::Index(r, place, write) = is {
+                    // `v[i] = s;` / `v[i] = 5;` assigns to the place
+                    // `v[i]`: it reads like a plain assignment, and v
+                    // doesn't acquire anything. `v[i] += k` modifies
+                    // the element in place.
+                    match write {
+                        PlaceWrite::AssignCopy => hover_messages::event_dot_copyable_assign(place),
+                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place),
+                        PlaceWrite::AssignOwned => safe_message(hover_messages::event_dot_acquire, place, from),
+                        PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref()),
+                    }
                 } else if let ResourceTy::Deref(r) = is {
                     // `*r += 1;` modifies what r points to in place.
                     // `*r = v;` is an assignment to the place `*r`: it
@@ -1472,10 +1492,13 @@ impl Event {
                     safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
                 }
             }
-            Event::Copy{ from, is: ResourceTy::Index(r, place, _), ..} => {
-                // `v[i] = y;` with y: Copy overwrites one element.
-                let src_name = from.extract_rap().filter(|f| !f.is_fn()).map(|_| from.name());
-                hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), src_name.as_ref().map(|n| (n, true)), false)
+            Event::Copy{ is: ResourceTy::Index(r, place, write), ..} => {
+                // `v[i] = y;` with y: Copy assigns a new value to the
+                // place `v[i]`.
+                match write {
+                    PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref()),
+                    _ => hover_messages::event_dot_copyable_assign(place),
+                }
             }
             Event::Copy{ from, is: ResourceTy::Deref(r), ..} => {
                 // `*r = y;` with y: Copy overwrites the resource r
