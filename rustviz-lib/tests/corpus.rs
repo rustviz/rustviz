@@ -2119,7 +2119,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound to a copyable value",
             "*p is assigned a new value",
         ],
-        must_not_contain: &["*p is bound to a copyable value"],
+        must_not_contain: &["*p is bound to a copyable value", "(copied from"],
     },
     TooltipExpect {
         name: "static_mut_write",

@@ -1909,7 +1909,7 @@ impl Event {
             }
             Event::Copy{ from, is: is @ (ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _)), ..} => {
                 // `*r = y;` / `r.f = y;` with y: Copy assigns a new value
-                // to the place; it isn't an initialization.
+                // to the place `*r` / `r.f`; it isn't an initialization.
                 let deref = self.deref_name(my_name).clone();
                 let write = match is {
                     ResourceTy::DerefField(_, _, w) => *w,
