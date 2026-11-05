@@ -117,6 +117,34 @@ pub fn event_dot_union_go_out_of_scope(my_name: &String) -> String {
     )
 }
 
+// A `ManuallyDrop<T>` goes out of scope (#283). It never drops the `T`
+// inside it: that only happens through `ManuallyDrop::drop` /
+// `into_inner` / `take`, and otherwise the value is leaked.
+pub fn event_dot_manually_drop_go_out_of_scope(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+        fmt_style(my_name)
+    )
+}
+
+// `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped here,
+// by hand.
+pub fn event_dot_manually_drop_by_hand(my_name: &String) -> String {
+    format!(
+        "ManuallyDrop::drop drops the value inside {0} (by hand)",
+        fmt_style(my_name)
+    )
+}
+
+// State of a `ManuallyDrop` after `ManuallyDrop::drop`: it holds no
+// resource, and using it again is undefined behaviour.
+pub fn state_dropped_by_hand(my_name: &String) -> String {
+    format!(
+        "{0}'s value was dropped by hand; it must not be used again",
+        fmt_style(my_name)
+    )
+}
+
 // A union that already holds a value is written to again (#191):
 // `u.a = 5;`, `u.a = y;`, `u = U { .. };`. Nothing is acquired and the
 // old contents aren't dropped. `from` names the variable the new

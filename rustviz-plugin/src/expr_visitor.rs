@@ -252,20 +252,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: false, is_manually_drop: false}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: true}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: true, is_manually_drop: false}), scope, is_global);
+  }
+
+  // Marks the owner (or struct field) just registered as `name` as a
+  // `ManuallyDrop<T>` when `ty` is one, so its scope end and
+  // reassignments don't claim to drop the `T` (#283). Call right after
+  // `add_owner` / `add_struct`, before any event clones the RAP. A name
+  // that was already registered (and so not re-added by `add_rap`) is
+  // left alone.
+  pub fn mark_if_manually_drop(&mut self, name: &str, ty: Ty<'tcx>) {
+    if !ty.ty_adt_def().map_or(false, |d| d.is_manually_drop()) {
+      return;
+    }
+    let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
+    match self.raps.get_mut(name).map(|rd| &mut rd.rap) {
+      Some(ResourceAccessPoint::Owner(o)) if o.hash == just_added => o.is_manually_drop = true,
+      Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => s.is_manually_drop = true,
+      _ => {}
+    }
   }
 
   // Adds an owner RAP that binds a closure literal. Routed through
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true, is_union: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -347,7 +365,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_mut: mutability,
       is_member: mem,
       is_copy,
-      interior_mut }),
+      interior_mut,
+      is_manually_drop: false }),
       scope, is_global);
   }
 
@@ -396,6 +415,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         touches_ty(from) || touches_ty(to)
       }
       ExternalEvent::GoOutOfScope { ro, .. }
+      | ExternalEvent::ManuallyDropByHand { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. } => {
         self.skip_raps.contains(ro.name())
       }
@@ -922,7 +942,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     else {
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
-      self.add_owner(name, mutability, is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
+      self.add_owner(name.clone(), mutability, is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
+      self.mark_if_manually_drop(&name, ty);
     }
   }
 
@@ -984,6 +1005,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let field_is_copy = self.ty_is_copy(field_ty, owner_id);
         self.add_struct(field_name.clone(), top_owner_hash, true, mutability, field_is_copy, self.ty_has_interior_mut(field_ty, owner_id),
             self.current_scope, !self.inside_branch);
+        self.mark_if_manually_drop(&field_name, field_ty);
         // Recurse for nested struct fields. Skip enums / unions
         // (only struct ADTs are flattened today) and skip the
         // special-owner builtins like `String` whose internals
@@ -1068,7 +1090,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                             let field_name = format!("{}.{}", name, field.name.as_str());
                             let field_ty = field.ty(self.tcx, generic_args);
                             let field_is_copy = self.ty_is_copy(field_ty, pat.hir_id.owner);
-                            self.add_struct(field_name, owner_hash, true, muta, field_is_copy, self.ty_has_interior_mut(field_ty, pat.hir_id.owner), scope, false);
+                            self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_has_interior_mut(field_ty, pat.hir_id.owner), scope, false);
+                            self.mark_if_manually_drop(&field_name, field_ty);
                         }
                     },
                     // Unions render as opaque single-owner columns —
@@ -1086,6 +1109,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             } else {
                 let is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                 self.add_owner(name.clone(), muta, is_copy, self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
+                self.mark_if_manually_drop(&name, ty);
             }
 
             let evt = if parent_ty.is_ref() {
@@ -1864,6 +1888,9 @@ fn holds_resource_after(events: &[(usize, ExternalEvent)], rap_name: &str) -> Op
   let is_rap = |r: &ResourceTy| r.extract_rap().map_or(false, |r| r.name() == rap_name);
   for (_, ev) in events.iter().rev() {
     match ev {
+      ExternalEvent::ManuallyDropByHand { ro, .. } if ro.name() == rap_name => {
+        return Some(false);
+      }
       ExternalEvent::Move { from, to, .. } => {
         if is_rap(to) {
           return Some(true);
