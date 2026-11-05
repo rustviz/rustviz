@@ -1414,6 +1414,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // value; leave its wording alone.
           ResourceTy::DerefField(rap, place, _) if is_assign && !lhs_ty.is_ref() =>
             ResourceTy::DerefField(rap, place, assign_kind()),
+          // A write to a union (`u.f = e`, `u = U { .. }`) is flagged
+          // too, with the Copy-ness of the value written, so the dot
+          // can say "assigned a copy of y" or "acquires ownership of
+          // a resource" (a union never drops either way).
+          ResourceTy::Value(rap) if is_assign
+            && rap.is_union() && (lhs_is_union_field || lhs_ty.is_union()) => {
+            let write = if is_copyable { PlaceWrite::AssignCopy } else { PlaceWrite::AssignOwned };
+            ResourceTy::Value(rap.with_place_write(write))
+          }
           other => other,
         };
         // if we are pointing at a new piece of data

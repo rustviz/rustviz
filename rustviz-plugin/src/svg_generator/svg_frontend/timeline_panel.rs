@@ -1983,21 +1983,25 @@ fn union_write_title(
     if !rap.is_union() {
         return None;
     }
-    let (from, id, is_copy) = match event {
-        Event::Acquire { from, is: ResourceTy::Value(_), id } => (from, *id, false),
-        Event::Copy { from, is: ResourceTy::Value(_), id } => (from, *id, true),
+    // The copy of the union RAP the write event carries says whether the
+    // value written is Copy (`PlaceWrite`); a literal's event is an
+    // Acquire either way, so the event's kind can't tell.
+    let (from, id, written) = match event {
+        Event::Acquire { from, is: ResourceTy::Value(w), id } => (from, *id, w),
+        Event::Copy { from, is: ResourceTy::Value(w), id } => (from, *id, w),
         _ => return None,
     };
+    let is_copy = matches!(written.place_write(), PlaceWrite::AssignCopy);
     let first = first_value_event_id(&visualization_data.timelines.get(&hash)?.history)?;
     if id <= first {
         return None;
     }
     let source = match from {
         ResourceTy::Value(r) | ResourceTy::Deref(r) if !matches!(r, ResourceAccessPoint::Function(_)) =>
-            Some((r.name(), is_copy)),
+            Some(r.name()),
         _ => None,
     };
-    Some(hover_messages::event_dot_union_write(name, source))
+    Some(hover_messages::event_dot_union_write(name, is_copy, source))
 }
 
 // Whether a column holds a value after `event`, given whether it held

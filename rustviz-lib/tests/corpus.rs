@@ -902,6 +902,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r holds a mutable reference; it can read and write the borrowed value",
         ],
         must_not_contain: &[
+            "*r is assigned a new value",
             "(copied from",
             "(moved from",
             "the value r points to is modified through *r",
@@ -2152,7 +2153,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `u._a = y;` — the field write lands on u's column. It's
             // a write, not an initialization (#191).
             "Copy from y to u",
-            "u is written to (copied from y); writing to a union never drops its old contents",
+            "u is assigned a copy of y; writing to a union never drops its old contents",
+            // `u._b = 1.5;` — a literal has no source to name.
+            "u is assigned a new value; writing to a union never drops its old contents",
             // `let x = unsafe { u._a };` — a copy out of u.
             "Copy from u to x",
             "x is initialized with a copy of u",
@@ -3149,25 +3152,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "union_manually_drop",
         must_contain: &[
             "slot acquires ownership of a resource",
-            "slot is written to; writing to a union never drops its old contents",
+            "slot is assigned a new value; writing to a union never drops its old contents",
             "slot goes out of scope. A union's fields are never dropped automatically.",
         ],
         must_not_contain: &[
             "slot goes out of scope. Its resource is dropped.",
             "slot acquires ownership of a new resource; its previous resource is dropped",
+            "slot is written to",
         ],
     },
     TooltipExpect {
         name: "union_whole_assign",
         must_contain: &[
-            "u is written to (copied from y); writing to a union never drops its old contents",
-            "u is written to; writing to a union never drops its old contents",
+            "u is assigned a copy of y; writing to a union never drops its old contents",
+            "u acquires ownership of a resource; writing to a union never drops its old contents",
             "u goes out of scope. A union's fields are never dropped automatically.",
         ],
         must_not_contain: &[
             "u is initialized with a copy of y",
             "u acquires ownership of a new resource; its previous resource is dropped",
             "u goes out of scope. Its resource is dropped.",
+            "u is written to",
+            "(copied from",
+            "(moved from",
         ],
     },
     // ─── Wording on references and Copy assignments (#178) ──────────
@@ -3232,7 +3239,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from z to p.y",
             "n is assigned a new value",
             "n is assigned a copy of m",
-            "b is written to; writing to a union never drops its old contents",
+            "b is assigned a new value; writing to a union never drops its old contents",
         ],
         must_not_contain: &[
             "p.x acquires ownership of a resource",
@@ -3240,7 +3247,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.y is initialized with a copy of z",
             "n is initialized with a copy of m",
             "b acquires ownership of a resource",
-            "b is assigned a new value",
+            "b is written to",
         ],
     },
     TooltipExpect {
