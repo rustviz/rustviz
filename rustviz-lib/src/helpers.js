@@ -56,7 +56,10 @@ function helpers(classname) {
         tooltip.style.cssText = "position: absolute; padding: 0.5em; font-size: 0.75em; border-radius: 8px;" +
                                 "font-family: 'Trebuchet MS', Helvetica, sans-serif;" +
                                 "background: rgb(70, 70, 70, 0.6); color: white; z-index: 100; display: none;" +
-                                "max-width: 360px; overflow-wrap: break-word;";
+                                "max-width: 360px; overflow-wrap: break-word;" +
+                                // pin the layout box to the page origin so the translate() below is
+                                // measured from a known point, whatever margins the host page gives <p>
+                                "top: 0; left: 0; margin: 0;";
         page.parentNode.insertBefore(tooltip, page);
     }
 
@@ -243,10 +246,21 @@ function displayTooltip(tooltip, classname) {
 }
 
 
+// Track mouse movement. With <object> embedding (mdbook-rustviz),
+// evt.clientX/Y are local to the SVG document, so the panel's bounding rect
+// maps them back to the page. With inline SVG (`rustviz html`, the
+// playground), evt.clientX/Y are already viewport coordinates and only the
+// scroll offset is needed (the tooltip is position:absolute).
 function mousePos(evt, obj) {
-    let x_pos = evt.clientX + obj.getBoundingClientRect().x + 15;
-    let y_pos = evt.clientY + obj.getBoundingClientRect().y + window.scrollY + 45;
-
+    let x_pos, y_pos;
+    if (obj && obj.contentDocument) {
+        let r = obj.getBoundingClientRect();
+        x_pos = evt.clientX + r.x + 15;
+        y_pos = evt.clientY + r.y + window.scrollY + 45;
+    } else {
+        x_pos = evt.clientX + window.scrollX + 15;
+        y_pos = evt.clientY + window.scrollY + 25;
+    }
     return {
         x: Math.round(x_pos),
         y: Math.round(y_pos)
