@@ -3,7 +3,7 @@
 // the place `*r`, a Copy value is "assigned a copy of y" (or "a new
 // value" when the source isn't a named place), and an owned
 // value says its previous resource is dropped. The arrow carries the
-// copy or move. An in-place update (`*r += 1`) keeps "modified through".
+// copy or move. An in-place update (`*r += 1`, `*r += y`) keeps "modified through".
 struct Q {
     n: i32,
 }
@@ -17,6 +17,8 @@ fn main() {
     let z = &y;
     *r = *z;
     *r += 1;
+    *r += y;
+    *r += *z;
     let mut a = String::from("a");
     let t = String::from("t");
     let ra = &mut a;

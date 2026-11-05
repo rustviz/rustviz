@@ -3519,6 +3519,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*n is assigned a new value",
             "*rq is assigned a new value",
             "the resource r points to is modified through *r",
+            "Copy from *z to *r",
         ],
         must_not_contain: &[
             "+= reads from/writes to r (mutable reborrow",
