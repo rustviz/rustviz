@@ -741,9 +741,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       // `r.push_str(..)` with r: `&mut String` is
                       // `String::push_str(&mut *r, ..)` — an implicit
                       // reborrow of r. With r an owner it's a plain
-                      // autoref (`&mut s`), not a reborrow.
+                      // autoref (`&mut s`), not a reborrow. A written
+                      // `(&mut s).push_str(..)` is a fresh borrow of s
+                      // (rustc reborrows the temporary `&mut s`, not
+                      // s), and `(&mut *r).push_str(..)` a reborrow of
+                      // r; decide by the `&mut` operand, as match_arg
+                      // does for `f(&mut s)` (#367).
                       let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
-                      let is_reborrow = is_implicit_mut_reborrow(rcvr, typeck);
+                      let is_reborrow = match rcvr.kind {
+                        ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, typeck),
+                        _ => is_implicit_mut_reborrow(rcvr, typeck),
+                      };
                       let result_has_lifetime = call_result_has_lifetime(expr, typeck);
                       self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref);
                     },

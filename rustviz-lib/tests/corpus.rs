@@ -335,6 +335,8 @@ const EXPECTED_OK: &[&str] = &[
     "binop_operand_copies",
     "method_autoref_receiver",
     "method_autoref_ref_receiver",
+    // `(&mut s).method()` is a fresh borrow of s, not a reborrow (#367).
+    "method_addrof_receiver",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3060,6 +3062,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push_str reads from/writes to w (implicitly mutably borrowed)",
             "push_str reads from/writes to w (implicitly mutably borrowed) (mutable reborrow — w can't be used until push_str returns)",
             "is_empty reads from r (implicitly borrowed)",
+        ],
+    },
+    TooltipExpect {
+        name: "method_addrof_receiver",
+        // `(&mut s).push_str` borrows s afresh, like the explicit
+        // `String::push_str(&mut s, ..)`; only `(&mut *r)` / `r.` on a
+        // `&mut String` r are reborrows.
+        must_contain: &[
+            "push_str reads from/writes to s",
+            "push_str reads from/writes to s (implicitly mutably borrowed)",
+            "String::push_str reads from/writes to s",
+            "push_str reads from/writes to r (mutable reborrow — r can't be used until push_str returns)",
+        ],
+        must_not_contain: &[
+            "push_str reads from/writes to s (mutable reborrow — s can't be used until push_str returns)",
         ],
     },
 ];
