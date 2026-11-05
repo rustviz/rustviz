@@ -224,9 +224,10 @@ const BOOK: &[Snippet] = &[
         note: "array literal `a` has no creation event (#179)",
         must_contain: &[
             "Immutable borrow from a to slice",
-            "Return immutably borrowed resource from slice to a",
+            "Return immutably borrowed value from slice to a",
             "a goes out of scope. No resource is dropped.",
         ],
+        must_not_contain: &["Return immutably borrowed resource from slice to a"],
         ..E
     },
     Snippet {
@@ -264,11 +265,11 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c4_15_mutate_copy_int",
         must_contain: &[
-            "x's resource is copied to the caller",
+            "x's value is copied to the caller",
             "Copy from a to add_one",
             "Copy from add_one to b",
         ],
-        must_not_contain: &["x's resource is moved to the caller"],
+        must_not_contain: &["x's resource is moved to the caller", "x's resource is copied to the caller"],
         ..E
     },
     // ─── Chapter 5: structs and methods ───────────────────────────────
@@ -900,8 +901,9 @@ const BOOK: &[Snippet] = &[
         id: "c13_03_fnmut_counter",
         must_contain: &[
             "Closure capture (mutable borrow) from count to inc",
-            "Return mutably borrowed resource from inc to count",
+            "Return mutably borrowed value from inc to count",
         ],
+        must_not_contain: &["Return mutably borrowed resource from inc to count"],
         ..E
     },
     Snippet {
@@ -1005,8 +1007,8 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c15_03_ref_deref",
-        must_contain: &["Immutable borrow from x to y", "Return immutably borrowed resource from y to x"],
-        must_not_contain: &["y is the owner of the resource"],
+        must_contain: &["Immutable borrow from x to y", "Return immutably borrowed value from y to x"],
+        must_not_contain: &["y is the owner of the resource", "Return immutably borrowed resource from y to x"],
         ..E
     },
     Snippet {
@@ -1234,10 +1236,10 @@ const BOOK: &[Snippet] = &[
             "Mutable borrow from x to r",
             "r holds a mutable reference; it can read and write the borrowed resource",
             "the resource r points to is modified through *r",
-            "Return mutably borrowed resource from r to x",
+            "Return mutably borrowed value from r to x",
             "Copy from x to y",
         ],
-        must_not_contain: &["r is the owner of the resource", "*r acquires ownership of a resource"],
+        must_not_contain: &["r is the owner of the resource", "*r acquires ownership of a resource", "Return mutably borrowed resource from r to x"],
         ..E
     },
     Snippet {
@@ -1317,9 +1319,9 @@ const BOOK: &[Snippet] = &[
             "Mutable borrow from n to r",
             "r holds a mutable reference; it can read and write the borrowed resource",
             "the resource r points to is modified through *r",
-            "Return mutably borrowed resource from r to n",
+            "Return mutably borrowed value from r to n",
         ],
-        must_not_contain: &["*r acquires ownership of a resource", "r is the owner of the resource"],
+        must_not_contain: &["*r acquires ownership of a resource", "r is the owner of the resource", "Return mutably borrowed resource from r to n"],
         ..E
     },
     Snippet {
