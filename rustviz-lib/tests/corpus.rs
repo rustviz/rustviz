@@ -2718,7 +2718,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "a's resource is immutably borrowed by b; a is read-only while the borrow is live",
             "a's resource is immutably borrowed by c; a is read-only while the borrow is live",
-            "*r is assigned a new value",
+            "*r is assigned a copy of y",
             "r's mutable borrow ends",
             "s's resource is immutably borrowed by show; s is read-only while the borrow is live",
             "show reads from s",
@@ -3934,7 +3934,7 @@ fn same_line_events_share_one_dot() {
             "a's resource is immutably borrowed by c; a is read-only while the borrow is live",
         ][..],
         &[
-            "*r is assigned a new value",
+            "*r is assigned a copy of y",
             "r's mutable borrow ends",
         ],
         // The call icon's line goes between the borrow and its end.
