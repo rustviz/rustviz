@@ -415,12 +415,14 @@ fn prepare_registry(registry: &mut Handlebars) {
     // We want to preserve the inputs `as is`, and want to make no changes based on html escape.
     registry.register_escape_fn(handlebars::no_escape);
 
+    // Arrows come before events so dots and function icons paint (and
+    // hit-test) above the arrow shafts that start or end at their centres.
     let timeline_panel_template =
         "    <g id=\"labels\">\n{{ labels }}    </g>\n\n    \
         <g id=\"timelines\">\n{{ timelines }}    </g>\n\n    \
         <g id=\"ref_line\">\n{{ ref_line }}    </g>\n\n    \
-        <g id=\"events\">\n{{ dots }}    </g>\n\n    \
-        <g id=\"arrows\">\n{{ arrows }}    </g>";
+        <g id=\"arrows\">\n{{ arrows }}    </g>\n\n    \
+        <g id=\"events\">\n{{ dots }}    </g>";
 
     let struct_template  = 
         "    <g id=\"{{struct_name}}\">\n\
