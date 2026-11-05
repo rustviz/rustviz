@@ -674,6 +674,10 @@ fn update_timeline_data(events: & mut Vec<(usize, Event)>, parent_data: &Timelin
 const LABEL_CHAR_PX: i64 = 9;
 // Minimum blank space between two neighbouring header labels.
 const LABEL_GAP: i64 = 10;
+// Blank space between a struct box's edge and the label inside it that
+// reaches furthest (#477). Neighbouring labels keep this much extra
+// room so a widened box doesn't touch them.
+const BOX_PAD: i64 = 6;
 
 fn label_half_width(chars: i64) -> i64 {
     (chars * LABEL_CHAR_PX + 1) / 2
@@ -716,6 +720,10 @@ fn compute_column_layout<'a>(
         let mut owner: i64 = -1;
         let mut owner_x: i64 = 0;
         let mut last_x: i64 = 0;
+        // Half the header-label widths of the open struct's first and
+        // last columns (#477): the box must reach past both.
+        let mut owner_half: i64 = 0;
+        let mut last_half: i64 = 0;
         // Half the header-label width of the previous column in this
         // fn, so the next column can keep clear of it (#361).
         let mut prev_label: Option<(i64, i64)> = None; // (centre x, half width)
@@ -757,8 +765,20 @@ fn compute_column_layout<'a>(
             // right (#361). Widen the gap just enough when that would
             // happen; columns that already fit keep their position.
             let label_half = label_half_width(label_len);
+            let rap = &timeline.resource_access_point;
+            let starts_struct = rap.is_struct_group() && !rap.is_member();
+            let extends_open_struct =
+                owner != -1 && rap.is_member() && rap.get_owner() as i64 == owner;
             if let Some((prev_x, prev_half)) = prev_label {
-                let needed = prev_half + label_half + LABEL_GAP;
+                // A struct box ends after the previous column or starts
+                // at this one: leave room for the box padding too.
+                let mut needed = prev_half + label_half + LABEL_GAP;
+                if owner != -1 && !extends_open_struct {
+                    needed += BOX_PAD;
+                }
+                if starts_struct {
+                    needed += BOX_PAD;
+                }
                 if x - prev_x < needed {
                     x = prev_x + needed;
                 }
@@ -778,20 +798,19 @@ fn compute_column_layout<'a>(
             // at the struct's own column: a struct none of whose fields
             // got a column (none was ever used) gets a box around its
             // own label rather than a negative width (#192).
-            let rap = &timeline.resource_access_point;
-            let starts_struct = rap.is_struct_group() && !rap.is_member();
-            let extends_open_struct =
-                owner != -1 && rap.is_member() && rap.get_owner() as i64 == owner;
             if owner != -1 && !extends_open_struct {
-                structs_info.structs.push((owner, owner_x, last_x));
+                structs_info.structs.push((owner, owner_x, last_x, owner_half, last_half));
                 owner = -1;
             }
             if starts_struct {
                 owner = *rap.hash() as i64;
                 owner_x = x;
                 last_x = x;
+                owner_half = label_half;
+                last_half = label_half;
             } else if extends_open_struct {
                 last_x = x;
+                last_half = label_half;
             }
 
             resource_owners_layout.insert(*hash, TimelineColumnData
@@ -812,7 +831,7 @@ fn compute_column_layout<'a>(
         // Finalize any open struct group at the end of this fn
         // (same trailing-struct fix as before, scoped per-fn).
         if owner != -1 {
-            structs_info.structs.push((owner, owner_x, last_x));
+            structs_info.structs.push((owner, owner_x, last_x, owner_half, last_half));
         }
         max_x = cmp::max(max_x, x);
     }
@@ -3819,7 +3838,7 @@ fn render_struct_box(
     // SVG" layout (label_y=70, box=50..80). Per-fn struct boxes
     // override below to track their fn's label row.
     const DEFAULT_BOX_Y: i64 = 50;
-    for (owner, owner_x, last_x) in structs_info.structs.iter() {
+    for (owner, owner_x, last_x, owner_half, last_half) in structs_info.structs.iter() {
         let owner_hash = *owner as u64;
         let y = match fn_start_lines.get(&owner_hash) {
             // Labels sit on the row directly above the fn signature
@@ -3829,12 +3848,17 @@ fn render_struct_box(
             Some(&line) => get_y_axis_pos(line) - LINE_SPACE - 20,
             None => DEFAULT_BOX_Y,
         };
+        // Fixed padding around the end columns, or the end labels'
+        // extent plus BOX_PAD if that is wider (#477). Labels between
+        // the two ends lie between the end columns, so they fit.
+        let left = cmp::min(owner_x - 20, owner_x - owner_half - BOX_PAD);
+        let right = cmp::max(last_x + 40, last_x + last_half + BOX_PAD);
         let box_data = BoxData {
             name: owner_hash,
             hash: 0,
-            x: owner_x - 20,
+            x: left,
             y,
-            w: last_x - owner_x + 60,
+            w: right - left,
             h: 30,
             title: String::new(),
         };
