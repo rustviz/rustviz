@@ -274,6 +274,17 @@ impl Hash for ResourceTy {
   }
 }
 
+/// Dot text for a Copy value assigned to the place `place`, worded as a
+/// plain assignment is on main: "a copy of x" when the source is a named
+/// place (`*r = y`, `v[i] = x`), "a new value" otherwise (a literal, an
+/// expression, a call result).
+pub fn place_assign_copy_message(place: &String, from: &ResourceTy) -> String {
+    match from.extract_rap().filter(|f| !f.is_fn()) {
+        Some(_) => hover_messages::event_dot_copyable_assign_copy(place, &from.name()),
+        None => hover_messages::event_dot_copyable_assign(place),
+    }
+}
+
 impl ResourceAccessPoint {
     /// A copy of this RAP marked as the target of a place write `*r = e`
     /// (see `PlaceWrite`). Only owners (a `Box`) and `&mut` references
@@ -1311,7 +1322,7 @@ impl Event {
                     // `*r = v;` is an assignment to the place `*r`: it
                     // reads like a plain assignment.
                     match r.place_write() {
-                        PlaceWrite::AssignCopy => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
+                        PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name)),
                         PlaceWrite::AssignOwned => safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from),
                         PlaceWrite::Update => hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy()),
@@ -1338,8 +1349,9 @@ impl Event {
                 // points to; it isn't an initialization of *r.
                 let deref = self.deref_name(my_name).clone();
                 match r.place_write() {
-                    PlaceWrite::AssignCopy => hover_messages::event_dot_copyable_assign(&deref),
-                    _ => hover_messages::event_dot_copy_through_deref(r.name(), &deref, &from.name()),
+                    PlaceWrite::AssignCopy => place_assign_copy_message(&deref, from),
+                    // `*r += y`: an in-place update; the arrow shows the copy.
+                    _ => hover_messages::event_dot_write_through_deref(r.name(), &deref, true),
                 }
             }
             Event::Copy{ from ,..} => {

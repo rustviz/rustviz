@@ -492,19 +492,6 @@ pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, poi
     )
 }
 
-// Copy-flavoured write through a dereference: `*r = y;` with y: Copy.
-// The place `*r` already exists, so it is not "initialized"; it is
-// overwritten with a copy of y. `*r` has y's type, which is Copy, so
-// what r points to is a "value" (#312).
-pub fn event_dot_copy_through_deref(ref_name: &String, deref_name: &String, from_name: &String) -> String {
-    format!(
-        "the value {0} points to is modified through {1} (copied from {2})",
-        fmt_style(ref_name),
-        fmt_style(deref_name),
-        fmt_style(from_name)
-    )
-}
-
 // 1   0        1   0
 // |            |   
 // o-->*   or   o-->*     the star event
