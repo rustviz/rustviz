@@ -2962,7 +2962,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "set borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
             "borrow_mut borrows r immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "lock borrows m immutably (a shared borrow); m has interior mutability, so its contents can change even through a shared borrow",
-            "len reads from s",
+            "len reads from s (implicitly borrowed)",
         ],
         must_not_contain: &[
             "set reads from c",
@@ -2977,7 +2977,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "set borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
             "borrow_mut borrows cell immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "fetch_add borrows hits immutably (a shared borrow); hits has interior mutability, so its contents can change even through a shared borrow",
-            "len reads from s",
+            "len reads from s (implicitly borrowed)",
         ],
         must_not_contain: &[
             "set reads from c",
