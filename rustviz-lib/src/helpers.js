@@ -7,15 +7,25 @@
 //   - <object> tags loading external .svg files (mdbook output), or
 //   - inline <svg> elements (CLI --html output, single-file).
 //
-// `getSvgRoot()` papers over the difference: for an <object> we
+// `panelRoot()` papers over the difference: for an <object> we
 // reach into its contentDocument; for an inline <svg> the element
 // IS the root. Everything downstream uses element-scoped query
 // methods (querySelector, getElementsByClassName on the root)
 // instead of Document-scoped getElementById, so the same code runs
 // in both modes without further branching.
 
-function getSvgRoot(elt) {
-    return elt.contentDocument ? elt.contentDocument.documentElement : elt;
+// Same helper as the playground's copy. A panel is an <object> (mdbook), a
+// bare inline <svg> (`rustviz html`), or a wrapper element holding an <svg>
+// (playground).
+function panelRoot(panel) {
+    if (!panel) return null;
+    if (panel.contentDocument) return panel.contentDocument.documentElement;
+    if (panel.tagName && panel.tagName.toLowerCase() === 'svg') return panel;
+    return panel.querySelector ? panel.querySelector('svg') : null;
+}
+function panelOwnerDocument(panel) {
+    if (panel && panel.contentDocument) return panel.contentDocument;
+    return document;
 }
 
 const SVG = {
@@ -57,6 +67,9 @@ function helpers(classname) {
                                 "font-family: 'Trebuchet MS', Helvetica, sans-serif;" +
                                 "background: rgb(70, 70, 70, 0.6); color: white; z-index: 100; display: none;" +
                                 "max-width: 360px; overflow-wrap: break-word;" +
+                                // never intercept the mouse: if the tooltip sits under the cursor it would
+                                // steal the hover, hiding itself and flickering
+                                "pointer-events: none;" +
                                 // pin the layout box to the page origin so the translate() below is
                                 // measured from a known point, whatever margins the host page gives <p>
                                 "top: 0; left: 0; margin: 0;";
@@ -71,12 +84,16 @@ function displayFn(classname) {
     let vis_num = document.getElementsByClassName(classname);
     let code_obj = vis_num[0];
     let tl_obj = vis_num[1];
-    let c_svg = getSvgRoot(code_obj);
-    let tl_svg = getSvgRoot(tl_obj);
+    let c_svg = panelRoot(code_obj);
+    let tl_svg = panelRoot(tl_obj);
+    if (!c_svg || !tl_svg) return;
     let triggers = tl_svg.getElementsByClassName('fn-trigger');
     var functions = c_svg.getElementsByClassName('fn');
 
     for (let i = 0; i < triggers.length; i++) {
+        // helpers() runs on every mouseenter of the container; don't stack listeners
+        if (triggers[i].classList.contains('fn-listener')) continue;
+        triggers[i].classList.add('fn-listener');
         triggers[i].addEventListener('mouseover', showFn);
         triggers[i].addEventListener('mouseout', hideFn);
     }
@@ -120,14 +137,16 @@ function sizeToFit(object) {
 
 function displayTooltip(tooltip, classname) {
     let tl_obj = document.getElementsByClassName(classname)[1];
-    let tl_svg = getSvgRoot(tl_obj);
+    let tl_svg = panelRoot(tl_obj);
+    if (!tl_svg) return;
     let triggers = tl_svg.getElementsByClassName('tooltip-trigger');
 
     var time_start = null;
 
     for (let i = 0; i < triggers.length; i++) {
-        if (triggers[i].classList.contains('listener')) break;
-        else triggers[i].classList.add('listener');
+        // prevent adding duplicate listeners
+        if (triggers[i].classList.contains('listener')) continue;
+        triggers[i].classList.add('listener');
 
         triggers[i].addEventListener('mousemove', showTooltip);
         triggers[i].addEventListener('mouseleave', hideTooltip);
@@ -163,7 +182,8 @@ function displayTooltip(tooltip, classname) {
 
     function insertUnderline(e) {
         let code_obj = document.getElementsByClassName(classname + ' code_panel')[0];
-        let code_root = getSvgRoot(code_obj);
+        let code_root = panelRoot(code_obj);
+        if (!code_root) return;
         let begin = 0, end = 0;
         if (e.currentTarget.tagName === 'path') {
             let arr = e.currentTarget.getAttribute('d').split(' ');
@@ -231,7 +251,7 @@ function displayTooltip(tooltip, classname) {
                 // measured box. (It used to be a row of '_' sized by assuming
                 // 8px per character, which fell short with the rendered font.)
                 let box = lines[i].getBBox();
-                let emph = code_root.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'line');
+                let emph = panelOwnerDocument(code_obj).createElementNS('http://www.w3.org/2000/svg', 'line');
                 emph.setAttribute('class', 'code emph');
                 emph.setAttribute('x1', box.x);
                 emph.setAttribute('x2', box.x + box.width);
@@ -269,7 +289,8 @@ function mousePos(evt, obj) {
 
 function removeUnderline(e, classname) {
     let code_obj = document.getElementsByClassName(classname + ' code_panel')[0];
-    let code_root = getSvgRoot(code_obj);
+    let code_root = panelRoot(code_obj);
+    if (!code_root) return;
     let arr = code_root.getElementsByClassName('emph');
     for (let i = arr.length-1; i >= 0; --i) {
         arr[i].remove();
