@@ -7172,6 +7172,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from t to big",
         ],
     },
+    // An if-let arm's struct-field columns say one thing per row (#486): they
+    // used to draw "has no value yet" over "holds a copyable value" on the
+    // pattern's rows. (Fixed on main by #405; `well_formed` now checks every
+    // fixture for stacked segments.)
+    TooltipExpect {
+        name: "if_let_struct_fields_unused",
+        must_contain: &[
+            "p.x is bound to a copyable value",
+            "p.x holds a copyable value",
+            "p.y is bound to a copyable value",
+            "p.y holds a copyable value",
+        ],
+        must_not_contain: &[
+            "p.x has no value yet",
+            "p.y has no value yet",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -7237,6 +7254,13 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         "{}: straight arrow(s) drawn across event dots, hiding their tooltips: {:?}",
         name,
         crossed
+    );
+    let stacked = stacked_segments(&timeline);
+    assert!(
+        stacked.is_empty(),
+        "{}: column segments with different tooltips drawn over the same rows: {:?}",
+        name,
+        stacked
     );
     let shared = shared_dot_points(&timeline);
     assert!(
@@ -7479,6 +7503,60 @@ fn assert_no_negative_sizes(name: &str, timeline: &str) {
             panic!("{}: negative size in timeline: {}", name, &timeline[start..end]);
         }
     }
+}
+
+/// Vertical state-line pieces of a timeline panel that lie over the same
+/// rows of the same column but carry different tooltips, as
+/// `(column hash, x, from y, to y, tooltip A, tooltip B)`. Only the top
+/// one can be hovered, so a column drawn like that says two things about
+/// one row (#486: a pattern-bound field's column drew "has no value yet"
+/// and "holds a copyable value" over the same rows).
+fn stacked_segments(svg: &str) -> Vec<String> {
+    let mut by_column: BTreeMap<(String, String), Vec<(f64, f64, String)>> = BTreeMap::new();
+    for (i, _) in svg.match_indices(" data-tooltip-text=\"") {
+        let start = match svg[..i].rfind('<') {
+            Some(s) => s,
+            None => continue,
+        };
+        let tag_end = start + svg[start..].find('>').unwrap_or(svg.len() - start);
+        let tag = &svg[start..tag_end];
+        let tip = match attr(tag, "data-tooltip-text") {
+            Some(t) => t.to_owned(),
+            None => continue,
+        };
+        let lines: Vec<&str> = if tag.starts_with("<line ") {
+            vec![tag]
+        } else if tag.starts_with("<g ") {
+            let body = &svg[start..start + svg[start..].find("</g>").unwrap_or(svg.len() - start)];
+            start_tags(body, "line")
+        } else {
+            continue;
+        };
+        for l in lines {
+            let (x1, x2) = (attr(l, "x1"), attr(l, "x2"));
+            if x1.is_none() || x1 != x2 {
+                continue;
+            }
+            let ys: Option<(f64, f64)> = attr(l, "y1").zip(attr(l, "y2"))
+                .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
+            if let (Some((a, b)), Some(h)) = (ys, attr(l, "data-hash")) {
+                by_column.entry((h.to_owned(), x1.unwrap().to_owned()))
+                    .or_default()
+                    .push((a.min(b), a.max(b), tip.clone()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for ((hash, x), segs) in by_column {
+        for (i, a) in segs.iter().enumerate() {
+            for b in &segs[i + 1..] {
+                if a.2 != b.2 && a.1.min(b.1) - a.0.max(b.0) > 0.5 {
+                    out.push(format!("hash {} x={}: y {}..{} {:?} / y {}..{} {:?}", hash, x, a.0, a.1, a.2, b.0, b.1, b.2));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Every hash (from 1 up) that the panel's elements use, as
