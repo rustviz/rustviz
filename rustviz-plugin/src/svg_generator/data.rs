@@ -510,16 +510,22 @@ pub enum ExternalEvent {
         to: ResourceTy,
         id: usize
     },
+    // `into_closure`: a closure literal passed to a call captures
+    // `from` by value (`thread::spawn(move || ..v..)`): `from` moves
+    // (or is copied) into the closure, not into the callee; `to` is
+    // the callee. Only `match_closure_arg` sets it.
     Copy {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
+        into_closure: bool,
         id: usize
     },
     Move {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
+        into_closure: bool,
         id: usize
     },
     // `is_reborrow`: the borrow was written `&*r` / `&mut *r` with
@@ -716,6 +722,7 @@ pub enum Event {
     Duplicate {
         to: ResourceTy,
         is: ResourceTy,
+        into_closure: bool,
         id: usize
     },
     // this happens when a ResourceAccessPoint transfers a copy of its contents
@@ -737,6 +744,7 @@ pub enum Event {
     Move {
         to: ResourceTy,
         is: ResourceTy,
+        into_closure: bool,
         id: usize
     },
 
@@ -1154,6 +1162,12 @@ impl Event {
                 }
             }
             // arrow going out
+            Event::Duplicate{ to, into_closure: true, ..} => {
+                hover_messages::event_dot_copy_into_closure_arg(&self.deref_name(my_name), &to.name())
+            }
+            Event::Move{ to, into_closure: true, ..} => {
+                hover_messages::event_dot_move_into_closure_arg(&self.deref_name(my_name), &to.name())
+            }
             Event::Duplicate{ to, is, ..} => {
                 match to {
                     // Returning a `&T` copies the reference, not the referent.
@@ -1880,15 +1894,15 @@ impl Visualizable for VisualizationData {
       match ext_ev {
         ExternalEvent::Bind { from, to, id } => {
           if to_o { vec![(line_num,  Event::Acquire{from : from.to_owned(), is: to.clone(), id: *id})] }
-          else { vec![(line_num, Event::Duplicate{to : to.to_owned(), is: from.clone(), id: *id})] }
+          else { vec![(line_num, Event::Duplicate{to : to.to_owned(), is: from.clone(), into_closure: false, id: *id})] }
         },
-        ExternalEvent::Copy{from: from_ro, to: to_ro, id, ..} => {
+        ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, ..} => {
           if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
-          else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
+          else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, id: *id})] }
         },
-        ExternalEvent::Move{from: from_ro, to: to_ro, id, ..} => {
+        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, ..} => {
           if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
-          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
+          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, id: *id})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
@@ -2079,19 +2093,19 @@ impl Visualizable for VisualizationData {
 
         match event {
             // eg let ro_to = String::from("");
-            ExternalEvent::Move{from: from_ro, to: to_ro, id, ..} => {
+            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, ..} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
+                maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, id: id}, line_number);
             },
             // eg: let ro_to = 5;
             ExternalEvent::Bind{from: from_ro, to: to_ro, id} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
+                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, id: id}, line_number);
             },
             // eg: let x : i64 = y as i64;
-            ExternalEvent::Copy{from: from_ro, to: to_ro, id, ..} => {
+            ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, ..} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
+                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, id: id}, line_number);
             },
             ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, id } => {
                 // need to add events with more granularity for Branches

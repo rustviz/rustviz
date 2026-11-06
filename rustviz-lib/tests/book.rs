@@ -906,10 +906,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_04_thread_spawn_move",
-        status: Wrong,
-        note: "the move closure passed to thread::spawn takes list; no capture shown, list shown dropped in main (#172)",
-        must_contain: &["list acquires ownership of a resource"],
-        known_wrong: &["list goes out of scope. Its resource is dropped."],
+        must_contain: &[
+            "list acquires ownership of a resource",
+            "Move from list into the closure passed to thread::spawn",
+            "list's resource is moved into a closure passed to thread::spawn; it's dropped when that closure is dropped",
+            "list goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &["list goes out of scope. Its resource is dropped.", "Move from list to thread::spawn"],
         ..E
     },
     Snippet {

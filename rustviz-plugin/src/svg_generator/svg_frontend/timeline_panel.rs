@@ -2105,7 +2105,15 @@ fn render_arrow (
             let styled_from_string = SPAN_BEGIN.to_string() + &from.name() + SPAN_END;
             title = format!("{} from {}", title, styled_from_string);
             let styled_to_string = SPAN_BEGIN.to_string() + &to.name() + SPAN_END;
-            title = format!("{} to {}", title, styled_to_string);
+            // A by-value capture of a closure literal passed to a call
+            // goes into the closure, which is then passed to the callee.
+            let into_closure = matches!(external_event,
+                ExternalEvent::Move { into_closure: true, .. } | ExternalEvent::Copy { into_closure: true, .. });
+            title = if into_closure {
+                format!("{} into the closure passed to {}", title, styled_to_string)
+            } else {
+                format!("{} to {}", title, styled_to_string)
+            };
             // A borrow "returned" from `s` to `*s`: the lender has no
             // column, so don't describe it as returned to itself.
             // When the visitor knows it borrowed 'static data (a string

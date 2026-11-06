@@ -204,9 +204,6 @@ panic.
   &str`, `longest`, `largest`, `v.get(i)`, `v.iter()`): the result isn't
   linked to the borrow it came from, and the input's borrow is shown
   ending at the call even while the result is still in use.
-- A closure passed straight to a function (`thread::spawn(move || …)`,
-  `apply(|x| x + k)`) has no captures drawn, so a value it `move`s is
-  still shown as dropped at the end of scope.
 - Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
 - A variable assigned in only some branches (`let mut s; if c { s = …
   }`) is drawn as owning a value after the `if`, and a later `s = …` as
@@ -236,6 +233,9 @@ rather than listed here.
   (`*cell.borrow_mut() += 1`) shows only the `borrow_mut` call (a shared
   borrow of `cell`), not the write itself.
 - Closures: captures are shown; events inside the closure body aren't.
+  For a closure passed straight to a function (`thread::spawn(move ||
+  …)`), what it captures by value is drawn as moved / copied into the
+  call; what it captures by reference (`apply(|x| x + k)`) isn't drawn.
 - Loops (`for`, `while`, `loop`) show a single iteration.
 - Method chains (`a.get_mut().push(x)`): only the first call renders.
 - Match guards (`pat if cond =>`, `pat if let … =>`): the guard's events

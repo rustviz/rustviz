@@ -519,8 +519,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// "from p"), where marking every field moved would be wrong.
   fn propagate_struct_transfer(&mut self, line_num: usize, event: &ExternalEvent) {
     let (from, to, is_copy, id) = match event {
-      ExternalEvent::Move { from, to, id, is_partial: false } => (from, to, false, *id),
-      ExternalEvent::Copy { from, to, id, is_partial: false } => (from, to, true, *id),
+      ExternalEvent::Move { from, to, id, is_partial: false, .. } => (from, to, false, *id),
+      ExternalEvent::Copy { from, to, id, is_partial: false, .. } => (from, to, true, *id),
       _ => return,
     };
     let struct_name = |r: &ResourceTy| match r {
@@ -564,9 +564,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev_id = *self.unique_id;
         *self.unique_id += 1;
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         };
         self.add_external_event(line_num, ev);
       }
@@ -619,8 +619,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
-      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial },
+      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false },
@@ -759,9 +759,76 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .map_or(false, |adt| self.tcx.is_diagnostic_item(rustc_span::sym::RefCell, adt.did()))
   }
 
+  /// Registered RAP name for a closure capture's place: the root
+  /// variable, plus any struct-field projections (`p.name` for a
+  /// disjoint capture of one field, which has its own column). A
+  /// capture through a dereference (`*r`) is named after the reference
+  /// itself. `None` if a field projection isn't a named struct field.
+  fn capture_rap_name(&self, place: &rustc_middle::hir::place::Place<'tcx>, root: &str) -> Option<String> {
+    let mut name = root.to_owned();
+    for (i, proj) in place.projections.iter().enumerate() {
+      match proj.kind {
+        rustc_middle::hir::place::ProjectionKind::Field(idx, variant) => {
+          let ty = place.ty_before_projection(i);
+          let adt = ty.ty_adt_def().filter(|a| a.is_struct())?;
+          name = format!("{}.{}", name, adt.variant(variant).fields[idx].name.as_str());
+        }
+        _ => break,
+      }
+    }
+    Some(name)
+  }
+
+  /// A closure literal passed straight to a call (`thread::spawn(move
+  /// || ..)`, `v.into_iter().for_each(move |x| ..)`): each variable it
+  /// captures by value is moved (or, if Copy, copied) into the closure,
+  /// which is handed to the callee, so draw it as moved / copied into
+  /// the call (#230). The closure itself has no column. By-reference
+  /// captures aren't drawn: whether their borrow ends with the call
+  /// depends on whether the callee keeps the closure (`map(|x| x + k)`
+  /// returns an iterator that still borrows `k`). Returns false if the
+  /// closure captures nothing by value, so the caller falls back to the
+  /// plain argument handling.
+  fn match_closure_arg(&mut self, closure: &'tcx rustc_hir::Closure<'tcx>, arg: &'tcx Expr, to_ro: &ResourceTy) -> bool {
+    let line_num = expr_to_line(&arg, &self.tcx);
+    let typeck = self.tcx.typeck(closure.def_id);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner);
+    let mut drew_any = false;
+    for capture in typeck.closure_min_captures_flattened(closure.def_id) {
+      if !matches!(capture.info.capture_kind,
+        rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse) {
+        continue;
+      }
+      let upvar_hir_id = match capture.place.base {
+        rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
+        _ => continue,
+      };
+      let root = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+      let Some(name) = self.capture_rap_name(&capture.place, &root) else { continue };
+      let Some(rd) = self.raps.get(&name) else { continue };
+      let from_rap = rd.rap.to_owned();
+      self.update_rap(&from_rap, line_num);
+      let evt = if self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) { Evt::Copy } else { Evt::Move };
+      let mut ev = self.ext_ev_of_evt(evt, to_ro.clone(), ResourceTy::Value(from_rap), *self.unique_id, false);
+      if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut ev {
+        *into_closure = true;
+      }
+      self.add_external_event(line_num, ev);
+      *self.unique_id += 1;
+      drew_any = true;
+    }
+    drew_any
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     self.add_fn(fn_name.clone());
+    if let ExprKind::Closure(closure) = arg.kind {
+      let to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
+      if self.match_closure_arg(closure, arg, &to_ro) {
+        return;
+      }
+    }
     let line_num = expr_to_line(&arg, &self.tcx);
     let tycheck_results = self.tcx.typeck(arg.hir_id.owner);
     let arg_ty = tycheck_results.node_type(arg.hir_id);
