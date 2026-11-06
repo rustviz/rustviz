@@ -162,6 +162,7 @@ const BOOK: &[Snippet] = &[
             "Copy from as_bytes to bytes",
             "L2 s's resource is no longer immutably borrowed",
             "L2 as_bytes no longer borrows the resource s points to",
+            "the resource bytes points to",
         ],
         ..E
     },
@@ -191,6 +192,7 @@ const BOOK: &[Snippet] = &[
             "word is the owner of the resource",
             "s's resource is moved to the caller",
             "Return immutably borrowed resource from word to *word",
+            "the resource word points to",
             "Copy from first_word to word",
             "L13 my_string's resource is no longer immutably borrowed",
         ],
@@ -890,6 +892,7 @@ const BOOK: &[Snippet] = &[
         must_not_contain: &[
             "result is the owner of the resource",
             "Return immutably borrowed resource from result to *result",
+            "the resource result points to",
             "L9 string1's resource is no longer immutably borrowed",
             "L9 string2's resource is no longer immutably borrowed",
         ],
