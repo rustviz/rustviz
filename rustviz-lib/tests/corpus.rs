@@ -419,6 +419,8 @@ const EXPECTED_OK: &[&str] = &[
     "closure_call_result",
     // A struct bound from an overloaded operator's result (#314).
     "operator_result_struct_fields",
+    // Reassigning a reference variable is an assignment (#414).
+    "ref_reassign_wording",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4094,6 +4096,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "c.label goes out of scope. No resource is dropped.",
             "flipped.samples goes out of scope. No resource is dropped.",
+        ],
+    },
+    // ─── Reassigning a reference variable (#414) ────────────────────
+    TooltipExpect {
+        name: "ref_reassign_wording",
+        // r, m and t already hold a reference when they are assigned
+        // another one; `u = &a;` is u's first value (a borrow).
+        must_contain: &[
+            "r is assigned a copy of s's reference",
+            "s's reference is copied (not the resource it points to)",
+            "m is assigned n's mutable reference (moved out of n)",
+            "n's mutable reference is moved (not the resource it points to)",
+            "t is assigned the result of first",
+            "Immutable borrow from a to u",
+        ],
+        must_not_contain: &[
+            "r is initialized by copy from s",
+            "m is bound to a mutable reference",
+            "t is initialized by copy from first",
         ],
     },
 ];
