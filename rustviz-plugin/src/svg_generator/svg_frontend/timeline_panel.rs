@@ -3109,9 +3109,11 @@ fn render_branches(
                     // Only where the column is still drawn: a branch
                     // that moved the value away ended its column at
                     // the move already.
+                    // The bar is a marker, not a line of code: hovering it
+                    // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_bar = format!(
-                            "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
+                            "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
                             hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y,
                             hover_messages::branch_never_reaches_merge(&rap.name().to_string()),
                         );
