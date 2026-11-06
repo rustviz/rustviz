@@ -542,6 +542,12 @@ const EXPECTED_OK: &[&str] = &[
     "match_arm_macro_ref_binding",
     "match_arm_call_mut_ref_binding",
     "iflet_one_line_ref_binding",
+    // An `if let` / `while let` pattern that borrows, copies or moves
+    // is drawn at the start of its arm's column (#382).
+    "if_let_binding_borrow",
+    "if_let_binding_copy",
+    "if_let_binding_move",
+    "while_let_binding_kinds",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5510,6 +5516,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "if_let_binding_borrow",
+        // #382: `if let Some(a) = &x` borrows the String in `x`; nothing
+        // is moved or copied out of it. The geometry is checked by
+        // `if_let_binding_is_drawn_at_the_start_of_its_arm`.
+        must_contain: &[
+            "Partial immutable borrow from x to a",
+            "x's resource is immutably borrowed by a; x is read-only while the borrow is live",
+            "a immutably borrows a resource",
+        ],
+        must_not_contain: &["Move from x to a", "x's resource is moved", "Copy from x to a"],
+    },
+    TooltipExpect {
+        name: "if_let_binding_copy",
+        // #382: the i32 in `y: Option<i32>` is copied into `b`; `y`
+        // keeps its value.
+        must_contain: &["Copy from y to b", "y's value is copied"],
+        must_not_contain: &["Move from y to b", "y's resource is moved"],
+    },
+    TooltipExpect {
+        name: "if_let_binding_move",
+        // #382: the String is moved out of `name` / `opt` into the
+        // binding, only on the path where the pattern matched.
+        must_contain: &[
+            "Move from name to n",
+            "name's resource is moved",
+            "Move from opt to s",
+            "opt's resource is moved",
+        ],
+        must_not_contain: &["Copy from name to n", "Copy from opt to s"],
+    },
+    TooltipExpect {
+        name: "while_let_binding_kinds",
+        // #382: the same three kinds of binding in `while let`.
+        must_contain: &[
+            "Partial immutable borrow from x to a",
+            "Copy from y to b",
+            "Move from o to s",
+        ],
+        must_not_contain: &["Move from x to a", "Move from y to b", "Copy from o to s"],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -6114,6 +6161,150 @@ fn borrow_end_in_arm_is_drawn_in_the_arm() {
             "{}: the borrow ends at y={}, above where it starts (y={})", name, back[0].1, lent[0].1,
         );
         assert_ne!(back[0].0, splits[0].0, "{}: {var} gets its value back on its parent column", name);
+    }
+}
+
+/// The timeline y of the code-panel row showing source line `src`
+/// (compared with whitespace collapsed). A line's text sits 5px below its
+/// timeline row.
+fn code_row_y(code_svg: &str, src: &str) -> f64 {
+    let want = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rows: Vec<f64> = start_tags(code_svg, "text")
+        .into_iter()
+        .filter_map(|tag| {
+            let at = code_svg.find(tag)?;
+            let body = &code_svg[at + tag.len()..];
+            let body = &body[..body.find("</text>")?];
+            let mut text = String::new();
+            let mut in_tag = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => text.push(ch),
+                    _ => {}
+                }
+            }
+            let text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
+            let words: Vec<&str> = text.split_whitespace().collect();
+            // The first word is the line number.
+            (words.len() > 1 && words[1..].join(" ") == want).then(|| attr(tag, "y")?.parse::<f64>().ok())?
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "code rows showing {:?}: {:?}", src, rows);
+    rows[0] - 5.0
+}
+
+/// The points of the gray arrow shaft whose tooltip is exactly `text`.
+fn arrow_points(svg: &str, text: &str) -> Vec<Vec<(f64, f64)>> {
+    let mut out = Vec::new();
+    for (i, _) in svg.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
+        let group = &svg[i..i + svg[i..].find("</g>").unwrap_or(svg.len() - i)];
+        let open = &group[..group.find('>').unwrap_or(group.len()) + 1];
+        if timeline_tooltips(open) != [text] {
+            continue;
+        }
+        let shaft = start_tags(group, "polyline")
+            .into_iter()
+            .filter_map(|t| attr(t, "points"))
+            .chain(start_tags(group, "path").into_iter().filter_map(|t| attr(t, "d")))
+            .next();
+        let Some(shaft) = shaft else { continue };
+        let nums: Vec<f64> = shaft
+            .split(|c: char| c == ' ' || c == ',')
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        out.push(nums.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect());
+    }
+    out
+}
+
+/// #382: an `if let` whose pattern borrows, copies or moves out of a
+/// variable used to draw that binding on the split row, beside the split
+/// dot: the `if` arm's diagonal reached its column a row lower, so the
+/// column ran back up to the dot (a Z), and the binding's arrow hopped
+/// over the split dot. The binding now sits on the `if let` row where the
+/// arm's column starts, and the split dot is half a row above it (no row
+/// is added). A `while let` body is drawn inline, with the binding on the
+/// `while let` row; that part is a regression guard (it passed before).
+#[test]
+fn if_let_binding_is_drawn_at_the_start_of_its_arm() {
+    // (fixture, variable, `if let` line, binding dot on the variable's
+    // `if` arm, the binding's arrow)
+    let if_lets = [
+        ("if_let_binding_borrow", "x", "if let Some(a) = &x {",
+         "x's resource is immutably borrowed by a; x is read-only while the borrow is live",
+         "Partial immutable borrow from x to a"),
+        ("if_let_binding_copy", "y", "if let Some(b) = y {", "y's value is copied", "Copy from y to b"),
+        ("if_let_binding_move", "name", "if let Some(n) = name {", "name's resource is moved", "Move from name to n"),
+        ("if_let_binding_move", "opt", "if let Some(s) = opt {", "opt's resource is moved", "Move from opt to s"),
+    ];
+    for (name, var, line, bind_text, arrow_text) in if_lets {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let row = code_row_y(&code, line);
+        let bind = dots_with_tooltip(&timeline, bind_text);
+        let arrow = arrow_points(&timeline, arrow_text);
+        let split = dots_with_tooltip(&timeline, &format!("{} is live in a conditional expression ", var));
+        assert_eq!((bind.len(), arrow.len(), split.len()), (1, 1, 1), "{} {}: dots / arrow", name, var);
+        let (bind, split) = (bind[0], split[0]);
+        // The binding is on its own source row, and its arrow runs level
+        // along it from the binding dot.
+        assert_eq!(bind.1, row, "{} {}: binding dot not on the `if let` row", name, var);
+        assert!(arrow[0].len() == 2 && arrow[0].iter().all(|p| p.1 == row),
+            "{} {}: {:?} isn't a straight arrow along the `if let` row y={}: {:?}", name, var, arrow_text, row, arrow[0]);
+        // The split dot is above that row, within the half row above it.
+        assert!(row - 30.0 < split.1 && split.1 < row,
+            "{} {}: split dot at y={} is not between the row above and the `if let` row y={}", name, var, split.1, row);
+        // The arm's diagonal ends at the binding dot, and the arm's
+        // column doesn't run above it.
+        let lines = svg_lines(&timeline);
+        let near = |a: f64, b: f64| (a - b).abs() <= 3.0;
+        let diagonals: Vec<_> = lines.iter()
+            .filter(|(x1, y1, x2, y2)| {
+                (near(*x1, split.0) && near(*y1, split.1) && near(*x2, bind.0))
+                    || (near(*x2, split.0) && near(*y2, split.1) && near(*x1, bind.0))
+            })
+            .collect();
+        assert!(!diagonals.is_empty(), "{} {}: no diagonal from the split dot to the arm", name, var);
+        for &&(x1, y1, x2, y2) in &diagonals {
+            let end_y = if near(x1, bind.0) { y1 } else { y2 };
+            assert!(near(end_y, bind.1),
+                "{} {}: the arm's diagonal ends at y={}, not at the binding dot y={}", name, var, end_y, bind.1);
+        }
+        for &(x1, y1, x2, y2) in &lines {
+            // (Vertical lines only: a double line's bevel joins the
+            // diagonal's offset ends to the column's.)
+            if near(x1, bind.0) && x1 == x2 {
+                assert!(y1.min(y2) >= bind.1 - 1e-6,
+                    "{} {}: the arm's column runs above its binding dot: ({}, {}) -> ({}, {})", name, var, x1, y1, x2, y2);
+            }
+        }
+        // Nothing to hop over: the binding's arrow is straight.
+        assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
+        let hops: Vec<&str> = start_tags(&timeline, "path")
+            .into_iter()
+            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+            .collect();
+        assert_eq!(hops, Vec::<&str>::new(), "{} {}: an arrow hops over a dot", name, var);
+    }
+
+    let rv = run_with_local_backend("while_let_binding_kinds");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    assert!(!timeline.contains("is live in a conditional expression"), "a `while let` body is drawn inline");
+    for (line, bind_text, arrow_text) in [
+        ("while let Some(a) = &x {",
+         "x's resource is immutably borrowed by a; x is read-only while the borrow is live",
+         "Partial immutable borrow from x to a"),
+        ("while let Some(b) = y {", "y's value is copied", "Copy from y to b"),
+        ("while let Some(s) = o {", "o's resource is moved", "Move from o to s"),
+    ] {
+        let row = code_row_y(&code, line);
+        let bind = dots_with_tooltip(&timeline, bind_text);
+        let arrow = arrow_points(&timeline, arrow_text);
+        assert_eq!((bind.len(), arrow.len()), (1, 1), "{}: dot / arrow", line);
+        assert_eq!(bind[0].1, row, "{}: binding not on its row", line);
+        assert!(arrow[0].iter().all(|p| p.1 == row), "{}: arrow not along its row: {:?}", line, arrow[0]);
     }
 }
 

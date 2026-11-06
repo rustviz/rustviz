@@ -580,7 +580,16 @@ pub enum BranchType {
   Match(Vec<String>, Vec<(usize, usize)>)
 }
 
+/// The label of an `if let`'s first arm (the one its pattern matched),
+/// in place of "If".
+pub const IF_LET_ARM: &str = "If let";
+
 impl BranchType {
+    /// An `if let`: its first arm starts by binding the pattern, on the
+    /// split line (see `IF_LET_ARM`).
+    pub fn is_if_let(&self) -> bool {
+        matches!(self, BranchType::If(labels, _) if labels.first().is_some_and(|l| l == IF_LET_ARM))
+    }
     pub fn get_start_end(&self, index: usize) -> (usize, usize) {
         match self {
             BranchType::If(_, v) 
