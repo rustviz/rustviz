@@ -112,7 +112,7 @@ impl PartialEq for DropsOld { fn eq(&self, _: &Self) -> bool { true } }
 impl Eq for DropsOld {}
 impl Hash for DropsOld { fn hash<H: Hasher>(&self, _: &mut H) {} }
 
-/// What a write through a place (`*r = e`) does to the place's old
+/// What a write through a place (`*r = e`, `v[i] = e`) does to the place's old
 /// value. Carried on the copy of the RAP a write event holds, and used
 /// only to pick the dot's tooltip (2026-11-05 decision: a place
 /// assignment reads like a plain assignment). It is not part of the
@@ -224,23 +224,6 @@ pub struct Function {
     /// `std::mem::drop` and the argument's type needs drop (see
     /// `DropsOld`): the call is where the value is dropped.
     pub drops_arg: DropsOld,
-}
-
-/// What a write to a place that is not a plain local (`v[i] = e`) does to
-/// the place's old value. It only picks the dot's tooltip: a place
-/// assignment reads like a plain assignment `y = e` (2026-11-05
-/// decision), an in-place update keeps "modified through".
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
-pub enum PlaceWrite {
-    /// An in-place update (`v[i] += k`), or not an assignment at all.
-    #[default]
-    Update,
-    /// `v[i] = e` with a Copy value.
-    AssignCopy,
-    /// `v[i] = e` with an owned value over an old value that needs drop.
-    AssignDropsOld,
-    /// `v[i] = e` with an owned value over an old value with nothing to drop.
-    AssignOwned,
 }
 
 // ResourceTy is a wrapper for ResourceAccessPoints

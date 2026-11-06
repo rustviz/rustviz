@@ -21,8 +21,15 @@ fn main() {
     names[0] += "!";
     let mut grid = [[0; 2]; 2];
     grid[1][0] = 7;
+    let y = 3;
+    grid[0][1] = y;
+    grid[1][1] += 1;
+    let mut cube = vec![vec![vec![1, 2]]];
+    cube[0][0][1] = 5;
+    let mut rows = vec![vec![String::new()]];
+    rows[0][0] = String::from("q");
     let mut ps = vec![P { name: String::new() }];
     let p = P { name: String::from("z") };
     ps[0] = p;
-    println!("{:?} {:?} {:?} {}", v, names, grid, ps[0].name);
+    println!("{:?} {:?} {:?} {:?} {:?} {}", v, names, grid, cube, rows, ps[0].name);
 }

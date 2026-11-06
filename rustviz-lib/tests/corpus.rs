@@ -4416,6 +4416,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. No resource is dropped.",
             "Move from String::from to names[0]",
             "grid[1][0] is assigned a new value",
+            // Nested collections read the same at any depth: the place
+            // is the subject, not the outermost collection.
+            "grid[0][1] is assigned a copy of y",
+            "Copy from y to grid[0][1]",
+            "grid's resource is modified through grid[1][1]",
+            "cube[0][0][1] is assigned a new value",
+            "rows[0][0] acquires ownership of a new resource; its previous resource is dropped",
             "Move from p to ps[0]",
             "ps[0] acquires ownership of a new resource; its previous resource is dropped",
             "p.name's resource is moved",
@@ -4439,6 +4446,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v's resource is modified through v[0]",
             "v's resource is modified through v[2]",
             "grid's resource is modified through grid[1][0]",
+            "grid's resource is modified through grid[0][1]",
+            "cube's resource is modified through cube[0][0][1]",
+            "rows's resource is modified through rows[0][0]",
+            "grid[1][1] is assigned",
             "ps's resource is modified through ps[0]",
             "the value previously in",
             // Integers have nothing to drop.
