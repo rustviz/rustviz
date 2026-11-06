@@ -5228,8 +5228,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "no_drop_iter",
         must_contain: &[
-            "it2 is bound to a value",
-            "it2 holds a value",
+            // it2 holds an `Iter`, a value that borrows `w` (#336): its
+            // column says so instead of the plain-value wording.
+            "it2 holds a value that immutably borrows w's resource (it2 isn't a reference itself)",
+            "it2 holds a value that contains a reference (it2 isn't a reference itself)",
             "it2 goes out of scope",
             "it2's value is immutably borrowed by len; it2 is read-only while the borrow is live",
             "w acquires ownership of a resource",
@@ -6521,9 +6523,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from it to v",
             "Return immutably borrowed resource from third to v",
             "Return immutably borrowed resource from x to v",
-            "it goes out of scope. Its value is dropped, but not the data it borrowed.",
+            // An `Iter` needs no drop, so nothing is claimed dropped (#484).
+            "it goes out of scope",
         ],
         must_not_contain: &[
+            "it goes out of scope. Its value is dropped, but not the data it borrowed.",
             ", through the value iter returned",
             ", through the value get returned",
             ", through the reference unwrap returned",
@@ -6560,9 +6564,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "it2 takes over it's value, and the borrow it holds",
             "Move from it2 to consume",
             "Return immutably borrowed resource from it2 to v",
-            "it2 goes out of scope. No resource is dropped.",
+            "it2 goes out of scope",
         ],
         must_not_contain: &[
+            "it2 goes out of scope. No resource is dropped.",
             "Return immutably borrowed resource from it to v",
             "it2 goes out of scope. Its value is dropped, but not the data it borrowed.",
         ],
@@ -6575,9 +6580,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from v to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
             "Move from it to sum",
             "Return immutably borrowed resource from it to v",
-            "it goes out of scope. No resource is dropped.",
+            "it goes out of scope",
         ],
         must_not_contain: &[
+            "it goes out of scope. No resource is dropped.",
             ", through the value iter returned",
             "Move from iter to it",
         ],
