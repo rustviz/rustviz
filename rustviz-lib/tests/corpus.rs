@@ -5115,6 +5115,20 @@ fn columns_past_the_palette_get_a_stroke() {
     assert_eq!(hashes_without_colour(&rv.code_panel_string()), Vec::<u64>::new());
 }
 
+/// #472: arrow shafts start or end at the centre of a dot or function
+/// icon, so the arrows group must come before the events group in the
+/// SVG: later siblings paint (and hit-test) on top.
+#[test]
+fn arrows_are_drawn_beneath_dots_and_function_icons() {
+    let rv = run_with_local_backend("arrow_hops_over_dots");
+    let timeline = rv.timeline_panel_string();
+    let arrows = timeline.find("<g id=\"arrows\">").expect("arrows group");
+    let events = timeline.find("<g id=\"events\">").expect("events group");
+    assert!(arrows < events, "g#arrows must precede g#events");
+    assert!(timeline.matches("<g id=\"arrows\">").count()
+        == timeline.matches("<g id=\"events\">").count());
+}
+
 /// Every tooltip attribute is escaped: no bare `<`, and every `&` starts
 /// an entity. An operator named `&` or `<` used to be written raw, and
 /// the timeline SVG was not valid XML (#376).
