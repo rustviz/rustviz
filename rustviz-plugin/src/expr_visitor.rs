@@ -12,7 +12,7 @@ use rustc_middle::{
   ty::*,
 };
 use rustc_hir::{Expr, ExprKind, QPath, PatKind, Mutability, UnOp, def::*, Pat};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
@@ -2708,7 +2708,33 @@ pub fn print_out_of_scope(&mut self){
         }
       }
     }
-    
+    // A reference that borrows through another one (`let r = &v[0]` with
+    // `v: &Vec<i32>`) keeps that other reference live until its own last
+    // use. The visitor only extends `v` at the uses it can see; `r`'s
+    // end can come from MIR alone (a use inside `println!`). So raise each
+    // lending reference to the end of the references borrowed from it,
+    // or `v`'s borrow end lands on the line that creates `r` (#416).
+    // Taking the max makes the order of the passes irrelevant.
+    #[expect(clippy::disallowed_methods, reason = "collected into a BTreeMap")]
+    let ends: BTreeMap<String, (usize, Option<String>)> = self.borrow_map.iter().map(|(n, d)| {
+      let lender = d.lender.extract_rap().map(|r| r.name().to_string());
+      (n.clone(), (d.lifetime, lender))
+    }).collect();
+    for (name, (kill, _)) in &ends {
+      let mut cur = ends.get(name).and_then(|e| e.1.clone());
+      let mut seen: BTreeSet<String> = BTreeSet::new();
+      while let Some(l) = cur {
+        if !seen.insert(l.clone()) { break; }
+        match self.borrow_map.get_mut(&l) {
+          Some(d) => {
+            if d.lifetime < *kill { d.lifetime = *kill; }
+            cur = ends.get(&l).and_then(|e| e.1.clone());
+          }
+          None => break,
+        }
+      }
+    }
+
     info!("BORROW MAP {:#?}", self.borrow_map);
     //let lifetime_map = self.lifetime_map.clone();
     let mut ultimate_refs: HashSet<String> = HashSet::new();
