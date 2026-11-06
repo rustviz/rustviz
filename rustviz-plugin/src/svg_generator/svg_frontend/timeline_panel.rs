@@ -1019,7 +1019,25 @@ fn render_dot(
                 });
                 let cx = timeline_data.x_val;
                 let cy = get_y_axis_pos(*merge_point) + if collapsed { COLLAPSED_APEX } else { 0 };
-                if partly_initialized {
+                // A reference declared before the conditional whose
+                // borrow ended in every arm (`end_outer_borrows_in_arms`).
+                let borrow_ended_in_every_arm = is.extract_rap().is_some_and(|r| r.is_ref())
+                    && all_paths_present(ty, branch_history.len())
+                    && branch_history.iter().all(|b| {
+                        matches!(
+                            b.states.last().map(|s| &s.2),
+                            Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
+                        ) && ends_borrow(&b.e_data)
+                    });
+                if borrow_ended_in_every_arm {
+                    let m_data = EventDotData {
+                        hash: *hash as u64,
+                        dot_x: cx,
+                        dot_y: cy,
+                        title: hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()),
+                    };
+                    append_dot(m_data, timeline_data, dots, None);
+                } else if partly_initialized {
                     let m_data = EventDotData {
                         hash: *hash as u64,
                         dot_x: cx,
@@ -1376,6 +1394,26 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
         }
     }
     (moved, acquired)
+}
+
+// The first line where a reference's borrow ends in `history` (one
+// arm's events), looking into conditionals nested in it.
+fn first_borrow_end(history: &[(usize, Event)]) -> Option<usize> {
+    history.iter().filter_map(|(l, e)| match e {
+        Event::StaticDie { .. } | Event::MutableDie { .. } => Some(*l),
+        Event::Branch { branch_history, .. } => branch_history.iter().filter_map(|b| first_borrow_end(&b.e_data)).min(),
+        _ => None,
+    }).min()
+}
+
+// Whether a reference's borrow ends in `history` (one arm's events),
+// possibly in every arm of a conditional nested in it.
+fn ends_borrow(history: &[(usize, Event)]) -> bool {
+    history.iter().any(|(_, e)| match e {
+        Event::StaticDie { .. } | Event::MutableDie { .. } => true,
+        Event::Branch { branch_history, .. } => branch_history.iter().all(|b| ends_borrow(&b.e_data)),
+        _ => false,
+    })
 }
 
 // Classify a conditional's merge for one variable by each branch's
@@ -3128,6 +3166,18 @@ fn render_branches(
                 ty.get_start_end(i).1.clamp(lo, hi.max(lo))
             });
             let apexes = CollapsedApexes::of(&branch.e_data);
+            // A reference declared before the conditional whose borrow
+            // ends in this arm (`end_outer_borrows_in_arms`): the
+            // dashed rest of the arm is "no value" only in the sense
+            // that its borrow is over, not that r was never assigned.
+            let borrow_end = if rap.is_ref() { first_borrow_end(&branch.e_data) } else { None };
+            let ended_title = |segs: &mut Vec<BranchSeg>, to: usize| {
+                if let (Some(end), Some(seg)) = (borrow_end, segs.last_mut()) {
+                    if to > end && matches!(seg.state, State::FullPrivilege { s: LineState::Uninit }) {
+                        seg.title = hover_messages::state_ref_borrow_ended(rap.name());
+                    }
+                }
+            };
             let mut stop_y: Option<f64> = None;
             for (top, bot, state) in &branch.states {
                 // The binding's dot is on the split row, above the row
@@ -3142,20 +3192,26 @@ fn render_branches(
                 };
                 let Some((y1, y2)) = apexes.segment_ys(*top, bot) else { continue };
                 if stop_line == Some(bot) { stop_y = Some(y2 as f64); }
+                let n = segs.len();
                 push_seg_if_renderable(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
                     state.clone(), visualization_data,
                 );
+                if segs.len() > n { ended_title(&mut segs, bot); }
             }
             let mut stop_bar = String::new();
             match stop_line {
-                None => push_seg_if_renderable(
-                    &mut segs, rap,
-                    (branch_x, column_bot_y), (parent_x, merge_y),
-                    end_state, visualization_data,
-                ),
+                None => {
+                    let n = segs.len();
+                    push_seg_if_renderable(
+                        &mut segs, rap,
+                        (branch_x, column_bot_y), (parent_x, merge_y),
+                        end_state, visualization_data,
+                    );
+                    if segs.len() > n { ended_title(&mut segs, *merge_point); }
+                }
                 Some(_) => {
                     // Only where the column is still drawn: a branch
                     // that moved the value away ended its column at

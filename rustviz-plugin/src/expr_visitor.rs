@@ -3094,6 +3094,160 @@ pub fn print_out_of_scope(&mut self){
       }
     }
     self.nest_borrow_ends_in_arms();
+    self.end_outer_borrows_in_arms();
+  }
+
+  /// A reference declared before an `if` / `match` whose last use is
+  /// inside one of its arms: its borrow ends in that arm, and on the
+  /// paths through the other arms it has already ended. `print_lifetimes`
+  /// adds the borrow's end at that last use's line on the fn's top
+  /// level, after the whole body is visited, so it was drawn on the
+  /// reference's and the lender's *parent* columns, in the middle of
+  /// the branch diamond, as if it happened whichever arm ran; the
+  /// reference's column then ran on through the diamond to the join.
+  ///
+  /// Move it into the arm, and give every other arm its own end of the
+  /// borrow: after the reference's last use in that arm, or where the
+  /// arm starts if it doesn't use it. The lender then gets its value
+  /// back on each path, so it gets a column in the conditional too.
+  /// Loops are left alone: a borrow used in a loop body lasts across
+  /// iterations.
+  fn end_outer_borrows_in_arms(&mut self) {
+    let mut i = 0;
+    while i < self.preprocessed_events.len() {
+      let (line, ev) = &self.preprocessed_events[i];
+      let (r, lender) = match ev {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. } => {
+          (r, to.extract_rap().filter(|l| *l != r))
+        }
+        // A RefDie gives nothing back to its lender (see print_lifetimes).
+        ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } => (r, None),
+        _ => { i += 1; continue; }
+      };
+      // A function's column isn't drawn in a conditional's arms.
+      if lender.is_some_and(|l| l.is_fn()) || branch_ending_borrow(self.preprocessed_events, r, *line).is_none() {
+        i += 1;
+        continue;
+      }
+      let (r, lender) = (r.clone(), lender.cloned());
+      let ev = self.preprocessed_events.remove(i);
+      // Arrows listed together on a line are drawn one below the other,
+      // with a blank row per extra arrow. An arm's line map also lists
+      // arrows to and from functions (#419), so listing the moved arrow
+      // there would add a row the top level didn't have; list it only
+      // if it was stacked with other arrows at the top level. An arrow
+      // its line map doesn't list is drawn first on its line.
+      let stacked = self.event_line_map.get(&ev.0).is_some_and(|evs| evs.len() > 1);
+      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), stacked, self.unique_id);
+    }
+  }
+}
+
+/// The `if` / `match` among `events` that `r` is live in (declared
+/// before it) and whose arm `a` holds `line`: (its index, a).
+fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, line: usize) -> Option<(usize, usize)> {
+  events.iter().enumerate().find_map(|(k, (_, ev))| {
+    let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, branch_type, .. } = ev else { return None };
+    // Declared before the conditional: a `let` inside an arm is in that
+    // arm's `decl_vars` (and, for a `match`, also in `live_vars`; #425).
+    if matches!(branch_type, BranchType::Loop(..))
+      || !live_vars.contains(r)
+      || branches.iter().any(|b| b.decl_vars.contains(r))
+    {
+      return None;
+    }
+    // A borrow ending on the line an arm starts or the conditional ends
+    // on can't be told apart from the conditional itself; leave it.
+    if line <= *split_point || line >= *merge_point {
+      return None;
+    }
+    (0..branches.len())
+      .find(|&a| { let (start, end) = branch_type.get_start_end(a); start <= line && line <= end })
+      .map(|a| (k, a))
+  })
+}
+
+/// Whether `e` uses `r`; a conditional `r` is live in does.
+fn touches(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
+  match e {
+    ExternalEvent::Branch { live_vars, .. } => live_vars.contains(r),
+    _ => {
+      let (from, to) = ResourceAccessPoint_extract(e);
+      from.extract_rap() == Some(r) || to.extract_rap() == Some(r)
+    }
+  }
+}
+
+/// Where `r` is last used in `events` (one arm's): (line, index just
+/// after that event). A nested conditional counts up to its join.
+fn last_use_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> Option<(usize, usize)> {
+  let i = events.iter().rposition(|(_, e)| touches(e, r))?;
+  let line = match &events[i].1 {
+    ExternalEvent::Branch { merge_point, .. } => *merge_point,
+    _ => events[i].0,
+  };
+  Some((line, i + 1))
+}
+
+/// Put `ev`, the end of `r`'s borrow (see `end_outer_borrows_in_arms`),
+/// into `events`: into the arm of the conditional that holds its line
+/// (recursing into nested conditionals), with a copy ending the borrow
+/// in each other arm; or, if no conditional holds it, in line order.
+fn end_borrow_in_arms(
+  events: &mut Vec<(usize, ExternalEvent)>,
+  ev: (usize, ExternalEvent),
+  r: &ResourceAccessPoint,
+  lender: Option<&ResourceAccessPoint>,
+  in_line_map: bool,
+  unique_id: &mut usize,
+) {
+  let Some((k, a)) = branch_ending_borrow(events, r, ev.0) else {
+    // Right after r's last use on or before its line, ahead of other
+    // events on that line: in `Some(x) => ..` on `third`, third's
+    // borrow ends once x is copied out of it, before x borrows v.
+    let at = events.iter()
+      .rposition(|(l, e)| *l <= ev.0 && touches(e, r))
+      .or_else(|| events.iter().rposition(|(l, _)| *l < ev.0))
+      .map_or(0, |i| i + 1);
+    events.insert(at, ev);
+    return;
+  };
+  let ExternalEvent::Branch { branches, live_vars, branch_type, .. } = &mut events[k].1 else {
+    unreachable!("branch_ending_borrow returns a Branch")
+  };
+  // The lender gets its value back in each arm, so it has a column in
+  // the conditional.
+  if let Some(l) = lender {
+    live_vars.insert(l.clone());
+  }
+  for (b, arm) in branches.iter_mut().enumerate() {
+    if b == a {
+      if in_line_map && ev.1.is_arrow_ev() && branch_ending_borrow(&arm.e_data, r, ev.0).is_none() {
+        arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
+      }
+      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, in_line_map, unique_id);
+      continue;
+    }
+    let mut copy = ev.1.clone();
+    match &mut copy {
+      ExternalEvent::StaticDie { id, .. } | ExternalEvent::MutableDie { id, .. } | ExternalEvent::RefDie { id, .. } => {
+        *id = *unique_id;
+        *unique_id += 1;
+      }
+      _ => unreachable!("only a borrow's end is moved into arms"),
+    }
+    let at = match last_use_in(&arm.e_data, r) {
+      // After the arm's last use of r.
+      Some(at) => at,
+      // The arm doesn't use r: on this path the borrow ended before
+      // the arm, so end it first thing in the arm.
+      None => {
+        let start = branch_type.get_start_end(b).0;
+        (start, arm.e_data.iter().position(|(el, _)| *el >= start).unwrap_or(arm.e_data.len()))
+      }
+    };
+    arm.e_data.insert(at.1, (at.0, copy));
   }
 }
 
