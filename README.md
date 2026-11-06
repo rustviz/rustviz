@@ -311,7 +311,8 @@ rather than listed here.
   a column labelled `(temporary)` that is dropped there. A call's
   result that nothing binds or moves on (`make();`, `let _ = make();`,
   `make().len()`, `f(&make())`, a `match` scrutinee) gets a short
-  `(unbound temporary)` column dropped where Rust drops it. Left out
+  `(temporary)` column too (numbered in one sequence with the others:
+  `(temporary 2)`, ...), dropped where Rust drops it. Left out
   (their drops are not stated): temporaries that aren't a call's result
   (`vec![..];`, `format!(..);`, a struct literal), the scrutinee of
   `if let` / `while let`, a `for` loop's head (`for x in make().iter()`),

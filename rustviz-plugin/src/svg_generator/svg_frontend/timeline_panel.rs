@@ -1182,8 +1182,15 @@ fn render_dot(
                         // apex 3px below center.
                         let cx = timeline_data.x_val;
                         let cy = get_y_axis_pos(*line_number);
-                        let mut title = event.print_message_with_name(&mut name);
-                        title.push_str(". Its resource is dropped.");
+                        let title = if ro.is_temporary() {
+                            // A `let`-extended temporary (#400): say why
+                            // it lives, and so drops, only here.
+                            hover_messages::event_dot_temporary_go_out_of_scope(&name)
+                        } else {
+                            let mut title = event.print_message_with_name(&mut name);
+                            title.push_str(". Its resource is dropped.");
+                            title
+                        };
                         let drop_data = DropDotData {
                             hash: *hash as u64,
                             dot_x: cx,

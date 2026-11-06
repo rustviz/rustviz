@@ -2539,15 +2539,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // here and is dropped where its scope ends.
     self.add_fn(fn_name.clone());
     let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
-    self.unbound_temp_count += 1;
-    let tmp_name = unbound_temporary_label(self.unbound_temp_count);
+    // Numbered in one sequence with the `let`-extended temporaries
+    // (#400): the label doesn't say which kind it is, the tooltips do.
+    self.temp_count += 1;
+    let tmp_name = temporary_label(self.temp_count);
     self.add_owner(tmp_name.clone(), false, false, false, end_line, !self.inside_branch);
+    if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
+      o.unbound_temp = true;
+    }
     self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let line = expr_to_line(expr, &self.tcx);
     self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
-    // The type goes into HTML (a tooltip): escape `<` and `>`.
-    let ty = strip_module_paths(&ty.to_string()).replace('&', "&amp;amp;").replace('<', "&amp;lt;").replace('>', "&amp;gt;");
+    // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
+    let ty = strip_module_paths(&ty.to_string());
     let id = *self.unique_id;
     self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), id });
     *self.unique_id += 1;

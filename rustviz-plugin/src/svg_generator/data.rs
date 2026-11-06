@@ -162,6 +162,9 @@ pub struct Owner {
     /// True iff this owner's type is `ManuallyDrop<T>`: it never drops
     /// the `T` inside it, at scope end or when overwritten (#283).
     pub is_manually_drop: bool,
+    /// True iff this owner is an unbound temporary (see
+    /// `ResourceAccessPoint::is_unbound_temporary`).
+    pub unbound_temp: bool,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
 }
@@ -343,16 +346,6 @@ pub fn temporary_label(n: usize) -> String {
     }
 }
 
-/// Column label of the n-th (1-based) unbound temporary in a fn: a
-/// call's result that no variable takes and Rust drops at the end of
-/// its statement (#457).
-pub fn unbound_temporary_label(n: usize) -> String {
-    match n {
-        1 => "(unbound temporary)".to_owned(),
-        n => format!("(unbound temporary {})", n),
-    }
-}
-
 impl ResourceAccessPoint {
     /// A copy of this function RAP marked as `std::mem::drop` called on
     /// a value that needs drop.
@@ -383,13 +376,14 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::MutRef(m) => m.write,
             _ => PlaceWrite::Update,
         }
-        }
     }
 
-    /// True iff this RAP is an unbound temporary (see
-    /// `unbound_temporary_label`).
+    /// True iff this RAP is an unbound temporary (#457): a call's
+    /// result that nothing binds, dropped by an event of its own. It
+    /// is labelled like a lifetime-extended one (`temporary_label`),
+    /// so the label can't tell the two apart.
     pub fn is_unbound_temporary(&self) -> bool {
-        self.name().starts_with("(unbound temporary")
+        matches!(self, ResourceAccessPoint::Owner(Owner { unbound_temp: true, .. }))
     }
 
     /// True iff this RAP is a lifetime-extended temporary (see

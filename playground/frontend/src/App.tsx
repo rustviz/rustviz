@@ -355,7 +355,7 @@ const Description: React.FC = () => (
         call&apos;s result that nothing binds or moves on (
         <code>make();</code>, <code>make().len()</code>,{' '}
         <code>f(&amp;make())</code>) gets a short{' '}
-        <code>(unbound temporary)</code> column. Other temporaries (
+        <code>(temporary)</code> column too (numbered together). Other temporaries (
         <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
         <code>for</code> head) drop without being drawn or mentioned.
       </li>
