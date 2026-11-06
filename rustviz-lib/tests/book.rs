@@ -106,9 +106,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c4_02_copy_tuple",
-        status: Missing,
-        note: "`let p = (1, 2);` has no creation event on L2 (#179)",
-        must_contain: &["Copy from p to q", "p goes out of scope. No resource is dropped."],
+        must_contain: &["Copy from p to q", "Copy from p.0 to q.0", "Copy from p.1 to q.1"],
         ..E
     },
     Snippet {
@@ -1145,22 +1143,20 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_06_tuple_index",
-        status: Missing,
-        note: "was a crash at c2037dd. `let tup = (..)` and `let five_hundred = tup.0` have no events (#189)",
         must_contain: &[
-            "Copy from tup to x",
-            "z is initialized by copy from tup",
+            "Copy from tup.0 to x",
+            "z is initialized by copy from tup.2",
+            "Copy from tup.0 to five_hundred",
             "println! reads from five_hundred through an implicit reference, so five_hundred isn't moved",
         ],
         ..E
     },
     Snippet {
         id: "m_07_tuple_var_destructure_move",
-        note: "minor: pair has no creation event",
         must_contain: &[
-            "Move from pair to a",
-            "Move from pair to b",
-            "pair goes out of scope. No resource is dropped.",
+            "Move from pair.0 to a",
+            "Move from pair.1 to b",
+            "pair goes out of scope. pair.0 and pair.1 were moved out earlier, so no resource is dropped.",
             "a goes out of scope. Its resource is dropped.",
         ],
         ..E
