@@ -120,7 +120,7 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
     texts.dedup();
     // `s = String::from(..)` says "acquires ownership of a new resource;
     // its previous resource is dropped": the plain "acquires ownership of
-    // a resource" next to it adds nothing (#506).
+    // a resource" next to it adds nothing (#506, #519).
     let all = texts.clone();
     texts.retain(|t| !all.iter().any(|r| hover_messages::reassign_subsumes_acquire(r, t)));
     if texts.len() <= 1 {

@@ -9794,3 +9794,24 @@ fn mutable_branch_bends_have_round_joints() {
     let imm = run_with_local_backend("if_no_else").timeline_panel_string();
     assert!(!imm.contains("stroke-linecap"));
 }
+
+/// #519: the dot of `t = (w, 2)` (and of `t.0 = s`) says the new resource
+/// is acquired and the old one dropped, and nothing else. It doesn't also
+/// list "t acquires ownership of a resource" as a bullet. (The initial
+/// `let mut t = ...` dot does say that, so this can't be a
+/// `must_not_contain`: it checks the shape of the reassignment dots.)
+#[test]
+fn tuple_reassignment_dots_have_one_line() {
+    let rv = run_with_local_backend("tuple_field_write");
+    let timeline = rv.timeline_panel_string();
+    let dots: Vec<Vec<String>> = tooltip_lines(&timeline).into_iter()
+        .filter(|l| l.iter().any(|t| t.contains("its previous resource is dropped")))
+        .collect();
+    let mut got: Vec<String> = dots.iter().map(|l| l.join(" | ")).collect();
+    got.sort();
+    assert_eq!(got, vec![
+        "t acquires ownership of a new resource; its previous resource is dropped".to_owned(),
+        "t.0 acquires ownership of a new resource; its previous resource is dropped".to_owned(),
+        "t.0 acquires ownership of a new resource; its previous resource is dropped".to_owned(),
+    ]);
+}
