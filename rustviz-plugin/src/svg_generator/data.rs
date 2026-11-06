@@ -1839,7 +1839,7 @@ impl Event {
             // `let first = v[0];`: one element is copied out of the
             // resource v owns (or points to); v keeps all of it.
             Event::Duplicate{ is: ResourceTy::Index(r, place, _), .. } => {
-                hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref())
+                hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
             }
             Event::Duplicate{ to, is, ..} => {
                 match to {

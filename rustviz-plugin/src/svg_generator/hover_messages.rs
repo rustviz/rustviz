@@ -769,18 +769,23 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
 // Copy of one element out of a resource: `let first = v[0];`. The
 // element is copied; `holder` (or, when it is a reference, the resource
 // it points to) still has all of its contents.
-pub fn event_dot_copy_out_of_element(holder: &String, place: &String, holder_is_ref: bool) -> String {
+pub fn event_dot_copy_out_of_element(holder: &String, place: &String, holder_is_ref: bool, holds_value: bool) -> String {
+    // `holds_value`: the holder (or the referent) needs no drop, so it
+    // is a "value", not a "resource" (#484): `[[i32; 2]; 2]` is a value,
+    // a `Vec<i32>` is a resource.
     if holder_is_ref {
         format!(
-            "{0} is copied out of the resource {1} points to",
+            "{0} is copied out of the {2} {1} points to",
             fmt_style(place),
-            fmt_style(holder)
+            fmt_style(holder),
+            held(holds_value)
         )
     } else {
         format!(
-            "{0} is copied out of {1}'s resource",
+            "{0} is copied out of {1}'s {2}",
             fmt_style(place),
-            fmt_style(holder)
+            fmt_style(holder),
+            held(holds_value)
         )
     }
 }

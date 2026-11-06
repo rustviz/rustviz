@@ -364,6 +364,9 @@ rather than listed here.
 - A `for` loop variable taken from a range or a call (`for i in 0..n`,
   `for c in s.chars()`) has no start or end on its timeline, only the
   reads in the body.
+- A reference to a non-Copy value with nothing to drop (`&[i32]`,
+  `&str`) still reads "the resource xs points to" in tooltips; only a
+  Copy referent reads "value" (#549).
 - Raw pointers aren't modelled: `let p = &mut x as *mut i32;` shows no
   borrow of `x`, so a write `*p = 2` isn't connected to `x`.
 - `const` and `static` items get no column of their own; reading one
