@@ -181,11 +181,22 @@ function displayTooltip(tooltip, classname) {
     }
 
     function insertUnderline(e) {
+        // A branch column's diagonal from the split or to the join
+        // passes other arms' lines; it underlines nothing (#369).
+        if (e.currentTarget.getAttribute('data-underline') === 'none') return;
+        // A branch column's hover polygon names the y-range of its
+        // arm's own lines.
+        let underline_y = e.currentTarget.getAttribute('data-underline-y');
         let code_obj = document.getElementsByClassName(classname + ' code_panel')[0];
         let code_root = panelRoot(code_obj);
         if (!code_root) return;
         let begin = 0, end = 0;
-        if (e.currentTarget.tagName === 'path') {
+        if (underline_y) {
+            let ys = underline_y.split(' ').map(parseFloat);
+            begin = Math.min(ys[0], ys[1]);
+            end = Math.max(ys[0], ys[1]);
+        }
+        else if (e.currentTarget.tagName === 'path') {
             let arr = e.currentTarget.getAttribute('d').split(' ');
             if (e.currentTarget.parentNode.id === 'ref_line') {
                 begin = parseInt(arr[2]);

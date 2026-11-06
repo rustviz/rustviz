@@ -504,6 +504,14 @@ const EXPECTED_OK: &[&str] = &[
     "ref_param_end_shared_line",
     // A reference bound by an `if` starts its bracket at the join (#489).
     "branch_ref_bracket_if",
+    // Hovering an arm's column underlines only that arm's own lines
+    // (#369); the check is `arm_underline_off_its_lines`, run on every
+    // case above.
+    "if_else_arm_columns",
+    "let_if_else_arm_columns",
+    "match_three_arm_columns",
+    "if_body_on_split_line",
+    "else_on_join_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5335,6 +5343,88 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         );
     }
     assert_no_negative_sizes(name, &timeline);
+    let stray = arm_underline_off_its_lines(&code, &timeline);
+    assert!(
+        stray.is_empty(),
+        "{}: {} branch column element(s) would underline another arm's lines: {:?}",
+        name,
+        stray.len(),
+        &stray[..stray.len().min(5)]
+    );
+}
+
+/// The value of attribute `name` in the tag `tag` (`<line ... y1="..." ...>`).
+fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!(" {}=\"", name);
+    let start = tag.find(&key)? + key.len();
+    Some(&tag[start..start + tag[start..].find('"')?])
+}
+
+/// #369: hovering an arm of an `if`/`else` or `match` underlines only
+/// that arm's own lines. Its column is also drawn beside the other
+/// arms' code (dashed), and the diagonals from the split and to the
+/// join pass those lines; none of that may underline them. Each arm's
+/// `<g class="branch-group">` names the code panel rows of its first and
+/// last line in `data-arm-rows`. This returns every `<line>` and hover
+/// `<polygon>` in one that has no `data-underline-y` inside those rows
+/// and doesn't opt out of underlining (`data-underline="none"`), and
+/// every diagonal that doesn't opt out.
+fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String> {
+    // Row number -> y the timeline draws it at: the k-th
+    // `<text class="code" .. y="Y">` of the code panel, drawn at Y - 5.
+    let row_y: Vec<f64> = code_svg
+        .split("<text class=\"code\"")
+        .skip(1)
+        .filter_map(|chunk| tag_attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "y"))
+        .filter_map(|y| y.parse::<f64>().ok())
+        .map(|y| y - 5.0)
+        .collect();
+    let y_of = |row: &usize| row.checked_sub(1).and_then(|i| row_y.get(i));
+    const TOL: f64 = 2.0;
+    let mut out = Vec::new();
+    for group in timeline_svg.split("<g class=\"branch-group\"").skip(1) {
+        let group = &group[..group.find("</g>").unwrap_or(group.len())];
+        let head = &group[..group.find('>').unwrap_or(group.len())];
+        let rows: Vec<usize> = tag_attr(head, "data-arm-rows")
+            .map(|r| r.split(' ').filter_map(|n| n.parse().ok()).collect())
+            .unwrap_or_default();
+        let (Some(first), Some(last)) = (rows.first().and_then(y_of), rows.get(1).and_then(y_of)) else {
+            // An arm with no lines of its own (an implicit `else`):
+            // everything in it must opt out.
+            for tag in group.split(|c| c == '<').skip(1) {
+                let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+                if (tag.starts_with("line ") || tag.starts_with("polygon "))
+                    && tag_attr(tag, "data-underline") != Some("none")
+                {
+                    out.push(format!("arm without own lines: <{}", tag));
+                }
+            }
+            continue;
+        };
+        for el in ["line ", "polygon "] {
+            for seg in group.split(&format!("<{}", el)).skip(1) {
+                let tag = &seg[..seg.find('>').unwrap_or(seg.len())];
+                let range: Vec<f64> = tag_attr(tag, "data-underline-y")
+                    .map(|r| r.split(' ').filter_map(|v| v.parse().ok()).collect())
+                    .unwrap_or_default();
+                let n = |a: &str| tag_attr(tag, a).and_then(|v| v.parse::<f64>().ok());
+                let diagonal = el == "line "
+                    && matches!((n("x1"), n("x2")), (Some(x1), Some(x2)) if (x1 - x2).abs() > 0.01
+                        && (n("y1") != n("y2")));
+                let ok = match range[..] {
+                    [a, b] => !diagonal && *first - TOL <= a.min(b) && a.max(b) <= *last + 5.0 + TOL,
+                    _ => tag_attr(tag, "data-underline") == Some("none"),
+                };
+                if !ok {
+                    out.push(format!(
+                        "arm on rows {}-{} (y {}..{}): <{}{}",
+                        rows[0], rows[1], first, last, el, tag
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// SVG rejects negative `width` / `height` (browsers log a console error
