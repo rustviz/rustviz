@@ -1234,6 +1234,11 @@ pub struct BranchData {
   pub diverges: bool,
   // See ExtBranchData::exits.
   pub exits: Vec<BranchExit>,
+  // The variable's state as control reaches the split, after every
+  // event of the line the branch splits on (a match arm's binding
+  // `Some(x) => match b {` comes before the inner split, #502). Set by
+  // compute_states; every arm starts from it.
+  pub entry_state: Option<State>,
 }
 
 
@@ -2623,6 +2628,7 @@ impl Visualizable for VisualizationData {
                     let mut reaching_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         let diverges = branch.diverges;
+                        branch.entry_state = Some(previous_state.clone());
                         let end_state = self.compute_branch_states(
                             & mut branch.e_data,
                             & mut branch.states,
@@ -2699,6 +2705,7 @@ impl Visualizable for VisualizationData {
                     let mut reaching_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         let diverges = branch.diverges;
+                        branch.entry_state = Some(previous_state.clone());
                         let end_state = self.compute_branch_states(
                             & mut branch.e_data,
                             & mut branch.states,
@@ -2937,7 +2944,7 @@ impl Visualizable for VisualizationData {
                             is_struct_group: false,
                             is_member: false, 
                             owner: 0
-                          }, e_data: new_b_history, width: 0, states: Vec::new(), diverges: b.diverges, exits: b.exits.clone() });
+                          }, e_data: new_b_history, width: 0, states: Vec::new(), diverges: b.diverges, entry_state: None, exits: b.exits.clone() });
                     }
 
                     b_history.push((line_number,  
@@ -3087,7 +3094,7 @@ impl Visualizable for VisualizationData {
                             is_struct_group: false,
                             is_member: false, 
                             owner: 0
-                        }, e_data: b_history, width: 0, states: Vec::new(), diverges: branch.diverges, exits: branch.exits.clone() });
+                        }, e_data: b_history, width: 0, states: Vec::new(), diverges: branch.diverges, entry_state: None, exits: branch.exits.clone() });
                     }
                     maybe_append_event(self, &is.clone(), Event::Branch { 
                                         is: is, 

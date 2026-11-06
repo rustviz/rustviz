@@ -3301,10 +3301,17 @@ fn render_branches(
         // or `let s;` assigned inside the branches, #234) gets the
         // dashed "has no value yet" leading on every arm: it owns
         // nothing until the branch's acquire.
-        let parent_pre = parent_states.iter()
-            .find(|(s, e, _)| *s <= *split_point && *split_point <= *e)
-            .map(|item| item.2.clone())
-            .unwrap_or(State::OutOfScope);
+        // That's the state the arms were computed from: looking it up
+        // in `parent_states` by line found the state *before* an event
+        // on the split line, so an arm's binding on the line its inner
+        // `match` splits on (`Some(x) => match b {`) read as "x has no
+        // value yet" on every inner arm (#502).
+        let parent_pre = branch_history.first()
+            .and_then(|b| b.entry_state.clone())
+            .unwrap_or_else(|| parent_states.iter()
+                .find(|(s, e, _)| *s <= *split_point && *split_point <= *e)
+                .map(|item| item.2.clone())
+                .unwrap_or(State::OutOfScope));
         let parent_active = match parent_pre {
             State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
             ref s => convert_back(s),
@@ -4069,6 +4076,7 @@ mod tests {
             states: Vec::new(),
             diverges: false,
             exits: Vec::new(),
+            entry_state: None,
         }
     }
 
