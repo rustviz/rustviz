@@ -346,6 +346,12 @@ const EXPECTED_OK: &[&str] = &[
     "closure_arg_move_captures",
     // A `move` closure copies the Copy values it captures (#311).
     "move_closure_copy_capture",
+    // — A reference copied out of an `Option<&T>` / tuple of references
+    //   by a pattern doesn't borrow the matched value (#304).
+    "match_copy_ref_out_of_option",
+    "match_copy_ref_out_of_tuple",
+    "iflet_copy_ref_out_of_option",
+    "match_ref_binding_borrows",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3188,6 +3194,63 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g owns a closure which owns 1 resource via capture",
             "g goes out of scope. Its 1 captured resource is dropped.",
         ],
+    },
+    // ─── References copied out of a matched value (#304) ────────────
+    TooltipExpect {
+        name: "match_copy_ref_out_of_option",
+        // Book ch. 8.1: `x` is a copy of the `&i32` stored in `third`.
+        // It borrows an element of `v`, not `third`; nothing borrows
+        // `third`. (What `third` holds isn't tracked, so x's lender is
+        // left out rather than named.)
+        must_contain: &[
+            "x is initialized by copy from third",
+            "Partial copy from third to x",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from x to third",
+            "third's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "match_copy_ref_out_of_tuple",
+        // `(x, y)` on a tuple of references copies each reference out;
+        // they borrow `a` and `b`, not `pair`.
+        must_contain: &[
+            "Partial copy from pair to x",
+            "Partial copy from pair to y",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from x to pair",
+            "Return immutably borrowed resource from y to pair",
+            "pair's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "iflet_copy_ref_out_of_option",
+        // `if let Some(x) = head` / `if let Some(y) = v.get(1)`: the
+        // bound reference borrows an element of `v`, not `head`, and
+        // certainly not the function `get`.
+        must_contain: &[
+            "x is initialized by copy from head",
+            "y is initialized by copy from get",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from x to head",
+            "head's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from y to get",
+        ],
+    },
+    TooltipExpect {
+        name: "match_ref_binding_borrows",
+        // Bindings that *do* borrow the matched value keep it as their
+        // lender: `Some(ref s)` on an owned Option, and `Some(t)` on
+        // `&opt` (default binding modes).
+        must_contain: &[
+            "Return immutably borrowed resource from s to opt",
+            "Partial immutable borrow from opt to t",
+            "Return immutably borrowed resource from t to opt",
+        ],
+        must_not_contain: &[],
     },
 ];
 
