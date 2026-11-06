@@ -1376,6 +1376,10 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
         BranchJoin::BoundHere => match is.extract_rap() {
             Some(rap) if rap.is_ref() =>
                 hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref()),
+            // A Copy value (`let n = match x { 0 => 1, _ => 2 };`) isn't
+            // a resource anyone owns (#316).
+            Some(rap) if rap.is_copy() =>
+                hover_messages::event_dot_branch_merge_bound_copy(var_name),
             _ => hover_messages::event_dot_branch_merge_bound(var_name),
         },
         // No branch moved it (#179: this used to be an empty tooltip).

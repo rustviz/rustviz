@@ -391,6 +391,9 @@ const EXPECTED_OK: &[&str] = &[
     // A closure captures only the fields it uses (Rust 2021; #328).
     "closure_disjoint_field_capture",
     "closure_whole_struct_capture",
+    // A Copy variable bound in every branch is "bound to a value" at
+    // the merge, not "acquired ownership of a resource" (#316).
+    "merge_bound_copy",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3787,6 +3790,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "p.nick goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // ─── Copy variable bound in every branch (#316) ─────────────────
+    TooltipExpect {
+        name: "merge_bound_copy",
+        // `let n = match x { 0 => 1, _ => 2 };` and a `Copy` struct
+        // bound by an if/else: no resource, no ownership. The String
+        // `s` still acquires ownership.
+        must_contain: &[
+            "n is bound to a value (in all branches above)",
+            "p is bound to a value (in all branches above)",
+            "p.x is bound to a value (in all branches above)",
+            "s acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "n acquired ownership of a resource (in all branches above)",
+            "p acquired ownership of a resource (in all branches above)",
+            "p.x acquired ownership of a resource (in all branches above)",
+            "p.y acquired ownership of a resource (in all branches above)",
         ],
     },
 ];
