@@ -1385,6 +1385,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// A `return` also drops the iterators of the `for` loops it leaves,
+  /// which variables were moved into (#482), where its other drops are
+  /// drawn (`drop_locals_on_exit`: in a branch). The caller leaves out
+  /// a `return` in a closure, which leaves only the closure.
+  fn drop_loop_iterators_on_return(&mut self, line: usize) {
+    if !self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
+      return;
+    }
+    for ro in self.loop_iterators.clone() {
+      let id = self.add_loop_iterator_drop(ro, line, true);
+      self.exit_drops.insert(id);
+    }
+  }
+
+  /// The drop of the iterator `ro` was moved into by `for s in ro`, at
+  /// `line`: where the loop ends, or (`early`) at a `return` inside it
+  /// (#482). Drawn on `ro`'s column, which doesn't own it any more.
+  /// Returns the event's id.
+  pub fn add_loop_iterator_drop(&mut self, ro: ResourceAccessPoint, line: usize, early: bool) -> usize {
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line, ExternalEvent::LoopIteratorDrop { ro, early, id });
+    id
+  }
+
   /// If `call` is a call to a panic function (what `panic!()`,
   /// `unreachable!()`, `todo!()`, `unimplemented!()` and
   /// `std::panic::panic_any` call), the line of the panic in the
@@ -2517,6 +2542,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // a branch, those drops are drawn on the branch's columns, at
         // the `return`.
         self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, "return");
+        if !self.in_closure(expr) {
+          self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
+        }
       }
 
       // a block eg: {}
@@ -2996,6 +3024,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               id: *self.unique_id,
               is_partial: false,
               into_closure: false,
+              loop_head: LoopHead::No,
             }));
             *self.unique_id += 1;
             liveness.insert(r.clone());
@@ -3882,6 +3911,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       && head_ty == typeck.node_type(guard_expr.hir_id)
                   };
 
+                // The loop owns its iterator and drops it when the loop
+                // ends: a head that is moved in (`for s in v`, `for s in
+                // it`) whose iterator has drop glue (`vec::IntoIter`)
+                // says where it goes on the move (#482). `slice::Iter`
+                // and the like have nothing to drop. The iterator built
+                // from a collection (`v`) is a `(temporary N)` column
+                // (`note_for_head_temporary`); an iterator variable
+                // (`it`) is the loop's iterator itself, so its drop is
+                // on its own column (`iterator_head`).
+                let iterator_needs_drop = matches!(iterand_evt, Some(Evt::Move))
+                  && matches!(head_arg.kind, ExprKind::Path(_))
+                  && self.tcx.typeck(guard_expr.hir_id.owner)
+                    .node_type(guard_expr.hir_id)
+                    .needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, guard_expr.hir_id.owner));
+
                 // Register the user pattern binding(s) as branch-scoped
                 // RAPs so events inside the body referencing them
                 // resolve. Two cases:
@@ -3915,6 +3959,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 if let Some(outer_arm) = arms.first() {
                   self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len });
                 }
+                // The variable moved into the loop as its iterator, whose
+                // drop is stated on its column (#482).
+                let mut iterator_head: Option<ResourceAccessPoint> = None;
                 if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
                   let pat_name = binding_name(&self.tcx, pat_hirid);
                   let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -3963,10 +4010,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   if head_is_iterator {
                     // The iterator is moved into the loop; nothing is
                     // moved into (or borrowed by) the loop variable.
-                    self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+                    if iterator_needs_drop {
+                      iterator_head = head_rty.extract_rap().cloned();
+                      self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Iterator);
+                    } else {
+                      self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+                    }
                     self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
                   } else if let Some(e) = iterand_evt {
-                    self.add_ev(for_line, e, to_rty, head_rty, false);
+                    if iterator_needs_drop {
+                      self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::Collection);
+                    } else {
+                      self.add_ev(for_line, e, to_rty, head_rty, false);
+                    }
                   } else {
                     // A Range or a call result (`0..n`, `s.chars()`) has
                     // no place to borrow or move from: each iteration's
@@ -3995,7 +4051,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
                 // Visit body — events flow into the global timeline.
                 let before = self.rap_names();
+                if let Some(ro) = &iterator_head {
+                  self.loop_iterators.push(ro.clone());
+                }
                 self.visit_expr(body_expr);
+                if iterator_head.is_some() {
+                  self.loop_iterators.pop();
+                }
                 self.inside_branch = prev_inside_branch;
 
                 // The pattern bindings are fresh each iteration and,
@@ -4018,6 +4080,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   self.exit_frames.pop();
                 }
                 self.in_scope.truncate(entry_len);
+                // The loop drops its iterator where it ends, however it
+                // ends (running out, a `break`) (#482).
+                if let Some(ro) = iterator_head {
+                  self.add_loop_iterator_drop(ro, span_end_line(&expr.span, &self.tcx), false);
+                }
               }
             }
           }
@@ -4309,6 +4376,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let ty = typeck.expr_ty(iter_call);
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, iter_call.hir_id.owner);
     if ty.is_ref() || !ty.needs_drop(self.tcx, env) || self.temp_drops_noted.contains(&head.hir_id) {
+      return;
+    }
+    // `for s in it` with `it` an iterator already: `into_iter` hands
+    // `it`'s value back unchanged, so no new value is built. It's moved
+    // into the loop, and its drop is stated on its own column (#482).
+    if matches!(head.kind, ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, Res::Local(_)))
+      && typeck.expr_ty(head) == ty
+    {
       return;
     }
     let end_line = span_end_line(&for_expr.span, &self.tcx);

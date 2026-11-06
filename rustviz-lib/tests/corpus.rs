@@ -983,6 +983,8 @@ const EXPECTED_OK: &[&str] = &[
     "same_name_plain_owners_share",
     // A variable moved into a macro's or literal's temporary (#570).
     "temporary_moves_variable",
+    // A for loop's iterator with drop glue is dropped when the loop ends (#482).
+    "for_iterator_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -10992,6 +10994,55 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary that the literal on the right of this let builds",
         ],
     },
+    TooltipExpect {
+        name: "for_iterator_drop",
+        // #482: a `for` loop owns its iterator and drops it when the
+        // loop ends (running out or a `break`), or at a `return` inside
+        // it, with whatever the iterator still owns (the elements it
+        // hasn't handed out, a `vec::IntoIter`'s buffer).
+        // - `for s in v` (v: Vec<String>) moves v into the iterator
+        //   `into_iter` builds, a `(temporary)` column that #469 drops
+        //   at the loop's end.
+        // - `for s in it3` (it3: vec::IntoIter<String>): `into_iter`
+        //   hands it3's value back unchanged, so it3's value is the
+        //   loop's iterator. No temporary: the drop is a drop dot on
+        //   it3's own column at the loop's closing brace (its line is
+        //   pinned by `loop_iterator_drop_dots_sit_where_the_loop_is_left`).
+        // - `for word in words` with a `return` inside: dropped at the
+        //   `return` too.
+        // `slice::Iter` (`for s in &q`, `for s in it`) has no drop glue:
+        // nothing to say, and `q` is only borrowed.
+        must_contain: &[
+            "v's resource is moved into the `for` loop's iterator",
+            "n's resource is moved into the `for` loop's iterator",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<i32> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "it3's resource is moved into the `for` loop, which uses it as its iterator",
+            "it3's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
+            "words's resource is moved into the `for` loop, which uses it as its iterator",
+            "words's former resource, the `for` loop's iterator, is dropped here: the function returns from inside the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+            "words's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
+            "it3 goes out of scope. No resource is dropped.",
+            "v goes out of scope. No resource is dropped.",
+            // A slice iterator has nothing to drop.
+            "it's value is moved",
+        ],
+        must_not_contain: &[
+            // The move used to forecast the drop instead of drawing it.
+            "The iterator is dropped when the loop ends",
+            // it3 / words are the iterator: no temporary is built from
+            // them (only v's and n's loops have one).
+            "(temporary 3)",
+            "Move from into_iter to (temporary 3)",
+            "q's resource is moved into the",
+            "it's resource is moved into the",
+            "z's resource is moved into the",
+            "w's resource is moved into the",
+            // it3 / words don't take part in the `if` around the `return`.
+            "words is live in a conditional expression",
+            "words was moved or dropped in every branch",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13694,6 +13745,48 @@ fn reassignment_dot_has_one_line() {
     assert_eq!(dot, vec![
         "s acquires ownership of a new resource; its previous resource is dropped".to_owned(),
     ]);
+}
+
+/// #482: the iterator a `for` loop takes from a variable (`for s in
+/// it3`) is dropped where the loop is left: a drop dot (circle and
+/// triangle) on the variable's column at the loop's closing brace, and
+/// at a `return` inside the loop.
+#[test]
+fn loop_iterator_drop_dots_sit_where_the_loop_is_left() {
+    let rv = run_with_local_backend("for_iterator_drop");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let step = row("for s in it3 {") - row("let it3 = z.into_iter();");
+    let drop_dot = |text: &str, want_y: f64, var_line: &str| {
+        let dots = dots_with_tooltip(&timeline, text);
+        assert_eq!(dots.len(), 1, "one dot {:?}: {:?}", text, dots);
+        let (x, y) = dots[0];
+        assert_eq!(y, want_y, "{:?} is at y={}, not on the row y={}", text, y, want_y);
+        // A drop dot: the tooltip `<g>` wraps a circle and the triangle.
+        let at = timeline.find(&format!("<circle cx=\"{}\" cy=\"{}\"", x, y)).expect("its circle");
+        let g = &timeline[timeline[..at].rfind("<g ").unwrap()..];
+        assert!(g[..g.find("</g>").unwrap()].contains("<polygon points="), "{:?} isn't a drop dot", text);
+        // On the variable's own column (its move dot's x).
+        let moved = dots_with_tooltip(&timeline, var_line);
+        assert!(moved.iter().any(|&(mx, _)| (mx - x).abs() < 30.0), "{:?} at x={} is off the column of {:?} ({:?})", text, x, var_line, moved);
+    };
+    // `for s in it3 {` .. `}`: the closing brace is two rows down.
+    drop_dot(
+        "it3's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
+        row("for s in it3 {") + 2.0 * step,
+        "it3's resource is moved into the `for` loop, which uses it as its iterator",
+    );
+    drop_dot(
+        "words's former resource, the `for` loop's iterator, is dropped here: the function returns from inside the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+        row("return word.len();"),
+        "words's resource is moved into the `for` loop, which uses it as its iterator",
+    );
+    // `for word in words {` .. `}`: six rows down.
+    drop_dot(
+        "words's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
+        row("for word in words {") + 6.0 * step,
+        "words's resource is moved into the `for` loop, which uses it as its iterator",
+    );
 }
 
 /// cy of every timeline dot whose tooltip contains `needle` (the dot
