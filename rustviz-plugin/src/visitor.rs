@@ -513,10 +513,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // resolved to `Deref(s)`, surfacing the nonsensical
           // tooltip "Return immutably borrowed resource from s
           // to *s".
+          let pointee_copy = self.ref_pointee_is_copy(ty, param.hir_id.owner);
           self.add_ref(name.clone(),
           bool_of_mut(ty.ref_mutability().unwrap()),
           bool_of_mut(binding_annotation.1), line_num,
-          ResourceTy::Caller, VecDeque::new(), self.current_scope, !self.inside_branch);
+          ResourceTy::Caller, VecDeque::new(), self.current_scope, !self.inside_branch, pointee_copy);
           // Stretch the loan to the closing brace so the dashed
           // ref-line trapezoid covers the full body.
           if let Some(rd) = self.borrow_map.get_mut(&name) {
@@ -902,6 +903,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             }
             return;
           }
+        };
+        // `*r = v` assigns to the place `*r`: say so (2026-11-05
+        // decision, place assignments read like plain assignment).
+        // `*r += v` is an in-place update and keeps its wording.
+        let lhs_rty = match lhs_rty {
+          ResourceTy::Deref(rap) if matches!(expr.kind, ExprKind::Assign(..)) && !lhs_ty.is_ref() => {
+            let write = if is_copyable {
+              PlaceWrite::AssignCopy
+            } else if lhs_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner)) {
+              PlaceWrite::AssignDropsOld
+            } else {
+              PlaceWrite::AssignOwned
+            };
+            ResourceTy::Deref(rap.with_place_write(write))
+          }
+          other => other,
         };
         // if we are pointing at a new piece of data
         //
@@ -1907,6 +1924,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
                     .pat_ty(user_pat);
                   if pat_ty.is_ref() {
+                    let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
                     self.add_ref(
                       pat_name.clone(),
                       bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -1916,6 +1934,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       std::collections::VecDeque::new(),
                       self.current_scope,
                       false,
+                      pointee_copy,
                     );
                   } else {
                     let is_copy = self.tcx.type_is_copy_modulo_regions(
@@ -2240,6 +2259,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let name = ident.to_string();
         let pat_ty = self.tcx.typeck(hirid.owner).pat_ty(pat);
         if pat_ty.is_ref() {
+          let pointee_copy = self.ref_pointee_is_copy(pat_ty, hirid.owner);
           self.add_ref(
             name.clone(),
             bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -2249,6 +2269,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             std::collections::VecDeque::new(),
             self.current_scope,
             false,
+            pointee_copy,
           );
         } else {
           let is_copy = self.tcx.type_is_copy_modulo_regions(

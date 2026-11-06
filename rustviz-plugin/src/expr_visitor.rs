@@ -252,13 +252,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: false, is_manually_drop: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, write: Default::default()}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: true, is_manually_drop: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, write: Default::default()}), scope, is_global);
   }
 
   // Marks the owner (or struct field) just registered as `name` as a
@@ -283,28 +283,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, write: Default::default()}), scope, is_global);
   }
 
   // Adds a reference RAP
-  pub fn add_ref(&mut self, name: String, ref_mutability: bool, lhs_mut: bool, line_num: usize, lender: ResourceTy, alia: VecDeque<String>, scope: usize, is_global: bool) {
+  // `pointee_copy`: the referent type is Copy (see `ref_pointee_is_copy`).
+  pub fn add_ref(&mut self, name: String, ref_mutability: bool, lhs_mut: bool, line_num: usize, lender: ResourceTy, alia: VecDeque<String>, scope: usize, is_global: bool, pointee_copy: bool) {
     match ref_mutability {
       true => {
-        self.add_mut_ref(name.clone(), lhs_mut, scope, is_global);
+        self.add_mut_ref_member(name.clone(), lhs_mut, scope, is_global, None, pointee_copy);
       }
       false => { 
-        self.add_static_ref(name.clone(), lhs_mut, scope, is_global);
+        self.add_static_ref_member(name.clone(), lhs_mut, scope, is_global, None, pointee_copy);
       }
     }
     self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None });
   }
   
-  pub fn add_static_ref(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_static_ref_member(name, mutability, scope, is_global, None);
-  }
-
-  pub fn add_mut_ref(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_mut_ref_member(name, mutability, scope, is_global, None);
+  /// True iff `ref_ty` is `&T` / `&mut T` with `T: Copy` (`&i32`).
+  /// Such a reference points to a "value", not a "resource" (#312).
+  pub fn ref_pointee_is_copy(&self, ref_ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
+    match ref_ty.kind() {
+      TyKind::Ref(_, inner, _) => self.ty_is_copy(*inner, owner),
+      _ => false,
+    }
   }
 
   /// `add_static_ref` with optional struct-membership. Pass
@@ -317,12 +319,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     scope: usize,
     is_global: bool,
     member_of: Option<u64>,
+    pointee_copy: bool,
   ) {
     self.add_rap(
       ResourceAccessPoint::StaticRef(StaticRef {
         name,
         hash: self.rap_hashes as u64,
         is_mut: mutability,
+        pointee_copy,
         member_of,
       }),
       scope, is_global,
@@ -336,13 +340,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     scope: usize,
     is_global: bool,
     member_of: Option<u64>,
+    pointee_copy: bool,
   ) {
     self.add_rap(
       ResourceAccessPoint::MutRef(MutRef {
         name,
         hash: self.rap_hashes as u64,
         is_mut: mutability,
+        pointee_copy,
         member_of,
+        write: Default::default(),
       }),
       scope, is_global,
     );
@@ -980,13 +987,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let is_special = ty_is_special_owner(&ty);
     if ty.is_ref() {
       let (lender, aliasing, static_lender) = self.get_ref_data_full(&expr);
+      let pointee_copy = self.ref_pointee_is_copy(ty, expr.hir_id.owner);
       self.add_ref(name.clone(), 
       bool_of_mut(ty.ref_mutability().unwrap()), 
       mutability, 
       expr_to_line(&expr, &self.tcx),
       lender,
       aliasing,
-      self.current_scope, !self.inside_branch);
+      self.current_scope, !self.inside_branch, pointee_copy);
       if let Some(rd) = self.borrow_map.get_mut(&name) {
         rd.static_lender = static_lender;
       }
@@ -1074,12 +1082,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let field_ty = field.ty(self.tcx, generic_args);
       if field_ty.is_ref() {
         let ref_mutability = bool_of_mut(field_ty.ref_mutability().unwrap());
+        let pointee_copy = self.ref_pointee_is_copy(field_ty, owner_id);
         if ref_mutability {
           self.add_mut_ref_member(field_name.clone(), mutability,
-              self.current_scope, !self.inside_branch, Some(top_owner_hash));
+              self.current_scope, !self.inside_branch, Some(top_owner_hash), pointee_copy);
         } else {
           self.add_static_ref_member(field_name.clone(), mutability,
-              self.current_scope, !self.inside_branch, Some(top_owner_hash));
+              self.current_scope, !self.inside_branch, Some(top_owner_hash), pointee_copy);
         }
         // Same lender-placeholder rationale as the flat case before
         // the refactor: borrow stored in this field outlives the
@@ -1169,7 +1178,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                     Some(rustc_hir::ByRef::Yes(..))
                 );
                 let lender = if by_ref || parent_ty.is_ref() { parent.clone() } else { ResourceTy::Anonymous };
-                self.add_ref(name.clone(), ref_mutability, muta, line_num, lender, VecDeque::new(), scope, false);
+                let pointee_copy = self.ref_pointee_is_copy(ty, id.owner);
+                self.add_ref(name.clone(), ref_mutability, muta, line_num, lender, VecDeque::new(), scope, false, pointee_copy);
             } else if ty.is_adt() && !ty_is_special_owner(&ty) {
                 // Same rule as `define_lhs` and fn params: only
                 // user-defined (crate-local) structs get a struct
