@@ -138,6 +138,52 @@ fn plugin_panic_prints_one_clean_unsupported_line() {
     );
 }
 
+/// Snippets that trip an internal-state guard, with the reason the
+/// student-facing line must give (#134). The reason must be readable: no
+/// bare "not possible", and no std `unwrap()` text (a missing lookup says
+/// so in words). As with `KNOWN_PANICKING`, a snippet that starts working
+/// is skipped, but at least one must still trip a guard.
+const GUARD_REASONS: &[(&str, &str, &str)] = &[
+    // Shadowing a moved variable (#253): `s` is "re-acquired" after a move.
+    (
+        "shadow_moved",
+        "fn main() {\n    let s = String::from(\"a\");\n    let t = s;\n    let s = String::from(\"b\");\n    println!(\"{} {}\", s, t);\n}\n",
+        "immutable variable `s` re-acquires a resource after a move",
+    ),
+    // A write through `*r` in both arms of an if/else (#264): the layout
+    // has no column for the event's timeline.
+    (
+        "write_through_ref_in_arms",
+        "fn main() {\n    let mut s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let c = true;\n    let r = &mut s;\n    if c {\n        *r = t;\n    } else {\n        *r = String::new();\n    }\n}\n",
+        "no layout column for the timeline of event",
+    ),
+];
+
+#[test]
+fn plugin_internal_errors_give_a_readable_reason() {
+    let mut tripped = 0;
+    for (name, src, reason) in GUARD_REASONS {
+        let (ok, stderr) = run_plugin_raw(src);
+        if ok {
+            eprintln!("{} no longer trips an internal guard; skipping", name);
+            continue;
+        }
+        tripped += 1;
+        let line = stderr
+            .lines()
+            .find(|l| l.contains(UNSUPPORTED_PREFIX))
+            .unwrap_or_else(|| panic!("{}: no unsupported line in:\n{}", name, stderr));
+        assert!(line.contains("(internal error at "), "{}: {:?}", name, line);
+        assert!(line.contains(reason), "{}: reason {:?} missing from {:?}", name, reason, line);
+        for bad in ["not possible", "Not possible", "Option::unwrap", "Result::unwrap", "internal state:", "panicked at"] {
+            assert!(!stderr.contains(bad), "{}: {:?} leaked into:\n{}", name, bad, stderr);
+        }
+        let err = render(src).expect_err("guard snippet rendered");
+        assert_eq!(error_kind(err.as_ref()), ErrorKind::Unsupported, "{}: {}", name, err);
+    }
+    assert!(tripped > 0, "none of GUARD_REASONS trips a guard any more; add a snippet that does");
+}
+
 #[test]
 fn book_borrow_error_reads_as_does_not_compile() {
     let err = render(BOOK_TWO_MUT_BORROWS).expect_err("borrow error rendered");

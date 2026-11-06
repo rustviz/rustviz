@@ -391,7 +391,7 @@ pub fn get_live_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &HashMap<String, RapDat
         None => HashSet::new()
       }
     }
-    StmtKind::Item(_item) => panic!("not yet able to handle items inside of bodies"),
+    StmtKind::Item(_item) => panic!("unsupported: items (`fn`, `struct`, `use`, ...) declared inside a function body"),
     StmtKind::Expr(ref expression) | StmtKind::Semi(ref expression) => {
         get_live_of_expr(expression, tcx, raps)
     }

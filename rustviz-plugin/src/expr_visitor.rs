@@ -3042,7 +3042,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       match fetch_mutability(&rhs) { // fetch last ref mutability in the chain -> &&&mut x
         Some(Mutability::Not) => self.add_borrow_ev(line_num, Evt::SBorrow, lhs, res, is_reborrow),
         Some(Mutability::Mut) => self.add_borrow_ev(line_num, Evt::MBorrow, lhs, res, is_reborrow),
-        None => panic!("Shouldn't have been able to get here")
+        None => panic!("internal state: a borrow expression has no `&`/`&mut` to take the mutability from")
       }
     }
     //a block: { <stmt1>...<stmt_n>, <expr> };
