@@ -954,6 +954,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let muta = bool_of_mut(binding_annotation.1);
             let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
             self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_is_plain(ty, param.hir_id.owner), self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+            self.mark_owner_type(&name, ty);
             for (field, field_ty) in self.member_fields(ty) {
               // A reference element would need its own loan bookkeeping;
               // leave it without a column.

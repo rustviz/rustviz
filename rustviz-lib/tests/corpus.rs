@@ -713,6 +713,10 @@ const EXPECTED_OK: &[&str] = &[
     // Weak::clone (#373).
     "rc_fields",
     "rc_weak_clone",
+    // An Rc/Arc/Weak inside Option/Box/Vec/HashMap/RefCell/a tuple (#373).
+    "rc_inside",
+    "rc_inside_flag",
+    "rc_inside_tuple",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7508,6 +7512,71 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w2 acquires ownership of a resource",
             "w3 acquires ownership of a resource",
             "w2 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_inside",
+        // A value whose only droppable contents are Rcs says the Rc inside
+        // only lowers a count; a collection adds that its own buffer is
+        // freed. A Vec of (Rc, String), a HashMap keyed by String and a
+        // struct with its own Drop impl also own other data, so they keep
+        // main's plain sentence.
+        must_contain: &[
+            "o goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+            "b goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+            "c goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+            "ao goes out of scope. Its resource is dropped (the Arc inside only lowers its reference count).",
+            "wo goes out of scope. Its resource is dropped (the Weak inside doesn't keep its value alive).",
+            "v goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed).",
+            "h goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed).",
+            "d's resource is moved into drop, which drops it (the Rc inside only lowers its reference count)",
+            "mixed goes out of scope. Its resource is dropped.",
+            "keyed goes out of scope. Its resource is dropped.",
+            "n goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "o goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "ao goes out of scope. Its resource is dropped.",
+            "wo goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped.",
+            "h goes out of scope. Its resource is dropped.",
+            "d's resource is moved into drop, which drops it.",
+            "mixed goes out of scope. Its resource is dropped (",
+            "keyed goes out of scope. Its resource is dropped (",
+            "n goes out of scope. Its resource is dropped (",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_inside_flag",
+        // The moved-on-some-paths wording (drop flag) and `drop(x)` carry
+        // the same parenthetical.
+        must_contain: &[
+            "o goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "v goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "o was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (the Rc inside only lowers its reference count) when o goes out of scope.",
+            "v was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed) when v goes out of scope.",
+            "o's resource is moved into drop, which drops it (the Rc inside only lowers its reference count)",
+            "v's resource is moved into drop, which drops it (each Rc in it only lowers its reference count; its own buffer is freed)",
+        ],
+        must_not_contain: &[
+            "o goes out of scope. Its resource is dropped here only if",
+            "v goes out of scope. Its resource is dropped here only if",
+            "its resource is dropped when o goes out of scope.",
+            "its resource is dropped when v goes out of scope.",
+            "o's resource is moved into drop, which drops it.",
+            "v's resource is moved into drop, which drops it.",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_inside_tuple",
+        // A tuple parameter whose only droppable part is an Rc.
+        must_contain: &[
+            "t goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+        ],
+        must_not_contain: &[
+            "t goes out of scope. Its resource is dropped.",
         ],
     },
 ];

@@ -199,6 +199,9 @@ pub struct Owner {
     /// their `Weak<T>`s: dropping it lowers a count and frees the shared
     /// value only if it was the last owner (#373).
     pub rc: Option<RcKind>,
+    /// `Some(RcDrop::Inside { .. })` iff this owner's type only contains
+    /// `Rc`s / `Arc`s / `Weak`s inside std containers (#373).
+    pub rc_inside: Option<RcDrop>,
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std
@@ -218,7 +221,16 @@ impl RcKind {
 /// What a drop claims about counts: the dropped place is itself an
 /// `Rc` / `Arc` / `Weak`, or a struct all of whose droppable fields are.
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
-pub enum RcDrop { Own(RcKind), Fields(RcKind) }
+pub enum RcDrop {
+    Own(RcKind),
+    Fields(RcKind),
+    /// The type wraps `Rc`s / `Arc`s / `Weak`s of one kind in std
+    /// containers (`Option`, `Box`, tuples, `Vec`, ...) and owns nothing
+    /// else that needs drop. `many`: more than one handle (or a
+    /// collection of them); `buffer`: a `Vec` / `HashMap` / ... that also
+    /// frees its own allocation.
+    Inside { kind: RcKind, many: bool, buffer: bool },
+}
 
 /// A call that makes another owner of the same shared value, recognised
 /// from the resolved callee (not its name): `<Rc<T> as Clone>::clone`
@@ -250,6 +262,8 @@ pub struct Struct {
     /// is a `k`, and the struct has no `Drop` impl of its own: dropping
     /// it only lowers counts (#373).
     pub rc_fields: Option<RcKind>,
+    /// Same as `Owner::rc_inside`.
+    pub rc_inside: Option<RcDrop>,
 }
 
 // a reference of type &mut T
@@ -477,6 +491,8 @@ impl ResourceAccessPoint {
     pub fn rc_drop(&self) -> Option<RcDrop> {
         match self {
             ResourceAccessPoint::Struct(Struct { rc_fields: Some(k), .. }) => Some(RcDrop::Fields(*k)),
+            ResourceAccessPoint::Owner(Owner { rc_inside: Some(d), .. })
+            | ResourceAccessPoint::Struct(Struct { rc_inside: Some(d), .. }) => Some(*d),
             _ => self.rc_kind().map(RcDrop::Own),
         }
     }

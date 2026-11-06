@@ -230,9 +230,14 @@ panic.
   shared value is freed only when its last `Rc` is dropped, without saying
   which one that is (a `Weak` doesn't keep the value alive). This applies
   to a variable or struct field whose own type is `Rc` / `Arc` / `Weak`,
-  and to a struct whose only droppable fields are of one such type. An
-  `Rc` inside another type (`Option<Rc<T>>`, `Vec<Rc<T>>`) keeps the plain
-  wording.
+  and to a struct whose only droppable fields are of one such type. A
+  value whose only droppable contents are handles of one kind inside
+  `Option`, `Box`, `Cell`, `RefCell`, tuples, arrays or `Vec` / `VecDeque`
+  / `HashMap` / `BTreeMap` (`Option<Rc<T>>`, `Vec<Rc<T>>`) says that the
+  `Rc` inside only lowers its reference count (and, for a collection, that
+  its own buffer is freed). A type that also owns other droppable data
+  (`Vec<(Rc<T>, String)>`, `HashMap<String, Rc<T>>`), has its own `Drop`
+  impl, or mixes `Rc` and `Arc` keeps the plain wording.
 - `if let` with a tuple pattern (`if let (Some(a), Some(b)) = (x, y)`)
   shows no bindings, and `x` / `y` as still owning their values.
 - A closure that uses one field or element (`move || p.name.len()`,

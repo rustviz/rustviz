@@ -407,13 +407,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None}), scope, is_global);
   }
 
   /// `Some(kind)` iff `ty` is `Rc<T>`, `Arc<T>` or one of their
@@ -447,6 +447,52 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     kind
   }
 
+  /// `Some(Inside { .. })` iff `ty` is not itself an `Rc`/`Arc`/`Weak` but
+  /// every part of it that needs drop is one, of a single kind, reached
+  /// only through std containers whose drop just drops their elements:
+  /// `Option`, `Box`, `Cell`, `RefCell`, tuples, arrays (no allocation of
+  /// their own, apart from `Box`) and `Vec`, `VecDeque`, `HashMap`,
+  /// `BTreeMap` (which also free a buffer). Any other type that needs
+  /// drop (a `String`, a user type, which may have its own `Drop`, a
+  /// trait object, ...) makes the answer `None` (#373).
+  pub fn rc_inside_kind(&self, ty: Ty<'tcx>) -> Option<RcDrop> {
+    use rustc_span::sym;
+    use rustc_middle::ty::TyKind;
+    struct Acc { kind: Option<RcKind>, count: usize, buffer: bool }
+    fn go<'tcx>(me: &ExprVisitor<'_, 'tcx>, ty: Ty<'tcx>, acc: &mut Acc, depth: usize) -> bool {
+      let tcx = me.tcx;
+      let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+      if !ty.needs_drop(tcx, env) { return true; }
+      if depth > 8 { return false; }
+      if let Some(k) = me.rc_kind(ty) {
+        if acc.kind.is_some_and(|o| o != k) { return false; }
+        acc.kind = Some(k);
+        acc.count += 1;
+        return true;
+      }
+      match ty.kind() {
+        TyKind::Tuple(ts) => ts.iter().all(|t| go(me, t, acc, depth + 1)),
+        TyKind::Array(t, _) => { acc.count += 1; go(me, *t, acc, depth + 1) }
+        TyKind::Adt(def, args) => {
+          let did = def.did();
+          let item = |s| tcx.is_diagnostic_item(s, did);
+          let buffer = item(sym::Vec) || (!did.is_local() && tcx.crate_name(did.krate) == sym::alloc && tcx.item_name(did).as_str() == "VecDeque") || item(sym::HashMap) || item(sym::BTreeMap);
+          if !(ty.is_box() || buffer || item(sym::Option) || item(sym::Cell) || item(sym::RefCell)) {
+            return false;
+          }
+          if buffer { acc.buffer = true; }
+          // Allocator / hasher arguments that need drop make it `Other`.
+          args.types().all(|t| go(me, t, acc, depth + 1))
+        }
+        _ => false,
+      }
+    }
+    if self.rc_kind(ty).is_some() { return None; }
+    let mut acc = Acc { kind: None, count: 0, buffer: false };
+    if !go(self, ty, &mut acc, 0) { return None; }
+    Some(RcDrop::Inside { kind: acc.kind?, many: acc.count > 1 || acc.buffer, buffer: acc.buffer })
+  }
+
   // Marks the owner (or struct field) just registered as `name` from
   // its type: as a `ManuallyDrop<T>` so its scope end and
   // reassignments don't claim to drop the `T` (#283), and as an
@@ -458,7 +504,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let rc = self.rc_kind(ty);
     let manually_drop = ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
     let rc_fields = self.rc_fields_kind(ty);
-    if rc.is_none() && !manually_drop && rc_fields.is_none() {
+    let rc_inside = self.rc_inside_kind(ty);
+    if rc.is_none() && !manually_drop && rc_fields.is_none() && rc_inside.is_none() {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
@@ -466,11 +513,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Some(ResourceAccessPoint::Owner(o)) if o.hash == just_added => {
         o.is_manually_drop = manually_drop;
         o.rc = rc;
+        o.rc_inside = rc_inside;
       }
       Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => {
         s.is_manually_drop = manually_drop;
         s.rc = rc;
         s.rc_fields = rc_fields;
+        s.rc_inside = rc_inside;
       }
       _ => {}
     }
@@ -480,7 +529,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -589,7 +638,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_copy,
       is_plain_value,
       interior_mut,
-      is_manually_drop: false, rc: None, rc_fields: None }),
+      is_manually_drop: false, rc: None, rc_fields: None, rc_inside: None }),
       scope, is_global);
   }
 
@@ -2119,6 +2168,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let owner_hash = self.rap_hashes as u64;
       let parent_is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
+      self.mark_owner_type(&name, ty);
       self.register_struct_members(&name, ty, owner_hash, mutability, MemberSite {
         owner_id: expr.hir_id.owner,
         assigned_at: expr_to_line(&expr, &self.tcx),
@@ -2686,6 +2736,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 let owner_hash = self.rap_hashes as u64;
                 let parent_is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                 self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_is_plain(ty, pat.hir_id.owner), self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
+                self.mark_owner_type(&name, ty);
                 for (field, field_ty) in self.member_fields(ty) {
                     // A reference element would need its own loan
                     // bookkeeping; leave it without a column.
