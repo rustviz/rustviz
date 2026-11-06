@@ -1,13 +1,15 @@
-// A let-chain with no `else` that moves out of `x` (#198). The move
-// happens as soon as `let Some(a) = x` matches, whether or not the rest
-// of the chain holds, so `x` has nothing left to drop at the end. Before
-// the fix the move wasn't drawn and `x` was said to drop its String.
+// A let-chain whose last `let` moves out of `x` (#198). That `let`'s
+// bindings happen only when the whole condition holds, so the move is
+// drawn in the if branch, and after the `if` `x` is dropped only if the
+// body didn't run. (A move by an earlier part would last even when a
+// later part fails, so that's refused, #281.)
 
 fn consume(_o: String) {}
 
 fn main() {
+    let n = 3;
     let x = Some(String::from("a"));
-    if let Some(a) = x && a.len() > 0 {
+    if n > 0 && let Some(a) = x {
         consume(a);
     }
 }
