@@ -905,8 +905,9 @@ fn render_dot(
     // holds one is an assignment (`n += 1`, `p.x = 5`), not an
     // initialization (#178).
     let mut held = held_before;
-    for (line_number, event) in history.iter() {
+    for (i, (line_number, event)) in history.iter().enumerate() {
         let held_at_event = held;
+        let event_y = event_dot_y(history, i);
         held = holds_value_after(held, event);
         // Closure-capture per-upvar dots on the closure's own
         // timeline are suppressed here: the closure's Bind-Acquire
@@ -1074,7 +1075,7 @@ fn render_dot(
         let mut data = EventDotData {
             hash: *hash as u64,
             dot_x: timeline_data.x_val,
-            dot_y: get_y_axis_pos(*line_number),
+            dot_y: event_y,
             // default value if print_message_with_name() fails
             title: "Unknown Resource Owner Value".to_owned()
         };
@@ -1103,7 +1104,7 @@ fn render_dot(
                         let move_count = closure_move_capture_count(visualization_data, *hash);
                         if move_count > 0 {
                             let cx = timeline_data.x_val;
-                            let cy = get_y_axis_pos(*line_number);
+                            let cy = event_y;
                             let title = hover_messages::event_dot_closure_go_out_of_scope(&name, move_count);
                             let drop_data = DropDotData {
                                 hash: *hash as u64,
@@ -1136,7 +1137,7 @@ fn render_dot(
                         // Moved in some branches of a conditional but
                         // not others (#179): the drop flag decides here.
                         let cx = timeline_data.x_val;
-                        let cy = get_y_axis_pos(*line_number);
+                        let cy = event_y;
                         let drop_data = DropDotData {
                             hash: *hash as u64,
                             dot_x: cx,
@@ -1166,7 +1167,7 @@ fn render_dot(
                             data.title = title;
                         } else {
                             let cx = timeline_data.x_val;
-                            let cy = get_y_axis_pos(*line_number);
+                            let cy = event_y;
                             let drop_data = DropDotData {
                                 hash: *hash as u64,
                                 dot_x: cx,
@@ -1198,7 +1199,7 @@ fn render_dot(
                         // circle: base 1px above center (~6px wide),
                         // apex 3px below center.
                         let cx = timeline_data.x_val;
-                        let cy = get_y_axis_pos(*line_number);
+                        let cy = event_y;
                         let title = if ro.is_temporary() {
                             // A `let`-extended temporary (#400): say why
                             // it lives, and so drops, only here.
@@ -1227,7 +1228,7 @@ fn render_dot(
                 // resource to drop here, so no `if !resource_hold` branch.
                 Event::ManuallyDropByHand => {
                     let cx = timeline_data.x_val;
-                    let cy = get_y_axis_pos(*line_number);
+                    let cy = event_y;
                     let title = event.print_message_with_name(&mut name);
                     let drop_data = DropDotData {
                         hash: *hash as u64,
@@ -1243,7 +1244,7 @@ fn render_dot(
                 },
                 Event::OwnerDropAtReassign | Event::TemporaryDrop { .. } => {
                     let cx = timeline_data.x_val;
-                    let cy = get_y_axis_pos(*line_number);
+                    let cy = event_y;
                     let title = event.print_message_with_name(&mut name);
                     let drop_data = DropDotData {
                         hash: *hash as u64,
@@ -2108,7 +2109,7 @@ fn render_arrow (
             }
             let timeline = fetch_timeline(param.hash(), visualization_data, resource_owners_layout, *id);
             let cx = timeline.x_val as f64;
-            let cy = get_y_axis_pos(*line_number) as f64;
+            let cy = column_event_y(visualization_data, param.hash(), *id, *line_number) as f64;
 
             // L sized so the visible horizontal span equals
             // `target_visible` from the bend out to the arrow
@@ -2205,7 +2206,7 @@ fn render_arrow (
             };
             let timeline = fetch_timeline(rap.hash(), visualization_data, resource_owners_layout, *id);
             let cx = timeline.x_val as f64;
-            let cy = get_y_axis_pos(*line_number) as f64;
+            let cy = column_event_y(visualization_data, rap.hash(), *id, *line_number) as f64;
 
             let leg: f64 = 10.0;
             let head_offset: f64 = 18.0;
@@ -2360,8 +2361,8 @@ fn render_arrow (
                     // a hand-tuned partial fix for the same problem.
                     let x1 = to_timeline.x_val;
                     let x2 = x1 + arrow_length;
-                    let y1 = get_y_axis_pos(*line_number);
-                    let y2 = get_y_axis_pos(*line_number);
+                    let y1 = column_event_y(visualization_data, to_variable.hash(), external_event.get_id(), *line_number);
+                    let y2 = y1;
                     data.coordinates.push((x1 as f64, y1 as f64));
                     data.coordinates.push((x2 as f64, y2 as f64));
     
@@ -2463,7 +2464,7 @@ fn render_arrow (
                     dots.add_call(
                         from_variable.hash().to_owned() as u64,
                         from_timeline.x_val,
-                        get_y_axis_pos(*line_number),
+                        column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number),
                         from_timeline,
                         title,
                         external_event.get_id(),
@@ -2479,8 +2480,8 @@ fn render_arrow (
                     head_offset = 10.0;
                     let x2 = from_timeline.x_val - 5;
                     let x1 = x2 - arrow_length;
-                    let y1 = get_y_axis_pos(*line_number);
-                    let y2 = get_y_axis_pos(*line_number);
+                    let y1 = column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number);
+                    let y2 = y1;
                     data.coordinates.push((x1 as f64, y1 as f64));
                     data.coordinates.push((x2 as f64, y2 as f64));
     
@@ -2526,8 +2527,8 @@ fn render_arrow (
 
                     let x1 = to_timeline.x_val;
                     let x2 = from_timeline.x_val;
-                    let y1 = get_y_axis_pos(*line_number);
-                    let y2 = get_y_axis_pos(*line_number);
+                    let y1 = column_event_y(visualization_data, to_variable.hash(), e.get_id(), *line_number);
+                    let y2 = column_event_y(visualization_data, from_variable.hash(), e.get_id(), *line_number);
                     if arrow_order > 0 && x2 <= x1{ // trapezoid
                         let x3 = from_timeline.x_val + 20;
                         let x4 = to_timeline.x_val - 20;
@@ -2557,12 +2558,14 @@ fn render_arrow (
                         // straight through those middle dots, visually
                         // overlapping them and (more importantly) eating
                         // their hover events because the arrow's <g>
-                        // tooltip-trigger sits on top.
-                        if let Some(rendered) = render_hopping_arrow(
+                        // tooltip-trigger sits on top. (Not when one end
+                        // is on a split dot and the other isn't, see
+                        // `event_dot_y`: that arrow isn't level.)
+                        if let Some(rendered) = (y1 == y2).then(|| render_hopping_arrow(
                             x1, y1, x2,
                             &data.title,
                             &dots.positions,
-                        ) {
+                        )).flatten() {
                             // Inline render done; push to the right
                             // output bucket and bypass the post-match
                             // polyline pipeline by leaving coordinates
@@ -2591,7 +2594,7 @@ fn render_arrow (
             if !data.coordinates.is_empty() {
                 let last_index = data.coordinates.len() - 1;
 
-                if data.coordinates.len() == 2 {
+                if data.coordinates.len() == 2 && data.coordinates[0].1 == data.coordinates[1].1 {
                     // [0]     [last index]
                     // <-------------------
                     if data.coordinates[0].0 < data.coordinates[last_index].0 {
@@ -3478,6 +3481,52 @@ impl CollapsedApexes {
         }
         Some((y1, y2))
     }
+}
+
+/// The y of the dot for event `i` of a column's `history`. Usually its
+/// line's row, but a conditional whose branches share lines draws its
+/// arms on those rows, as a diamond from the split dot above its first
+/// line to the join dot below its last (see `render_branches`). An
+/// event recorded before the split, on its line, is part of the
+/// condition or scrutinee (`if t.len() > 1 { .. } else { .. }` on one
+/// line): it runs before any arm, so it goes on the split dot, not in
+/// the middle of the diamond (#492). Likewise an event recorded after
+/// the conditional, on its last line, runs after the arms: it goes on
+/// the join dot.
+fn event_dot_y(history: &[(usize, Event)], i: usize) -> i64 {
+    let line = history[i].0;
+    let collapsed = |ev: &Event, on: fn(usize, usize) -> usize| matches!(ev,
+        Event::Branch { split_point, merge_point, .. }
+            if branch_is_collapsed(*split_point, *merge_point) && on(*split_point, *merge_point) == line);
+    let before_split = history[i + 1..].iter()
+        .take_while(|(l, _)| *l == line)
+        .any(|(_, ev)| collapsed(ev, |split, _| split));
+    let after_join = history[..i].iter().rev()
+        .any(|(_, ev)| collapsed(ev, |_, merge| merge));
+    get_y_axis_pos(line) + if before_split {
+        -COLLAPSED_APEX
+    } else if after_join {
+        COLLAPSED_APEX
+    } else {
+        0
+    }
+}
+
+/// `event_dot_y` of the event `id` on `hash`'s column (or in one of its
+/// branches), for the arrows and call icons that meet that event's dot.
+/// The line's row when the column has no such event.
+fn column_event_y(vd: &VisualizationData, hash: &u64, id: usize, line: usize) -> i64 {
+    fn find(history: &[(usize, Event)], id: usize) -> Option<i64> {
+        history.iter().enumerate().find_map(|(i, (_, ev))| match ev {
+            Event::Branch { branch_history, .. } =>
+                branch_history.iter().find_map(|b| find(&b.e_data, id)),
+            _ if ev.get_id() == id => Some(event_dot_y(history, i)),
+            _ => None,
+        })
+    }
+    vd.timelines.get(hash)
+        .and_then(|t| find(&t.history, id))
+        .unwrap_or_else(|| get_y_axis_pos(line))
 }
 
 // render timelines (states) for RAPs using vertical lines

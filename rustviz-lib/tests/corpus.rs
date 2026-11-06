@@ -525,6 +525,9 @@ const EXPECTED_OK: &[&str] = &[
     "shared_borrow_end_in_if_arm",
     "borrow_end_in_match_arm",
     "borrow_end_in_nested_if",
+    // One-line if / if let / match: condition events go on the split
+    // dot, events after the conditional on the join dot (#492).
+    "one_line_cond_events",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5946,6 +5949,64 @@ fn else_if_is_drawn_in_the_else_branch() {
     assert_eq!(splits.len(), 2, "{:?}", splits);
     let (outer, inner) = (splits[0], splits[1]);
     assert!(inner.0 > outer.0, "inner `if` at x={} is not right of the parent column x={}", inner.0, outer.0);
+}
+
+/// `(cx, cy)` of every dot in a timeline panel one of whose tooltip
+/// lines (see `tooltip_lines`) is `text`: a plain circle, or a tooltip
+/// `<g>` around a circle (a drop dot, a dot with a call icon).
+fn dots_listing(svg: &str, text: &str) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for (i, _) in svg.match_indices(" data-tooltip-text=\"") {
+        let Some(start) = svg[..i].rfind('<') else { continue };
+        let tag = &svg[start..start + svg[start..].find('>').unwrap_or(svg.len() - start) + 1];
+        let circle = if tag.starts_with("<circle ") {
+            Some(tag)
+        } else if tag.starts_with("<g ") {
+            let body = &svg[start..start + svg[start..].find("</g>").unwrap_or(svg.len() - start)];
+            start_tags(body, "circle").first().copied()
+        } else {
+            None
+        };
+        let Some((x, y)) = circle.and_then(|c| attr(c, "cx").zip(attr(c, "cy"))) else { continue };
+        if tooltip_lines(tag).iter().flatten().any(|l| l == text) {
+            out.push((x.parse().unwrap(), y.parse().unwrap()));
+        }
+    }
+    out
+}
+
+/// #492: when an `if` / `if let` / `match` shares a line with its arms,
+/// its arms are drawn as a diamond around that line, from the split dot
+/// above it to the join dot below. The condition or scrutinee runs
+/// before any arm, but its event was drawn at the line's own y: in the
+/// middle of the diamond, between the arms. It goes on the split dot
+/// now, and an event after the conditional on the join dot.
+#[test]
+fn one_line_condition_events_are_drawn_before_the_split() {
+    let timeline = run_with_local_backend("one_line_cond_events").timeline_panel_string();
+    let one = |text: &str| -> (f64, f64) {
+        let dots = dots_listing(&timeline, text);
+        assert_eq!(dots.len(), 1, "dots listing {:?}: {:?}", text, dots);
+        dots[0]
+    };
+    for (var, cond) in [
+        ("t", "len reads from t (implicitly borrowed)"),
+        ("u", "chars reads from u (implicitly borrowed)"),
+        ("w", "len reads from w (implicitly borrowed)"),
+    ] {
+        let split = one(&format!("{} is live in a conditional expression ", var));
+        let join = one(&format!("{} isn't moved in any of the branches above", var));
+        let event = one(cond);
+        assert_eq!(event.0, split.0, "{:?} is not on {}'s column", cond, var);
+        assert!(event.1 <= split.1,
+            "{:?} at y={} is below {}'s split dot at y={} (join at y={})", cond, event.1, var, split.1, join.1);
+    }
+    // `if x.is_empty() { v.len() } else { 0 } + v.capacity()`: the
+    // `capacity` call runs after the `if`.
+    let join = one("v isn't moved in any of the branches above");
+    let after = one("capacity reads from v (implicitly borrowed)");
+    assert_eq!(after.0, join.0);
+    assert!(after.1 >= join.1, "capacity call at y={} is above v's join dot at y={}", after.1, join.1);
 }
 
 ///
