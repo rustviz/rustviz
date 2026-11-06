@@ -1,5 +1,0 @@
-[v1]
-"rustviz-plugin 2.0.0 (path+file:///private/tmp/claude-501/-Users-cyrus-projects-rustviz-rustviz/d03c5d4f-f688-41f8-a157-e63087349189/scratchpad/rb7-447/rustviz-plugin)" = [
-    "cargo-rv-plugin",
-    "rv-plugin-driver",
-]

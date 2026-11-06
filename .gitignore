@@ -31,3 +31,6 @@ playground/frontend/*.tsbuildinfo
 # with whatever plugin is installed; tracking it would ship renderings
 # from an older plugin.
 playground/frontend/src/prerendered.json
+
+# Private plugin install roots used by local test runs (cargo install --root inst)
+/inst/
