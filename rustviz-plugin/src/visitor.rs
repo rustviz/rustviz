@@ -669,6 +669,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
               let to_ro = ResourceTy::Caller;
               let from_ro = match fetch_rap(e, &self.tcx, &self.raps) {
+                // A unit struct / enum constructor (`Marker`) or a fn
+                // item named as the tail expression has no column of
+                // its own, and neither has the caller: an arrow
+                // between the two can't be drawn (it used to panic in
+                // the renderer, #136). Treat the value like a literal.
+                Some(r) if r.is_fn() => ResourceTy::Anonymous,
                 Some(r) => ResourceTy::Value(r), // todo, technically need to check for deref here
                 None => ResourceTy::Anonymous
               };

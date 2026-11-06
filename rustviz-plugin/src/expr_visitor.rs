@@ -581,15 +581,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if is_copy && to_struct.is_none() {
           continue;
         }
+        let child_name = child.name().clone();
         let from_child = ResourceTy::Value(child);
         let ev_id = *self.unique_id;
         *self.unique_id += 1;
+        let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         } else {
           ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         };
         self.add_external_event(line_num, ev);
+        // A nested struct field moved into a function / closure
+        // (`drop(o)` moves `o.inner.v` too) goes to an Anonymous
+        // target, which the recursion through the synthesized event
+        // above doesn't follow; move its own fields here.
+        if to_anonymous && !is_copy {
+          self.move_struct_fields_away(line_num, &child_name);
+        }
       }
     } else if let Some(to_name) = to_struct {
       self.bind_struct_fields(line_num, &to_name);
@@ -608,6 +617,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
     if let Some(name) = struct_name {
       self.bind_struct_fields(line_num, &name);
+    }
+  }
+
+  /// Every field of `parent`, recursively, moves along with it to a
+  /// place that has no per-field columns (a function or closure that
+  /// took the whole struct). No extra arrows: the struct's own arrow
+  /// shows where the value went.
+  fn move_struct_fields_away(&mut self, line_num: usize, parent: &str) {
+    for child in self.struct_children(parent) {
+      let name = child.name().clone();
+      let ev_id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line_num, ExternalEvent::Move {
+        from: ResourceTy::Value(child),
+        to: ResourceTy::Anonymous,
+        id: ev_id,
+        is_partial: false,
+        into_closure: false,
+      });
+      self.move_struct_fields_away(line_num, &name);
     }
   }
 
