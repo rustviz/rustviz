@@ -1,7 +1,7 @@
 // #414: assigning to a reference variable that already holds a
 // reference is an assignment, not an initialization. `r = s;` copies
-// the `&i32` out of s (references to `T` are Copy), `m = n;` moves the
-// `&mut String` out of n, and `t = first(..)` takes the reference the
+// the `&i32` out of s (references to `T` are Copy), `m = n;` reborrows the
+// `&mut String` n holds (an assignment is a coercion site, #289), and `t = first(..)` takes the reference the
 // call returns. `let u; u = &x;` is the first value u gets.
 fn first<'a>(a: &'a String, _b: &'a String) -> &'a String {
     a

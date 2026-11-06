@@ -827,6 +827,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     ownership_after(self.preprocessed_events, rap_name, None).unwrap_or(Ownership::None)
   }
 
+  /// True iff `name` is a reference whose value was moved, since it was
+  /// last assigned, into something that carries the borrow on and ends
+  /// it itself: another reference (`let r2 = r;`, `Holder { r }`) or the
+  /// caller (`r` as a fn's result). After such a move `name` holds
+  /// nothing, so its own borrow-end / return-to-lender event would be
+  /// false (#209). A `&mut` moved into a call (`take(r)`) isn't covered:
+  /// nothing else with a column ends that borrow, so `r`'s end stands
+  /// for it. Moves inside a branch aren't seen here (Branch events
+  /// aren't searched); those keep the old drawing.
+  pub fn ref_handed_off(&self, name: &str) -> bool {
+    let (Some(rd), Some(rap_data)) = (self.borrow_map.get(name), self.raps.get(name)) else {
+      return false;
+    };
+    let hash = *rap_data.rap.hash();
+    self.preprocessed_events.iter().any(|(line, ev)| match ev {
+      ExternalEvent::Move { from: ResourceTy::Value(f), to, .. }
+        if *f.hash() == hash && *line >= rd.assigned_at =>
+      {
+        match to {
+          ResourceTy::Caller => true,
+          ResourceTy::Value(t) => self.borrow_map.contains_key(t.name())
+            && self.raps.get(t.name()).map_or(false, |r| r.rap.hash() == t.hash()),
+          _ => false,
+        }
+      }
+      _ => false,
+    })
+  }
+
+  /// `let r2: &mut String = r;`, `Holder { r: a }`, `q = r;`: a `&mut`
+  /// place used where the expected type is already a `&mut` (an
+  /// annotated `let`, a struct field, an assignment) is coerced with an
+  /// implicit reborrow, `&mut *r`, so `r` is usable again once the new
+  /// reference is done. Only `let r2 = r;` with an inferred type moves
+  /// `r`. rustc records the reborrow as an adjustment on `rhs` (#289).
+  pub fn is_coerced_mut_reborrow(&self, lhs: &ResourceTy, rhs_rap: &ResourceAccessPoint, rhs: &Expr, evt: &Evt) -> bool {
+    matches!(evt, Evt::Move)
+      && matches!(lhs, ResourceTy::Value(_))
+      && rhs_rap.is_mutref()
+      && is_implicit_mut_reborrow(rhs, self.tcx.typeck(rhs.hir_id.owner))
+  }
+
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
@@ -1638,6 +1680,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     else { // if we are copying a reference (ie let a = b (where b is ref))
       // in this case we are borrowing to whatever b refers to
       // likewise, aliasing data is just copied here
+      // ... unless rustc reborrows it (`let r2: &mut String = r;`,
+      // see is_coerced_mut_reborrow): then, as for `&mut *r`, the new
+      // reference borrows through r and gives the borrow back to *r.
+      if matches!(expr.kind, ExprKind::Path(_) | ExprKind::Field(..))
+        && is_implicit_mut_reborrow(expr, self.tcx.typeck(expr.hir_id.owner)) {
+        if let ResourceTy::Value(x) = get_rap(&expr, &self.tcx, &self.raps) {
+          if x.is_mutref() {
+            let lender = ResourceTy::Deref(x);
+            let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+            return (lender, aliasing);
+          }
+        }
+      }
       let lender = find_lender(&expr, &self.tcx, &self.raps, &self.borrow_map);
       (find_lender(&expr, &self.tcx, &self.raps, &self.borrow_map), get_aliasing_data(&lender, &self.borrow_map))
     }
@@ -2289,6 +2344,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         Some(rd) => {
           let rhs_rap = rd.rap.to_owned();
           self.update_rap(&rhs_rap, line_num);
+          if self.is_coerced_mut_reborrow(&lhs, &rhs_rap, rhs, &evt) {
+            self.add_borrow_ev(line_num, Evt::MBorrow, lhs, ResourceTy::Value(rhs_rap), true);
+            return;
+          }
           self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
         }
         None => {
@@ -2672,6 +2731,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // of `u`.
       if let Some(rhs_rap) = field_rap(inner, id.as_str(), &self.tcx, &self.raps) {
         let line_num = span_to_line(&inner.span, &self.tcx);
+        if self.is_coerced_mut_reborrow(&lhs, &rhs_rap, rhs, &evt) {
+          self.add_borrow_ev(line_num, Evt::MBorrow, lhs, ResourceTy::Value(rhs_rap), true);
+          return;
+        }
         self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
       }
     }
@@ -3017,6 +3080,15 @@ pub fn print_out_of_scope(&mut self){
     info!("BORROW MAP {:#?}", self.borrow_map);
     //let lifetime_map = self.lifetime_map.clone();
     let mut ultimate_refs: HashSet<String> = HashSet::new();
+    // References whose value was moved on to another reference or the
+    // caller (`let r2 = r;`): the borrow now ends with the new holder,
+    // so the moved-from one gets no end event and doesn't take part in
+    // picking which ref returns the borrow (#209).
+    #[expect(clippy::disallowed_methods, reason = "collected into a set, order never observed")]
+    let handed_off: HashSet<String> = self.borrow_map.keys()
+      .filter(|k| self.ref_handed_off(k))
+      .cloned()
+      .collect();
     let lender_to_refs = get_non_anon_lenders(&self.borrow_map);
     info!("lender to refs {:#?}", lender_to_refs);
 
@@ -3038,18 +3110,17 @@ pub fn print_out_of_scope(&mut self){
     for (_, refs) in lender_to_refs.iter() {
       let regions = get_regions(refs, &self.borrow_map);
       for region in regions.iter() {
+        let region: Vec<&String> = region.iter().filter(|r| !handed_off.contains(*r)).collect();
         let mut max_lifetime: usize = 0;
-        #[expect(clippy::iter_over_hash_type, reason = "computes a max")]
-        for r in region {
-          let lifetime = self.borrow_map.get(r).unwrap().lifetime;
+        for r in region.iter() {
+          let lifetime = self.borrow_map.get(*r).unwrap().lifetime;
           if lifetime > max_lifetime {
             max_lifetime = lifetime;
           }
         }
-        #[expect(clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
-        for r in region {
-          if self.borrow_map.get(r).unwrap().lifetime == max_lifetime {
-            ultimate_refs.insert(r.to_owned());
+        for r in region.iter() {
+          if self.borrow_map.get(*r).unwrap().lifetime == max_lifetime {
+            ultimate_refs.insert(r.to_string());
           }
         }
       }
@@ -3087,6 +3158,9 @@ pub fn print_out_of_scope(&mut self){
     // Add events
     for (k, ref_data) in &vec {
       let RefData { lender: r_ty, lifetime, .. } = ref_data;
+      if handed_off.contains(k) {
+        continue;
+      }
       let from_ro = self.raps.get(k).unwrap().rap.to_owned();
       let to_ro = match r_ty {
         ResourceTy::Anonymous => ResourceTy::Deref(from_ro.clone()),
