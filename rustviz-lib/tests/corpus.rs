@@ -479,6 +479,11 @@ const EXPECTED_OK: &[&str] = &[
     "struct_destructure_match",
     // Compound assignment (`acc += x`, `s += &t`) isn't `a = b` (#260).
     "compound_assign",
+    // Fields moved out on some paths only: the struct's scope end says
+    // they're dropped only if no branch moved them (#395).
+    "partial_move_one_arm_tuple",
+    "partial_move_one_arm_struct",
+    "partial_move_if_branches",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4913,6 +4918,55 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource n points to is modified through *n (copied from by)",
             "+= reads from/writes to r (mutable reborrow",
             "r's resource is mutably borrowed by +=",
+        ],
+    },
+    // ─── Fields moved out on some paths only (#395) ─────────────────
+    // A struct or tuple whose fields were moved out in some branches
+    // only: at its scope end those fields are dropped only if the path
+    // taken didn't move them (a runtime drop flag), which is what the
+    // fields' own columns say (#179) and now the struct's too.
+    TooltipExpect {
+        name: "partial_move_one_arm_tuple",
+        must_contain: &[
+            "t goes out of scope. t.0 and t.1.1 were moved out in some of the branches above; \
+             each is dropped here only if no branch above moved it (Rust tracks this with runtime \
+             drop flags).",
+            "t.1 goes out of scope. t.1.1 was moved out in at least one branch above, so it's \
+             dropped here only if no branch above moved it (Rust tracks this with a runtime drop \
+             flag).",
+            "t.0 goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "t goes out of scope. t.0 and t.1.1 were moved out earlier, so no resource is dropped.",
+            "t.1 goes out of scope. t.1.1 was moved out earlier, so no resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "partial_move_one_arm_struct",
+        must_contain: &[
+            "p goes out of scope. p.a was moved out in at least one branch above, so it's dropped \
+             here only if no branch above moved it (Rust tracks this with a runtime drop flag). \
+             p.b is dropped.",
+            "p.b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["p goes out of scope. p.a was moved out earlier, so only p.b is dropped."],
+    },
+    TooltipExpect {
+        name: "partial_move_if_branches",
+        must_contain: &[
+            "p goes out of scope. p.a and p.b were moved out in some of the branches above; each \
+             is dropped here only if no branch above moved it (Rust tracks this with runtime drop \
+             flags).",
+            "q goes out of scope. q.b was moved out earlier. q.a was moved out in at least one \
+             branch above, so it's dropped here only if no branch above moved it (Rust tracks this \
+             with a runtime drop flag).",
+            // Moved in both branches: moved for sure.
+            "r goes out of scope. r.a was moved out earlier, so only r.b is dropped.",
+        ],
+        must_not_contain: &[
+            "p goes out of scope. p.a and p.b were moved out earlier, so no resource is dropped.",
+            "q goes out of scope. q.a and q.b were moved out earlier, so no resource is dropped.",
         ],
     },
 ];
