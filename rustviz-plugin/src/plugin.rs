@@ -196,6 +196,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               uninit_locals: HashMap::new(),
               rhs_arm_ids: HashMap::new(),
               exit_drops: HashSet::new(),
+              unlent_refs: HashSet::new(),
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
@@ -273,6 +274,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           uninit_locals: HashMap::new(),
           rhs_arm_ids: HashMap::new(),
           exit_drops: HashSet::new(),
+          unlent_refs: HashSet::new(),
         };
         visitor.visit_body(hir_body);
         visitor.print_lifetimes();

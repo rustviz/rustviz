@@ -4635,6 +4635,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(copied from",
         ],
     },
+    TooltipExpect {
+        name: "for_over_iterator_var",
+        // `for x in it` moves the iterator `it` into the loop; each `x` is
+        // a reference `next()` hands out, not something `it` lends. It
+        // used to read "Move from it to x" and "Return ... from x to it"
+        // (#417). A collection by value (`for s in w`) still moves into
+        // the loop variable's column.
+        must_contain: &[
+            "it's resource is moved",
+            "x is bound to a mutable reference",
+            "s is bound to an immutable reference",
+            "Move from w to s",
+        ],
+        must_not_contain: &[
+            "Move from it to x",
+            "Return mutably borrowed resource from x to it",
+            "Move from it2 to s",
+            "Return immutably borrowed resource from s to it2",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
