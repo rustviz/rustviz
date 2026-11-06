@@ -412,6 +412,61 @@ fn binding_pats<'tcx>(pat: &'tcx Pat<'tcx>, out: &mut Vec<&'tcx Pat<'tcx>>) {
   }
 }
 
+/// The by-reference bindings in a fn parameter's pattern that borrow
+/// the parameter value itself, which the function owns: `ref s` in
+/// `fn f(ref s: String)`, `ref a` in `fn g((ref a, b): (String, i32))`.
+/// A binding reached through a reference, written (`&(ref a, b)`) or
+/// implicit (`(a, b): &(String, i32)`), borrows the caller's data
+/// instead, so it isn't collected. Each entry is the binding's
+/// `HirId` and whether it binds the whole parameter (`ref s`) rather
+/// than part of it (#377).
+fn own_param_ref_bindings<'tcx>(
+  pat: &'tcx Pat<'tcx>,
+  typeck: &rustc_middle::ty::TypeckResults<'tcx>,
+  is_root: bool,
+  out: &mut Vec<(HirId, bool)>,
+) {
+  // Matching through an implicit deref (default binding modes): what's
+  // below borrows from behind the caller's reference.
+  if typeck.pat_adjustments().get(pat.hir_id).is_some_and(|a| !a.is_empty()) {
+    return;
+  }
+  match pat.kind {
+    PatKind::Binding(_, _, _, sub) => {
+      if let Some(m) = typeck.pat_binding_modes().get(pat.hir_id) {
+        if matches!(m.0, rustc_hir::ByRef::Yes(..)) {
+          out.push((pat.hir_id, is_root));
+        }
+      }
+      if let Some(sp) = sub {
+        own_param_ref_bindings(sp, typeck, false, out);
+      }
+    }
+    PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) => {
+      for p in ps { own_param_ref_bindings(p, typeck, false, out); }
+    }
+    PatKind::Struct(_, fs, _) => {
+      for f in fs { own_param_ref_bindings(f.pat, typeck, false, out); }
+    }
+    PatKind::Or(ps) => {
+      if let Some(p) = ps.first() { own_param_ref_bindings(p, typeck, false, out); }
+    }
+    // An owned `Box` (or a deref pattern) the function owns: its
+    // contents are still the function's own.
+    PatKind::Box(inner) | PatKind::Deref(inner) => own_param_ref_bindings(inner, typeck, false, out),
+    PatKind::Guard(inner, _) => own_param_ref_bindings(inner, typeck, is_root, out),
+    PatKind::Slice(before, mid, after) => {
+      for p in before { own_param_ref_bindings(p, typeck, false, out); }
+      if let Some(p) = mid { own_param_ref_bindings(p, typeck, false, out); }
+      for p in after { own_param_ref_bindings(p, typeck, false, out); }
+    }
+    // `&(ref a, b)`: behind the caller's reference.
+    PatKind::Ref(..) => {}
+    PatKind::Wild | PatKind::Never | PatKind::Missing | PatKind::Err(_)
+    | PatKind::Expr(_) | PatKind::Range(..) => {}
+  }
+}
+
 /// The name, with its `!`, of the outermost bang macro the user wrote
 /// that `span` was expanded from: `println!` for the `&x` that
 /// `format_args_nl!` builds inside `println!`, `show!` if the user's
@@ -648,7 +703,20 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     // A plain `x: T` is the one-binding case.
     let mut bindings = Vec::new();
     binding_pats(param.pat, &mut bindings);
+    let typeck = self.tcx.typeck(param.hir_id.owner);
+    let mut own_refs = Vec::new();
+    own_param_ref_bindings(param.pat, typeck, true, &mut own_refs);
     for pat in bindings {
+      // `ref s` on a by-value parameter: `s` borrows the value this
+      // function owns, not the caller's (#377).
+      let own_param = own_refs.iter().find(|(id, _)| *id == pat.hir_id).map(|&(_, whole)| OwnParam {
+        fn_name: self.tcx.item_name(param.hir_id.owner.to_def_id()).to_string(),
+        whole,
+        // The pointee of the `&T` the binding is: dropped with the
+        // parameter when the function returns, if its type needs drop.
+        drops: typeck.pat_ty(pat).builtin_deref(false).is_some_and(|t|
+          t.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, param.hir_id.owner))),
+      });
       // add RAP corresponding to parameter type
       let line_num=span_to_line(&param.span, &self.tcx);
       let ty = self.tcx.typeck(param.hir_id.owner).pat_ty(pat);
@@ -657,6 +725,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         PatKind::Binding(binding_annotation, _ann_hirid, ident, _op_pat) =>{
           let name: String = ident.to_string();
           if ty.is_ref() {
+            // (A `ref` binding of a by-value parameter, `own_param`,
+            // takes the same path: its borrow also lasts the whole
+            // body and has no lender with a column here, since the
+            // value it borrows is the parameter itself. `Caller` is
+            // that "no column" placeholder; its dot names the
+            // function instead of the caller.)
+            //
             // A fn parameter of reference type is conceptually a
             // borrow that came from the caller's frame. Model that
             // explicitly so the borrow region renders for the full
@@ -723,7 +798,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
             self.mark_if_manually_drop(&name, ty);
           }
-          self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id });
+          self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id, own_param });
           *self.unique_id += 1;
           // A by-value struct parameter owns its fields' resources too
           // (and drops them at the end of the body unless moved on).

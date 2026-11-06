@@ -745,7 +745,11 @@ pub enum ExternalEvent {
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
-        id: usize
+        id: usize,
+        // `Some`: `param` is a `ref` binding of a by-value parameter
+        // (`fn f(ref s: String)`), so it borrows the value `f` owns,
+        // not anything of the caller's (#377).
+        own_param: Option<OwnParam>,
     },
     
     // Branches are the most interesting event
@@ -944,10 +948,26 @@ pub enum Event {
     ManuallyDropByHand,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
+    // (`own_param`: see ExternalEvent::InitRefParam)
     InitRefParam {
         param: ResourceAccessPoint,
-        id: usize
+        id: usize,
+        own_param: Option<OwnParam>,
     },
+}
+
+/// A `ref` / `ref mut` binding in a by-value fn parameter's pattern
+/// borrows the parameter value, which the function owns (#377).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OwnParam {
+    /// The function the parameter belongs to.
+    pub fn_name: String,
+    /// `ref s: String` (the whole value) rather than `(ref a, b)`
+    /// (part of it).
+    pub whole: bool,
+    /// The borrowed value's type needs drop: no column shows that drop
+    /// (when `fn_name` returns), so the dot's tooltip states it.
+    pub drops: bool,
 }
 
 
@@ -1291,6 +1311,9 @@ impl Event {
             }
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
+            }
+            Event::InitRefParam{ param, own_param: Some(own), .. } => {
+                hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -2153,8 +2176,8 @@ impl Visualizable for VisualizationData {
             (line_num,  Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
         },
-        ExternalEvent::InitRefParam{param: ro, id} => {
-          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id})]
+        ExternalEvent::InitRefParam{param: ro, id, own_param} => {
+          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone()})]
         },
         ExternalEvent::GoOutOfScope{ro,..} => {
           match ro {
@@ -2402,8 +2425,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::InitRefParam{param: ro, id} => {
-                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id}, line_number);
+            ExternalEvent::InitRefParam{param: ro, id, own_param} => {
+                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param}, line_number);
             },
             ExternalEvent::GoOutOfScope{ro, ..} => {
                 match ro {

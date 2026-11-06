@@ -199,6 +199,25 @@ pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
 // A reference function parameter receives a borrow from the caller.
 // Mirror message to `event_dot_owner_init_from_caller` for the ref
 // side: makes it clear that the lender lives outside this fn scope.
+// A `ref` / `ref mut` binding of a by-value parameter (`fn f(ref s:
+// String)`, `fn g((ref a, b): (String, i32))`). The caller's value was
+// moved (or copied) into `f`, which owns it; the binding borrows that,
+// so it mustn't say "from the caller" (#377).
+pub fn event_dot_ref_init_own_param(my_name: &String, fn_name: &String, whole: bool, is_mut: bool, drops: bool) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let fn_fmt = fmt_style(fn_name);
+    let kind = if is_mut { "a mutable" } else { "an immutable" };
+    let what = if whole { "the value" } else { "part of the value" };
+    let base = format!("{0} is {1} borrow of {2} passed to {3}, which {3} owns", my_name_fmt, kind, what, fn_fmt);
+    // The borrowed value has no column, so its drop (with the
+    // parameter, when `fn_name` returns) is stated here.
+    if drops {
+        format!("{}; {} is dropped when {} returns", base, if whole { "that value" } else { "that part" }, fn_fmt)
+    } else {
+        base
+    }
+}
+
 pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     if is_mut {

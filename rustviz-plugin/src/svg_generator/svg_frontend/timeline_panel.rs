@@ -2013,7 +2013,7 @@ fn render_arrow (
         // ownership transfers); falls through to the generic
         // logic below for those, which sees an (Anonymous,
         // Anonymous) extraction and early-returns.
-        ExternalEvent::InitRefParam { param, id } => {
+        ExternalEvent::InitRefParam { param, id, .. } => {
             let is_owned = matches!(
                 param,
                 ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)
