@@ -496,9 +496,19 @@ pub fn render_svg(
                 // in `r[0] = x;` / `*r = s;`.
                 let ref_param_ends = matches!(event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
                     && matches!(to, ResourceTy::Caller);
+                // A borrow stored in a place with no column (`v[0] = &u`,
+                // `rh.r = &t`, #282) and its end are drawn on the
+                // lender's column only, with no arrow, so they never
+                // join the line's arrows. They used to be lost whenever
+                // their line had another arrow (`rh`'s borrow of `hold`
+                // ending on `rh.r = &t;`, #512).
+                let place_borrow = (is_borrow && matches!(to, ResourceTy::Index(..)))
+                    || (matches!(event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+                        && matches!(from, ResourceTy::Index(..)));
                 if (is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
                     || borrow_of_temporary
-                    || ref_param_ends {
+                    || ref_param_ends
+                    || place_borrow {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
                 }
                 i += 1;

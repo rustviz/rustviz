@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -2451,12 +2451,27 @@ fn render_arrow (
                     // so "reads from" would be false (#203).
                     let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: ImplicitRef::No | ImplicitRef::Autoref, .. })
                         && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
+                    // The callee's signature lets it store the reference
+                    // (`point(&mut hold, &t)`, #513): the borrow lasts past
+                    // the call, until the borrow checker ends it.
+                    let stored_suffix: String = match external_event {
+                        ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place)), .. }
+                        | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place)), .. } => {
+                            let styled_place = styled_name_html(place);
+                            format!(
+                                "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use",
+                                styled_fn_name, styled_place, styled_from_name, styled_place,
+                            )
+                        }
+                        _ => String::new(),
+                    };
                     let title = if interior_mut {
                         hover_messages::fn_dot_shared_borrow_interior_mut(
                             &function.name, &from_variable.name(),
                             matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }))
+                            + &stored_suffix
                     } else {
-                        format!("{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix)
+                        format!("{}{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix, stored_suffix)
                     };
 
                     // The call icon shares the dot of the borrow it makes

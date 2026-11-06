@@ -330,7 +330,9 @@ const Description: React.FC = () => (
         is stated in the tooltip only. A write to an
         element (<code>v[i] = x</code>) is drawn on <code>v</code>&apos;s column,
         unless the element is a reference: <code>v[i] = &amp;s</code> (or{' '}
-        <code>h.r = &amp;s</code> through a reference) is drawn only as a
+        <code>h.r = &amp;s</code> through a reference, or a call that may
+        store <code>&amp;s</code>, like{' '}
+        <code>point(&amp;mut hold, &amp;s)</code>) is drawn only as a
         borrow on <code>s</code>&apos;s column. The element value a
         write replaces is dropped only in the tooltip&apos;s words, not on a
         column.
