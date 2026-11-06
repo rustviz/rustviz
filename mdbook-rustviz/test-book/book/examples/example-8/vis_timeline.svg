@@ -282,11 +282,11 @@
             <circle cx="70" cy="235" r="5"/>
             <polygon points="67,234 73,234 70,238" style="fill: white; stroke: none; pointer-events: none;"/>
         </g>
-        <circle cx="140" cy="145" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="len1 is initialized by copy from String::len"/>
+        <circle cx="140" cy="145" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="len1 is initialized with a copy of String::len"/>
         <circle cx="140" cy="235" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;len1&lt;/span&gt; goes out of scope"/>
-        <circle cx="210" cy="175" r="5" data-hash="6" class="tooltip-trigger" data-tooltip-text="len2 is initialized by copy from len"/>
+        <circle cx="210" cy="175" r="5" data-hash="6" class="tooltip-trigger" data-tooltip-text="len2 is initialized with a copy of len"/>
         <circle cx="210" cy="235" r="5" data-hash="6" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro',
         Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
         monospace, monospace !important;&quot;&gt;len2&lt;/span&gt; goes out of scope"/>

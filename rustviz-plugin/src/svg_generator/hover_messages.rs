@@ -711,7 +711,7 @@ pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, poi
 // |   |            |
 pub fn event_dot_copy_from(my_name: &String, target_name: &String) -> String {
     format!(
-        "{0} is initialized by copy from {1}",
+        "{0} is initialized with a copy of {1}",
         my_name,
         target_name
     )
