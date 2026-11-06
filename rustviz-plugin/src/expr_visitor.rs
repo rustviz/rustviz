@@ -1946,6 +1946,41 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
 }
 
+/// Emit a GoOutOfScope at `line` for each of `vars` (block-local
+/// bindings that print_out_of_scope skips because they were registered
+/// with is_global = false, e.g. a loop body's `let`s and a `for`
+/// loop's pattern bindings). Ordered by RAP hash, i.e. registration
+/// order, so the output doesn't depend on HashSet iteration order.
+#[expect(clippy::iter_over_hash_type, clippy::disallowed_methods, reason = "the collected RAPs are sorted by hash below")]
+pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize) {
+    // Only variables this block registered itself (is_global = false).
+    // A name that shadows an outer variable resolves to the outer RAP
+    // (add_rap keeps the first registration, see the README's shadowing
+    // limitation); that one keeps its own scope end.
+    let is_block_local = |r: &ResourceAccessPoint| {
+      self.raps.get(r.name()).map_or(false, |rd| !rd.is_global && rd.rap.hash() == r.hash())
+    };
+    let mut vars: Vec<ResourceAccessPoint> = vars.into_iter().filter(|r| is_block_local(r)).collect();
+    // A struct's field columns (`p.name`) go out of scope with it.
+    let owners: HashSet<u64> = vars.iter().filter_map(|r| match r {
+      ResourceAccessPoint::Struct(st) if !st.is_member => Some(st.hash),
+      _ => None,
+    }).collect();
+    for rd in self.raps.values() {
+      if let ResourceAccessPoint::Struct(st) = &rd.rap {
+        if st.is_member && owners.contains(&st.owner) && !rd.is_global {
+          vars.push(rd.rap.clone());
+        }
+      }
+    }
+    vars.sort_by_key(|r| *r.hash());
+    vars.dedup_by_key(|r| *r.hash());
+    for var in vars {
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, id: *self.unique_id });
+        *self.unique_id += 1;
+    }
+}
+
 /// Register the pattern bindings of an `if let` / `while let` form
 /// against the scrutinee and emit the scrutinee→binding events at the
 /// `let_expr` line.

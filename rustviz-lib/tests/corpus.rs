@@ -512,6 +512,13 @@ const EXPECTED_OK: &[&str] = &[
     "match_three_arm_columns",
     "if_body_on_split_line",
     "else_on_join_line",
+    // Loop variables and loop-body locals start and end (#205, #256,
+    // #261).
+    "for_var_call_result",
+    "for_var_range",
+    "loop_body_local_drop",
+    "loop_var_in_branch",
+    "for_var_string_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5241,6 +5248,78 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v's mutable borrow ends",
         ],
         must_not_contain: &[],
+    },
+    // ─── Loop variables and loop-body locals (#205, #256, #261) ──────
+    // Before #205 these columns had neither a start nor an end, so the
+    // must_contain lines are what fails on the old plugin.
+    TooltipExpect {
+        name: "for_var_call_result",
+        // `for c in s.chars()`: each iteration's `c` is a fresh char,
+        // bound at the `for` line and out of scope at the closing `}`.
+        must_contain: &[
+            "c is bound to a copyable value",
+            "c goes out of scope",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "for_var_range",
+        must_contain: &[
+            "i is bound to a copyable value",
+            "i goes out of scope",
+            "n goes out of scope",
+        ],
+        must_not_contain: &[
+            "i goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_body_local_drop",
+        // Each iteration's `y` / `z` / `w` is dropped at the end of the
+        // loop body; `moved` was moved into `consume` first.
+        must_contain: &[
+            "y goes out of scope. Its resource is dropped.",
+            "z goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped.",
+            "moved goes out of scope. No resource is dropped.",
+            "i goes out of scope",
+        ],
+        must_not_contain: &[
+            "moved goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "for_var_string_drop",
+        // `s` owns each String the loop hands it, so it is dropped at the
+        // closing brace of every iteration.
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_var_in_branch",
+        // `x` (a while-let binding) and `i` (a for variable) exist only
+        // inside their loops, which sit in one branch of an if/else and
+        // a match. They aren't live across the conditional, and
+        // nothing is moved.
+        must_contain: &[
+            "x goes out of scope",
+            "i is bound to a copyable value",
+            "i goes out of scope",
+        ],
+        must_not_contain: &[
+            "x is live in a conditional expression",
+            "x was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            "x goes out of scope. No resource is dropped.",
+            "i is live in a conditional expression",
+            "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+        ],
     },
 ];
 

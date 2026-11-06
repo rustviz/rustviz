@@ -305,8 +305,9 @@ const Description: React.FC = () => (
     <p><strong>Simplified or not shown:</strong></p>
     <ul>
       <li>
-        Loops show one iteration (and a loop variable like{' '}
-        <code>for c in s.chars()</code> has no start or end); closures show
+        Loops show one iteration (a <code>for</code> loop&apos;s variable is
+        drawn from the <code>for</code> line to the body&apos;s closing
+        brace); closures show
         their captures but not their bodies (for a closure passed straight to
         a function, only what it moves or copies in); in a method chain only
         the first call is drawn on the variable (later calls work on temporary

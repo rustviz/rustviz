@@ -238,7 +238,10 @@ rather than listed here.
   For a closure passed straight to a function (`thread::spawn(move ||
   …)`), what it captures by value is drawn as moved / copied into the
   call; what it captures by reference (`apply(|x| x + k)`) isn't drawn.
-- Loops (`for`, `while`, `loop`) show a single iteration.
+- Loops (`for`, `while`, `loop`) show a single iteration. A `for`
+  loop's variable is drawn bound at the `for` line and going out of
+  scope at the body's closing brace, like the body's own `let`s; Rust
+  creates it afresh each iteration.
 - Leaving a function early drops every value it still owns, where it
   leaves. That's drawn for a `return` that ends an `if`/`else` branch
   or a `match` arm, but not for `panic!()` / `unreachable!()` (the
