@@ -288,10 +288,6 @@ const Description: React.FC = () => (
         the count (which clone frees the value isn&apos;t shown).
       </li>
       <li>
-        An or-pattern <code>match</code> arm (<code>Ok(s) | Err(s)</code>)
-        shows no binding.
-      </li>
-      <li>
         An <code>if</code> written on one line (<code>if c {'{'} take(s); {'}'}</code>)
         is drawn as if its body always ran; spread it over several lines to see
         the move as conditional.

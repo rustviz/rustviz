@@ -2976,6 +2976,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
             res.push((self.raps.get(&name).unwrap().rap.to_owned(), evt, parent_ty.clone()));
         }
+        // `Ok(s) | Err(s)`: every alternative binds the same names, with
+        // the same types and binding modes, out of the same matched
+        // value, so whichever one matches, the bindings are the first
+        // alternative's (#503).
+        PatKind::Or(alts) => {
+            if let Some(first) = alts.first() {
+                self.get_dec_of_pat2(first, ty_results, parent, parent_ty, scope, res);
+            }
+        }
         _ => {}
     }
 }
