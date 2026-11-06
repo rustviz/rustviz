@@ -818,6 +818,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     is_param && !moved_from(self.preprocessed_events, name)
   }
 
+  /// Whether `e` never completes normally: its type is `!` (`return`,
+  /// `panic!()`), or it is an `if`/`else` chain or `match` every branch
+  /// of which diverges, or a block that ends in one (#491). rustc types
+  /// `if c { return 1; } else { return 2; }` as `()`, not `!`, so the
+  /// type alone misses a nested `else if` whose branches all return.
+  pub fn expr_diverges(&self, e: &'tcx Expr<'tcx>) -> bool {
+    if self.tcx.typeck(e.hir_id.owner).expr_ty_opt(e).is_some_and(|ty| ty.is_never()) {
+      return true;
+    }
+    match e.kind {
+      ExprKind::If(_, then, Some(els)) => self.expr_diverges(then) && self.expr_diverges(els),
+      ExprKind::Match(_, arms, _) => !arms.is_empty() && arms.iter().all(|a| self.expr_diverges(a.body)),
+      ExprKind::Block(b, _) => {
+        b.expr.is_some_and(|t| self.expr_diverges(t))
+          || b.stmts.iter().any(|st| matches!(st.kind,
+            StmtKind::Expr(x) | StmtKind::Semi(x) if self.expr_diverges(x)))
+      }
+      _ => false,
+    }
+  }
+
   /// Keep a `return`'s drops (`drop_locals_on_return`) only in a
   /// branch that diverges, i.e. one that always leaves through them;
   /// in one that doesn't (the `return` is in a nested `if` without
@@ -1875,9 +1896,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // A branch of type `!` (`return`, `panic!()`) never reaches
         // the merge (#296). Values dropped at a `return` in it (#363)
         // are live in it.
-        let typeck = self.tcx.typeck(expr.hir_id.owner);
-        let if_diverges = typeck.expr_ty(if_expr).is_never();
-        let else_diverges = else_expr.is_some_and(|e| typeck.expr_ty(e).is_never());
+        let if_diverges = self.expr_diverges(if_expr);
+        let else_diverges = else_expr.is_some_and(|e| self.expr_diverges(e));
         liveness.extend(self.keep_exit_drops(&mut if_ev, if_diverges));
         liveness.extend(self.keep_exit_drops(&mut else_ev, else_diverges));
         // Variables declared inside a loop in a branch already go out
@@ -2370,7 +2390,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // arm's own pat-decls are subtracted at the end.
                 collect_event_live_vars(&branch_e_data, &mut liveness);
                 // Values dropped at a `return` in the arm (#363).
-                let arm_diverges = self.tcx.typeck(arm.body.hir_id.owner).expr_ty(arm.body).is_never();
+                let arm_diverges = self.expr_diverges(arm.body);
                 liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
                 arm_scoped = scoped_in_events(&branch_e_data, &self.exit_drops);
                 all_pat_decls = &all_pat_decls | &arm_scoped;
@@ -3439,7 +3459,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `x = …` is treated as a reassignment.
   fn join_uninit_locals(&mut self, ends: Vec<(Option<&'tcx Expr<'tcx>>, HashMap<HirId, DeferredLet>)>) {
     let diverges = |e: &Option<&'tcx Expr<'tcx>>| {
-      e.is_some_and(|e| self.tcx.typeck(e.hir_id.owner).expr_ty(e).is_never())
+      e.is_some_and(|e| self.expr_diverges(e))
     };
     let mut reaching: Vec<HashMap<HirId, DeferredLet>> =
       ends.iter().filter(|(e, _)| !diverges(e)).map(|(_, m)| m.clone()).collect();
@@ -3847,7 +3867,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     events: &[(usize, ExternalEvent)],
     decls: &HashSet<ResourceAccessPoint>,
   ) -> (bool, Vec<BranchExit>) {
-    if !self.tcx.typeck(body.hir_id.owner).expr_ty(body).is_never() {
+    if !self.expr_diverges(body) {
       return (false, Vec::new());
     }
     let leaves = branch_leaves(self.tcx, body);

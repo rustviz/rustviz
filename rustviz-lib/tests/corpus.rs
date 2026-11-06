@@ -652,6 +652,9 @@ const EXPECTED_OK: &[&str] = &[
     // value being dropped (#267).
     "reassign_in_branch_drop",
     "reassign_through_ref_in_branch",
+    // An `else if` chain / `else { match .. }` whose branches all
+    // return diverges as a whole (#491).
+    "else_if_chain_diverges",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6694,6 +6697,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "its previous value is dropped",
             "(copied from",
             "(moved from",
+        ],
+    },
+    // #491: every branch of the `else if` chain returns, so only the
+    // `if c` path (which moved `s`) reaches the end: nothing is dropped
+    // there, and Rust needs no runtime drop flag for it to say so.
+    TooltipExpect {
+        name: "else_if_chain_diverges",
+        must_contain: &[
+            "s was moved or dropped in every branch above that reaches this point",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Its resource is dropped here only if no branch above moved it",
+            "s was moved in at least one branch above, so it can't be used after the branches",
         ],
     },
 ];
