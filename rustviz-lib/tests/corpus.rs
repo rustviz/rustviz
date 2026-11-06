@@ -492,6 +492,9 @@ const EXPECTED_OK: &[&str] = &[
     "move_into_call_same_line_borrow_end",
     // A call's result nothing takes is a temporary, dropped at the end of its statement (#457).
     "unbound_temporary",
+    // A reference parameter's borrow end on a line shared with another
+    // arrow (#416).
+    "ref_param_end_shared_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5078,6 +5081,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to (temporary 11)",
         ],
     },
+    TooltipExpect {
+        name: "ref_param_end_shared_line",
+        // `r`'s last use is also `v`'s last use. The end event (from the
+        // parameter to the caller) isn't an arrow, so it used to be
+        // dropped when another arrow shared the line (#416).
+        must_contain: &[
+            "v's immutable borrow ends",
+            "v's mutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -5712,6 +5726,44 @@ fn drop_on_a_call_dot_is_marked_below_it() {
         .expect("a call dot whose tooltip includes the drop");
     let group = &group[..group.find("</g>").unwrap_or(group.len())];
     assert!(group.contains("class=\"drop-mark\""), "no drop mark below the call dot: {}", group);
+}
+
+#[test]
+fn shared_reborrow_keeps_param_column_to_its_end() {
+    // `fn f(v: &Vec<i32>) { let r = &v[0]; println!("{}", r); }`: `r` is a
+    // shared reborrow through `v`, so `v` stays readable until `r`'s last
+    // use (line 3). v's column has to run down to the dot that says
+    // "v's immutable borrow ends"; it used to stop at line 2, where `r`
+    // is created (#416).
+    let rv = run_with_local_backend("ref_param_end_shared_line");
+    let timeline = rv.timeline_panel_string();
+    let end_y: f64 = start_tags(&timeline, "circle")
+        .into_iter()
+        .find(|t| attr(t, "data-tooltip-text").is_some_and(|x| x.contains("immutable borrow ends")))
+        .map(|t| num_attr(t, "cy"))
+        .expect("a dot for v's borrow end");
+    let first_y: f64 = start_tags(&timeline, "circle")
+        .into_iter()
+        .find(|t| attr(t, "data-tooltip-text").is_some_and(|x| x.contains("is an immutable borrow from the caller")))
+        .map(|t| num_attr(t, "cy"))
+        .expect("a dot for v's start");
+    // The column's state lines (all of `f`'s v column: same x as the
+    // first dot, between its first and last dots) must reach the end dot
+    // without a gap.
+    let mut spans: Vec<(f64, f64)> = start_tags(&timeline, "line")
+        .into_iter()
+        .filter(|t| attr(t, "class").is_some_and(|c| c.contains("hollow")))
+        .filter(|t| num_attr(t, "y1") >= first_y && num_attr(t, "y2") <= end_y)
+        .map(|t| (num_attr(t, "y1"), num_attr(t, "y2")))
+        .collect();
+    spans.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut reached = first_y;
+    for (y1, y2) in &spans {
+        if *y1 <= reached { reached = reached.max(*y2); }
+    }
+    assert_eq!(reached, end_y, "v's column stops at y={} but its borrow ends at y={}", reached, end_y);
+    // `end_y` is line 3, one row below the borrow on line 2.
+    assert!(end_y - first_y >= 60.0, "v's borrow ends too early: {} .. {}", first_y, end_y);
 }
 
 #[test]
