@@ -1903,14 +1903,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // only when the branch is taken, so they start `if_ids`; the
         // scrutinee is evaluated either way and stays outside.
         let if_lo;
+        let if_hash_lo;
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
             if_lo = *self.unique_id;
+            if_hash_lo = self.rap_hashes;
             self.register_iflet_let_bindings(let_expr, None)
           } else {
             self.visit_expr(&guard_expr);
             if_lo = *self.unique_id;
+            if_hash_lo = self.rap_hashes;
             HashSet::new()
           };
         self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
@@ -1918,7 +1921,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // `let x;` locals (#234); see join_uninit_locals.
         let uninit_before = self.uninit_locals.clone();
         self.visit_expr(&if_expr);
-        let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before);
+        // Everything declared in each branch, also inside an inline
+        // construct nested in it (an `else if let`'s bindings, #501):
+        // see raps_declared_since.
+        let if_inner = self.raps_declared_since(if_hash_lo, &uninit_before);
+        let else_hash_lo = self.rap_hashes;
+        let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
         let if_ids = if_lo..*self.unique_id;
         let else_decl = match else_expr {
           Some(e) => {
@@ -1927,6 +1935,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
           None => HashSet::new(),
         };
+        let mut else_inner = self.raps_declared_since(else_hash_lo, &uninit_before);
+        if let Some(e) = else_expr {
+          else_inner = &else_inner | &else_if_let_bindings(e, &self.raps);
+        }
         let uninit_after_else = std::mem::take(&mut self.uninit_locals);
         self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if), (else_expr, uninit_after_else)]);
         let else_ids = if_ids.end..*self.unique_id;
@@ -1946,6 +1958,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // top-level `let` inside it).
         let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
         if_decl = &if_decl | &iflet_bindings;
+        // `if_decl` / `else_decl` are the variables this `if` ends at
+        // its branches' closing braces. The `*_scope` sets add those
+        // ended by a construct nested in the branch (it draws their
+        // GoOutOfScope itself): none of them is live across the `if`,
+        // and the branch's events for them go on their own columns.
+        let if_scope = &if_decl | &if_inner;
+        let else_scope = &else_decl | &else_inner;
 
         // `if cond { … }` / `if let pat = expr { … }` without an
         // `else`. When the body moves a variable that outlives the
@@ -1971,7 +1990,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .filter(|(_, e)| if_ids.contains(&e.get_id())
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
-            if !events_move_out_of_outer(&body_ev, &if_decl) {
+            if !events_move_out_of_outer(&body_ev, &if_scope) {
                 for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
                     self.preprocessed_events.push((
                         if_end,
@@ -2021,7 +2040,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // branch — they're not pre-existing variables that need a
         // branched timeline. Subtract them out.
         let declared_in_branches: HashSet<ResourceAccessPoint> =
-          &(&if_decl | &else_decl) | &(&if_scoped | &else_scoped);
+          &(&if_scope | &else_scope) | &(&if_scoped | &else_scoped);
         liveness = &liveness - &declared_in_branches;
 
         // add gos events for variables declared in each block
@@ -2034,8 +2053,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
+        if_decl.extend(if_inner);
         if_decl.extend(if_scoped);
         let mut else_decl = else_decl;
+        else_decl.extend(else_inner);
         else_decl.extend(else_scoped);
 
         
@@ -2144,15 +2165,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               if let ExprKind::If(cond, then_body, _else) = e.kind {
                 // While-let: register the pattern bindings against the
                 // scrutinee so identifiers inside the body resolve.
-                // Pass body_end so the helper emits a GoOutOfScope at
-                // the body's closing brace — there's no surrounding
-                // Branch event to clean up after the binding (loop
-                // bodies are visited inline into the global timeline).
+                // They go out of scope at the body's closing brace;
+                // there's no surrounding Branch event to clean up after
+                // them (loop bodies are visited inline into the global
+                // timeline). That GoOutOfScope is emitted after the
+                // body's events: inside an if/match branch, events are
+                // kept in the order they're emitted, and one emitted
+                // before the body put the binding's end before its uses
+                // (`x goes out of scope. No resource is dropped.` for an
+                // i32 `x`, #261).
+                let mut bindings = HashSet::new();
                 if let ExprKind::Let(let_expr) = cond.kind {
                   self.visit_expr(let_expr.init);
-                  let body_end = self.tcx.sess.source_map()
-                    .lookup_char_pos(then_body.span.hi()).line;
-                  self.register_iflet_let_bindings(let_expr, Some(body_end));
+                  bindings = self.register_iflet_let_bindings(let_expr, None);
                 } else {
                   self.visit_expr(cond);
                 }
@@ -2160,11 +2185,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.inside_branch = true;
                 self.visit_expr(then_body);
                 self.inside_branch = prev;
-                // The body's `let`s go out of scope at its closing
-                // brace (#256); nothing else emits that for them.
+                // The body's `let`s, and the pattern's bindings, go out
+                // of scope at its closing brace (#256); nothing else
+                // emits that for them.
                 let body_end = self.tcx.sess.source_map()
                   .lookup_char_pos(then_body.span.hi()).line;
-                let decls = get_decl_of_expr(then_body, &self.tcx, &self.raps);
+                let mut decls = get_decl_of_expr(then_body, &self.tcx, &self.raps);
+                decls.extend(bindings);
                 self.emit_scope_end(decls, body_end);
                 // A `while` also ends when its condition is false.
                 self.emit_loop_exit_moves(expr, None, &before, true);
@@ -2292,6 +2319,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let uninit_before = self.uninit_locals.clone();
             let mut uninit_ends = Vec::new();
             for arm in arms.iter() {
+              let arm_hash_lo = self.rap_hashes;
               let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
               let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
 
@@ -2487,6 +2515,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
               all_pat_decls = &all_pat_decls | &pat_decls;
               let mut arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
+              // Everything declared in the arm, also inside an inline
+              // construct nested in it (`Some(x) => { if let Some(y) =
+              // b { … } }`, #501), exists only in the arm (the nested
+              // construct ends what it declares itself).
+              let arm_inner = self.raps_declared_since(arm_hash_lo, &uninit_before);
+              all_pat_decls = &all_pat_decls | &arm_inner;
               // Variables declared inside a loop in this arm already go
               // out of scope there (see scoped_in_events).
               let mut arm_scoped: HashSet<ResourceAccessPoint> = HashSet::new();
@@ -2538,6 +2572,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
               }
 
+              arm_decls.extend(arm_inner);
               arm_decls.extend(arm_scoped);
               if !inline {
                 let branch_line_map = create_line_map(&branch_e_data);
@@ -3841,6 +3876,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       Evt::Move
     }
+  }
+
+  /// The variables that came into existence while one branch of a
+  /// conditional was visited: every RAP registered since the RAP
+  /// counter stood at `first_hash` (hashes are handed out in order).
+  /// That's the branch's own `let`s and pattern bindings, but also
+  /// those of an inline `if` / `if let` / `else if let` / `for` nested
+  /// in it (#501), which the branch's top-level statements don't show.
+  /// They exist only inside the branch, so they mustn't be drawn as
+  /// variables live across it. Left out: functions (call-site labels),
+  /// and `let x;` locals declared before the branch and first assigned
+  /// in it (`uninit`, #234), which do exist before the branch.
+  fn raps_declared_since(
+    &self,
+    first_hash: usize,
+    uninit: &HashMap<HirId, DeferredLet>,
+  ) -> HashSet<ResourceAccessPoint> {
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let deferred: HashSet<String> = uninit.keys().map(|h| self.tcx.hir_name(*h).to_string()).collect();
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let declared = self.raps.values()
+      .map(|rd| &rd.rap)
+      // A deferred struct's field columns (`p.x`) come with it.
+      .filter(|r| *r.hash() >= first_hash as u64 && !r.is_fn()
+        && !r.name().split('.').next().is_some_and(|base| deferred.contains(base)))
+      .cloned()
+      .collect();
+    declared
   }
 
   /// Set the uninitialized-locals state after a branch construct from

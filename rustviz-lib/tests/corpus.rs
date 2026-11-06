@@ -726,6 +726,15 @@ const EXPECTED_OK: &[&str] = &[
     "array_literal_moves",
     "vec_macro_moves",
     "index_copy_read",
+    // A variable declared inside a branch, also in an inline `if` /
+    // `else if let` / `for` nested in it, exists only there (#501).
+    "else_if_let_binding",
+    "match_arm_nested_if_let",
+    "if_branch_nested_decls",
+    "while_let_in_branch",
+    // An `else if let` reusing the `if let` binding's name used to panic
+    // in fetch_timeline (#525).
+    "else_if_let_same_name",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7684,6 +7693,90 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first goes out of scope. No resource is dropped.",
             "v's resource is copied",
             "grid[1][0] is copied out of grid's resource",
+        ],
+    },
+    // ─── Variables declared in a nested construct (#501) ─────────────
+    TooltipExpect {
+        name: "else_if_let_binding",
+        // `y` exists only in the `else if let` branch: one column, no
+        // split dot of its own, no "no value yet" strips over the `if`
+        // branch. It's an i32: no drop text.
+        must_contain: &[
+            "Copy from b to y",
+            "y is initialized with a copy of b",
+            "y goes out of scope",
+            "x goes out of scope",
+        ],
+        must_not_contain: &[
+            "y is live in a conditional expression ",
+            "y has no value yet",
+            "y goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_arm_nested_if_let",
+        // `y`, bound by an `if let` inside the `Some(x)` arm, exists only
+        // in that `if let`, not across the `match`.
+        must_contain: &[
+            "y immutably borrows a resource",
+            "y's immutable borrow ends",
+            "y goes out of scope",
+            "x goes out of scope",
+        ],
+        must_not_contain: &[
+            "y is live in a conditional expression ",
+            "y has no value yet",
+        ],
+    },
+    TooltipExpect {
+        name: "if_branch_nested_decls",
+        // `z` (a `let` in an inner `if`) and `n` (a `for` variable) are
+        // declared inside the `if` branch; `s` is the variable that
+        // really is live across the `if`.
+        must_contain: &[
+            "z acquires ownership of a resource",
+            "z goes out of scope. Its resource is dropped.",
+            "n immutably borrows a resource",
+            "n's immutable borrow ends",
+            "s is live in a conditional expression ",
+        ],
+        must_not_contain: &[
+            "z is live in a conditional expression ",
+            "n is live in a conditional expression ",
+            "z has no value yet",
+            "n has no value yet",
+        ],
+    },
+    TooltipExpect {
+        name: "while_let_in_branch",
+        // #261: a `while let` binding in one branch of an `if` exists only
+        // in the loop body. It's an i32: no drop text at its end (its
+        // end used to be ordered before its use in the body).
+        must_contain: &[
+            "x is initialized with a copy of pop",
+            "x goes out of scope",
+            "v is live in a conditional expression ",
+        ],
+        must_not_contain: &[
+            "x is live in a conditional expression ",
+            "x has no value yet",
+            "x goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "else_if_let_same_name",
+        // #525: both `z`s share one column (shadowing isn't split into
+        // columns yet, see README), so the second one's copy reads "z is
+        // assigned a copy of b" there; that wording is the known
+        // one-column limitation and isn't pinned here.
+        must_contain: &[
+            "z is initialized with a copy of a",
+            "Copy from b to z",
+            "z goes out of scope",
+        ],
+        must_not_contain: &[
+            "z is live in a conditional expression ",
+            "z has no value yet",
         ],
     },
 ];
