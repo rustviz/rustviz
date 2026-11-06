@@ -421,6 +421,8 @@ const EXPECTED_OK: &[&str] = &[
     "operator_result_struct_fields",
     // Reassigning a reference variable is an assignment (#414).
     "ref_reassign_wording",
+    "long_ref_field_label",
+    "long_ref_label_then_short",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5087,6 +5089,65 @@ fn guard_that_moves_is_refused() {
     let msg = err.to_string();
     assert!(msg.contains("match guards that move or assign a variable declared outside the guard (`s`"),
         "expected the guard-move refusal, got:\n{}", msg);
+}
+
+/// Column header labels in one row as (x, visible text), left to right.
+/// A reference column's label is `r|*r` (the `|` sits in a `<tspan>`).
+fn header_labels(timeline: &str) -> Vec<(f64, f64, String)> {
+    let mut out = Vec::new();
+    for t in timeline.split("<text ").skip(1) {
+        let (tag, rest) = t.split_once('>').unwrap();
+        if !tag.contains("class=\"label") {
+            continue;
+        }
+        let body = &rest[..rest.find("</text>").unwrap()];
+        let mut text = String::new();
+        let mut in_tag = false;
+        for c in body.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => text.push(c),
+                _ => {}
+            }
+        }
+        out.push((num_attr(tag, "x"), num_attr(tag, "y"), text));
+    }
+    out.sort_by(|a, b| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap());
+    out
+}
+
+/// Neighbouring header labels don't overlap, and the last one fits in the
+/// panel. Labels are centred, monospace at 14px (about 8.4px a glyph).
+/// `h.e.part|*h.e.part` used to run into `h.e.n` (#361).
+#[test]
+fn long_header_labels_do_not_overlap() {
+    const GLYPH: f64 = 8.4;
+    for name in ["long_ref_field_label", "long_ref_label_then_short"] {
+        let t = run_with_local_backend(name).timeline_panel_string();
+        let labels = header_labels(&t);
+        for w in labels.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            if a.1 != b.1 {
+                continue;
+            }
+            let a_right = a.0 + a.2.chars().count() as f64 * GLYPH / 2.0;
+            let b_left = b.0 - b.2.chars().count() as f64 * GLYPH / 2.0;
+            assert!(
+                a_right < b_left,
+                "{}: label {:?} (x={}) overlaps {:?} (x={})",
+                name, a.2, a.0, b.2, b.0
+            );
+        }
+        let svg_tag = &t[t.find("<svg").unwrap() + 4..];
+        let width: f64 = {
+            let k = " width=\"";
+            let v = &svg_tag[svg_tag.find(k).unwrap() + k.len()..];
+            v[..v.find('"').unwrap()].trim_end_matches("px").parse().unwrap()
+        };
+        let last = labels.iter().map(|l| l.0 + l.2.chars().count() as f64 * GLYPH / 2.0).fold(0.0, f64::max);
+        assert!(last <= width, "{}: rightmost label ends at {} past the panel width {}", name, last, width);
+    }
 }
 
 /// #279: past the 12th hash, columns had no colour rule, so their state
