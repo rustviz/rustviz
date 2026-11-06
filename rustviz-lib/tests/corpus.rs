@@ -3132,7 +3132,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from b to !",
             "Copy from p.y to -",
             "Copy from *r to -",
-            "b's resource is copied",
+            "b's value is copied",
             "Move from wave to -",
             "wave's resource is moved",
             "wave goes out of scope. No resource is dropped.",
