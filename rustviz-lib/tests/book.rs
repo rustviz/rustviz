@@ -154,14 +154,15 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c4_07_first_word_loop",
         status: Wrong,
-        note: "bytes = s.as_bytes() is shown as copied from as_bytes, and s's borrow ends at L2 although bytes borrows *s until L3 (#171)",
+        note: "bytes = s.as_bytes() is shown as copied from as_bytes (#171)",
         must_contain: &[
             "s is an immutable borrow from the caller",
             "bytes holds an immutable reference; it can read the borrowed resource",
             "Copy from first_word to word",
+            "L2 as_bytes no longer borrows the resource s points to",
         ],
-        must_not_contain: &["bytes is the owner of the resource"],
-        known_wrong: &["Copy from as_bytes to bytes", "L2 s's resource is no longer immutably borrowed"],
+        must_not_contain: &["bytes is the owner of the resource", "L2 s's resource is no longer immutably borrowed"],
+        known_wrong: &["Copy from as_bytes to bytes"],
         ..E
     },
     Snippet {
@@ -520,17 +521,15 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_11_enum_method",
         status: Wrong,
-        note: "bare println! arm body: s's borrow end and self's 'no longer borrowed' are drawn on L10, above the println! that reads s (#371); self's own borrow ends at L9, before s reborrows through it at L10 (#372)",
+        note: "bare println! arm body: s's borrow end is drawn on L10, above the println! that reads s (#371); self's own borrow ends at L9, before s reborrows through it at L10 (#372)",
         must_contain: &[
             "Partial immutable borrow from self to s",
             "call reads from m (implicitly borrowed)",
             "m goes out of scope. Its resource is dropped.",
+            "L10 s no longer borrows the resource self points to",
         ],
-        known_wrong: &[
-            "L10 s's immutable borrow ends",
-            "L10 self's resource is no longer immutably borrowed",
-            "L9 self's immutable borrow ends",
-        ],
+        must_not_contain: &["L10 self's resource is no longer immutably borrowed"],
+        known_wrong: &["L10 s's immutable borrow ends", "L9 self's immutable borrow ends"],
         ..E
     },
     // ─── Chapter 8: collections ───────────────────────────────────────
@@ -732,9 +731,14 @@ const BOOK: &[Snippet] = &[
             "L3 x's immutable borrow ends (what it borrows from isn't shown)",
             "first_plus_one reads from v",
             "v goes out of scope. Its resource is dropped.",
+            "L2 first no longer borrows the resource v points to",
         ],
-        must_not_contain: &["x is the owner of the resource", "Return immutably borrowed resource from x to *x"],
-        known_wrong: &["L2 v's resource is no longer immutably borrowed"],
+        must_not_contain: &[
+            "x is the owner of the resource",
+            "Return immutably borrowed resource from x to *x",
+            "L2 v's resource is no longer immutably borrowed",
+        ],
+        known_wrong: &["L2 v's immutable borrow ends"],
         ..E
     },
     Snippet {

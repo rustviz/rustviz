@@ -386,6 +386,54 @@ pub fn event_dot_mut_lend(my_name: &String, target_name: &String, is_copy: bool)
     )
 }
 
+// Lender dot when the lender r is itself a reference (#313): `let r2 =
+// &mut *r;`, `let r3 = &*r;`, `r.push('a')`, `add(r)`. r owns nothing,
+// so what's borrowed is what r points to (r's own lender's data),
+// reached through r. While a mutable borrow through r is live r can't
+// be used; during a shared one a `&mut` r is read-only. A `&T` r can't
+// hand out mutable access to its referent, so a mutable borrow from it
+// (`&mut r` on a `let mut r: &T`) borrows the reference r itself.
+// `pointee_copy`: r points to a Copy type, so it's a "value" (#312).
+pub fn event_dot_lend_through_ref(ref_name: &String, target_name: &String, mutable: bool, ref_is_mut: bool, pointee_copy: bool) -> String {
+    let r = fmt_style(ref_name);
+    let t = fmt_style(target_name);
+    let noun = held(pointee_copy);
+    match (mutable, ref_is_mut) {
+        (true, true) => format!(
+            "the {2} {0} points to is mutably borrowed by {1} through {0}; {0} can't be used while the borrow is live",
+            r, t, noun),
+        (true, false) => format!(
+            "{0} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
+            r, t),
+        (false, true) => format!(
+            "the {2} {0} points to is immutably borrowed by {1} through {0}; {0} is read-only while the borrow is live",
+            r, t, noun),
+        (false, false) => format!(
+            "the {2} {0} points to is immutably borrowed by {1}",
+            r, t, noun),
+    }
+}
+
+// Lender dot where a borrow through the reference r ends (#313); the
+// counterpart of event_dot_lend_through_ref. `borrower` is the
+// reference / function / closure whose borrow ended, when known.
+// "the resource r points to is no longer borrowed" alone would be
+// false: r's own borrow of it is still live. No "r can be used
+// again": a call can consume r instead (`take(r)` with a generic
+// parameter moves it; #200), and the borrow can live on in the call's
+// result (`let w = first(r);`).
+pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&String>, mutable: bool, ref_is_mut: bool, pointee_copy: bool) -> String {
+    let r = fmt_style(ref_name);
+    let noun = held(pointee_copy);
+    if mutable && !ref_is_mut {
+        return format!("{0} is no longer mutably borrowed", r);
+    }
+    match borrower {
+        Some(b) => format!("{1} no longer borrows the {2} {0} points to", r, fmt_style(b), noun),
+        None => format!("the {1} {0} points to is no longer borrowed through {0}", r, noun),
+    }
+}
+
 // 0   1
 //     |
 // o<--o
@@ -1088,6 +1136,17 @@ pub fn state_partial_privilege(my_name: &String, is_copy: bool) -> String {
     format!(
         "{0}'s {1} is being shared by one or more variables",
         my_name_fmt, held(is_copy)
+    )
+}
+
+// PartialPrivilege on a `&mut` reference's lifeline: what it points to
+// is shared through it (`let r3 = &*r;`), so r can only read until
+// those shared borrows end (#313). r owns nothing, so the owner's
+// "r's resource is being shared" was wrong.
+pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> String {
+    format!(
+        "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only read it",
+        fmt_style(my_name), held(pointee_copy)
     )
 }
 

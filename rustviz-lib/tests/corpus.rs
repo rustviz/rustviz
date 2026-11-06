@@ -366,6 +366,8 @@ const EXPECTED_OK: &[&str] = &[
     "if_no_else_nested_move",
     // A reference to a Copy value says "the borrowed value" (#312).
     "ref_copy_referent_wording",
+    // Borrowing from a reference borrows what it points to (#313).
+    "reborrow_through_ref_wording",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -696,15 +698,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from rd to rd2",
             // Lend dots: a `&mut` source can't be used while the
             // borrow is live; an owner lent immutably is read-only.
-            "ra's resource is mutably borrowed by ra2; ra can't be used while the borrow is live",
-            "rb's resource is mutably borrowed by rb2; rb can't be used while the borrow is live",
+            // ra / rb own nothing: what's borrowed is what they point to
+            // (#313). (rb2 = &mut rb also borrows rb itself; the dot
+            // doesn't distinguish that, see the PR for #313.)
+            "the resource ra points to is mutably borrowed by ra2 through ra; ra can't be used while the borrow is live",
+            "ra2 no longer borrows the resource ra points to",
+            "the resource rb points to is mutably borrowed by rb2 through rb; rb can't be used while the borrow is live",
             "c's resource is immutably borrowed by rc; c is read-only while the borrow is live",
             // A `&String` source was already read-only, so the
             // borrow adds no restriction worth stating.
-            "rc's resource is immutably borrowed by rc2",
-            "rd's resource is immutably borrowed by rd2",
+            "the resource rc points to is immutably borrowed by rc2",
+            "the resource rd points to is immutably borrowed by rd2",
         ],
         must_not_contain: &[
+            "ra's resource is mutably borrowed by ra2; ra can't be used while the borrow is live",
+            "*ra's resource is no longer mutably borrowed",
+            "rc's resource is immutably borrowed by rc2",
             "Mutable reborrow from rb to rb2",
             "Immutable borrow from rc to rc2",
             "Immutable reborrow from rd to rd2",
@@ -744,10 +753,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "take reads from/writes to y",
             // `show(x)` with x: `&String`: the reference is copied.
             "show reads from x",
-            "x's resource is immutably borrowed by show",
-            "y's resource is mutably borrowed by push; y can't be used while the borrow is live",
+            // x and y own nothing; the calls borrow what they point to
+            // (#313). take consumes y, so nothing says y is usable again.
+            "the resource x points to is immutably borrowed by show",
+            "the resource y points to is mutably borrowed by push through y; y can't be used while the borrow is live",
+            "push no longer borrows the resource y points to",
         ],
         must_not_contain: &[
+            "x's resource is immutably borrowed by show",
+            "y's resource is mutably borrowed by push; y can't be used while the borrow is live",
+            "y's resource is no longer mutably borrowed",
             "first reads from/writes to y (mutable reborrow — y can't be used until first returns)",
             "take reads from/writes to y (mutable reborrow — y can't be used until take returns)",
             "show reads from x (immutable reborrow — x is read-only until show returns)",
@@ -3468,6 +3483,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(copied from",
             "the resource s points to is modified through *s",
             "(moved from",
+        ],
+    },
+    TooltipExpect {
+        name: "reborrow_through_ref_wording",
+        // r / r2 / p own nothing: a borrow from them is of what they
+        // point to, through them. The end of one doesn't end r's own
+        // borrow of s, so it names the borrower whose borrow ended.
+        must_contain: &[
+            "the resource r points to is mutably borrowed by r2 through r; r can't be used while the borrow is live",
+            "r2 no longer borrows the resource r points to",
+            "the resource r2 points to is mutably borrowed by push through r2; r2 can't be used while the borrow is live",
+            "push no longer borrows the resource r2 points to",
+            "the resource r points to is mutably borrowed by push through r; r can't be used while the borrow is live",
+            "the resource r points to is immutably borrowed by r3 through r; r is read-only while the borrow is live",
+            "r holds a mutable reference, but the resource it points to is currently shared through it, so r can only read it",
+            "r3 no longer borrows the resource r points to",
+            "the value p points to is mutably borrowed by q through p; p can't be used while the borrow is live",
+            "q mutably borrows a value",
+            "q no longer borrows the value p points to",
+            "Return mutably borrowed value from q to *p",
+            "the value p points to is mutably borrowed by add through p; p can't be used while the borrow is live",
+            "add no longer borrows the value p points to",
+        ],
+        must_not_contain: &[
+            "r's resource is mutably borrowed by r2; r can't be used while the borrow is live",
+            "*r's resource is no longer mutably borrowed",
+            "r's resource is mutably borrowed by push; r can't be used while the borrow is live",
+            "r's resource is no longer mutably borrowed",
+            "r2's resource is mutably borrowed by push; r2 can't be used while the borrow is live",
+            "r's resource is being shared by one or more variables",
+            "r's resource is immutably borrowed by r3; r is read-only while the borrow is live",
+            "*r's resource is no longer immutably borrowed",
+            "p's resource is mutably borrowed by q; p can't be used while the borrow is live",
+            "p's resource is mutably borrowed by add; p can't be used while the borrow is live",
+            "Return mutably borrowed resource from q to *p",
         ],
     },
 ];
