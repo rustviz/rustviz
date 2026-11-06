@@ -35,7 +35,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # windows-latest is paused during the 2.0 landing push: its runners
+        # queue for 10-40 min and gated every merge. Re-enable it (and add
+        # "build (windows-latest)" back to the main ruleset's required
+        # checks) before tagging 2.0. Tracked in #479.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     # Use bash everywhere — Windows runners ship Git Bash under the
