@@ -4,7 +4,7 @@
 // assignment (2026-11-05 decision): "*r acquires ownership of a new
 // resource; its previous resource is dropped". `*n = 5` (an integer) is
 // "*n is assigned a new value", `*rq = q2` (a struct with nothing to drop)
-// "*rq acquires ownership of a resource", and `*r += "x"` (an operator
+// "*rq is assigned a new value" (#484), and `*r += "x"` (an operator
 // call, nothing overwritten) keeps "modified through".
 struct Q {
     n: i32,

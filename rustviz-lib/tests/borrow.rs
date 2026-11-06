@@ -252,12 +252,11 @@ fn main() {
 fn immutable_struct_renders_hollow_and_drops_at_oos() {
     // `let r = Rect { .. }` — r is an immutable Struct binding.
     // Both r and its fields r.w / r.h should render Hollow (not
-    // Solid; they can't be reassigned). Drop-indicator wording
-    // diverges by Copy-ness: Rect is non-Copy (no derive), so r
-    // shows "Its resource is dropped" at OOS; r.w / r.h are u32
-    // which IS Copy, so they get the plain "goes out of scope"
-    // tooltip — Copy types have no destructor and the renderer
-    // shouldn't pretend otherwise.
+    // Solid; they can't be reassigned). Rect is non-Copy (no derive)
+    // but holds only integers, so it has no drop glue: nothing is
+    // dropped at OOS and the tooltip says only "goes out of scope"
+    // (#484: "resource" is for values that need drop). The same goes
+    // for the Copy fields r.w / r.h.
     let src = "\
 struct Rect { w: u32, h: u32 }
 
@@ -268,11 +267,14 @@ fn main() {
 ";
     let timeline = timeline_of(src);
 
-    // Non-Copy struct: drop tooltip + drop dot.
-    let r_drop = "r goes out of scope. Its resource is dropped.";
+    // Non-Copy struct with nothing to drop: plain OOS tooltip.
     assert!(
-        timeline.contains(r_drop),
-        "expected drop tooltip for r (non-Copy struct), not found"
+        timeline.contains("r goes out of scope"),
+        "expected plain OOS tooltip for r, not found"
+    );
+    assert!(
+        !timeline.contains("r goes out of scope. Its resource is dropped."),
+        "r has nothing to drop: should NOT carry the drop suffix"
     );
 
     // Copy fields: plain OOS tooltip, NO "Its resource is dropped".

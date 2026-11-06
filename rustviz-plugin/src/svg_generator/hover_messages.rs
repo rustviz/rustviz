@@ -34,6 +34,10 @@ fn fmt_style(plain: &String) -> String {
 // (rustc rejects `Copy` + `Drop`, E0184), so it has nothing to clean up
 // and nothing "owned" in the drop sense: its columns say "holds a
 // value", and the copy / borrow tooltips on them say "value" too.
+// A non-Copy type with no drop glue (#484: an iterator over borrowed data,
+// a struct of integers that doesn't derive `Copy`) holds a "value" too:
+// "resource" means something that needs cleaning up. Callers pass
+// `holds_value()` (Copy, or non-Copy with nothing to drop).
 // Everything else keeps RustViz's "resource".
 fn held(is_copy: bool) -> &'static str {
     if is_copy { "value" } else { "resource" }
@@ -112,6 +116,8 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     moved: &[String],
     maybe_moved: &[String],
     dropped: &[String],
+    // The struct has nothing to drop at all (#484): no "resource" talk.
+    plain: bool,
 ) -> String {
     fn join(names: &[String]) -> (String, bool) {
         let fmt: Vec<String> = names.iter().map(fmt_style).collect();
@@ -120,6 +126,20 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
         };
         (s, names.len() > 1)
+    }
+    if plain {
+        // Nothing here needs drop, so nothing is "dropped" whichever
+        // fields moved (#484).
+        let mut out = format!("{} goes out of scope.", fmt_style(my_name));
+        if !moved.is_empty() {
+            let (moved_s, moved_plural) = join(moved);
+            out.push_str(&format!(" {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
+        }
+        if !maybe_moved.is_empty() {
+            let (maybe_s, maybe_plural) = join(maybe_moved);
+            out.push_str(&format!(" {} {} moved out in at least one branch above.", maybe_s, if maybe_plural { "were" } else { "was" }));
+        }
+        return out;
     }
     if !maybe_moved.is_empty() {
         let mut out = format!("{} goes out of scope.", fmt_style(my_name));
@@ -224,6 +244,10 @@ pub fn event_dot_union_write(my_name: &String, from: Option<(&String, bool)>) ->
 // whatever the caller passed. The L-shaped arrow on the param's
 // timeline visually anchors that "from outside this scope" origin;
 // this is its tooltip and the matching dot tooltip.
+pub fn event_dot_owner_init_from_caller_value(my_name: &String) -> String {
+    format!("{0} is bound to a value from the caller", fmt_style(my_name))
+}
+
 pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!("{0} acquires ownership from the caller", my_name_fmt)
@@ -353,6 +377,10 @@ pub fn event_dot_copy_to(my_name: &String, _target_name: &String) -> String {
 //     |
 // o<--*   the star event
 // |
+pub fn event_dot_move_to_value(my_name: &String, _target_name: &String) -> String {
+    format!("{0}'s value is moved", fmt_style(my_name))
+}
+
 pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
@@ -366,7 +394,14 @@ pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
 // Source dot for a by-value capture of a closure literal passed to a
 // call (`thread::spawn(move || ..v..)`). The resource goes into the
 // closure, and is dropped when the closure is, not when the call returns.
-pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String) -> String {
+pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String, value: bool) -> String {
+    if value {
+        return format!(
+            "{0}'s value is moved into a closure passed to {1}",
+            fmt_style(my_name),
+            fmt_style(callee)
+        );
+    }
     format!(
         "{0}'s resource is moved into a closure passed to {1}; it's dropped when that closure is dropped",
         fmt_style(my_name),
@@ -383,11 +418,12 @@ pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> Str
 }
 
 // `drop(s);`: the value is moved into `std::mem::drop`, which drops it.
-pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String) -> String {
+pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool) -> String {
     format!(
-        "{0}'s resource is moved into {1}, which drops it",
+        "{0}'s {2} is moved into {1}, which drops it",
         fmt_style(my_name),
-        fmt_style(fn_name)
+        fmt_style(fn_name),
+        held(value)
     )
 }
 
@@ -396,6 +432,10 @@ pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String) -> String {
 //  |
 //  *-->   the return event
 //
+pub fn event_dot_move_to_caller_value(my_name: &String, _target_name: &String) -> String {
+    format!("{0}'s value is moved to the caller", fmt_style(my_name))
+}
+
 pub fn event_dot_move_to_caller(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
@@ -554,12 +594,14 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
 // event_dot_mut_lend. `through_ref`: X is a reference, so what's
 // borrowed is what X points to (Some(pointee_copy); see
 // event_dot_lend_through_ref).
-pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read_only: bool, through_ref: Option<bool>) -> String {
+// `lender_holds_value`: X holds a "value" (Copy, or nothing to drop), not
+// a "resource" (#484).
+pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read_only: bool, through_ref: Option<bool>, lender_holds_value: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let kind = if is_mut { "mutably" } else { "immutably" };
     let subject = match through_ref {
         Some(pointee_copy) => format!("the {} {} points to", held(pointee_copy), my_name_fmt),
-        None => format!("{}'s resource", my_name_fmt),
+        None => format!("{}'s {}", my_name_fmt, held(lender_holds_value)),
     };
     let base = format!(
         "{0} is {1} borrowed, and the reference is stored in a place that isn't drawn",
@@ -616,18 +658,20 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
 // this: it reads like a plain assignment (`event_dot_copyable_assign`,
 // `event_dot_owner_drop_at_reassign`, `event_dot_acquire`) with the
 // place as the subject.
-pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: bool) -> String {
+pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: bool, holds_value: bool) -> String {
     if holder_is_ref {
         format!(
-            "the resource {0} points to is modified through {1}",
+            "the {2} {0} points to is modified through {1}",
             fmt_style(holder),
-            fmt_style(place)
+            fmt_style(place),
+            held(holds_value)
         )
     } else {
         format!(
-            "{0}'s resource is modified through {1}",
+            "{0}'s {2} is modified through {1}",
             fmt_style(holder),
-            fmt_style(place)
+            fmt_style(place),
+            held(holds_value)
         )
     }
 }
@@ -636,6 +680,10 @@ pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: b
 // |            |   
 // o-->*   or   o-->*     the star event
 // |   |            |
+pub fn event_dot_acquire_value(my_name: &String, _target_name: &String) -> String {
+    format!("{0} is bound to a value", fmt_style(my_name))
+}
+
 pub fn event_dot_acquire(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
@@ -793,6 +841,13 @@ pub fn event_dot_static_borrow(my_name: &String, _target_name: &String, lender_i
 // y = x` / `let r = &x`.
 
 // Source dot for a `move`-captured upvar. Mirrors event_dot_move_to.
+pub fn event_dot_capture_move_to_closure_value(my_name: &String, target_name: &String) -> String {
+    format!(
+        "{0}'s value is captured (moved) by closure {1}",
+        fmt_style(my_name), fmt_style(target_name)
+    )
+}
+
 pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_fmt = fmt_style(target_name);
@@ -892,6 +947,13 @@ pub fn event_dot_closure_bind_with_captures(
 
 // Closure-side dot when a `move`-captured upvar lands on `f`'s
 // timeline. Mirrors event_dot_acquire.
+pub fn event_dot_closure_capture_acquire_value(my_name: &String, from_name: &String) -> String {
+    format!(
+        "Closure {0} captures (moves) {1}'s value",
+        fmt_style(my_name), fmt_style(from_name)
+    )
+}
+
 pub fn event_dot_closure_capture_acquire(my_name: &String, from_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     let from_fmt = fmt_style(from_name);
@@ -1212,6 +1274,15 @@ pub fn state_out_of_scope(my_name: &String) -> String {
 
 // The resource is transferred on this line or before this line due to move,
 // thus it is impossible to access this variable anymore. This is an invisible line in the timeline.
+pub fn state_value_moved(my_name: &String) -> String {
+    format!("{0}'s value was moved, so {0} can't be used until it's assigned again", fmt_style(my_name))
+}
+
+// Mutably borrowed, for a column holding a value with nothing to drop.
+pub fn state_value_revoked(my_name: &String) -> String {
+    format!("{0}'s value is mutably borrowed, so it cannot access the value", fmt_style(my_name))
+}
+
 pub fn state_resource_moved(my_name: &String, _to_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
@@ -1274,6 +1345,11 @@ pub fn state_uninitialized(my_name: &String) -> String {
 // "owner of the resource" framing doesn't fit — primitives are
 // values, not heap-backed resources. Used for the timeline-stripe
 // tooltip and the vertical lifeline.
+// A non-Copy owner with nothing to drop: also a value, not a resource (#484).
+pub fn state_full_privilege_value(my_name: &String) -> String {
+    format!("{0} holds a value", fmt_style(my_name))
+}
+
 pub fn state_full_privilege_copyable(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
 
@@ -1478,8 +1554,15 @@ pub fn event_dot_branch_merge_bound_copy(my_name: &String, some_diverge: bool) -
 // keeps a runtime "drop flag" and, at the end of the variable's scope,
 // drops the value only if it wasn't moved (#179). The scope-end dot
 // says that (`event_dot_go_out_of_scope_maybe_moved`).
-pub fn event_dot_branch_merge_moved_with_drop(my_name: &String) -> String {
+pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
+    if value {
+        return format!(
+            "{0} was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again).",
+            my_name_fmt
+        );
+    }
     format!(
         "{0} was moved in at least one branch above, so it can't be used after the branches \
          (until it's assigned again). If the branch that ran didn't move it, its resource is \
