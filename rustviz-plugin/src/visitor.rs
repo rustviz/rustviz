@@ -261,6 +261,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 }
 
+/// Every `PatKind::Binding` in `pat`, in source order (left to right),
+/// including `name @ sub` and the bindings inside `sub`. Or-pattern
+/// alternatives bind the same names, so only the first is walked.
+fn binding_pats<'tcx>(pat: &'tcx Pat<'tcx>, out: &mut Vec<&'tcx Pat<'tcx>>) {
+  match pat.kind {
+    PatKind::Binding(_, _, _, sub) => {
+      out.push(pat);
+      if let Some(sp) = sub {
+        binding_pats(sp, out);
+      }
+    }
+    PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) => {
+      for p in ps { binding_pats(p, out); }
+    }
+    PatKind::Struct(_, fs, _) => {
+      for f in fs { binding_pats(f.pat, out); }
+    }
+    PatKind::Or(ps) => {
+      if let Some(p) = ps.first() { binding_pats(p, out); }
+    }
+    PatKind::Ref(inner, _, _)
+    | PatKind::Box(inner)
+    | PatKind::Deref(inner)
+    | PatKind::Guard(inner, _) => binding_pats(inner, out),
+    PatKind::Slice(before, mid, after) => {
+      for p in before { binding_pats(p, out); }
+      if let Some(p) = mid { binding_pats(p, out); }
+      for p in after { binding_pats(p, out); }
+    }
+    PatKind::Wild | PatKind::Never | PatKind::Missing | PatKind::Err(_)
+    | PatKind::Expr(_) | PatKind::Range(..) => {}
+  }
+}
+
 /// The name, with its `!`, of the outermost bang macro the user wrote
 /// that `span` was expanded from: `println!` for the `&x` that
 /// `format_args_nl!` builds inside `println!`, `show!` if the user's
@@ -490,88 +524,97 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
   // visit parameter of current fn (add them as RAPs)
   fn visit_param(&mut self, param: &'tcx Param<'tcx>){
-    // add RAP corresponding to parameter type
-    let line_num=span_to_line(&param.span, &self.tcx);
-    let ty = self.tcx.typeck(param.hir_id.owner).pat_ty(param.pat);
-    let is_special = ty_is_special_owner(&ty);
-    match param.pat.kind {
-      PatKind::Binding(binding_annotation, _ann_hirid, ident, _op_pat) =>{
-        let name: String = ident.to_string();
-        if ty.is_ref() {
-          // A fn parameter of reference type is conceptually a
-          // borrow that came from the caller's frame. Model that
-          // explicitly so the borrow region renders for the full
-          // function body and the matching return-of-borrow
-          // (StaticDie / MutableDie emitted by print_lifetimes)
-          // lands at the fn body's closing brace rather than the
-          // parameter declaration line.
-          //
-          // Without this fix, add_ref left the lender as
-          // Anonymous and the lifetime equal to the param's own
-          // line — print_lifetimes then emitted a phantom
-          // StaticDie at the signature line whose `to` field
-          // resolved to `Deref(s)`, surfacing the nonsensical
-          // tooltip "Return immutably borrowed resource from s
-          // to *s".
-          let pointee_copy = self.ref_pointee_is_copy(ty, param.hir_id.owner);
-          self.add_ref(name.clone(),
-          bool_of_mut(ty.ref_mutability().unwrap()),
-          bool_of_mut(binding_annotation.1), line_num,
-          ResourceTy::Caller, VecDeque::new(), self.current_scope, !self.inside_branch, pointee_copy);
-          // Stretch the loan to the closing brace so the dashed
-          // ref-line trapezoid covers the full body.
-          if let Some(rd) = self.borrow_map.get_mut(&name) {
-            rd.lifetime = self.current_scope;
-          }
-        }
-        else if ty.is_adt() && !is_special{ // kind of weird given we don't have a InitStructParam
-          // Dispatch on the ADT kind so structs get per-field
-          // timelines while enums and unions stay opaque (same
-          // policy as the LHS-of-expr / pattern-binding sites in
-          // expr_visitor.rs). Without this branching, an enum or
-          // union parameter would silently get spurious field RAPs
-          // registered as if it were a struct.
-          match ty.ty_adt_def().unwrap().adt_kind() {
-            rustc_middle::ty::AdtKind::Struct => {
-              let owner_hash = self.rap_hashes as u64;
-              let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-              self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
-              let generic_args = match ty.kind() {
-                rustc_middle::ty::TyKind::Adt(_, args) => *args,
-                _ => unreachable!("ty.is_adt() but kind is not Adt"),
-              };
-              for field in ty.ty_adt_def().unwrap().all_fields() {
-                let field_name = format!("{}.{}", name.clone(), field.name.as_str());
-                let field_ty = field.ty(self.tcx, generic_args);
-                let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
-                self.add_struct(field_name.clone(), owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
-                self.mark_if_manually_drop(&field_name, field_ty);
-              }
-            }
-            rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
-              let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-              let interior_mut = self.ty_has_interior_mut(ty, param.hir_id.owner);
-              if ty.is_union() {
-                self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
-              } else {
-                self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
-              }
+    // A parameter written as a pattern (`(a, b): (String, i32)`,
+    // `P { name, .. }: P`, `&(x, y): &(i32, i32)`) binds each of its
+    // names from the caller's argument, so each name is registered
+    // like a parameter of its own, at the type it's bound at (#331).
+    // A plain `x: T` is the one-binding case.
+    let mut bindings = Vec::new();
+    binding_pats(param.pat, &mut bindings);
+    for pat in bindings {
+      // add RAP corresponding to parameter type
+      let line_num=span_to_line(&param.span, &self.tcx);
+      let ty = self.tcx.typeck(param.hir_id.owner).pat_ty(pat);
+      let is_special = ty_is_special_owner(&ty);
+      match pat.kind {
+        PatKind::Binding(binding_annotation, _ann_hirid, ident, _op_pat) =>{
+          let name: String = ident.to_string();
+          if ty.is_ref() {
+            // A fn parameter of reference type is conceptually a
+            // borrow that came from the caller's frame. Model that
+            // explicitly so the borrow region renders for the full
+            // function body and the matching return-of-borrow
+            // (StaticDie / MutableDie emitted by print_lifetimes)
+            // lands at the fn body's closing brace rather than the
+            // parameter declaration line.
+            //
+            // Without this fix, add_ref left the lender as
+            // Anonymous and the lifetime equal to the param's own
+            // line — print_lifetimes then emitted a phantom
+            // StaticDie at the signature line whose `to` field
+            // resolved to `Deref(s)`, surfacing the nonsensical
+            // tooltip "Return immutably borrowed resource from s
+            // to *s".
+            let pointee_copy = self.ref_pointee_is_copy(ty, param.hir_id.owner);
+            self.add_ref(name.clone(),
+            bool_of_mut(ty.ref_mutability().unwrap()),
+            bool_of_mut(binding_annotation.1), line_num,
+            ResourceTy::Caller, VecDeque::new(), self.current_scope, !self.inside_branch, pointee_copy);
+            // Stretch the loan to the closing brace so the dashed
+            // ref-line trapezoid covers the full body.
+            if let Some(rd) = self.borrow_map.get_mut(&name) {
+              rd.lifetime = self.current_scope;
             }
           }
+          else if ty.is_adt() && !is_special{ // kind of weird given we don't have a InitStructParam
+            // Dispatch on the ADT kind so structs get per-field
+            // timelines while enums and unions stay opaque (same
+            // policy as the LHS-of-expr / pattern-binding sites in
+            // expr_visitor.rs). Without this branching, an enum or
+            // union parameter would silently get spurious field RAPs
+            // registered as if it were a struct.
+            match ty.ty_adt_def().unwrap().adt_kind() {
+              rustc_middle::ty::AdtKind::Struct => {
+                let owner_hash = self.rap_hashes as u64;
+                let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+                self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+                let generic_args = match ty.kind() {
+                  rustc_middle::ty::TyKind::Adt(_, args) => *args,
+                  _ => unreachable!("ty.is_adt() but kind is not Adt"),
+                };
+                for field in ty.ty_adt_def().unwrap().all_fields() {
+                  let field_name = format!("{}.{}", name.clone(), field.name.as_str());
+                  let field_ty = field.ty(self.tcx, generic_args);
+                  let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
+                  self.add_struct(field_name.clone(), owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+                  self.mark_if_manually_drop(&field_name, field_ty);
+                }
+              }
+              rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
+                let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+                let interior_mut = self.ty_has_interior_mut(ty, param.hir_id.owner);
+                if ty.is_union() {
+                  self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
+                } else {
+                  self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
+                }
+              }
+            }
+          }
+          else {
+            let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+            self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+            self.mark_if_manually_drop(&name, ty);
+          }
+          self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id });
+          *self.unique_id += 1;
+          // A by-value struct parameter owns its fields' resources too
+          // (and drops them at the end of the body unless moved on).
+          self.bind_struct_fields(line_num, &name);
+          self.annotate_src(name.clone(), ident.span, false, *self.raps.get(&name).unwrap().rap.hash());
         }
-        else {
-          let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-          self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
-          self.mark_if_manually_drop(&name, ty);
-        }
-        self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id });
-        *self.unique_id += 1;
-        // A by-value struct parameter owns its fields' resources too
-        // (and drops them at the end of the body unless moved on).
-        self.bind_struct_fields(line_num, &name);
-        self.annotate_src(name.clone(), ident.span, false, *self.raps.get(&name).unwrap().rap.hash());
+        _ => {}
       }
-      _ => {}
     }
   }
 
