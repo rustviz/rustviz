@@ -773,6 +773,8 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    // References to `[i32]` / `str` point to values (#549).
+    "slice_ref_value",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -977,7 +979,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from map to count: or_insert's signature gives the reference it returns the same lifetime as the value it was called on",
             "the value count points to is modified through *count",
             "text is bound to an immutable reference",
-            "text holds an immutable reference; it can read the borrowed resource",
+            "text holds an immutable reference; it can read the borrowed value",
         ],
         must_not_contain: &[
             ", through the reference or_insert returned",
@@ -1050,7 +1052,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let s: &str = "hello";` — s borrows static string data.
         must_contain: &[
             "s is bound to an immutable reference",
-            "s holds an immutable reference; it can read the borrowed resource",
+            "s holds an immutable reference; it can read the borrowed value",
             "t is initialized with a copy of s",
         ],
         must_not_contain: &[
@@ -1065,7 +1067,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "msg is bound to an immutable reference",
             "msg is bound to an immutable reference (in all branches above)",
-            "msg holds an immutable reference; it can read the borrowed resource",
+            "msg holds an immutable reference; it can read the borrowed value",
         ],
         must_not_contain: &[
             "msg acquired ownership of a resource (in all branches above)",
@@ -6060,6 +6062,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "i is live in a conditional expression",
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
         ],
+    },    TooltipExpect {
+        name: "slice_ref_value",
+        // `xs: &[i32]` and `s: &str` point to values (nothing to drop);
+        // controls: `names: &[String]` and `st: &String` point to
+        // resources.
+        must_contain: &[
+            "the value xs points to is immutably borrowed by first",
+            "the value s points to is immutably borrowed by t",
+            "the resource names points to is immutably borrowed by first",
+            "the resource st points to is immutably borrowed by t",
+        ],
+        must_not_contain: &[
+            "the resource xs points to",
+            "the resource s points to",
+        ],
     },
     TooltipExpect {
         name: "tuple_destructure_assign",
@@ -8093,15 +8110,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `[[i32; 2]; 2]` has nothing to drop: a value (#484).
             "grid[1][0] is copied out of grid's value",
             "h is initialized with a copy of xs[0]",
-            // Known wrong (#549): `xs: &[i32]` points to a slice, which
-            // needs no drop, so this should read "the value xs points to".
-            "xs[0] is copied out of the resource xs points to",
+            // `xs: &[i32]` points to a slice that needs no drop: a value (#549).
+            "xs[0] is copied out of the value xs points to",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "first goes out of scope. No resource is dropped.",
             "v's resource is copied",
             "grid[1][0] is copied out of grid's resource",
+            "xs[0] is copied out of the resource xs points to",
         ],
     },
     // ─── Variables declared in a nested construct (#501) ─────────────
