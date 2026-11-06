@@ -375,6 +375,12 @@ rather than listed here.
 - A reference to a non-Copy value with nothing to drop (`&[i32]`,
   `&str`) still reads "the resource xs points to" in tooltips; only a
   Copy referent reads "value" (#549).
+- A `for` loop drops its iterator when the loop ends (the elements it
+  hasn't handed out after a `break`, a `vec::IntoIter`'s buffer). That's
+  stated on the move of a variable the loop takes (`for s in v`, `for s
+  in it`), but not when the head is a call (`for s in v.into_iter()`,
+  `v.drain(..)`, an adapter chain) or the pattern is a tuple
+  (`for (a, b) in pairs`).
 - Raw pointers aren't modelled: `let p = &mut x as *mut i32;` shows no
   borrow of `x`, so a write `*p = 2` isn't connected to `x`.
 - `const` and `static` items get no column of their own; reading one

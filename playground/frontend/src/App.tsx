@@ -331,6 +331,11 @@ const Description: React.FC = () => (
         friends is shown as that read.
       </li>
       <li>
+        A <code>for</code> loop drops its iterator when the loop ends. That&apos;s
+        stated when the loop takes a variable (<code>for s in v</code>), but not
+        for a call (<code>for s in v.into_iter()</code>) or a tuple pattern.
+      </li>
+      <li>
         Values dropped when a function leaves early are drawn for a{' '}
         <code>return</code> that ends an <code>if</code>/<code>else</code>{' '}
         branch or a <code>match</code> arm, but not for <code>panic!()</code>,{' '}

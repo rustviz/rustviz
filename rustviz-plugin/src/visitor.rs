@@ -2746,6 +2746,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       && head_ty == typeck.node_type(guard_expr.hir_id)
                   };
 
+                // The loop owns its iterator and drops it when the loop
+                // ends: a head that is moved in (`for s in v`, `for s in
+                // it`) whose iterator has drop glue (`vec::IntoIter`)
+                // says so on the move (#482). `slice::Iter` and the
+                // like have nothing to drop.
+                let iterator_needs_drop = matches!(iterand_evt, Some(Evt::Move))
+                  && matches!(head_arg.kind, ExprKind::Path(_))
+                  && self.tcx.typeck(guard_expr.hir_id.owner)
+                    .node_type(guard_expr.hir_id)
+                    .needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, guard_expr.hir_id.owner));
+
                 // Register the user pattern binding(s) as branch-scoped
                 // RAPs so events inside the body referencing them
                 // resolve. Two cases:
@@ -2821,10 +2832,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   if head_is_iterator {
                     // The iterator is moved into the loop; nothing is
                     // moved into (or borrowed by) the loop variable.
-                    self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+                    if iterator_needs_drop {
+                      self.add_loop_iterator_move_ev(for_line, ResourceTy::Anonymous, head_rty);
+                    } else {
+                      self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+                    }
                     self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
                   } else if let Some(e) = iterand_evt {
-                    self.add_ev(for_line, e, to_rty, head_rty, false);
+                    if iterator_needs_drop {
+                      self.add_loop_iterator_move_ev(for_line, to_rty, head_rty);
+                    } else {
+                      self.add_ev(for_line, e, to_rty, head_rty, false);
+                    }
                   } else {
                     // A Range or a call result (`0..n`, `s.chars()`) has
                     // no place to borrow or move from: each iteration's

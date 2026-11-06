@@ -482,6 +482,17 @@ pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
     )
 }
 
+// Source dot for the head of a `for` loop that is moved into the loop's
+// iterator (`for s in v`, `for s in it`), when the iterator has drop
+// glue (#482). The loop owns the iterator and drops it when the loop
+// ends, however it ends, taking along what it still owns.
+pub fn event_dot_move_into_loop_iterator(my_name: &String) -> String {
+    format!(
+        "{0}'s resource is moved into the for loop's iterator. The iterator is dropped when the loop ends, which drops whatever it still owns, such as elements it hasn't handed out yet (after a break, say)",
+        fmt_style(my_name)
+    )
+}
+
 // Source dot for a by-value capture of a closure literal passed to a
 // call (`thread::spawn(move || ..v..)`). The resource goes into the
 // closure, and is dropped when the closure is, not when the call returns.

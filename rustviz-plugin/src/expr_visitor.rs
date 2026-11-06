@@ -890,7 +890,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_iterator: false }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -936,6 +936,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         id: ev_id,
         is_partial: false,
         into_closure: false,
+        loop_iterator: false,
       });
       self.move_struct_fields_away(line_num, &name);
     }
@@ -1041,7 +1042,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
       Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_iterator: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
@@ -1086,6 +1087,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   pub fn add_ev(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, is_partial: bool) {
     self.add_external_event(line_num, self.ext_ev_of_evt(evt, lhs, rhs, *self.unique_id, is_partial));
+    *self.unique_id += 1;
+  }
+
+  /// A `for` loop's head `from` moved into the loop's iterator, which
+  /// has drop glue (#482), with the arrow's target `to`.
+  pub fn add_loop_iterator_move_ev(&mut self, line_num: usize, to: ResourceTy, from: ResourceTy) {
+    let mut ev = self.ext_ev_of_evt(Evt::Move, to, from, *self.unique_id, false);
+    if let ExternalEvent::Move { loop_iterator, .. } = &mut ev {
+      *loop_iterator = true;
+    }
+    self.add_external_event(line_num, ev);
     *self.unique_id += 1;
   }
 

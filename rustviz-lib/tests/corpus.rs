@@ -773,6 +773,8 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    // A for loop's iterator with drop glue is dropped when the loop ends (#482).
+    "for_iterator_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8355,6 +8357,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "for_iterator_drop",
+        // #482: `for s in v` moves `v` into a hidden `vec::IntoIter`,
+        // and `for s in it3` moves the iterator `it3` into the loop.
+        // The loop owns that iterator and drops it when the loop ends,
+        // dropping the elements it hasn't handed out (after a `break`),
+        // so the move says so. `slice::Iter` (`for s in &q`, `for s in
+        // it` with `it = q.iter()`) has no drop glue: nothing to say,
+        // and `q` is only borrowed.
+        must_contain: &[
+            "v's resource is moved into the for loop's iterator. The iterator is dropped when the loop ends, which drops whatever it still owns, such as elements it hasn't handed out yet (after a break, say)",
+            "it3's resource is moved into the for loop's iterator. The iterator is dropped when the loop ends, which drops whatever it still owns, such as elements it hasn't handed out yet (after a break, say)",
+            "n's resource is moved into the for loop's iterator. The iterator is dropped when the loop ends, which drops whatever it still owns, such as elements it hasn't handed out yet (after a break, say)",
+            "v goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "q's resource is moved into the for loop's iterator",
+            "it's resource is moved into the for loop's iterator",
+            "z's resource is moved into the for loop's iterator",
+        ],
     },
 ];
 
