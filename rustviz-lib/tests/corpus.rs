@@ -4199,7 +4199,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `h` for its duration and copies the i32 result out.
         must_contain: &[
             "h's resource is immutably borrowed by get; h is read-only while the borrow is live",
-            "get reads from h",
+            "get reads from h (implicitly borrowed)",
             "Copy from get to v",
             "h goes out of scope. Its resource is dropped.",
         ],
@@ -4220,13 +4220,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope. No resource is dropped.",
             "w.s goes out of scope. No resource is dropped.",
             "inner goes out of scope. Its resource is dropped.",
-            "incr reads from/writes to c",
+            "incr reads from/writes to c (implicitly mutably borrowed)",
             "Counter::get reads from c",
             "Immutable borrow from p to nm",
             "Return immutably borrowed resource from nm to p",
-            "first reads from pair",
+            "first reads from pair (implicitly borrowed)",
             "pair.0 goes out of scope. Its resource is dropped.",
-            "x reads from pt",
+            "x reads from pt (implicitly borrowed)",
         ],
         must_not_contain: &[
             "w goes out of scope. Its resource is dropped.",
@@ -4242,8 +4242,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from Marker to m",
             "Move from Marker::make to n",
-            "name reads from m",
-            "name reads from n",
+            "name reads from m (implicitly borrowed)",
+            "name reads from n (implicitly borrowed)",
         ],
         must_not_contain: &[
             "m's resource is moved",
