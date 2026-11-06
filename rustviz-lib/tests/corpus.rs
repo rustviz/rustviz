@@ -694,7 +694,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(moved from",
             "the value r points to is modified through *r",
             "the resource r points to is modified through *r (copied from y)",
-            "*r is initialized by copy from y",
+            "*r is initialized with a copy of y",
             "r is the owner of the resource",
         ],
     },
@@ -731,7 +731,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s is bound to an immutable reference",
             "s holds an immutable reference; it can read the borrowed resource",
-            "t is initialized by copy from s",
+            "t is initialized with a copy of s",
         ],
         must_not_contain: &[
             "s acquires ownership of a resource",
@@ -1778,7 +1778,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // value" Binds on line 2 with no arrow from `parse`.
         must_contain: &[
             "Copy from parse to n",
-            "n is initialized by copy from parse",
+            "n is initialized with a copy of parse",
             "Copy from n to Ok",
         ],
         must_not_contain: &[
@@ -1792,7 +1792,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // chain (`map`).
         must_contain: &[
             "Copy from map to n",
-            "n is initialized by copy from map",
+            "n is initialized with a copy of map",
         ],
         must_not_contain: &[
             "n is bound to a copyable value",
@@ -1849,7 +1849,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let y = x` is a regular Copy from x to y.
         must_contain: &[
             "x is bound to a copyable value",
-            "y is initialized by copy from x",
+            "y is initialized with a copy of x",
             "Copy from x to y",
         ],
         must_not_contain: &[
@@ -1859,6 +1859,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "N goes out of scope",
             // No Move from N — const reads aren't moves.
             "Move from N to x",
+            // Old wording (maintainer chose "with a copy of").
+            "initialized by copy from",
         ],
     },
     TooltipExpect {
@@ -1928,7 +1930,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u is written to (copied from y); writing to a union never drops its old contents",
             // `let x = unsafe { u._a };` — a copy out of u.
             "Copy from u to x",
-            "x is initialized by copy from u",
+            "x is initialized with a copy of u",
             "u's value is copied",
             // `let r = unsafe { &u._b };` — u is the lender.
             "Immutable borrow from u to r",
@@ -1949,7 +1951,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u._b, mutable",
             // The read / borrow must not lose their source.
             "x is bound to a copyable value",
-            "u is initialized by copy from y",
+            "u is initialized with a copy of y",
             "Return immutably borrowed resource from r to *r",
         ],
     },
@@ -1980,7 +1982,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from Color to black",
             "black acquires ownership of a resource",
             "Copy from black.0 to r",
-            "r is initialized by copy from black.0",
+            "r is initialized with a copy of black.0",
         ],
         must_not_contain: &[
             // The read must not lose its source.
@@ -2196,13 +2198,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // IntoIterator>::into_iter(self)`: `self` is the reference,
         // so nothing is moved out of `v`, which still owns (and
         // drops) its vector. `v.len()` takes `&self`. `n` (a usize)
-        // is initialized by copy from `count`, on the line where r's
+        // is initialized with a copy of `count`, on the line where r's
         // borrow ends (#190).
         must_contain: &[
             "into_iter reads from r",
             "len reads from v (implicitly borrowed)",
             "v goes out of scope. Its resource is dropped.",
-            "n is initialized by copy from count",
+            "n is initialized with a copy of count",
             "Copy from count to n",
         ],
         must_not_contain: &[
@@ -2336,7 +2338,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Copy from p to q",
             "Copy from p.x to q.x",
-            "q.x is initialized by copy from p.x",
+            "q.x is initialized with a copy of p.x",
             "q.x goes out of scope",
         ],
         must_not_contain: &[
@@ -2431,7 +2433,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Used to produce no event at all for the guard.
         must_contain: &[
             "check reads from s",
-            "n is initialized by copy from opt",
+            "n is initialized with a copy of opt",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -2459,7 +2461,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the arm. Its uses used to be skipped (unregistered local).
         must_contain: &[
             "Copy from checked_mul to m",
-            "m is initialized by copy from checked_mul",
+            "m is initialized with a copy of checked_mul",
             "m goes out of scope",
             "describe reads from s",
             "s goes out of scope. Its resource is dropped.",
@@ -2583,7 +2585,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x is bound to a copyable value",
             "Copy from x to y",
-            "y is initialized by copy from x",
+            "y is initialized with a copy of x",
         ],
         must_not_contain: &[
             "x's resource is moved",
@@ -2723,7 +2725,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // and gets the fn's return value.
         must_contain: &[
             "area holds a copyable value",
-            "area is initialized by copy from area",
+            "area is initialized with a copy of area",
             "area goes out of scope",
         ],
         must_not_contain: &[],
@@ -2746,7 +2748,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "len holds a copyable value",
             "len reads from s (implicitly borrowed)",
-            "n is initialized by copy from len",
+            "n is initialized with a copy of len",
         ],
         must_not_contain: &[
             "Pass by immutable reference from s to len",
@@ -2778,9 +2780,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow ended on the same line, leaving no creation event and
         // "No resource is dropped." (the moved-out owner wording).
         must_contain: &[
-            "n is initialized by copy from count",
-            "k is initialized by copy from sum",
-            "w is initialized by copy from count",
+            "n is initialized with a copy of count",
+            "k is initialized with a copy of sum",
+            "w is initialized with a copy of count",
             "Copy from sum to k",
             "Copy from count to w",
             "k goes out of scope",
@@ -2840,7 +2842,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m's mutable borrow ends",
         ],
         must_not_contain: &[
-            "add_one is initialized by copy from Anonymous resource",
+            "add_one is initialized with a copy of Anonymous resource",
         ],
     },
     TooltipExpect {
@@ -2933,7 +2935,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u goes out of scope. A union's fields are never dropped automatically.",
         ],
         must_not_contain: &[
-            "u is initialized by copy from y",
+            "u is initialized with a copy of y",
             "u acquires ownership of a new resource; its previous resource is dropped",
             "u goes out of scope. Its resource is dropped.",
         ],
@@ -3005,8 +3007,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "p.x acquires ownership of a resource",
             "p.x is the owner of the resource",
-            "p.y is initialized by copy from z",
-            "n is initialized by copy from m",
+            "p.y is initialized with a copy of z",
+            "n is initialized with a copy of m",
             "b acquires ownership of a resource",
             "b is assigned a new value",
         ],
@@ -3418,7 +3420,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `third`. (What `third` holds isn't tracked, so x's lender is
         // left out rather than named.)
         must_contain: &[
-            "x is initialized by copy from third",
+            "x is initialized with a copy of third",
             "Partial copy from third to x",
         ],
         must_not_contain: &[
@@ -3446,8 +3448,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // bound reference borrows an element of `v`, not `head`, and
         // certainly not the function `get`.
         must_contain: &[
-            "x is initialized by copy from head",
-            "y is initialized by copy from get",
+            "x is initialized with a copy of head",
+            "y is initialized with a copy of get",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from x to head",
@@ -3527,7 +3529,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Partial copy from opt to s",
-            "s is initialized by copy from opt",
+            "s is initialized with a copy of opt",
             "opt's resource is copied",
             "Move from name to n",
             "name's resource is moved",
@@ -4078,7 +4080,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure add_one is bound",
         ],
         must_not_contain: &[
-            "add_one is initialized by copy from Anonymous resource",
+            "add_one is initialized with a copy of Anonymous resource",
         ],
     },
     TooltipExpect {
@@ -4107,7 +4109,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f acquires ownership from the caller",
         ],
         must_not_contain: &[
-            "f is initialized by copy from Anonymous resource",
+            "f is initialized with a copy of Anonymous resource",
         ],
     },
     TooltipExpect {
@@ -4119,8 +4121,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from a to f",
         ],
         must_not_contain: &[
-            "f is initialized by copy from a",
-            "f is initialized by copy from helper",
+            "f is initialized with a copy of a",
+            "f is initialized with a copy of helper",
         ],
     },
     TooltipExpect {
@@ -4142,7 +4144,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "closure_call_result",
         must_contain: &[
             "Closure add_one is bound",
-            "y is initialized by copy from add_one",
+            "y is initialized with a copy of add_one",
             "Copy from add_one to y",
         ],
         must_not_contain: &[
@@ -4180,9 +4182,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from a to u",
         ],
         must_not_contain: &[
-            "r is initialized by copy from s",
+            "r is initialized with a copy of s",
             "m is bound to a mutable reference",
-            "t is initialized by copy from first",
+            "t is initialized with a copy of first",
         ],
     },
     // ─── Element / slice borrows through a reference (#407) ─────────
@@ -4348,7 +4350,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Copy from s to r",
-            "r is initialized by copy from s",
+            "r is initialized with a copy of s",
             "s's resource is copied",
             "Move from w to m",
             "w's resource is moved",
@@ -4544,10 +4546,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // "acquire ownership" (#351).
         must_contain: &[
             "Copy from r.tl.x to a",
-            "a is initialized by copy from r.tl.x",
+            "a is initialized with a copy of r.tl.x",
             "r.tl.x holds a copyable value",
             "Copy from m.tl.y to b",
-            "b is initialized by copy from m.tl.y",
+            "b is initialized with a copy of m.tl.y",
             "Copy from n.tl.x to c",
             "Copy from t.tl.y to d",
             "e.part is an immutable borrow from the caller",
@@ -4705,7 +4707,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from String::from to t.0",
             "Copy from t.1 to n",
-            "n is initialized by copy from t.1",
+            "n is initialized with a copy of t.1",
             "t.0 goes out of scope. Its resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
         ],
@@ -4771,7 +4773,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "tuple_field_read",
         must_contain: &[
             "Copy from t.0 to a",
-            "a is initialized by copy from t.0",
+            "a is initialized with a copy of t.0",
         ],
         must_not_contain: &[
             "a goes out of scope. No resource is dropped.",
@@ -4907,7 +4909,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "acc is initialized by copy from x",
+            "acc is initialized with a copy of x",
             "Copy from x to acc",
             "s immutably borrows a resource",
             "s acquires ownership of a new resource; its previous resource is dropped",

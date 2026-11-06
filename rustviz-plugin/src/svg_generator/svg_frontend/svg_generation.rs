@@ -447,7 +447,7 @@ pub fn render_svg(
             // never borrowed from (`for word in s.split_whitespace()`:
             // "Return immutably borrowed resource from word to
             // split_whitespace"), and calling a closure read as
-            // initialising it ("add_one is initialized by copy from
+            // initialising it ("add_one is initialized with a copy of
             // Anonymous resource"). A Copy from a temporary into a
             // function's argument (`Some(*x + 1)`) draws nothing either
             // way.

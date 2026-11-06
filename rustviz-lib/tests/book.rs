@@ -201,7 +201,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "s is bound to an immutable reference",
             "Copy from s to t",
-            "t is initialized by copy from s",
+            "t is initialized with a copy of s",
             "s's reference is copied (not the resource it points to)",
             "s's borrow of the string literal ends (string literals live for the whole program)",
             "t's borrow of the string literal ends (string literals live for the whole program)",
@@ -472,7 +472,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_06_if_let_copy",
-        must_contain: &["Copy from config_max to max", "max is initialized by copy from config_max"],
+        must_contain: &["Copy from config_max to max", "max is initialized with a copy of config_max"],
         ..E
     },
     Snippet {
@@ -796,7 +796,7 @@ const BOOK: &[Snippet] = &[
             "item's resource is copied",
             "Immutable borrow from list to largest",
             "Return immutably borrowed resource from result to *result",
-            "L5 largest is initialized by copy from item",
+            "L5 largest is initialized with a copy of item",
         ],
         known_wrong: &[
             "L13 number_list's resource is no longer immutably borrowed",
@@ -885,7 +885,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &["Closure add_one is bound"],
         must_not_contain: &["add_one's resource is copied"],
         known_wrong: &[
-            "y is initialized by copy from add_one",
+            "y is initialized with a copy of add_one",
             "Copy from add_one to y",
         ],
         ..E
@@ -931,7 +931,7 @@ const BOOK: &[Snippet] = &[
             "f goes out of scope. Its resource is dropped.",
             "Copy from apply to r",
         ],
-        must_not_contain: &["f is initialized by copy from Anonymous resource"],
+        must_not_contain: &["f is initialized with a copy of Anonymous resource"],
         ..E
     },
     Snippet {
@@ -1145,7 +1145,7 @@ const BOOK: &[Snippet] = &[
         id: "m_06_tuple_index",
         must_contain: &[
             "Copy from tup.0 to x",
-            "z is initialized by copy from tup.2",
+            "z is initialized with a copy of tup.2",
             "Copy from tup.0 to five_hundred",
             "println! reads from five_hundred through an implicit reference, so five_hundred isn't moved",
         ],
