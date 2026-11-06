@@ -2506,7 +2506,12 @@ fn render_arrow (
                 },
                 (from_variable, to_variable, e) => {
                     let line_map = fetch_line_map(&visualization_data, e.get_id());
-                    let mut arrow_order = line_map.get(line_number).unwrap().iter().position(|x| x == external_event).unwrap() as i64;
+                    // An arrow its line map doesn't list (a borrow's end
+                    // moved into an arm, see `nest_borrow_ends_in_arms`)
+                    // is drawn first on its line.
+                    let mut arrow_order = line_map.get(line_number)
+                        .and_then(|evs| evs.iter().position(|x| x == external_event))
+                        .unwrap_or(0) as i64;
                     match e {
                       ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. } => {
                         if from.is_same_underlying(to) {

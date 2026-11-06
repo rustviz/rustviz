@@ -519,6 +519,12 @@ const EXPECTED_OK: &[&str] = &[
     "loop_body_local_drop",
     "loop_var_in_branch",
     "for_var_string_drop",
+    // A borrow by a reference declared in an arm ends in that arm
+    // (#389); `borrow_end_in_arm_is_drawn_in_the_arm` checks where.
+    "borrow_end_in_if_arm",
+    "shared_borrow_end_in_if_arm",
+    "borrow_end_in_match_arm",
+    "borrow_end_in_nested_if",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5886,6 +5892,45 @@ fn branches_on_shared_lines_open_and_close_around_their_dots() {
         let mut xs: Vec<f64> = arm_dots.iter().map(|d| d.0).collect();
         xs.dedup();
         assert_eq!(xs.len(), arms, "{}: arms share a column: {:?}", name, arm_dots);
+    }
+}
+
+/// #389: a reference declared inside an `if` / `match` arm stops
+/// borrowing inside that arm, so the lender gets its value back on the
+/// arm's column, where the borrow started. That dot used to be drawn
+/// on the lender's parent column, which then ran beside the arm's code
+/// from there to the join, as if the conditional weren't there.
+#[test]
+fn borrow_end_in_arm_is_drawn_in_the_arm() {
+    for (name, var, kind) in [
+        ("borrow_end_in_if_arm", "s", "mutably"),
+        ("shared_borrow_end_in_if_arm", "s", "immutably"),
+        ("borrow_end_in_match_arm", "v", "mutably"),
+        ("borrow_end_in_nested_if", "s", "mutably"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let restriction = if kind == "mutably" {
+            format!("{var} can't be used while the borrow is live")
+        } else {
+            format!("{var} is read-only while the borrow is live")
+        };
+        let lent = dots_with_tooltip(&timeline, &format!("{var}'s resource is {kind} borrowed by r; {restriction}"));
+        let back = dots_with_tooltip(&timeline, &format!("{var}'s resource is no longer {kind} borrowed"));
+        let mut splits = dots_with_tooltip(&timeline, &format!("{var} is live in a conditional expression "));
+        splits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!((lent.len(), back.len()), (1, 1), "{}: dots {:?} {:?}", name, lent, back);
+        assert!(!splits.is_empty(), "{}: no split dot", name);
+        assert_eq!(
+            back[0].0, lent[0].0,
+            "{}: {var} gets its value back at x={}, not on the arm's column (x={}) where it lent it",
+            name, back[0].0, lent[0].0,
+        );
+        assert!(
+            back[0].1 > lent[0].1,
+            "{}: the borrow ends at y={}, above where it starts (y={})", name, back[0].1, lent[0].1,
+        );
+        assert_ne!(back[0].0, splits[0].0, "{}: {var} gets its value back on its parent column", name);
     }
 }
 
