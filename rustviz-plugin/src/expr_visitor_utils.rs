@@ -948,22 +948,23 @@ pub fn is_auto_borrowed(e: &Expr, typeck: &TypeckResults) -> bool {
   typeck.expr_adjustments(e).iter().any(|a| matches!(a.kind, Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Not))))
 }
 
-/// `a <op> b` where `<op>` is a built-in arithmetic / bitwise operator
-/// on primitives (`x + y`, `a.x * 2`, `n % 2` with i32 operands), i.e.
-/// not a method call. Like its trait method (`Add::add(self, rhs)`),
-/// it takes both operands by value, and since every primitive is
-/// `Copy` each operand is copied in. Returns the operator's text plus
+/// `a <op> b` where `<op>` is a built-in arithmetic / bitwise /
+/// comparison operator on primitives (`x + y`, `a.x * 2`, `n % 2`,
+/// `t < lim` with i32 operands), i.e. not a method call. Every
+/// primitive is `Copy`, so each operand is read by copying it into the
+/// operator (#241, #497; the comparison's trait method takes `&`, but
+/// a built-in one never borrows anything). Returns the operator's text plus
 /// the operands that name a column (a local, a struct field, or `*r`),
 /// in source order; literals, calls, nested operators and indexing
-/// (`v[i]` copies an element, not `v`) are left out. Comparisons and
-/// the short-circuiting `&&` / `||` return `None`.
+/// (`v[i]` copies an element, not `v`) are left out. The
+/// short-circuiting `&&` / `||` return `None`.
 pub fn builtin_binop_copied_operands<'tcx>(
   expr: &'tcx Expr<'tcx>,
   tcx: &TyCtxt<'tcx>,
   raps: &HashMap<String, RapData>,
 ) -> Option<(&'static str, Vec<&'tcx Expr<'tcx>>)> {
   let ExprKind::Binary(op, lhs, rhs) = expr.kind else { return None };
-  if !op.node.is_by_value() || op.node.is_lazy() || tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
+  if op.node.is_lazy() || tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
     return None;
   }
   let operands: Vec<&'tcx Expr<'tcx>> = [lhs, rhs].into_iter()

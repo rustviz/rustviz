@@ -689,6 +689,8 @@ const EXPECTED_OK: &[&str] = &[
     "fnonce_call_copy_result",
     "fnonce_closure_moved_to_binding",
     "fnmut_call_unchanged",
+    // A built-in comparison (`t < lim`) reads both operands (#497).
+    "comparison_reads",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2056,10 +2058,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "match_with_guard",
         // Pattern guard (`x if x > 0`). The pattern `x` binds from
         // the scrutinee (`n`, Copy) — that's the "Copy from n to x"
-        // event. The guard expression itself is never visited, so
-        // nothing is asserted about it. Both arms borrow `s`; merge
-        // is Unchanged.
+        // event. The guard `x > 0` reads `x` like any comparison
+        // (#497). Both arms borrow `s`; merge is Unchanged.
         must_contain: &[
+            "Copy from x to >",
             "Move from String::from to s",
             "Copy from n to x",
             "show reads from s",
@@ -3424,9 +3426,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `x + y` on i32 is `Add::add(x, y)`: both operands are taken
         // by value, i.e. copied, and stay usable. Field operands
         // (`a.x + a.y`) are copied out of their own columns. A
-        // comparison (`x < y`) reads through references (`lt(&x, &y)`)
-        // and isn't drawn as a copy; a literal operand has no column.
+        // comparison on primitives (`x < y`) reads both operands the
+        // same way (#497); a literal operand has no column.
         must_contain: &[
+            "Copy from x to <",
+            "Copy from y to <",
             "Copy from x to +",
             "Copy from y to +",
             "Copy from a.x to +",
@@ -3440,8 +3444,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from x to +",
             "x's resource is moved",
             "Copy from x to z",
-            "Copy from x to <",
-            "Copy from y to <",
+            "Copy from x to bigger",
         ],
     },
     TooltipExpect {
@@ -3974,9 +3977,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `PartialOrd::lt(&a, &b)`: rustc inserts a `&` on each
         // operand, so both are borrowed for the call and stay usable
         // (they're printed at the end). Same for a derived PartialEq
-        // struct and for fields. `i < n` on integers is built in: no
-        // event.
+        // struct and for fields. `i < n` on integers is built in: it
+        // copies both operands into `<` and borrows nothing (#497).
         must_contain: &[
+            "Copy from i to <",
+            "Copy from n to <",
             "== reads from a (implicitly borrowed)",
             "== reads from b (implicitly borrowed)",
             "< reads from a (implicitly borrowed)",
@@ -3996,7 +4001,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from a to ==",
             "< reads from i (implicitly borrowed)",
             "< reads from i",
-            "Copy from i to <",
         ],
     },
     TooltipExpect {
@@ -7139,6 +7143,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once)",
             "f goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "comparison_reads",
+        // #497: `t < lim` on i32s reads both operands, as `t + lim`
+        // does (#241): each is copied into the operator, and the result
+        // (a bool) is a new value that isn't `t` or `lim` (`z` is bound
+        // to a copyable value, not copied from either). The same in an
+        // `if` condition (`==`) and with a literal (`t >= 3`: only `t`
+        // names a column).
+        must_contain: &[
+            "Copy from t to <",
+            "Copy from lim to <",
+            "Copy from t to +",
+            "Copy from lim to +",
+            "Copy from t to ==",
+            "Copy from lim to ==",
+            "Copy from t to >=",
+            "t's value is copied",
+            "lim's value is copied",
+            "z is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "Copy from lim to z",
+            "Copy from t to z",
+            "Copy from lim to >=",
+            "Copy from t to big",
         ],
     },
 ];
