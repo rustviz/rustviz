@@ -749,6 +749,8 @@ const EXPECTED_OK: &[&str] = &[
     // `r.a.push_str(..)`) are reborrows on the reference's column, and
     // a write through them drops the owner's field (#202, #323).
     "field_mut_borrow_through_ref",
+    // Copying out of an `if let` scrutinee doesn't branch it (#496).
+    "if_let_copy_and_move_out_of_scrutinee",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -780,11 +782,8 @@ fn forbidden_present(forbid: &str, actual: &[String]) -> bool {
 /// so the suite is green while the bug is tracked; the test fails when the
 /// text disappears, so the entry gets moved to `must_not_contain`.
 const KNOWN_STILL_PRINTED: &[(&str, &str, &str)] = &[
-    (
-        "if_let_no_else",
-        "in a conditional expression",
-        "pins known-wrong output, see #517: a single-arm if-let is meant to be inlined with no Branch event, but opt's column still gets a Branch dot reading \"opt is live in a conditional expression\"",
-    ),
+    // (#517's if_let_no_else entry is gone: with #496/#517, `opt` is maybe-moved
+    // after a single-arm `if let`, so "in a conditional expression" is true.)
 ];
 
 const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
@@ -1870,21 +1869,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "if_let_no_else",
-        // Single-arm if-let inlines: destructure Move from opt to
-        // x, then a borrow from x to show. No Branch event, so no
-        // merge tooltip wording.
+        // Single-arm if-let: destructure Move from opt to x, then a
+        // borrow from x to show. The pattern moves the String out of
+        // `opt` only when it matches, so `opt` is maybe-moved afterwards
+        // (#257) and its column is drawn split at the `if let`, with the
+        // implicit empty `else`: "opt is live in a conditional
+        // expression" there is true, and the merge says opt was moved in
+        // one branch (#517: this fixture used to claim there is no Branch
+        // event).
         must_contain: &[
             "Move from Some to opt",
             "Move from opt to x",
             "show reads from x",
             "x goes out of scope. Its resource is dropped.",
+            "opt was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when opt goes out of scope.",
         ],
         must_not_contain: &[
             "may have been moved",
             "moved or dropped in every branch",
             "in branches where it was not",
-            // "in a conditional expression" pins known-wrong output, see
-            // KNOWN_STILL_PRINTED below (#517).
         ],
     },
     TooltipExpect {
@@ -6147,6 +6152,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &["Copy from name to n", "Copy from opt to s"],
     },
     TooltipExpect {
+        name: "if_let_copy_and_move_out_of_scrutinee",
+        // #496: `n` is copied out of `msg` and `s` is moved out of it,
+        // only when the pattern matches. The copy leaves `msg` as it was;
+        // the move is what makes `msg` maybe-moved afterwards.
+        must_contain: &[
+            "Copy from msg to n",
+            "n is initialized with a copy of msg",
+            "Move from msg to s",
+            "msg's resource is moved",
+            "msg was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when msg goes out of scope.",
+        ],
+        must_not_contain: &["Move from msg to n", "Copy from msg to s", "msg's resource is copied"],
+    },
+    TooltipExpect {
         name: "while_let_binding_kinds",
         // #382: the same three kinds of binding in `while let`.
         must_contain: &[
@@ -8805,6 +8826,27 @@ fn assert_arm_starts_on_split_line(name: &str, var: &str, line: &str, bind_text:
     assert_eq!(hops, Vec::<&str>::new(), "{} {}: an arrow hops over a dot", name, var);
 }
 
+/// #496: `if let Some(b) = y { take(b); } else { take(0); }` copies the
+/// `i32` out of `y`. That doesn't change `y`, so its column used to split
+/// into an `if` arm and an `else` arm that both read "y holds a copyable
+/// value" down to the join, for nothing. `y` is now one column with the
+/// copy on it.
+#[test]
+fn copying_out_of_an_if_let_scrutinee_doesnt_branch_it() {
+    let rv = run_with_local_backend("if_let_binding_copy");
+    let timeline = rv.timeline_panel_string();
+    for text in [
+        "y is live in a conditional expression",
+        "y isn't moved in any of the branches above",
+    ] {
+        assert!(!timeline.contains(text), "y has a branch: {:?}", text);
+    }
+    // The copy is still drawn on y, and b still gets the value.
+    assert_eq!(dots_with_tooltip(&timeline, "y's value is copied").len(), 1);
+    assert_eq!(arrow_points(&timeline, "Copy from y to b").len(), 1);
+    assert_eq!(dots_with_tooltip(&timeline, "b is initialized with a copy of y").len(), 1);
+}
+
 /// #382: an `if let` whose pattern borrows, copies or moves out of a
 /// variable used to draw that binding on the split row, beside the split
 /// dot: the `if` arm's diagonal reached its column a row lower, so the
@@ -8821,7 +8863,9 @@ fn if_let_binding_is_drawn_at_the_start_of_its_arm() {
         ("if_let_binding_borrow", "x", "if let Some(a) = &x {",
          "x's resource is immutably borrowed by a; x is read-only while the borrow is live",
          "Partial immutable borrow from x to a"),
-        ("if_let_binding_copy", "y", "if let Some(b) = y {", "y's value is copied", "Copy from y to b"),
+        // (`if_let_binding_copy` isn't here: a copy changes nothing about
+        // `y`, so `y` has no arms; see
+        // `copying_out_of_an_if_let_scrutinee_doesnt_branch_it`.)
         ("if_let_binding_move", "name", "if let Some(n) = name {", "name's resource is moved", "Move from name to n"),
         ("if_let_binding_move", "opt", "if let Some(s) = opt {", "opt's resource is moved", "Move from opt to s"),
     ];
