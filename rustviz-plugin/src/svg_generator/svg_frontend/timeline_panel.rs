@@ -2338,7 +2338,12 @@ fn render_arrow (
                             " through an implicit mutable reference, so {} isn't moved", styled_from_name),
                         ExternalEvent::PassByStaticReference { implicit: ImplicitRef::Autoref, .. } =>
                             " (implicitly borrowed)".to_string(),
-                        ExternalEvent::PassByMutableReference { implicit: ImplicitRef::Autoref, .. } =>
+                        // A reborrow through a reference (`rv[0].push(..)`
+                        // with rv: &mut Vec) already says "mutable
+                        // reborrow"; "implicitly mutably borrowed" would
+                        // stack a second parenthetical, and describes an
+                        // autoref of an owner, which this isn't.
+                        ExternalEvent::PassByMutableReference { implicit: ImplicitRef::Autoref, is_reborrow: false, .. } =>
                             " (implicitly mutably borrowed)".to_string(),
                         _ => String::new(),
                     };

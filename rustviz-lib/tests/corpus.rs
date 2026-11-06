@@ -4130,7 +4130,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Mutable reborrow from rv to e",
             "add reads from/writes to rv (mutable reborrow — rv can't be used until add returns)",
-            "push reads from/writes to rv (implicitly mutably borrowed) (mutable reborrow — rv can't be used until push returns)",
+            "push reads from/writes to rv (mutable reborrow — rv can't be used until push returns)",
             "Mutable borrow from w to f",
             "Immutable reborrow from r to sl",
         ],
@@ -4140,6 +4140,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push reads from/writes to rv",
             "Mutable reborrow from w to f",
             "Immutable borrow from r to sl",
+            "(implicitly mutably borrowed) (mutable reborrow",
+            "push reads from/writes to rv (implicitly mutably borrowed)",
         ],
     },
 ];
