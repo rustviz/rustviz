@@ -775,6 +775,9 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_shadow",
     // References to `[i32]` / `str` point to values (#549).
     "slice_ref_value",
+    // Copying `&T` / moving `&mut T` says "value" or "resource" by the
+    // pointee (#551).
+    "ref_copy_value_wording",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3317,7 +3320,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "r's mutable reference is moved (not the resource it points to)",
             "r's mutable reference is moved to the caller (not the resource it points to)",
-            "a's reference is copied (not the resource it points to)",
+            "a's reference is copied (not the value it points to)",
             "Move from r to r2",
             "s goes out of scope. Its resource is dropped.",
         ],
@@ -3335,7 +3338,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s's borrow of the string literal ends (string literals live for the whole program)",
             "t's borrow of the string literal ends (string literals live for the whole program)",
-            "s's reference is copied (not the resource it points to)",
+            "s's reference is copied (not the value it points to)",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from s to *s",
@@ -3890,7 +3893,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m's value is no longer immutably borrowed",
             "r immutably borrows a value",
             "Return immutably borrowed value from r to m",
-            "r's reference is copied (not the resource it points to)",
+            "r's reference is copied (not the value it points to)",
             "r holds an immutable reference; it can read the borrowed value",
             "k's value is mutably borrowed by w; k can't be used while the borrow is live",
             "k's value is no longer mutably borrowed",
@@ -4586,7 +4589,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // another one; `u = &a;` is u's first value (a borrow).
         must_contain: &[
             "r is assigned a copy of s's reference",
-            "s's reference is copied (not the resource it points to)",
+            "s's reference is copied (not the value it points to)",
             // `m = n;` assigns to an `&mut String` place, so rustc
             // reborrows `&mut *n` instead of moving n (#289); n is
             // usable again after m's last use.
@@ -8372,6 +8375,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "ref_copy_value_wording",
+        // Copying `&i32` / `&str` copies the reference, not a value;
+        // moving `&mut i32` likewise. Controls: `&String` / `&mut String`
+        // point to resources.
+        must_contain: &[
+            "r1's reference is copied (not the value it points to)",
+            "w1's reference is copied (not the value it points to)",
+            "m1's mutable reference is moved (not the value it points to)",
+            "q1's reference is copied (not the resource it points to)",
+            "u1's mutable reference is moved (not the resource it points to)",
+        ],
+        must_not_contain: &[
+            "r1's reference is copied (not the resource it points to)",
+            "w1's reference is copied (not the resource it points to)",
+            "m1's mutable reference is moved (not the resource it points to)",
+            "q1's reference is copied (not the value it points to)",
+            "u1's mutable reference is moved (not the value it points to)",
+        ],
     },
 ];
 

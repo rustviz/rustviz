@@ -584,18 +584,22 @@ pub fn event_dot_copy_ref_to_caller(my_name: &String, _target_name: &String) -> 
 // or returned) or copied (`&T` is Copy). Only the reference moves or is
 // copied; the resource it points to stays where it is, still owned by
 // its lender (#178).
-pub fn event_dot_ref_moved(my_name: &String, to_caller: bool) -> String {
+// `pointee_copy`: the referent doesn't need drop, so it's a "value"
+// (`&i32`, `&str`), not a "resource" (#551).
+pub fn event_dot_ref_moved(my_name: &String, to_caller: bool, pointee_copy: bool) -> String {
     format!(
-        "{0}'s mutable reference is moved{1} (not the resource it points to)",
+        "{0}'s mutable reference is moved{1} (not the {2} it points to)",
         fmt_style(my_name),
-        if to_caller { " to the caller" } else { "" }
+        if to_caller { " to the caller" } else { "" },
+        held(pointee_copy)
     )
 }
 
-pub fn event_dot_ref_copied(my_name: &String) -> String {
+pub fn event_dot_ref_copied(my_name: &String, pointee_copy: bool) -> String {
     format!(
-        "{0}'s reference is copied (not the resource it points to)",
-        fmt_style(my_name)
+        "{0}'s reference is copied (not the {1} it points to)",
+        fmt_style(my_name),
+        held(pointee_copy)
     )
 }
 

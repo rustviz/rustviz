@@ -204,7 +204,7 @@ const BOOK: &[Snippet] = &[
             "s is bound to an immutable reference",
             "Copy from s to t",
             "t is initialized with a copy of s",
-            "s's reference is copied (not the resource it points to)",
+            "s's reference is copied (not the value it points to)",
             "s's borrow of the string literal ends (string literals live for the whole program)",
             "t's borrow of the string literal ends (string literals live for the whole program)",
         ],
