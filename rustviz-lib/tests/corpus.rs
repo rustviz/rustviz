@@ -490,6 +490,8 @@ const EXPECTED_OK: &[&str] = &[
     // a move into a call survives a borrow ending on the same line.
     "mutref_moved_into_generic",
     "move_into_call_same_line_borrow_end",
+    // A call's result nothing takes is a temporary, dropped at the end of its statement (#457).
+    "unbound_temporary",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4987,24 +4989,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // it. It gets a column, r borrows from it, and it's dropped at
         // scope end. `show(&String::from(..))` (dropped at the end of
         // its statement) and `&Point { x: 4 }` (nothing to drop) get
-        // none, which is why inner's is `(temporary 4)`.
+        // no extended-temporary column. With #457 the former still
+        // gets an unbound `(temporary 4)` (one numbering for both
+        // kinds), so inner's is `(temporary 5)`.
         must_contain: &[
             "Move from String::from to (temporary)",
             "(temporary) acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
             "Immutable borrow from (temporary) to r",
             "Return immutably borrowed resource from r to (temporary)",
-            "(temporary) goes out of scope. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
             "Move from Vec::new to (temporary 2)",
             "Mutable borrow from (temporary 2) to m",
-            "(temporary 2) goes out of scope. Its resource is dropped.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
             "Immutable borrow from (temporary 3) to s",
-            "(temporary 3) goes out of scope. Its resource is dropped.",
-            "Immutable borrow from (temporary 4) to inner",
-            "(temporary 4) goes out of scope. Its resource is dropped.",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "Immutable borrow from (temporary 5) to inner",
+            "(temporary 5) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from r to String::from",
-            "Immutable borrow from (temporary 5) to inner",
+            "Immutable borrow from (temporary 4) to inner",
+            "unbound temporary",
         ],
     },
     TooltipExpect {
@@ -5035,6 +5040,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // ─── Unbound temporaries (#457) ──────────────────────────────────
+    TooltipExpect {
+        name: "unbound_temporary",
+        // `let _ = f();`, `f();`, `f().len()`, `show(&f())`, a match
+        // scrutinee, an `if` condition, a block's tail expression, both
+        // arms of an if/else and a `println!` argument each drop a
+        // temporary, and the drop is stated (timing checked with a
+        // Drop-printing program). Values that are moved on (`let kept =
+        // make();`, `match Some(make()) { Some(s) => s, .. }`) are not
+        // temporaries: no 11th column.
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "Move from make to (temporary 2)",
+            "Move from make to (temporary 3)",
+            "Move from String::from to (temporary 4)",
+            "Move from Some to (temporary 5)",
+            "Move from make to (temporary 6)",
+            "Move from make to (temporary 7)",
+            "Move from make to (temporary 8)",
+            "Move from String::from to (temporary 9)",
+            "Move from make to (temporary 10)",
+            "A temporary holds the value that make returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that String::from returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that Some returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of the condition: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "unbound temporary",
+            "Move from make to (temporary 11)",
+            "Move from Some to (temporary 11)",
+            "Move from String::from to (temporary 11)",
         ],
     },
 ];

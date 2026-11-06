@@ -973,6 +973,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             return;
           }
         }
+        if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+          self.note_temporary_drop(expr, name);
+        }
 
         // need to specifically handle println! macro because it's common
         // note that other macros will need to be resolved similarly (vec![], assert!, etc)
@@ -1039,6 +1042,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let line_num = expr_to_line(&rcvr, &self.tcx);
         let fn_name = name_and_generic_args.ident.as_str().to_owned();
         self.add_fn(fn_name.clone());
+        self.note_temporary_drop(expr, fn_name.clone());
         // Recurse into the receiver first: in a chain like
         // `v.iter().map(f).collect()` that visits `v.iter()` (and
         // `.map(f)`) before this call, so events come out in
@@ -1690,7 +1694,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
             if !events_move_out_of_outer(&body_ev, &if_decl) {
-                for var in in_decl_order(&if_decl) {
+                for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
                     self.preprocessed_events.push((
                         if_end,
                         ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
@@ -1738,12 +1742,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         liveness = &liveness - &declared_in_branches;
 
         // add gos events for variables declared in each block
-        for var in in_decl_order(&if_decl) {
+        for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
           if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
 
-        for var in in_decl_order(&else_decl) {
+        for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v)) {
           else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
@@ -2196,7 +2200,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
 
               // add gos events
-              for r in in_decl_order(&arm_decls) {
+              for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v)) {
                 let id = *self.unique_id;
                 *self.unique_id += 1;
                 let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
@@ -2506,6 +2510,207 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// A call whose result is a temporary that Rust drops at the end of
+  /// its statement (#457): `make();`, `let _ = make();`, `make().len()`,
+  /// `f(&make())`. The temporary has no column, so say so on the
+  /// producing fn's column with a drop dot. Only when the result's type
+  /// needs drop, and only for the shapes where the value certainly isn't
+  /// moved on: anything else (a field moved out of it, a `match` that
+  /// binds part of it by value, a borrow a `let` extends) says nothing.
+  fn note_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, fn_name: String) {
+    if self.temp_drops_noted.contains(&expr.hir_id) {
+      return;
+    }
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let ty = typeck.expr_ty(expr);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+    if !ty.needs_drop(self.tcx, env) || !self.is_unmoved_temporary(expr, typeck, env) {
+      return;
+    }
+    let Some((when, end_line, owner)) = self.temporary_scope_end(expr) else { return };
+    // Branch events are sliced out by line, so a one-line `match` / `if`
+    // can't hold a column of its own (the same limit as #354 / #459).
+    if self.inside_one_line_branch(expr) {
+      return;
+    }
+    self.temp_drops_noted.insert(expr.hir_id);
+
+    // The temporary gets a short column: it acquires the call's result
+    // here and is dropped where its scope ends.
+    self.add_fn(fn_name.clone());
+    let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
+    // Numbered in one sequence with the `let`-extended temporaries
+    // (#400): the label doesn't say which kind it is, the tooltips do.
+    self.temp_count += 1;
+    let tmp_name = temporary_label(self.temp_count);
+    self.add_owner(tmp_name.clone(), false, false, false, end_line, !self.inside_branch);
+    if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
+      o.unbound_temp = true;
+    }
+    self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
+    let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
+    let line = expr_to_line(expr, &self.tcx);
+    self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
+    // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
+    let ty = strip_module_paths(&ty.to_string());
+    let id = *self.unique_id;
+    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), id });
+    *self.unique_id += 1;
+  }
+
+  /// True iff `expr` sits inside an `if` / `match` that starts and ends
+  /// on one line.
+  fn inside_one_line_branch(&self, expr: &'tcx Expr<'tcx>) -> bool {
+    let sm = self.tcx.sess.source_map();
+    self.tcx.hir_parent_iter(expr.hir_id).any(|(_, node)| match node {
+      rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::If(..) | ExprKind::Match(..)) && !e.span.from_expansion() => {
+        sm.lookup_char_pos(e.span.lo()).line == sm.lookup_char_pos(e.span.hi()).line
+      }
+      _ => false,
+    })
+  }
+
+  /// True iff the value of the call `expr` is used only in a way that
+  /// leaves it a temporary to be dropped: discarded (`expr;`,
+  /// `let _ = expr;`), borrowed (`expr.len()`, `&expr` as an argument,
+  /// `expr == y`, `expr[i]`), or matched without moving anything out.
+  fn is_unmoved_temporary(
+    &self,
+    expr: &'tcx Expr<'tcx>,
+    typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+    env: rustc_middle::ty::TypingEnv<'tcx>,
+  ) -> bool {
+    use rustc_hir::Node;
+    let is_me = |e: &Expr| e.hir_id == expr.hir_id;
+    match self.tcx.parent_hir_node(expr.hir_id) {
+      Node::Stmt(s) => matches!(s.kind, StmtKind::Semi(e) | StmtKind::Expr(e) if is_me(e)),
+      Node::LetStmt(l) => l.init.is_some_and(is_me) && l.els.is_none() && matches!(l.pat.kind, PatKind::Wild),
+      Node::Expr(p) => match p.kind {
+        // `make().len()` autorefs the receiver; `make().into_iter()` moves it.
+        ExprKind::MethodCall(_, rcvr, _, _) if is_me(rcvr) => typeck.expr_ty_adjusted(rcvr).is_ref(),
+        ExprKind::AddrOf(..) => self.borrowed_as_argument(p, typeck),
+        ExprKind::Index(base, _, _) if is_me(base) => !self.extended_by_let(p),
+        // A Copy field read leaves the whole temporary to drop; moving a
+        // field out leaves only the rest, which isn't stated.
+        ExprKind::Field(base, _) if is_me(base) => {
+          self.tcx.type_is_copy_modulo_regions(env, typeck.expr_ty(p)) && !self.extended_by_let(p)
+        }
+        // `==`, `<`, … take both operands by reference.
+        ExprKind::Binary(op, l, r) if is_me(l) || is_me(r) => op.node.is_comparison(),
+        ExprKind::Match(scrut, arms, rustc_hir::MatchSource::Normal) if is_me(scrut) => {
+          let mut moves_out = false;
+          for arm in arms {
+            arm.pat.each_binding(|ann, hid, _, _| {
+              if ann.0 == rustc_hir::ByRef::No && typeck.node_type(hid).needs_drop(self.tcx, env) {
+                moves_out = true;
+              }
+            });
+          }
+          !moves_out
+        }
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
+  /// `&call()` (or `&mut call()`) where the `&` is an argument of a
+  /// call, a method call or a macro's tuple: the borrow ends with the
+  /// call, so the temporary is dropped at the end of the statement. A
+  /// `let` that borrows it instead extends it (#400), and a tuple
+  /// struct / variant constructor extends it too.
+  fn borrowed_as_argument(&self, addr: &'tcx Expr<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> bool {
+    use rustc_hir::Node;
+    match self.tcx.parent_hir_node(addr.hir_id) {
+      Node::Expr(g) => match g.kind {
+        ExprKind::Call(callee, _) => !is_ctor_path(callee, typeck),
+        ExprKind::MethodCall(..) => true,
+        ExprKind::Tup(_) => addr.span.from_expansion(),
+        _ => false,
+      },
+      Node::Stmt(_) => true,
+      _ => false,
+    }
+  }
+
+  /// True iff `e`, reached through `&`, field/index projections or
+  /// aggregate literals, is the initializer of a `let`: Rust then
+  /// extends the lifetime of a temporary borrowed on the way.
+  fn extended_by_let(&self, e: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    let mut cur = e.hir_id;
+    let mut saw_addr = matches!(e.kind, ExprKind::AddrOf(..));
+    loop {
+      match self.tcx.parent_hir_node(cur) {
+        Node::LetStmt(_) => return saw_addr,
+        Node::Expr(p) => match p.kind {
+          ExprKind::AddrOf(..) => saw_addr = true,
+          ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)
+          | ExprKind::Tup(_) | ExprKind::Array(_) | ExprKind::Struct(..) | ExprKind::Cast(..)
+          | ExprKind::Call(..) | ExprKind::Block(..) => {}
+          _ => return false,
+        },
+        Node::Block(_) => {}
+        _ => return false,
+      }
+      cur = self.tcx.parent_hir_id(cur);
+    }
+  }
+
+  /// When the temporary of `expr` is dropped, in words, and the line
+  /// that happens on: the end of the enclosing statement, the block's
+  /// final expression, the match arm, the `if` / `while` condition, the
+  /// `for` loop or the closure body.
+  fn temporary_scope_end(&self, expr: &'tcx Expr<'tcx>) -> Option<(&'static str, usize, Option<HirId>)> {
+    use rustc_hir::Node;
+    let mut cur = expr.hir_id;
+    loop {
+      let parent = self.tcx.parent_hir_node(cur);
+      let end = |span: rustc_span::Span| span_end_line(&span, &self.tcx);
+      match parent {
+        Node::Stmt(s) => {
+          let block = match self.tcx.parent_hir_node(s.hir_id) { Node::Block(b) => Some(b.hir_id), _ => None };
+          return Some(("at the end of this statement", end(s.span), block));
+        }
+        Node::Block(b) if b.expr.is_some_and(|e| e.hir_id == cur) => {
+          return Some(("at the end of the block's final expression", end(b.expr?.span), Some(b.hir_id)));
+        }
+        Node::Arm(a) if a.body.hir_id == cur => return Some(("at the end of this match arm", end(a.body.span), Some(a.body.hir_id))),
+        Node::Expr(e) => match e.kind {
+          ExprKind::DropTemps(inner) => {
+            if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::ForLoop)) {
+              return Some(("when the `for` loop ends", end(e.span), None));
+            }
+            // An `if` / `while` condition's temporaries are dropped
+            // before its body runs.
+            let is_cond = matches!(self.tcx.parent_hir_node(e.hir_id),
+              Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == e.hir_id));
+            return is_cond.then(|| ("at the end of the condition", end(inner.span), None));
+          }
+          // `if` / `while` conditions, and the operands of `&&` / `||`,
+          // are scopes of their own.
+          ExprKind::If(c, ..) if c.hir_id == cur => {
+            return Some(("at the end of the condition", end(c.span), None));
+          }
+          ExprKind::Binary(op, l, r)
+            if matches!(op.node, rustc_hir::BinOpKind::And | rustc_hir::BinOpKind::Or)
+              && (l.hir_id == cur || r.hir_id == cur) =>
+          {
+            let operand = if l.hir_id == cur { l } else { r };
+            return Some(("at the end of this `&&` / `||` operand", end(operand.span), None));
+          }
+          ExprKind::Closure(c) if self.tcx.hir_body(c.body).value.hir_id == cur => {
+            return Some(("at the end of the closure body", end(self.tcx.hir_body(c.body).value.span), None));
+          }
+          _ => {}
+        },
+        Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_) => return None,
+        _ => {}
+      }
+      cur = self.tcx.parent_hir_id(cur);
+    }
+  }
+
   /// Entry point for handling `let pat = init [else { … }];`.
   ///
   /// Walks the init expression once for side-effect events (calls,
@@ -3239,4 +3444,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.add_external_event(line_num, ev);
     *self.unique_id += 1;
   }
+}
+
+/// True iff `callee` names a tuple struct / variant constructor
+/// (`Some`, `Wrapper`).
+fn is_ctor_path<'tcx>(callee: &Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'tcx>) -> bool {
+  match callee.kind {
+    ExprKind::Path(ref qpath) => matches!(typeck.qpath_res(qpath, callee.hir_id), Res::Def(DefKind::Ctor(..), _)),
+    _ => false,
+  }
+}
+
+/// `std::option::Option<std::string::String>` -> `Option<String>`: drop
+/// the lower-case module prefixes from a printed type.
+fn strip_module_paths(ty: &str) -> String {
+  let mut out = String::new();
+  let mut word = String::new();
+  let mut chars = ty.chars().peekable();
+  while let Some(c) = chars.next() {
+    if c.is_alphanumeric() || c == '_' {
+      word.push(c);
+    } else if c == ':' && chars.peek() == Some(&':') && word.chars().next().is_some_and(|f| f.is_lowercase()) {
+      chars.next();
+      word.clear();
+    } else {
+      out.push_str(&word);
+      word.clear();
+      out.push(c);
+    }
+  }
+  out.push_str(&word);
+  out
 }
