@@ -473,14 +473,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_05_match_on_ref",
-        status: Wrong,
-        note: "bare println! arm body: s's borrow end and opt's 'no longer borrowed' are drawn on L4, above the println! that reads s on the row below (#371)",
         must_contain: &[
             "Partial immutable borrow from opt to s",
             "Return immutably borrowed resource from s to opt",
             "opt goes out of scope. Its resource is dropped.",
+            "L4+ s's immutable borrow ends",
+            "L4+ opt's resource is no longer immutably borrowed",
         ],
-        known_wrong: &["L4 s's immutable borrow ends", "L4 opt's resource is no longer immutably borrowed"],
+        must_not_contain: &["L4 s's immutable borrow ends", "L4 opt's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
@@ -533,15 +533,20 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_11_enum_method",
         status: Wrong,
-        note: "bare println! arm body: s's borrow end is drawn on L10, above the println! that reads s (#371); self's own borrow ends at L9, before s reborrows through it at L10 (#372)",
+        note: "self's own borrow ends at L9, before s reborrows through it at L10 (#372)",
         must_contain: &[
             "Partial immutable borrow from self to s",
             "call reads from m (implicitly borrowed)",
             "m goes out of scope. Its resource is dropped.",
+            "L10+ s no longer borrows the resource self points to",
+            "L10+ s's immutable borrow ends",
+        ],
+        must_not_contain: &[
+            "L10 self's resource is no longer immutably borrowed",
+            "L10 s's immutable borrow ends",
             "L10 s no longer borrows the resource self points to",
         ],
-        must_not_contain: &["L10 self's resource is no longer immutably borrowed"],
-        known_wrong: &["L10 s's immutable borrow ends", "L9 self's immutable borrow ends"],
+        known_wrong: &["L9 self's immutable borrow ends"],
         ..E
     },
     // ─── Chapter 8: collections ───────────────────────────────────────
