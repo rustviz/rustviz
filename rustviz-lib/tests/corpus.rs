@@ -495,6 +495,8 @@ const EXPECTED_OK: &[&str] = &[
     // A reference parameter's borrow end on a line shared with another
     // arrow (#416).
     "ref_param_end_shared_line",
+    // A reference bound by an `if` starts its bracket at the join (#489).
+    "branch_ref_bracket_if",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6291,4 +6293,39 @@ fn tooltip_attributes_are_escaped() {
             }
         }
     }
+}
+
+/// A reference bound by an `if` only exists once the branches have joined,
+/// so its dotted "holds a reference" bracket must start below the branch
+/// diamond, not between its arms (#489). On main the bracket started at the
+/// join line itself (y=235), cutting through the diamond that spans
+/// y=205..265.
+#[test]
+fn reference_bracket_starts_below_the_branch_diamond() {
+    let t = run_with_local_backend("branch_ref_bracket_if").timeline_panel_string();
+    // The bracket: `<path ... class="staticref ..." d="M x y ..."` for `x`.
+    let bracket = t
+        .lines()
+        .find(|l| l.contains("class=\"staticref") && l.contains("&gt;x&lt;/span&gt; holds a reference"))
+        .expect("bracket for x");
+    let d = &bracket[bracket.find("d=\"M ").unwrap() + 5..];
+    let mut nums = d.split(|c: char| c == ' ' || c == '"');
+    let _x: f64 = nums.next().unwrap().parse().unwrap();
+    let y: f64 = nums.next().unwrap().parse().unwrap();
+    // The `x` column's branch dots: the apex ("live in a conditional") and
+    // the arm's initialization dot. The diamond's bottom corner is the
+    // lowest arm dot's line plus half a row.
+    let mut arm_ys = Vec::new();
+    for c in t.lines().filter(|l| l.contains("<circle") && l.contains("data-hash=\"4\"")
+        && (l.contains("live in a conditional") || l.contains("initialized by"))) {
+        let cy = c.split("cy=\"").nth(1).unwrap().split('"').next().unwrap();
+        arm_ys.push(cy.parse::<f64>().unwrap());
+    }
+    let join = arm_ys.iter().cloned().fold(f64::MIN, f64::max);
+    assert!(
+        y >= join + 30.0,
+        "x's bracket starts at y={} inside the branch diamond (arm dots up to y={}, \
+         diamond ends at y={})",
+        y, join, join + 30.0
+    );
 }

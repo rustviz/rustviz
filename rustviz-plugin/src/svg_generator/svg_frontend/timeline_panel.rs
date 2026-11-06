@@ -3423,6 +3423,12 @@ fn render_ref_line(
                 let ro = timeline.resource_access_point.to_owned();
                 // verticle state lines
                 let states = &timeline.states;
+                // A reference bound by an `if`/`match` only exists once the
+                // join below the diamond has produced it, so its bracket
+                // starts at the join, clear of the arms (#489).
+                let apexes = CollapsedApexes::of(&timeline.history);
+                let start_y = |line: usize| get_y_axis_pos(line)
+                    + if apexes.merges.contains(&line) { COLLAPSED_APEX } else { 0 };
                 // struct can live over events
                 let mut alive = false;
                 let mut data = RefLineData {
@@ -3466,7 +3472,7 @@ fn render_ref_line(
                                 // set known vals
                                 data.hash = *hash;
                                 data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = get_y_axis_pos(*line_start);
+                                data.y1 = start_y(*line_start);
 
                                 let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
                                 data.title = match ro {
@@ -3483,7 +3489,7 @@ fn render_ref_line(
                                 // set known vals
                                 data.hash = *hash;
                                 data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = get_y_axis_pos(*line_start);
+                                data.y1 = start_y(*line_start);
 
                                 let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
                                 data.title = format!("{} holds an immutable reference", styled);
