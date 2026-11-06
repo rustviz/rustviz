@@ -671,7 +671,18 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
 // `event_dot_owner_drop_at_reassign`, `event_dot_acquire`) with the
 // place as the subject.
 pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: bool, holds_value: bool) -> String {
-    if holder_is_ref {
+    // `*slots[0] += 10`: the element slots[0] is a reference (or Box);
+    // the write goes through it to what it points to (#396). The
+    // collection's own resource isn't what changes. `holds_value` is
+    // about that pointee here.
+    if let Some(elem) = place.strip_prefix('*').map(|e| e.trim_start().to_owned()) {
+        format!(
+            "the {2} {0} points to is modified through {1}",
+            fmt_style(&elem),
+            fmt_style(place),
+            held(holds_value)
+        )
+    } else if holder_is_ref {
         format!(
             "the {2} {0} points to is modified through {1}",
             fmt_style(holder),

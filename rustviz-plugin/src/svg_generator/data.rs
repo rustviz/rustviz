@@ -123,12 +123,28 @@ pub enum PlaceWrite {
     /// An in-place update (`*r += 1`), or not an assignment at all.
     #[default]
     Update,
+    /// An in-place update of what a reference stored in an element
+    /// points to (`*slots[0] += 10`), where that pointee holds a value
+    /// (Copy, or nothing to drop) rather than a resource (#396, #484).
+    UpdateValue,
     /// `*r = e` with a Copy value.
     AssignCopy,
     /// `*r = e` with an owned value over an old value that needs drop.
     AssignDropsOld,
     /// `*r = e` with an owned value over an old value with nothing to drop.
     AssignOwned,
+}
+
+impl PlaceWrite {
+    /// The write an assignment becomes when its operator is `op=`: an
+    /// in-place update. Remembers whether the old value is a value (no
+    /// drop glue) for the `*slots[0] += 10` wording.
+    pub fn into_update(self) -> PlaceWrite {
+        match self {
+            PlaceWrite::AssignCopy | PlaceWrite::AssignOwned | PlaceWrite::UpdateValue => PlaceWrite::UpdateValue,
+            _ => PlaceWrite::Update,
+        }
+    }
 }
 
 impl PartialEq for PlaceWrite { fn eq(&self, _: &Self) -> bool { true } }
@@ -333,6 +349,20 @@ impl Hash for ResourceTy {
 /// plain assignment is on main: "a copy of x" when the source is a named
 /// place (`*r = y`, `v[i] = x`), "a new value" otherwise (a literal, an
 /// expression, a call result).
+/// Whether an in-place update of `place` (`v[i] += k`, `*slots[0] += 10`)
+/// changes a value rather than a resource: for a place through a stored
+/// reference, whether its pointee needs no drop; otherwise whether the
+/// holder does.
+fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &PlaceWrite) -> bool {
+    if place.starts_with('*') {
+        matches!(write, PlaceWrite::UpdateValue)
+    } else if r.is_ref() {
+        r.points_to_copy()
+    } else {
+        r.holds_value()
+    }
+}
+
 pub fn place_assign_copy_message(place: &String, from: &ResourceTy) -> String {
     match from.extract_rap().filter(|f| !f.is_fn()) {
         Some(_) => hover_messages::event_dot_copyable_assign_copy(place, &from.name()),
@@ -1584,7 +1614,7 @@ impl Event {
                         // The old element has nothing to drop (that's what makes
                         // it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
-                        PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() }),
+                        PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     }
                 } else if let ResourceTy::Deref(r) = is {
                     // `*r += 1;` modifies what r points to in place.
@@ -1596,7 +1626,7 @@ impl Event {
                         // The old value has nothing to drop (that's what
                         // makes it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
-                        PlaceWrite::Update => hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy()),
+                        PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy()),
                     }
                 } else if let Some(rap) = is.extract_rap().filter(|rap| rap.is_ref()) {
                     // `let s: &str = "hi";`, `let r2 = r;` — the
@@ -1633,7 +1663,7 @@ impl Event {
                 // `v[i] = y;` with y: Copy assigns a new value to the
                 // place `v[i]`.
                 match write {
-                    PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() }),
+                    PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     _ => place_assign_copy_message(place, from),
                 }
             }

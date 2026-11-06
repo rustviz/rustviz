@@ -335,7 +335,9 @@ const Description: React.FC = () => (
         <code>point(&amp;mut hold, &amp;s)</code>) is drawn only as a
         borrow on <code>s</code>&apos;s column. The element value a
         write replaces is dropped only in the tooltip&apos;s words, not on a
-        column.
+        column. So is a write through a reference stored in an element (
+        <code>*slots[0] += 10</code>), without showing which variable it
+        changes.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

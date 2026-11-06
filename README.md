@@ -292,6 +292,10 @@ rather than listed here.
   element value an assignment replaces is dropped only in words (the
   tooltip says "v[0] acquires ownership of a new resource; its previous
   resource is dropped"), not on a column.
+  A write through a reference or `Box` stored in an element
+  (`*slots[0] += 10` with `slots: Vec<&mut i32>`) is drawn there too,
+  as a modification of what `slots[0]` points to; the variable it
+  points to isn't shown changing.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library
