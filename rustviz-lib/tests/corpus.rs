@@ -8296,7 +8296,7 @@ fn reference_bracket_starts_below_the_branch_diamond() {
     // The bracket: `<path ... class="staticref ..." d="M x y ..."` for `x`.
     let bracket = t
         .lines()
-        .find(|l| l.contains("class=\"staticref") && l.contains("&gt;x&lt;/span&gt; holds a reference"))
+        .find(|l| l.contains("class=\"staticref") && l.contains("&gt;x&lt;/span&gt; holds a"))
         .expect("bracket for x");
     let d = &bracket[bracket.find("d=\"M ").unwrap() + 5..];
     let mut nums = d.split(|c: char| c == ' ' || c == '"');
@@ -8307,7 +8307,8 @@ fn reference_bracket_starts_below_the_branch_diamond() {
     // lowest arm dot's line plus half a row.
     let mut arm_ys = Vec::new();
     for c in t.lines().filter(|l| l.contains("<circle") && l.contains("data-hash=\"4\"")
-        && (l.contains("live in a conditional") || l.contains("initialized by"))) {
+        && (l.contains("live in a conditional") || l.contains("initialized by")
+            || l.contains("initialized with a copy of") || l.contains("immutably borrows a resource"))) {
         let cy = c.split("cy=\"").nth(1).unwrap().split('"').next().unwrap();
         arm_ys.push(cy.parse::<f64>().unwrap());
     }
