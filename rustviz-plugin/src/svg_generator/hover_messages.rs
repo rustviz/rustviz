@@ -14,6 +14,16 @@ fn fmt_style(plain: &String) -> String {
     span_begin + plain + span_end
 }
 
+// What a column holds, as named in tooltips (#274). A Copy type (`i32`,
+// `bool`, a `#[derive(Clone, Copy)]` struct) can't implement `Drop`
+// (rustc rejects `Copy` + `Drop`, E0184), so it has nothing to clean up
+// and nothing "owned" in the drop sense: its columns say "holds a
+// value", and the copy / borrow tooltips on them say "value" too.
+// Everything else keeps RustViz's "resource".
+fn held(is_copy: bool) -> &'static str {
+    if is_copy { "value" } else { "resource" }
+}
+
 /* The Event dot does not connect to any arrows, we typically follow the following format:
    ... happens
  */
@@ -222,12 +232,14 @@ pub fn event_dot_init_param(my_name: &String) -> String {
 //     |
 // o<--*   the star event
 // |   |
+// Only Copy types are copied, so this always says "value" (#274); a
+// `&T` being copied has its own message (event_dot_ref_copied).
 pub fn event_dot_copy_to(my_name: &String, _target_name: &String) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
-        "{0}'s resource is copied",
+        "{0}'s value is copied",
         my_name_fmt
     )
 }
@@ -283,7 +295,7 @@ pub fn event_dot_move_to_caller(my_name: &String, _target_name: &String) -> Stri
 pub fn event_dot_copy_to_caller(my_name: &String, _target_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0}'s resource is copied to the caller",
+        "{0}'s value is copied to the caller",
         my_name_fmt
     )
 }
@@ -337,18 +349,19 @@ pub fn event_dot_ref_copied(my_name: &String) -> String {
 // `RefCell`, `cell.set(..)`, `m.lock()`): those methods take `&self`
 // and mutate X through the shared borrow, so "read-only" would be
 // false.
-pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_only: bool) -> String {
+// `is_copy`: X is a Copy-typed owner, so its "value" is borrowed (#274).
+pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_only: bool, is_copy: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
     if omit_read_only {
         format!(
-            "{0}'s resource is immutably borrowed by {1}",
-            my_name_fmt, target_name_fmt
+            "{0}'s {2} is immutably borrowed by {1}",
+            my_name_fmt, target_name_fmt, held(is_copy)
         )
     } else {
         format!(
-            "{0}'s resource is immutably borrowed by {1}; {0} is read-only while the borrow is live",
-            my_name_fmt, target_name_fmt
+            "{0}'s {2} is immutably borrowed by {1}; {0} is read-only while the borrow is live",
+            my_name_fmt, target_name_fmt, held(is_copy)
         )
     }
 }
@@ -364,12 +377,12 @@ pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_o
 // "while the borrow is live" phrasing as `event_dot_static_lend`,
 // for the same reason, so a reader can spot the read-only-vs-unusable
 // distinction by hovering both kinds.
-pub fn event_dot_mut_lend(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_mut_lend(my_name: &String, target_name: &String, is_copy: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
     format!(
-        "{0}'s resource is mutably borrowed by {1}; {0} can't be used while the borrow is live",
-        my_name_fmt, target_name_fmt
+        "{0}'s {2} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
+        my_name_fmt, target_name_fmt, held(is_copy)
     )
 }
 
@@ -504,13 +517,14 @@ pub fn event_dot_copy_from(my_name: &String, target_name: &String) -> String {
 //     |
 // *<--o   the star event (&mut)
 // |   |
-pub fn event_dot_mut_borrow(my_name: &String, _target_name: &String) -> String {
+// `lender_is_copy`: the lender is a Copy-typed owner (#274).
+pub fn event_dot_mut_borrow(my_name: &String, _target_name: &String, lender_is_copy: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
-        "{0} mutably borrows a resource",
-        my_name_fmt
+        "{0} mutably borrows a {1}",
+        my_name_fmt, held(lender_is_copy)
     )
 }
 
@@ -518,13 +532,13 @@ pub fn event_dot_mut_borrow(my_name: &String, _target_name: &String) -> String {
 //     |
 // *<--o   the star event (&)
 // |   |
-pub fn event_dot_static_borrow(my_name: &String, _target_name: &String) -> String {
+pub fn event_dot_static_borrow(my_name: &String, _target_name: &String, lender_is_copy: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
-        "{0} immutably borrows a resource",
-        my_name_fmt
+        "{0} immutably borrows a {1}",
+        my_name_fmt, held(lender_is_copy)
     )
 }
 
@@ -567,22 +581,22 @@ pub fn event_dot_capture_copy_to_closure(my_name: &String, target_name: &String,
 }
 
 // Source dot for an immutably captured upvar. Mirrors event_dot_static_lend.
-pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String, is_copy: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_fmt = fmt_style(target_name);
     format!(
-        "{0}'s resource is captured (immutably borrowed) by closure {1}",
-        my_name_fmt, target_fmt
+        "{0}'s {2} is captured (immutably borrowed) by closure {1}",
+        my_name_fmt, target_fmt, held(is_copy)
     )
 }
 
 // Source dot for a mutably captured upvar. Mirrors event_dot_mut_lend.
-pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &String) -> String {
+pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &String, is_copy: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_fmt = fmt_style(target_name);
     format!(
-        "{0}'s resource is captured (mutably borrowed) by closure {1}",
-        my_name_fmt, target_fmt
+        "{0}'s {2} is captured (mutably borrowed) by closure {1}",
+        my_name_fmt, target_fmt, held(is_copy)
     )
 }
 
@@ -669,13 +683,13 @@ pub fn event_dot_closure_capture_mut_borrow(my_name: &String, from_name: &String
 // o<--o
 // |   |
 // o-->*   the star event (&)
-pub fn event_dot_static_reacquire(my_name: &String, _target_name: &String) -> String {
+pub fn event_dot_static_reacquire(my_name: &String, _target_name: &String, is_copy: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
-        "{0}'s resource is no longer immutably borrowed",
-        my_name_fmt
+        "{0}'s {1} is no longer immutably borrowed",
+        my_name_fmt, held(is_copy)
     )
 }
 
@@ -684,13 +698,13 @@ pub fn event_dot_static_reacquire(my_name: &String, _target_name: &String) -> St
 // o<--o
 // |
 // o-->*   the star event (&mut)
-pub fn event_dot_mut_reacquire(my_name: &String, _target_name: &String) -> String {
+pub fn event_dot_mut_reacquire(my_name: &String, _target_name: &String, is_copy: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
-        "{0}'s resource is no longer mutably borrowed",
-        my_name_fmt
+        "{0}'s {1} is no longer mutably borrowed",
+        my_name_fmt, held(is_copy)
     )
 }
 
@@ -1074,13 +1088,13 @@ pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
 //      When a static reference goes out of scope, decrement this value by 1;
 //      When a decrement happens while the borrow_count is 1, the state becomes
 //          FullPrivilege once again.
-pub fn state_partial_privilege(my_name: &String) -> String {
+pub fn state_partial_privilege(my_name: &String, is_copy: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
-        "{0}'s resource is being shared by one or more variables",
-        my_name_fmt
+        "{0}'s {1} is being shared by one or more variables",
+        my_name_fmt, held(is_copy)
     )
 }
 

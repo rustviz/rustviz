@@ -352,6 +352,8 @@ const EXPECTED_OK: &[&str] = &[
     "match_copy_ref_out_of_tuple",
     "iflet_copy_ref_out_of_option",
     "match_ref_binding_borrows",
+    // Copy values are "values" in copy / borrow tooltips too (#274).
+    "copy_value_wording",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -392,22 +394,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from f to x",
             // `y: u32` is Copy: returning it copies (the arrow's
             // tooltip used to say "moved" regardless).
-            "y's resource is copied to the caller",
+            // (A Copy value is a "value", not a "resource", #274.)
+            "y's value is copied to the caller",
         ],
         must_not_contain: &[
             "y's resource is moved to the caller",
+            "y's resource is copied to the caller",
         ],
     },
     TooltipExpect {
         name: "copy_return_param",
         // i32 and bool returns are copies, never moves.
         must_contain: &[
-            "x's resource is copied to the caller",
-            "big's resource is copied to the caller",
+            "x's value is copied to the caller",
+            "big's value is copied to the caller",
         ],
         must_not_contain: &[
             "x's resource is moved to the caller",
             "big's resource is moved to the caller",
+            "x's resource is copied to the caller",
+            "big's resource is copied to the caller",
         ],
     },
     TooltipExpect {
@@ -438,11 +444,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── References: borrow + return ─────────────────────────────────
     TooltipExpect {
         name: "basic_ref",
+        // x is an i32: what's borrowed and returned is a value (#274).
         must_contain: &[
             "Immutable borrow from x to y",
-            "Return immutably borrowed resource from y to x",
+            "Return immutably borrowed value from y to x",
+            "x's value is immutably borrowed by y; x is read-only while the borrow is live",
         ],
-        must_not_contain: &[],
+        must_not_contain: &[
+            "Return immutably borrowed resource from y to x",
+            "x's resource is immutably borrowed by y; x is read-only while the borrow is live",
+        ],
     },
     TooltipExpect {
         name: "basic_mutref",
@@ -451,13 +462,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // modifies x's resource rather than acquiring one.
         must_contain: &[
             "Mutable borrow from x to y",
-            "Return mutably borrowed resource from y to x",
+            "Return mutably borrowed value from y to x",
             "y holds a mutable reference; it can read and write the borrowed resource",
             "the resource y points to is modified through *y",
         ],
         must_not_contain: &[
             "y is the owner of the resource",
             "*y acquires ownership of a resource",
+            "Return mutably borrowed resource from y to x",
         ],
     },
     TooltipExpect {
@@ -1762,7 +1774,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `let x = unsafe { u._a };` — a copy out of u.
             "Copy from u to x",
             "x is initialized by copy from u",
-            "u's resource is copied",
+            "u's value is copied",
             // `let r = unsafe { &u._b };` — u is the lender.
             "Immutable borrow from u to r",
             "Return immutably borrowed resource from r to u",
@@ -1992,7 +2004,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from r to unwrap_or_else",
             "r goes out of scope. No resource is dropped.",
             "Copy from c to unwrap_or",
-            "c's resource is copied",
+            "c's value is copied",
             "clone reads from s (implicitly borrowed)",
             "is_some reads from c (implicitly borrowed)",
             "s goes out of scope. Its resource is dropped.",
@@ -2213,7 +2225,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "name's resource is moved to the caller",
             "u.email's resource is moved to the caller",
-            "u.active's resource is copied to the caller",
+            "u.active's value is copied to the caller",
             "u.name goes out of scope. Its resource is dropped.",
             "u.email goes out of scope. No resource is dropped.",
             "u1.email goes out of scope. No resource is dropped.",
@@ -2518,11 +2530,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // some runs c "returned" the borrow while b still held it, and
         // x read as "no longer immutably borrowed" one line early.
         must_contain: &[
-            "Return immutably borrowed resource from b to x",
+            "Return immutably borrowed value from b to x",
         ],
         must_not_contain: &[
-            "Return immutably borrowed resource from c to x",
-            "Return immutably borrowed resource from a to x",
+            "Return immutably borrowed value from c to x",
+            "Return immutably borrowed value from a to x",
         ],
     },
 
@@ -2633,8 +2645,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // checks the geometry. Listed so the fixture keeps
         // exercising a crossing: if a dot disappears, this fails.
         must_contain: &[
-            "Return mutably borrowed resource from r to x",
-            "y's resource is copied",
+            "Return mutably borrowed value from r to x",
+            "y's value is copied",
             "Move from p to q",
             "p.name's resource is moved",
             "p.email's resource is moved",
@@ -3025,8 +3037,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from a.x to +",
             "Copy from a.y to +",
             "Copy from x to *",
-            "x's resource is copied",
-            "a.y's resource is copied",
+            "x's value is copied",
+            "a.y's value is copied",
             "Copy from a.x to d",
         ],
         must_not_contain: &[
@@ -3120,7 +3132,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from b to !",
             "Copy from p.y to -",
             "Copy from *r to -",
-            "b's resource is copied",
+            "b's value is copied",
             "Move from wave to -",
             "wave's resource is moved",
             "wave goes out of scope. No resource is dropped.",
@@ -3251,6 +3263,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from t to opt",
         ],
         must_not_contain: &[],
+    },
+    // ─── Copy values are "values" everywhere on their column (#274) ──
+    TooltipExpect {
+        name: "copy_value_wording",
+        // m / k are i32 and p is a Copy struct: their columns say
+        // "holds a value", and so do their copy, borrow and
+        // borrow-return tooltips. The `&i32` r keeps reference wording.
+        must_contain: &[
+            "m's value is copied",
+            "m's value is immutably borrowed by r; m is read-only while the borrow is live",
+            "m's value is being shared by one or more variables",
+            "m's value is no longer immutably borrowed",
+            "r immutably borrows a value",
+            "Return immutably borrowed value from r to m",
+            "r's reference is copied (not the resource it points to)",
+            "r holds an immutable reference; it can read the borrowed resource",
+            "k's value is mutably borrowed by w; k can't be used while the borrow is live",
+            "k's value is no longer mutably borrowed",
+            "w mutably borrows a value",
+            "Return mutably borrowed value from w to k",
+            "k's value is captured (immutably borrowed) by closure f",
+            "p's value is copied",
+            "p.x's value is copied",
+        ],
+        must_not_contain: &[
+            "m's resource is copied",
+            "m's resource is immutably borrowed by r; m is read-only while the borrow is live",
+            "m's resource is being shared by one or more variables",
+            "m's resource is no longer immutably borrowed",
+            "r immutably borrows a resource",
+            "Return immutably borrowed resource from r to m",
+            "r's resource is being shared by one or more variables",
+            "r2's resource is being shared by one or more variables",
+            "k's resource is mutably borrowed by w; k can't be used while the borrow is live",
+            "k's resource is no longer mutably borrowed",
+            "w mutably borrows a resource",
+            "Return mutably borrowed resource from w to k",
+            "k's resource is captured (immutably borrowed) by closure f",
+            "p's resource is copied",
+            "p.x's resource is copied",
+        ],
     },
 ];
 
@@ -3900,14 +3953,14 @@ fn same_line_return_arrows_follow_source_order() {
     let rv = run_with_local_backend("basic_deref3");
     let returns: Vec<String> = timeline_tooltips(&rv.timeline_panel_string())
         .into_iter()
-        .filter(|t| t.starts_with("Return immutably borrowed resource from"))
+        .filter(|t| t.starts_with("Return immutably borrowed value from"))
         .collect();
     assert_eq!(
         returns,
         [
-            "Return immutably borrowed resource from y to x",
-            "Return immutably borrowed resource from z to x",
-            "Return immutably borrowed resource from a to x",
+            "Return immutably borrowed value from y to x",
+            "Return immutably borrowed value from z to x",
+            "Return immutably borrowed value from a to x",
         ],
     );
 }

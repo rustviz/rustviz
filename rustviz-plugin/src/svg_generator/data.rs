@@ -898,6 +898,13 @@ impl std::fmt::Display for State {
 }
 
 
+// Whether `rty` is a Copy-typed owner (`i32`, a Copy struct or field),
+// whose tooltips say "value" rather than "resource" (#274). A `*r`
+// place isn't: what it holds belongs to r's lender.
+fn holds_copy_value(rty: &ResourceTy) -> bool {
+    matches!(rty, ResourceTy::Value(r) if r.is_copy_owner())
+}
+
 fn safe_message(
     message_functor: fn(&String, &String) -> String,
     my_name: &String,
@@ -935,7 +942,7 @@ impl State {
                 hover_messages::state_full_privilege(my_name)
             }
             State::PartialPrivilege { .. } => {
-                hover_messages::state_partial_privilege(my_name)
+                hover_messages::state_partial_privilege(my_name, false)
             }
             State::RevokedPrivilege { to: _, borrow_to , prev_state: _} => {
                 safe_message(hover_messages::state_resource_revoked, my_name, borrow_to)
@@ -1197,8 +1204,10 @@ impl Event {
 
             }
             Event::StaticLend{ to, is, ..} => {
+                let is_copy = holds_copy_value(is);
                 if to.is_closure() {
-                    safe_message(hover_messages::event_dot_capture_static_lend_to_closure, &self.deref_name(my_name), to)
+                    let target_name = safe_message(|_, t| t.clone(), my_name, to);
+                    hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
                 } else {
                     // `is` is the lender. A `&T` lender was read-only
                     // already, and a `RefCell` / `Cell` / `Mutex` lender
@@ -1207,14 +1216,16 @@ impl Event {
                     let omit_read_only = is.extract_rap()
                         .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
                     let target_name = safe_message(|_, t| t.clone(), my_name, to);
-                    hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, omit_read_only)
+                    hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, omit_read_only, is_copy)
                 }
             }
-            Event::MutableLend{ to ,..} => {
+            Event::MutableLend{ to, is, ..} => {
+                let is_copy = holds_copy_value(is);
+                let target_name = safe_message(|_, t| t.clone(), my_name, to);
                 if to.is_closure() {
-                    safe_message(hover_messages::event_dot_capture_mut_lend_to_closure, &self.deref_name(my_name), to)
+                    hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
                 } else {
-                    safe_message(hover_messages::event_dot_mut_lend, &self.deref_name(my_name), to)
+                    hover_messages::event_dot_mut_lend(&self.deref_name(my_name), &target_name, is_copy)
                 }
             }
             Event::StaticDie{ to,.. } => {
@@ -1267,21 +1278,23 @@ impl Event {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
                 } else {
-                    hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name())
+                    hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }
             }
             Event::StaticBorrow{ from, is, ..} => {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
                 } else {
-                    hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name())
+                    hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }
             }
-            Event::StaticReacquire{ from ,..} => {
-                safe_message(hover_messages::event_dot_static_reacquire, &self.deref_name(my_name), from)
+            Event::StaticReacquire{ from, is, ..} => {
+                let from_name = safe_message(|_, t| t.clone(), my_name, from);
+                hover_messages::event_dot_static_reacquire(&self.deref_name(my_name), &from_name, holds_copy_value(is))
             }
-            Event::MutableReacquire{ from ,..} => {
-                safe_message(hover_messages::event_dot_mut_reacquire, &self.deref_name(my_name), from)
+            Event::MutableReacquire{ from, is, ..} => {
+                let from_name = safe_message(|_, t| t.clone(), my_name, from);
+                hover_messages::event_dot_mut_reacquire(&self.deref_name(my_name), &from_name, holds_copy_value(is))
             }
             Event::RefDie {..} => {
               panic!("should never be calling this function with this event");
@@ -1396,8 +1409,8 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
             else if *is_reborrow { String::from("Immutable reborrow") }
             else { String::from("Immutable borrow") }
         },
-        ExternalEvent::StaticDie{ .. } => {
-            String::from("Return immutably borrowed resource")
+        ExternalEvent::StaticDie{ to, .. } => {
+            format!("Return immutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
         },
         ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, .. } => {
             if *is_partial { String::from("Partial Mutable borrow") }
@@ -1410,8 +1423,8 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
             else if *is_reborrow { String::from("Mutable reborrow") }
             else { String::from("Mutable borrow") }
         },
-        ExternalEvent::MutableDie{ .. } => {
-           String::from("Return mutably borrowed resource")
+        ExternalEvent::MutableDie{ to, .. } => {
+           format!("Return mutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
         },
         // Reached only when the callee isn't a Function RAP — a call
         // through a closure variable (`f(&x)`, `g(r)`); calls to real

@@ -1496,8 +1496,12 @@ fn timeline_segment_title(
     // wording so the lifeline tooltip stays consistent with the
     // event-dot tooltip on the same column.
     if rap.is_copy_owner() {
-        if let State::FullPrivilege { .. } = state {
-            return hover_messages::state_full_privilege_copyable(rap.name());
+        match state {
+            State::FullPrivilege { .. } =>
+                return hover_messages::state_full_privilege_copyable(rap.name()),
+            State::PartialPrivilege { .. } =>
+                return hover_messages::state_partial_privilege(rap.name(), true),
+            _ => {}
         }
     }
     // References (`&mut T` / `&T` bindings, `&mut self`, ref params,
@@ -1515,6 +1519,12 @@ fn timeline_segment_title(
     // A reference that was moved out never had ownership to lose (#292).
     if let (State::ResourceMoved { .. }, true) = (state, rap.is_ref()) {
         return hover_messages::state_ref_moved(rap.name(), rap.is_mutref());
+    }
+    // A `&T` is in PartialPrivilege from the start (it shares its
+    // referent) and stays there when it's copied; it never had a
+    // resource of its own to share (#274).
+    if let (State::PartialPrivilege { .. }, ResourceAccessPoint::StaticRef(_)) = (state, rap) {
+        return hover_messages::state_static_ref_full_privilege(rap.name());
     }
     state.print_message_with_name(rap.name())
 }
