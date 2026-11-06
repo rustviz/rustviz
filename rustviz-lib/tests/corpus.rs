@@ -4909,7 +4909,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "acc is initialized by copy from x",
+            "acc is initialized with a copy of x",
             "Copy from x to acc",
             "s immutably borrows a resource",
             "s acquires ownership of a new resource; its previous resource is dropped",
