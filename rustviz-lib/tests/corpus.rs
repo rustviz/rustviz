@@ -445,6 +445,10 @@ const EXPECTED_OK: &[&str] = &[
     "diverging_call_arm",
     // A diverging branch's column stops at its end (#317).
     "diverging_branch_stops",
+    // — Element writes (#144): `v[i] = …` is drawn on v's column as a
+    //   modification of v's resource, directly or through a reference.
+    "index_assign",
+    "index_assign_through_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4385,6 +4389,106 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              reaches the end of the conditional, and m's column doesn't either",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "index_assign",
+        // `v[0] = 9`, `v[1] += k`, `v[2] = v[0]`, `names[0] = s`,
+        // `grid[1][0] = 7`, `ps[0] = p`: one element is overwritten;
+        // the collection keeps its resource. Before #144 these writes
+        // weren't drawn, and `p.name` still dropped a String that had
+        // moved into `ps[0]` with `p`. An assignment reads like a plain
+        // assignment with the place as subject (2026-11-05 decision);
+        // `+=` modifies the element in place and keeps "modified
+        // through".
+        must_contain: &[
+            // A literal has no source to name; a named place does.
+            "v[0] is assigned a new value",
+            "v's resource is modified through v[1]",
+            // `v[2] = v[0]`: an element read is not a modelled source
+            // (no arrow), so there is nothing to name.
+            "v[2] is assigned a new value",
+            "v[0] is assigned a copy of *z",
+            "Move from s to names[0]",
+            "names[0] acquires ownership of a new resource; its previous resource is dropped",
+            // `+=` on a String calls `add_assign`: nothing is overwritten.
+            "names's resource is modified through names[0]",
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+            "Move from String::from to names[0]",
+            "grid[1][0] is assigned a new value",
+            // Nested collections read the same at any depth: the place
+            // is the subject, not the outermost collection.
+            "grid[0][1] is assigned a copy of y",
+            "Copy from y to grid[0][1]",
+            "grid's resource is modified through grid[1][1]",
+            "cube[0][0][1] is assigned a new value",
+            "rows[0][0] acquires ownership of a new resource; its previous resource is dropped",
+            "Move from p to ps[0]",
+            "ps[0] acquires ownership of a new resource; its previous resource is dropped",
+            "p.name's resource is moved",
+            "p.name goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            // Treating `names[0] = …` as a write to `names` itself
+            // (the first version of this change) said the whole Vec
+            // was replaced and dropped.
+            "names acquires ownership of a new resource; its previous resource is dropped",
+            "v acquires ownership of a new resource; its previous resource is dropped",
+            // `v[1] += k`: k is an operand, not the element's new value.
+            "Copy from k to v[1]",
+            "v[1] is assigned a new value",
+            "v[2] is assigned a copy of",
+            "p.name goes out of scope. Its resource is dropped.",
+            // An assignment is not "modified through", and the arrow
+            // carries the move / copy.
+            "(copied from",
+            "(moved from",
+            "v's resource is modified through v[0]",
+            "v's resource is modified through v[2]",
+            "grid's resource is modified through grid[1][0]",
+            "grid's resource is modified through grid[0][1]",
+            "cube's resource is modified through cube[0][0][1]",
+            "rows's resource is modified through rows[0][0]",
+            "grid[1][1] is assigned",
+            "ps's resource is modified through ps[0]",
+            "the value previously in",
+            // Integers have nothing to drop.
+            "v[0] acquires ownership",
+        ],
+    },
+    TooltipExpect {
+        name: "index_assign_through_ref",
+        // `xs[i] = x` (xs: &mut [i32]), `dst[0] = s` (dst: &mut Vec),
+        // `r[0] = …` (r = &mut v): the write assigns to the place, which
+        // reads like a plain assignment with the place as subject. The
+        // parameters' borrows still end on the write's line (another
+        // arrow on that line used to hide that event).
+        must_contain: &[
+            "Copy from x to xs[i]",
+            "xs[i] is assigned a copy of x",
+            "xs's mutable borrow ends",
+            "Move from s to dst[0]",
+            "dst[0] acquires ownership of a new resource; its previous resource is dropped",
+            "dst's mutable borrow ends",
+            "s goes out of scope. No resource is dropped.",
+            "Move from String::from to r[0]",
+            "r[0] acquires ownership of a new resource; its previous resource is dropped",
+            "Return mutably borrowed resource from r to v",
+        ],
+        must_not_contain: &[
+            "xs[i] is assigned a new value",
+            "xs acquires ownership of a resource",
+            "dst acquires ownership of a resource",
+            "dst acquires ownership of a new resource; its previous resource is dropped",
+            "r acquires ownership of a resource",
+            "s goes out of scope. Its resource is dropped.",
+            "(copied from",
+            "(moved from",
+            "the resource xs points to is modified through xs[i]",
+            "the resource dst points to is modified through dst[0]",
+            "the resource r points to is modified through r[0]",
+            "the value previously in",
+        ],
     },
 ];
 

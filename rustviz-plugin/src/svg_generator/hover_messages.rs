@@ -511,6 +511,30 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
    ... from <Resource Owner 1>
  */
 
+// In-place update of one element of a resource: `a[i] += 1;`. The
+// element lives inside the resource `holder` owns (or, when `holder`
+// is a reference, inside the resource it points to), so `holder`
+// neither acquires a new resource nor drops its old one. `place` is
+// the element as written (`v[i]`). An assignment `v[i] = x;` is not
+// this: it reads like a plain assignment (`event_dot_copyable_assign`,
+// `event_dot_owner_drop_at_reassign`, `event_dot_acquire`) with the
+// place as the subject.
+pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: bool) -> String {
+    if holder_is_ref {
+        format!(
+            "the resource {0} points to is modified through {1}",
+            fmt_style(holder),
+            fmt_style(place)
+        )
+    } else {
+        format!(
+            "{0}'s resource is modified through {1}",
+            fmt_style(holder),
+            fmt_style(place)
+        )
+    }
+}
+
 // 1   0        1   0
 // |            |   
 // o-->*   or   o-->*     the star event

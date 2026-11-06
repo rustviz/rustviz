@@ -433,7 +433,7 @@ pub fn render_svg(
             // was dropped. That lost e.g. `Move from String::from to
             // s.b` next to `Move from t to s.c`. A Move/Copy out of a
             // function call, to the caller, or into a place with no
-            // column (`v[i] = s`, `self.name = s`, `r.name = s`: `to` is
+            // column (`self.name = s`, `r.name = s`: `to` is
             // Anonymous; otherwise s would later be shown dropping a
             // resource it gave away) now gets appended on its own, as
             // does a borrow of a temporary (`let r = &{};`, `let r =
@@ -464,8 +464,15 @@ pub fn render_svg(
                 let borrow_of_temporary = is_borrow
                     && matches!(from, ResourceTy::Anonymous)
                     && matches!(to, ResourceTy::Value(_) | ResourceTy::Deref(_));
+                // A reference parameter's borrow ending (`r`'s last use
+                // in `fn f(r: &mut T)` returns the borrow to the
+                // caller) shares its line with the write through `r`
+                // in `r[0] = x;` / `*r = s;`.
+                let ref_param_ends = matches!(event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+                    && matches!(to, ResourceTy::Caller);
                 if (is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
-                    || borrow_of_temporary {
+                    || borrow_of_temporary
+                    || ref_param_ends {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
                 }
                 i += 1;

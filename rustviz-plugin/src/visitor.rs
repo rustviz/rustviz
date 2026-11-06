@@ -1063,11 +1063,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             false => Evt::Move
           }
         };
-        // None means the LHS is a place the plugin doesn't model (an
-        // index `v[i]`, a field through a reference `self.n` / `r.x`
-        // before #147, `(*p).f`, …) or an unregistered name. The write
+        // None means the LHS is a place the plugin doesn't model (a
+        // field through a reference `self.n` / `r.x` before #147,
+        // `(*p).f`, a tuple field `t.0`, an element that is itself a
+        // reference `v[i] = &s`, …) or an unregistered name. The write
         // itself isn't drawn, but for `=` the RHS still goes into that
-        // place: `v[i] = s` / `self.name = s` move `s`. Record that
+        // place: `self.name = s` / `r.name = s` move `s`. Record that
         // against an anonymous destination, otherwise `s` would later
         // be shown dropping a resource it no longer owns. (For `op=`
         // the RHS is an operand, not a value stored in the place.)
@@ -1273,7 +1274,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           _ => Vec::new(),
         };
 
-        self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+        if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
+          // `v[i] += k`: k is an operand, not the element's new
+          // value, so don't draw it as copied into v[i].
+          let compound = match &lhs_rty {
+            ResourceTy::Index(r, place, _) => ResourceTy::Index(r.clone(), place.clone(), PlaceWrite::Update),
+            other => other.clone(),
+          };
+          self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);
+        } else {
+          let n_events = self.preprocessed_events.len();
+          self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+          // `v[1] = v[2]`: match_rhs has nothing to say about some
+          // RHS shapes (an index read, a field of a call, …), but the
+          // element is still overwritten.
+          if matches!(lhs_rty, ResourceTy::Index(..)) && self.preprocessed_events.len() == n_events {
+            self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
+          }
+        }
 
         for rap in drop_target.into_iter().chain(field_drop_targets) {
           self.add_external_event(line_num, ExternalEvent::OwnerDropAtReassign {

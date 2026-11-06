@@ -250,10 +250,17 @@ rather than listed here.
   Some(b) = y`): the bindings and their uses aren't shown.
 - Assignments to a place that has no column of its own aren't drawn: a
   field through a reference (`self.n += 1` in a `&mut self` method,
-  `c.n = …` where `c: &mut T`), an index (`v[i] = …`), or a field of a
-  method's result (`v.last_mut().unwrap().n = 5`). A value moved into
-  such a place is still shown as moved. Fields of a local struct,
-  including chained ones (`o.inner.x = …`), are drawn.
+  `c.n = …` where `c: &mut T`), a field of a method's result
+  (`v.last_mut().unwrap().n = 5`), or an element that is itself a
+  reference (`v[i] = &s`). A value moved into such a place is still
+  shown as moved. Fields of a local struct, including chained ones
+  (`o.inner.x = …`), are drawn.
+- A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
+  through `r: &mut Vec<_>`) is drawn on the collection's column as a
+  modification of its resource; elements have no columns of their own,
+  so the element value it replaces is dropped only in words (the
+  write's tooltip says "the value previously in v[0] is dropped"), not
+  on a column.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library

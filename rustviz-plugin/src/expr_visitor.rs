@@ -416,7 +416,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn event_touches_skipped(&self, event: &ExternalEvent) -> bool {
     let touches_ty = |r: &ResourceTy| -> bool {
       match r {
-        ResourceTy::Value(rap) | ResourceTy::Deref(rap) => {
+        ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::Index(rap, _, _) => {
           self.skip_raps.contains(rap.name())
         }
         _ => false,
@@ -485,7 +485,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       (ResourceTy::Value(_), ResourceTy::Value(_), _) // maybe change later
       | (ResourceTy::Deref(_), ResourceTy::Deref(_), _) 
       | (ResourceTy::Value(_), ResourceTy::Deref(_), _)
-      | (ResourceTy::Deref(_), ResourceTy::Value(_), _) => {
+      | (ResourceTy::Deref(_), ResourceTy::Value(_), _)
+      // `v[i] = s` / `v[i] = y`: an arrow into v's column.
+      | (ResourceTy::Value(_), ResourceTy::Index(..), _)
+      | (ResourceTy::Deref(_), ResourceTy::Index(..), _) => {
         self.event_line_map.get_mut(&line_num).unwrap().push(event.clone());
       },
       _ => ()
@@ -560,6 +563,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let pass_through = match to {
         ResourceTy::Caller => true,
         ResourceTy::Value(r) => r.is_fn() || r.is_closure(),
+        // `v[i] = p`: p's fields go into the element with it.
+        ResourceTy::Index(..) => true,
         _ => false,
       };
       if to_struct.is_none() && !pass_through {
@@ -792,11 +797,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   // Return the ResourceTy that corresponds to the LHS of an assignment.
-  // `None` means the LHS is a shape the plugin doesn't model (e.g.
-  // `a[i] = …` index, `(a, b) = …` destructure — #144), or names a
-  // path the plugin never registered as a RAP (synthetic macro local,
-  // unregistered nested-field projection). The caller short-circuits
-  // the assignment instead of crashing.
+  // `None` means the LHS is a shape the plugin doesn't model (e.g. a
+  // tuple field `t.0 = …`), or names a path the plugin never
+  // registered as a RAP (synthetic macro local, a field through a
+  // reference). The caller short-circuits the assignment instead of
+  // crashing.
   pub fn resource_of_lhs(&mut self, expr: &'tcx Expr) -> Option<ResourceTy> {
     match expr.kind {
       // Path / Field (including chained `a.b.c`): walk the projection
@@ -831,9 +836,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           None => Some(ResourceTy::Anonymous),
         }
       }
-      // Index, tuple-destructure, etc. — see issue #144.
+      // `v[i] = …`, `grid[r][c] += …`, `r[i] = …` (r: `&mut Vec<_>`):
+      // a write to one element of the resource the receiver owns or
+      // points to. Elements have no columns, so the event goes on the
+      // receiver's column, tagged as an element write: the receiver
+      // neither acquires a new resource nor drops its old one.
+      ExprKind::Index(..) => {
+        // An element that is itself a reference (`v[0] = &s`) would
+        // start a borrow whose end we don't track; leave it undrawn.
+        let elem_ty = self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id);
+        if elem_ty.is_ref() {
+          return None;
+        }
+        let name = expr_to_rap_name(expr, &self.tcx)?;
+        let rap = self.raps.get(&name)?.rap.to_owned();
+        if rap.is_fn() {
+          return None;
+        }
+        let place = self.place_label(expr, &name);
+        // A plain `=` assigns to the place: a Copy value is "assigned a
+        // new value", an owned value over one that needs drop drops it,
+        // and an owned value with nothing to drop just acquires the
+        // new one. The caller turns this into `Update` for `op=`, which
+        // calls the operator method and overwrites nothing.
+        let typing_env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+        let write = if self.tcx.type_is_copy_modulo_regions(typing_env, elem_ty) {
+          PlaceWrite::AssignCopy
+        } else if elem_ty.needs_drop(self.tcx, typing_env) {
+          PlaceWrite::AssignDropsOld
+        } else {
+          PlaceWrite::AssignOwned
+        };
+        Some(ResourceTy::Index(rap, place, write))
+      }
+      // Any other place expression: not modelled, skipped.
       _ => {
-        warn!("unsupported assignment LHS shape (#144); skipping assignment at this location");
+        warn!("unsupported assignment LHS shape; skipping assignment at this location");
         None
       }
     }
@@ -936,6 +974,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let ExprKind::Path(ref qpath) = callee.kind else { return false };
     let res = self.tcx.typeck(callee.hir_id.owner).qpath_res(qpath, callee.hir_id);
     matches!(res, rustc_hir::def::Res::Def(_, def_id) if self.tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def_id))
+  }
+
+  /// How an element place (`v[i]`) is named in tooltips: its source
+  /// text when that's short and plain, else `v[…]`. Tooltip text goes
+  /// into an HTML attribute, so text with markup characters, quotes
+  /// or line breaks is never used verbatim.
+  fn place_label(&self, expr: &Expr, rap_name: &str) -> String {
+    let fallback = format!("{}[…]", rap_name);
+    if expr.span.from_expansion() {
+      return fallback;
+    }
+    match self.tcx.sess.source_map().span_to_snippet(expr.span) {
+      Ok(text) if text.chars().count() <= 24
+        && !text.contains(|c: char| matches!(c, '<' | '>' | '&' | '"' | '\'' | '\n' | '\r')) => text,
+      _ => fallback,
+    }
   }
 
   // add events for arguments in a function call
@@ -1125,7 +1179,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if ty.builtin_deref(false).unwrap().is_ref() {
         match &lender {
           ResourceTy::Anonymous | ResourceTy::Caller => { (lender, aliasing) }
-          ResourceTy::Value(x) | ResourceTy::Deref(x) => {
+          ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
             aliasing.push_front(x.name().to_owned()); // here the lender is added to the list of aliases 
             (lender, aliasing)
           }
