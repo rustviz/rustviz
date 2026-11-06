@@ -592,6 +592,7 @@ const EXPECTED_OK: &[&str] = &[
     "fn_ret_ref_iter_next",
     "fn_ret_ref_reassign",
     "fn_ret_ref_struct_field",
+    "fn_ret_ref_arg_lists",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5980,6 +5981,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a to h.r",
             "a's resource is moved",
             "Return mutably borrowed resource from h.r to t",
+    TooltipExpect {
+        name: "fn_ret_ref_arg_lists",
+        // The arrow says which arguments the signature ties the result
+        // to. Elision ties a `&self` method's result to the receiver
+        // only, not to a reference argument too (`pick`); an explicit
+        // lifetime can tie it to the argument only (`pick_arg`).
+        must_contain: &[
+            "Immutable borrow from w to r1: pick's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Immutable borrow from o to r2: pick_arg's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from w to r3: both's signature gives the reference it returns the same lifetime as the value it was called on and its argument, so it may point into either, and both stay borrowed while r3 is in use",
+            "Immutable borrow from b to r4: three's signature gives the reference it returns the same lifetime as all three arguments, so it may point into any of them, and all of them stay borrowed while r4 is in use",
+            "Immutable borrow from c to r5: first_third's signature gives the reference it returns the same lifetime as its first and third arguments, so it may point into either, and both stay borrowed while r5 is in use",
+            "Immutable borrow from c to r6: three's signature gives the reference it returns the same lifetime as all three arguments (one of them is a value with no column here), so it may point into any of them, and a and c stay borrowed while r6 is in use",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from o to r1",
+            "Immutable borrow from b to r5",
+            ", through the reference",
         ],
     },
 ];
