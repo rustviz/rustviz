@@ -272,7 +272,12 @@ rather than listed here.
   `&mut self` method, `c.n = …` where `c: &mut T`), a place that holds
   a reference (`v[i] = &s`, `h.r = &x`: overwriting a reference drops
   nothing), and a place not reached from a local variable. A value
-  moved into such a place is still shown as moved. Fields of a local
+  moved into such a place is still shown as moved, and a borrow stored
+  in one (`v[i] = &s`, `h.r = &s`) is drawn on the lender's column
+  only, naming the place as the borrower ("borrowed by h.r"). It ends
+  where the borrow checker ends it; one stored behind a reference
+  parameter (`h: &mut Holder`) outlives the function, so no end is
+  drawn. Fields of a local
   struct, including chained ones (`o.inner.x = …`), have columns of
   their own.
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`

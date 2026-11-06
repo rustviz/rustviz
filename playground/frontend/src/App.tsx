@@ -330,9 +330,11 @@ const Description: React.FC = () => (
         the column of the variable it is reached from; the old value&apos;s drop
         is stated in the tooltip only. A write to an
         element (<code>v[i] = x</code>) is drawn on <code>v</code>&apos;s column,
-        unless the element is a reference (<code>v[i] = &amp;s</code>); the
-        element value it replaces is dropped only in the tooltip&apos;s words,
-        not on a column.
+        unless the element is a reference: <code>v[i] = &amp;s</code> (or{' '}
+        <code>h.r = &amp;s</code> through a reference) is drawn only as a
+        borrow on <code>s</code>&apos;s column. The element value a
+        write replaces is dropped only in the tooltip&apos;s words, not on a
+        column.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

@@ -508,6 +508,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // (Some(variable), Some(function), _)
       },
       (ResourceTy::Anonymous, ResourceTy::Anonymous, _) | (_, ResourceTy::Caller, _) => {},
+      // A borrow stored in an element (`v[0] = &u`, #282) is drawn on
+      // the lender's column only: v's column doesn't model it.
+      (_, ResourceTy::Index(..), ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => {},
       (ResourceTy::Value(_), ResourceTy::Value(_), _) // maybe change later
       | (ResourceTy::Deref(_), ResourceTy::Deref(_), _) 
       | (ResourceTy::Value(_), ResourceTy::Deref(_), _)
@@ -1083,20 +1086,115 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::Index(rap, place, write))
   }
 
+  /// `place = &x` / `place = &mut x` where `place` has no column of its
+  /// own: an element that is a reference (`v[0] = &u`), or a field
+  /// through a reference (`h.r = &y` with `h: &mut Holder`). The borrow
+  /// of `x` is drawn on x's column only, naming the place as the
+  /// borrower (`borrowed by v[0]`, `borrowed by h.r`; no borrower is
+  /// named if the place can't be, e.g. a field of a call's result). It
+  /// ends where the MIR loan does: the last use of whatever holds the
+  /// reference (#282). If the place lives behind a reference the
+  /// function was passed (`h.r = &y`, `self.r = …`), the borrow outlives
+  /// the function, so no end is drawn. It used to say "borrowed by
+  /// Anonymous resource" and never end.
+  pub fn store_borrow_in_unmodelled_place(&mut self, lhs: &'tcx Expr<'tcx>, rhs: &'tcx Expr<'tcx>, evt: Evt) {
+    let root = self.place_root(lhs);
+    // Only a place reached by fields / derefs from a variable is named.
+    let named_root = root.filter(|&(_, through_call)| !through_call).map(|(root, _)| root);
+    let dest = match lhs.kind {
+      ExprKind::Index(..) => expr_to_rap_name(lhs, &self.tcx)
+        .and_then(|name| {
+          let rap = self.raps.get(&name)?.rap.to_owned();
+          (!rap.is_fn()).then(|| ResourceTy::Index(rap, self.place_label(lhs, &name), PlaceWrite::Update))
+        })
+        .unwrap_or(ResourceTy::Anonymous),
+      // A field with no column of its own (`h.r` through a reference):
+      // named by its source text. `Index` is the place-with-no-column
+      // borrower here too; borrows into it stay on the lender's column.
+      ExprKind::Field(..) => named_root
+        .and_then(|root| {
+          let name = expr_to_rap_name(root, &self.tcx)?;
+          let rap = self.raps.get(&name)?.rap.to_owned();
+          let label = self.plain_source_text(lhs)?;
+          (!rap.is_fn()).then(|| ResourceTy::Index(rap, label, PlaceWrite::Update))
+        })
+        .unwrap_or(ResourceTy::Anonymous),
+      _ => ResourceTy::Anonymous,
+    };
+    let n_events = self.preprocessed_events.len();
+    self.match_rhs(dest.clone(), rhs, evt);
+    // A reference stored behind a reference parameter is handed back to
+    // the caller: its borrow lasts past this function's end.
+    if root.is_some_and(|(root, _)| self.is_ref_param(root)) {
+      return;
+    }
+    // The borrow match_rhs just recorded, if any (a borrow of a
+    // temporary, `v[0] = &String::new()`, has no lender column).
+    let borrow = self.preprocessed_events[n_events..].iter().find_map(|(line, ev)| match ev {
+      ExternalEvent::StaticBorrow { from: from @ ResourceTy::Value(lender), to, .. } if *to == dest =>
+        Some((*line, from.clone(), lender.name().to_owned(), Evt::SDie)),
+      ExternalEvent::MutableBorrow { from: from @ ResourceTy::Value(lender), to, .. } if *to == dest =>
+        Some((*line, from.clone(), lender.name().to_owned(), Evt::MDie)),
+      _ => None,
+    });
+    let Some((line, lender, lender_name, die)) = borrow else { return };
+    // MIR names the borrowed local (`p` for `&p.x`).
+    let root = lender_name.split('.').next().unwrap_or(&lender_name).to_owned();
+    let kill_line = self.gather_borrow_data(self.bwf).iter().find_map(|b| {
+      (b.region.0 == line && b.borrowed_place.as_deref() == Some(root.as_str())).then_some(b.region.1)
+    });
+    if let Some(kill_line) = kill_line {
+      // StaticDie/MutableDie { from: dest, to: lender }.
+      self.add_ev(kill_line, die, lender, dest, false);
+    }
+  }
+
+  /// The variable a place expression starts from: `h` for `h.r`,
+  /// `(*h).r` and `h.a.r`, `v` for `v[0]`, and `hs` for
+  /// `hs.last_mut().unwrap().r` (with `true`: the place is reached
+  /// through a method call's result). None if the place starts anywhere
+  /// else (a function call's result, a temporary).
+  fn place_root(&self, place: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, bool)> {
+    let mut cur = place;
+    let mut through_call = false;
+    loop {
+      match cur.kind {
+        ExprKind::Field(recv, _) | ExprKind::Index(recv, _, _) | ExprKind::Unary(UnOp::Deref, recv) => cur = recv,
+        ExprKind::MethodCall(_, recv, _, _) => {
+          through_call = true;
+          cur = recv;
+        }
+        ExprKind::Path(_) => return Some((cur, through_call)),
+        _ => return None,
+      }
+    }
+  }
+
+  /// `expr` names a parameter of this function whose type is a
+  /// reference (`h: &mut Holder`, `&mut self`).
+  fn is_ref_param(&self, expr: &Expr<'tcx>) -> bool {
+    let ExprKind::Path(rustc_hir::QPath::Resolved(None, path)) = expr.kind else { return false };
+    let rustc_hir::def::Res::Local(id) = path.res else { return false };
+    self.hir_body.params.iter().any(|p| p.pat.hir_id == id)
+      && self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id).is_ref()
+  }
+
+  /// A place's source text if it's short and plain enough to put in a
+  /// tooltip (see `place_label`).
+  fn plain_source_text(&self, expr: &Expr) -> Option<String> {
+    if expr.span.from_expansion() {
+      return None;
+    }
+    self.tcx.sess.source_map().span_to_snippet(expr.span).ok().filter(|text| text.chars().count() <= 24
+      && !text.contains(|c: char| matches!(c, '<' | '>' | '&' | '"' | '\'' | '\n' | '\r')))
+  }
+
   /// How an element place (`v[i]`) is named in tooltips: its source
   /// text when that's short and plain, else `v[…]`. Tooltip text goes
   /// into an HTML attribute, so text with markup characters, quotes
   /// or line breaks is never used verbatim.
   fn place_label(&self, expr: &Expr, rap_name: &str) -> String {
-    let fallback = format!("{}[…]", rap_name);
-    if expr.span.from_expansion() {
-      return fallback;
-    }
-    match self.tcx.sess.source_map().span_to_snippet(expr.span) {
-      Ok(text) if text.chars().count() <= 24
-        && !text.contains(|c: char| matches!(c, '<' | '>' | '&' | '"' | '\'' | '\n' | '\r')) => text,
-      _ => fallback,
-    }
+    self.plain_source_text(expr).unwrap_or_else(|| format!("{}[…]", rap_name))
   }
 
   // add events for arguments in a function call
