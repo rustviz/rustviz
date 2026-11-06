@@ -537,6 +537,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     v
   }
 
+  /// Every member column under a struct binding `parent`, at any depth
+  /// (`x.name`, `x.tl.x`) and including reference fields (`x.part`),
+  /// sorted by hash. A pattern binding's members live exactly as long
+  /// as the binding, so they join its arm's declared variables (#405).
+  pub fn struct_members_deep(&self, parent: &str) -> Vec<ResourceAccessPoint> {
+    let prefix = format!("{}.", parent);
+    #[expect(clippy::disallowed_methods, reason = "sorted by hash below")]
+    let mut v: Vec<ResourceAccessPoint> = self.raps.iter()
+      .filter(|(n, rd)| n.starts_with(&prefix) && rd.rap.is_member())
+      .map(|(_, rd)| rd.rap.clone())
+      .collect();
+    v.sort_by_key(|r| *r.hash());
+    v
+  }
+
+  /// `decls` (pattern bindings) plus the member columns of the struct
+  /// bindings among them.
+  pub fn with_struct_members(&self, decls: &HashSet<ResourceAccessPoint>) -> HashSet<ResourceAccessPoint> {
+    let mut out = decls.clone();
+    #[expect(clippy::disallowed_methods, reason = "sorted by hash below")]
+    let mut structs: Vec<&ResourceAccessPoint> = decls.iter()
+      .filter(|r| matches!(r, ResourceAccessPoint::Struct(Struct { is_member: false, .. })))
+      .collect();
+    structs.sort_by_key(|r| *r.hash());
+    for r in structs {
+      out.extend(self.struct_members_deep(r.name()));
+    }
+    out
+  }
+
   /// Make a struct's field columns follow a whole-struct transfer.
   ///
   /// Each field of a struct value has its own timeline, but most
@@ -1576,27 +1606,24 @@ pub fn register_iflet_let_bindings(
         self.add_external_event(let_line, event);
         *self.unique_id += 1;
 
-        if let Some(body_end) = emit_gos_at {
-            self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
-                ro: binding_rap.clone(),
-                id: *self.unique_id,
-            });
-            *self.unique_id += 1;
-        }
-        // A struct binding's reference fields (`x.part`) are declared
-        // by the pattern too, so in a Branch they're the arm's own
-        // columns and their init dot (#352) lands inside it, not on a
-        // pre-existing column that has no value yet.
+        // A struct binding's field columns (`x.name`, `x.n`) are
+        // declared here too: they go out of scope with `x`, and in a
+        // Branch they're the arm's own variables, not pre-existing
+        // ones (#405).
+        let mut scoped = vec![binding_rap.clone()];
         if matches!(binding_rap, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
-            let prefix = format!("{}.", binding_rap.name());
-            #[expect(clippy::disallowed_methods, reason = "collected into a set")]
-            let refs: Vec<ResourceAccessPoint> = self.raps.iter()
-                .filter(|(n, rd)| n.starts_with(&prefix) && rd.rap.is_ref())
-                .map(|(_, rd)| rd.rap.clone())
-                .collect();
-            registered.extend(refs);
+            scoped.extend(self.struct_members_deep(binding_rap.name()));
         }
-        registered.insert(binding_rap);
+        for r in scoped {
+            if let Some(body_end) = emit_gos_at {
+                self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
+                    ro: r.clone(),
+                    id: *self.unique_id,
+                });
+                *self.unique_id += 1;
+            }
+            registered.insert(r);
+        }
     }
     registered
 }
