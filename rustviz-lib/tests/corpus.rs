@@ -368,6 +368,11 @@ const EXPECTED_OK: &[&str] = &[
     "ref_copy_referent_wording",
     // Borrowing from a reference borrows what it points to (#313).
     "reborrow_through_ref_wording",
+    // Comparison operators borrow their operands (#366); operator names
+    // are escaped in tooltips (#376).
+    "comparison_operand_borrows",
+    "comparison_ref_operands",
+    "operator_name_escaped",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3520,6 +3525,70 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from q to *p",
         ],
     },
+    TooltipExpect {
+        name: "comparison_operand_borrows",
+        // `a == b` on Strings is `PartialEq::eq(&a, &b)`, `a < b` is
+        // `PartialOrd::lt(&a, &b)`: rustc inserts a `&` on each
+        // operand, so both are borrowed for the call and stay usable
+        // (they're printed at the end). Same for a derived PartialEq
+        // struct and for fields. `i < n` on integers is built in: no
+        // event.
+        must_contain: &[
+            "== reads from a (implicitly borrowed)",
+            "== reads from b (implicitly borrowed)",
+            "< reads from a (implicitly borrowed)",
+            "< reads from b (implicitly borrowed)",
+            "!= reads from a (implicitly borrowed)",
+            "== reads from p (implicitly borrowed)",
+            "== reads from q (implicitly borrowed)",
+            "== reads from p.name (implicitly borrowed)",
+            "== reads from q.name (implicitly borrowed)",
+            "a's resource is immutably borrowed by ==; a is read-only while the borrow is live",
+            "a goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from a to ==",
+            "a's resource is moved",
+            "b's resource is moved",
+            "Copy from a to ==",
+            "< reads from i (implicitly borrowed)",
+            "< reads from i",
+            "Copy from i to <",
+        ],
+    },
+    TooltipExpect {
+        name: "comparison_ref_operands",
+        // `x == y` with `x: &String` borrows the reference, reading
+        // through it; `*x < *y` reborrows `*x`. Neither borrows an
+        // owner Rust picked for you, so no "implicitly" note. In
+        // `r == &b` the `&b` is written.
+        must_contain: &[
+            "== reads from x",
+            "== reads from y",
+            "< reads from x",
+            "< reads from y",
+            "== reads from r",
+            "== reads from b",
+        ],
+        must_not_contain: &[
+            "== reads from x (implicitly borrowed)",
+            "< reads from x (implicitly borrowed)",
+            "== reads from r (implicitly borrowed)",
+            "== reads from b (implicitly borrowed)",
+        ],
+    },
+    TooltipExpect {
+        name: "operator_name_escaped",
+        // `&a & &b` is `BitAnd::bitand(&a, &b)`. The operator's name
+        // must reach the tooltip as `&` (escaped twice in the SVG).
+        must_contain: &[
+            "& reads from a",
+            "& reads from b",
+        ],
+        must_not_contain: &[
+            "&amp; reads from a",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -3929,6 +3998,14 @@ fn tooltip_lines(timeline_svg: &str) -> Vec<Vec<String>> {
                     if ch == '>' { in_tag = false; continue; }
                     if !in_tag { clean.push(ch); }
                 }
+                // The tooltip is HTML (the page sets it as innerHTML), so a
+                // name like `<` is an entity in it (#376): decode it as the
+                // browser would.
+                let clean = clean
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&amp;", "&");
                 clean.strip_prefix("• ").map(str::to_owned).unwrap_or(clean)
             })
             .collect();
@@ -4433,4 +4510,25 @@ fn columns_past_the_palette_get_a_stroke() {
     );
     assert_eq!(hashes_without_colour(&timeline), Vec::<u64>::new());
     assert_eq!(hashes_without_colour(&rv.code_panel_string()), Vec::<u64>::new());
+}
+
+/// Every tooltip attribute is escaped: no bare `<`, and every `&` starts
+/// an entity. An operator named `&` or `<` used to be written raw, and
+/// the timeline SVG was not valid XML (#376).
+#[test]
+fn tooltip_attributes_are_escaped() {
+    for name in ["operator_name_escaped", "comparison_operand_borrows"] {
+        let t = run_with_local_backend(name).timeline_panel_string();
+        for chunk in t.split("data-tooltip-text=\"").skip(1) {
+            let raw = &chunk[..chunk.find('"').unwrap()];
+            assert!(!raw.contains('<'), "{}: bare '<' in tooltip attribute {:?}", name, raw);
+            for (i, _) in raw.match_indices('&') {
+                let rest = &raw[i..];
+                assert!(
+                    ["&lt;", "&gt;", "&quot;", "&amp;", "&#"].iter().any(|e| rest.starts_with(e)),
+                    "{}: bare '&' in tooltip attribute {:?}", name, raw
+                );
+            }
+        }
+    }
 }

@@ -1,6 +1,18 @@
 /* Event Dot messages: shows up when someone hovers over a dot */
 
 use crate::svg_generator::data::StaticLender;
+/// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
+/// tooltip. A tooltip is HTML stored in an SVG attribute that is written
+/// without escaping (the span markup around names is already in its
+/// escaped form, `&lt;span …&gt;`), so a name needs two levels: `<`
+/// becomes `&lt;` in the HTML, which is `&amp;lt;` in the attribute. A
+/// bare `<` or `&` made the SVG invalid XML (#376).
+pub fn escape_tooltip_name(name: &str) -> String {
+    name.replace('&', "&amp;amp;")
+        .replace('<', "&amp;lt;")
+        .replace('>', "&amp;gt;")
+        .replace('"', "&amp;quot;")
+}
 
 // Add styling to string name with <span>
 fn fmt_style(plain: &String) -> String {
@@ -11,7 +23,7 @@ fn fmt_style(plain: &String) -> String {
     );
     let span_end = "&lt;/span&gt;";
 
-    span_begin + plain + span_end
+    span_begin + &escape_tooltip_name(plain) + span_end
 }
 
 // What a column holds, as named in tooltips (#274). A Copy type (`i32`,
