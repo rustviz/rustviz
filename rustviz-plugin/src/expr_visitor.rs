@@ -3031,13 +3031,20 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
 /// without that, the renderer's `fetch_timeline` panics looking for
 /// the Copy/Move event id in an empty history.
 ///
+/// Also returns the first event id that isn't a copy out of the
+/// scrutinee. The copies are emitted first, so a caller that draws the
+/// other bindings inside the branch can leave the copies on the
+/// timeline before it: copying a value out of the scrutinee changes
+/// nothing about it, so it doesn't make the scrutinee's column branch
+/// (#496).
+///
 /// The caller is responsible for separately visiting the scrutinee
 /// (for any reads/borrows it performs).
 pub fn register_iflet_let_bindings(
     &mut self,
     let_expr: &'tcx rustc_hir::LetExpr<'tcx>,
     emit_gos_at: Option<usize>,
-) -> HashSet<ResourceAccessPoint> {
+) -> (HashSet<ResourceAccessPoint>, usize) {
     let scrutinee = let_expr.init;
     let typeck_res = self.tcx.typeck(scrutinee.hir_id.owner);
     let scrutinee_ty = typeck_res.node_type(scrutinee.hir_id);
@@ -3054,8 +3061,16 @@ pub fn register_iflet_let_bindings(
     let mut decls = Vec::new();
     self.get_dec_of_pat_parts(let_expr.pat, typeck_res, &parent, scrutinee_ty, scope, &mut decls);
 
+    // Copies first (stable, so each group keeps pattern order).
+    let (copies, others): (Vec<_>, Vec<_>) =
+        decls.into_iter().partition(|(_, evt, _, _)| matches!(evt, Evt::Copy));
+    let n_copies = copies.len();
+    let mut first_other = None;
     let mut registered: HashSet<ResourceAccessPoint> = HashSet::new();
-    for (binding_rap, evt, from, partial) in decls {
+    for (i, (binding_rap, evt, from, partial)) in copies.into_iter().chain(others).enumerate() {
+        if i == n_copies {
+            first_other = Some(*self.unique_id);
+        }
         let is_partial = partial.unwrap_or(scrutinee_ty != typeck_res.node_type(let_expr.pat.hir_id));
         let event = self.ext_ev_of_evt(
             evt,
@@ -3086,7 +3101,7 @@ pub fn register_iflet_let_bindings(
             registered.insert(r);
         }
     }
-    registered
+    (registered, first_other.unwrap_or(*self.unique_id))
 }
 
 /// `lhs` is a reference being bound to `call`'s result, and
