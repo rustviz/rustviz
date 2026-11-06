@@ -318,7 +318,12 @@ rather than listed here.
   `fn point<'a>(h: &mut H<'a>, t: &'a String)`): it lasts until
   `hold`'s last use, drawn on `s`'s column only. Fields of a local
   struct, including chained ones (`o.inner.x = …`), have columns of
-  their own.
+  their own. Overwriting a reference field of a local struct
+  (`hold.r = &t` after `H { r: &s }`) keeps `s` borrowed until the
+  struct's last use, as the borrow checker does (the struct's type has
+  one lifetime for the reference). Overwriting the whole struct
+  (`hold = H { r: &t }`) ends the old borrow at the write in rustc but
+  isn't drawn ending at all (#538).
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
   through `r: &mut Vec<_>`) is drawn on the collection's column; an
   assignment reads like a plain assignment with the element as the

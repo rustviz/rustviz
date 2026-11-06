@@ -365,6 +365,10 @@ const Description: React.FC = () => (
       <li>
         A reference to a slice or <code>str</code> (<code>&amp;[i32]</code>) still
         says &quot;resource&quot; where &quot;value&quot; would be exact.
+        column.
+        Overwriting a whole struct that holds a reference (
+        <code>hold = H {'{'} r: &amp;t {'}'}</code>) doesn&apos;t draw the old
+        borrow ending (rustc ends it at the write).
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

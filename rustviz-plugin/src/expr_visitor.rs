@@ -1659,7 +1659,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// The last line of the MIR loan of `lender_name` (a variable or a
   /// field of one) taken on `line`: where the borrow checker ends it.
-  fn loan_end_line(&self, line: usize, lender_name: &str) -> Option<usize> {
+  /// `hold.r = &t` writes a reference field of a struct variable
+  /// (`lhs_expr` is the field, `lhs_rap` its column) that held a
+  /// borrow (`old`). Returns the line the borrow checker ends that old
+  /// loan on, if it's after the write; None for anything else (a plain
+  /// reference variable, whose old borrow does end at the write because
+  /// the variable is dead until then, or a loan that ends by then).
+  pub fn field_write_loan_end(&self, lhs_expr: &'tcx Expr<'tcx>, lhs_rap: &ResourceAccessPoint, old: &RefData, line: usize) -> Option<usize> {
+    let ExprKind::Field(..) = lhs_expr.kind else { return None };
+    let ResourceTy::Value(lender) = &old.lender else { return None };
+    if lender.is_ref() || lender.is_fn() || lhs_rap.is_fn() {
+      return None;
+    }
+    self.loan_end_line(old.assigned_at, lender.name()).filter(|&end| end > line)
+  }
+
+  pub fn loan_end_line(&self, line: usize, lender_name: &str) -> Option<usize> {
     // MIR names the borrowed local (`p` for `&p.x`).
     let root = lender_name.split('.').next().unwrap_or(lender_name);
     self.gather_borrow_data(self.bwf).iter().find_map(|b| {
