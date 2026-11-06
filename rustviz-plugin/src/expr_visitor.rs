@@ -6,7 +6,7 @@
 //! For example: Moves, Copies, Borrows are all represented with arrows between timelines.
 
 
-use log::{error, info, warn};
+use log::{info, warn};
 use rustc_middle::{
   mir::Body,
   ty::*,
@@ -1148,9 +1148,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
       }
     }
-    else if ty.is_fn() {
-      error!("cannot have fn as lhs of expr");
-    }
     else if ty.is_closure() {
       // Tag the binding as a closure so the tooltip layer can swap
       // capture-flavoured wording for moves/borrows into `name` and
@@ -1159,6 +1156,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_closure_owner(name, mutability, self.current_scope, !self.inside_branch);
     }
     else {
+      // Plain values, including a function item or function pointer
+      // (`let f = helper;`, `let f: fn(i32) -> i32 = helper;`). Both
+      // are Copy values that own no resource, so `f` is an ordinary
+      // Copy owner; calls through it (`f(x)`) are drawn by the visitor's
+      // Call arm like calls to a named function (#254).
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_owner(name.clone(), mutability, is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
       self.mark_if_manually_drop(&name, ty);
@@ -1468,12 +1470,20 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // the RHS were a literal: the LHS gets a Bind from an
       // Anonymous source. Same handling as the path-arm in
       // visitor.rs's main expression walker.
+      //
+      // A function item (`let f = helper;`, `let d = std::mem::drop;`)
+      // isn't a RAP either: the function itself has no column, and
+      // the value bound is a Copy function pointer that owns nothing
+      // (#254). Without this, a callee registered earlier in the same
+      // fn would show up as the source of a copy into `f`.
       if matches!(
         p.res,
         Res::Def(
           rustc_hir::def::DefKind::Const { .. }
             | rustc_hir::def::DefKind::AssocConst { .. }
-            | rustc_hir::def::DefKind::Static { .. },
+            | rustc_hir::def::DefKind::Static { .. }
+            | rustc_hir::def::DefKind::Fn
+            | rustc_hir::def::DefKind::AssocFn,
           _
         )
       ) {
@@ -1520,6 +1530,14 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         }
       }
     },
+    // `Type::item` (`let f = String::len;`, `let n = Self::N;`): an
+    // associated function or const, never a local, so like the
+    // fn-item / const case above the LHS gets a Bind from an
+    // Anonymous source.
+    ExprKind::Path(QPath::TypeRelative(..)) => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+    }
     // fn_expr: resolves to function itself (Path)
     // second arg, is a list of args to the function
     ExprKind::Call(fn_expr, _) => {
@@ -1538,6 +1556,34 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // but isn't in `self.raps` yet. Register it on the fly so the
       // Move/Copy arrow has a labeled source instead of falling back
       // to Anonymous.
+      // A call through a local `f` (closure, fn pointer) that leaves
+      // `f` in place: the result comes from the call, so its source is
+      // the call's Function RAP, not `f`'s column (#254, #299). An
+      // `FnOnce` call does consume `f`, and keeps `f` as the source.
+      match local_callee_result_key(rhs, &self.tcx) {
+        LocalCallee::Call(key) => {
+          // Registered on the fly if visit_expr hasn't reached the call yet.
+          if !self.raps.contains_key(&key) {
+            if let Some(n) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+              self.add_fn(n);
+            }
+          }
+          let from = self.raps.get(&key)
+            .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+            .unwrap_or(ResourceTy::Anonymous);
+          self.add_ev(line_num, evt, lhs, from, false);
+          return;
+        }
+        LocalCallee::Consumed => {
+          let from = hirid_to_var_name(fn_expr.hir_id, &self.tcx)
+            .and_then(|n| self.raps.get(&n))
+            .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+            .unwrap_or(ResourceTy::Anonymous);
+          self.add_ev(line_num, evt, lhs, from, false);
+          return;
+        }
+        LocalCallee::NotLocal => {}
+      }
       let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
         Some(n) => {
           if !self.raps.contains_key(&fn_key(&n)) {
