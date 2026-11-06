@@ -881,9 +881,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "r holds an immutable reference; it can read the borrowed value",
             "Immutable borrow from c to r: pick's signature gives the reference it returns the same lifetime as its argument",
-            "c's resource is immutably borrowed by r",
+            // Cell<i32> needs no drop: a value, not a resource (#484).
+            "c's value is immutably borrowed by r",
         ],
         must_not_contain: &[
+            "c's value is immutably borrowed by r; c is read-only while the borrow is live",
             "r holds an immutable reference; it can read the borrowed resource",
             ", through the reference pick returned",
             "r holds an immutable reference; it can read but not modify the borrowed resource",
@@ -4316,7 +4318,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // reborrows `&mut *n` instead of moving n (#289); n is
             // usable again after m's last use.
             "Mutable reborrow from n to m",
-            "t is assigned the result of first",
+            // `t = first(&y, &x)` reassigns t with a reference that
+            // borrows both arguments (#171), so it is drawn as borrows.
+            "Immutable borrow from y to t: first's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while t is in use",
             "Immutable borrow from a to u",
         ],
         must_not_contain: &[
@@ -4422,7 +4426,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "inner goes out of scope. Its resource is dropped.",
             "incr reads from/writes to c (implicitly mutably borrowed)",
             "Counter::get reads from c",
-            "Immutable borrow from p to nm",
+            "Immutable borrow from p to nm: name's signature gives the reference it returns the same lifetime as the value it was called on",
             "Return immutably borrowed resource from nm to p",
             "first reads from pair (implicitly borrowed)",
             "pair.0 goes out of scope. Its resource is dropped.",
@@ -5451,6 +5455,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. No resource is dropped.",
             "i is live in a conditional expression",
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+    },
     // ─── Functions returning a reference (#171) ──────────────────────
     TooltipExpect {
         name: "fn_ret_ref_first_word",
@@ -5562,7 +5568,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // x's lender is left out (an honest omission) rather than
         // drawn as `it`, which is what this used to say.
         must_contain: &[
-            "x is initialized by copy from unwrap",
+            "x is initialized with a copy of unwrap",
         ],
         must_not_contain: &[
             "Immutable borrow from it to x",
@@ -5981,6 +5987,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a to h.r",
             "a's resource is moved",
             "Return mutably borrowed resource from h.r to t",
+        ],
+    },
     TooltipExpect {
         name: "fn_ret_ref_arg_lists",
         // The arrow says which arguments the signature ties the result

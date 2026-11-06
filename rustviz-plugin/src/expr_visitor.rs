@@ -1543,11 +1543,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
-            implicit: ImplicitRef::No, stored_in,
+            implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in,
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, stored_in,
+            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in,
           }
         });
         *self.unique_id += 1;
