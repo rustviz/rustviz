@@ -776,17 +776,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let owner_hash = self.rap_hashes as u64;
                 let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
                 self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
-                let generic_args = match ty.kind() {
-                  rustc_middle::ty::TyKind::Adt(_, args) => *args,
-                  _ => unreachable!("ty.is_adt() but kind is not Adt"),
-                };
-                for field in ty.ty_adt_def().unwrap().all_fields() {
-                  let field_name = format!("{}.{}", name.clone(), field.name.as_str());
-                  let field_ty = field.ty(self.tcx, generic_args);
-                  let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
-                  self.add_struct(field_name.clone(), owner_hash, true, bool_of_mut(binding_annotation.1), field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
-                  self.mark_if_manually_drop(&field_name, field_ty);
-                }
+                // Nested struct fields get columns too (`r.tl.x`, #239).
+                // A reference field borrows from something in the
+                // caller's frame, like a reference parameter.
+                self.register_struct_members(&name, ty, owner_hash, bool_of_mut(binding_annotation.1), MemberSite {
+                  owner_id: param.hir_id.owner,
+                  assigned_at: line_num,
+                  scope: self.current_scope,
+                  is_global: !self.inside_branch,
+                  ref_lender: Some(ResourceTy::Caller),
+                });
               }
               rustc_middle::ty::AdtKind::Union | rustc_middle::ty::AdtKind::Enum => {
                 let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
@@ -809,6 +808,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // A by-value struct parameter owns its fields' resources too
           // (and drops them at the end of the body unless moved on).
           self.bind_struct_fields(line_num, &name);
+          // Its reference fields (`e.part: &str`, also nested) hold
+          // borrows the caller made, like a reference parameter (#351).
+          let prefix = format!("{}.", name);
+          #[expect(clippy::disallowed_methods, reason = "sorted by RAP hash below")]
+          let mut ref_fields: Vec<ResourceAccessPoint> = self.raps.iter()
+            .filter(|(n, rd)| n.starts_with(&prefix) && rd.rap.is_ref())
+            .map(|(_, rd)| rd.rap.clone())
+            .collect();
+          ref_fields.sort_by_key(|r| *r.hash());
+          for r in ref_fields {
+            self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id: *self.unique_id, own_param: None });
+            *self.unique_id += 1;
+          }
           self.annotate_src(name.clone(), ident.span, false, *self.raps.get(&name).unwrap().rap.hash());
         }
         _ => {}

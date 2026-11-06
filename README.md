@@ -208,6 +208,8 @@ panic.
 - A variable assigned in only some branches (`let mut s; if c { s = …
   }`) is drawn as owning a value after the `if`, and a later `s = …` as
   dropping the old value; Rust drops it only on paths that assigned it.
+- A reference field of a struct bound by a pattern (`if let Some(x) =
+  o` with `x.part: &str`) is drawn as owning a resource.
 - `Rc`: clones are shown as independent owners that each drop the value;
   reference counting isn't modelled.
 - Tuples: creating one (`let t = (1, String::new());`), reading a
