@@ -321,7 +321,10 @@ const Description: React.FC = () => (
       </li>
       <li>
         Writes to a field through a reference (<code>self.n += 1</code> in a{' '}
-        <code>&amp;mut self</code> method) aren&apos;t drawn. A write to an
+        <code>&amp;mut self</code> method) aren&apos;t drawn. A write to a tuple
+        field (<code>t.0 = x</code>) or a method result&apos;s field is drawn on
+        the column of the variable it is reached from; the old value&apos;s drop
+        is stated in the tooltip only. A write to an
         element (<code>v[i] = x</code>) is drawn on <code>v</code>&apos;s column,
         unless the element is a reference (<code>v[i] = &amp;s</code>); the
         element value it replaces is dropped only in the tooltip&apos;s words,
