@@ -9260,6 +9260,24 @@ fn tooltip_attributes_are_escaped() {
     }
 }
 
+/// The playground's and mdbook's copies of helpers.js must wrap
+/// tooltips with CSS, as `rustviz-lib/src/helpers.js` does. Their old
+/// `breakText` split the tooltip's HTML on spaces and cut through name
+/// spans, leaking `monospace !important;">` into long tooltips.
+#[test]
+fn tooltip_wrapping_is_css_not_word_splitting() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    for rel in [
+        "rustviz-lib/src/helpers.js",
+        "playground/frontend/public/ex-assets/helpers.js",
+        "mdbook-rustviz/test-book/mdbook_plugin/helpers.js",
+    ] {
+        let js = fs::read_to_string(root.join(rel)).unwrap();
+        assert!(!js.contains("breakText("), "{} still word-splits tooltip HTML", rel);
+        assert!(js.contains("overflow-wrap"), "{} doesn't wrap tooltips in CSS", rel);
+    }
+}
+
 /// A reference bound by an `if` only exists once the branches have joined,
 /// so its dotted "holds a reference" bracket must start below the branch
 /// diamond, not between its arms (#489). On main the bracket started at the

@@ -25,7 +25,8 @@ function helpers(classname) {
         tooltip.id = 'svg_tooltip';
         tooltip.style.cssText = "position: absolute; padding: 0.5em; font-size: 0.75em; border-radius: 8px;" +
                                 "font-family: 'Trebuchet MS', Helvetica, sans-serif;" +
-                                "background: rgb(70, 70, 70, 0.6); color: white; z-index: 100; display: none;";
+                                "background: rgb(70, 70, 70, 0.6); color: white; z-index: 100; display: none;" +
+                                "max-width: 360px; overflow-wrap: break-word;";
         page.parentNode.insertBefore(tooltip, page);
     }
 
@@ -128,9 +129,6 @@ function displayTooltip(tooltip, classname) {
         
         let text = e.currentTarget.getAttributeNS(null, "data-tooltip-text");
         tooltip.innerHTML = text;
-
-        // if out of bounds, break text into two lines
-        if (tooltip.getBoundingClientRect().right >= document.body.clientWidth) breakText(text, tooltip);
     }
 
     function hideTooltip(e) {
@@ -253,50 +251,6 @@ function removeUnderline(e, classname) {
     let arr = doc.getElementsByClassName('emph');
     for (let i = arr.length-1; i >= 0; --i) {
         arr[i].remove();
-    }
-}
-
-// adjust text box
-function breakText(text, tooltip) {
-    // combine span into one element
-    let split_text = text.split(' ');
-    let words = [];
-    let last = 0, span = false;
-    for(const elt of split_text) {
-        if (elt.startsWith('<')) {
-            span = true;
-            words.push(elt);
-            last = words.length-1;
-        }
-        else if (elt.startsWith('!important')) {
-            span = false;
-            words[last] += elt;
-        }
-        else {
-            if (span) {
-                words[last] = words[last] + ' ' + elt;
-            }
-            else {
-                words.push(elt);
-            }
-        }
-    }
-
-    // adjust size and split text based on page boundary
-    tooltip.innerHTML = '';
-    let left = tooltip.getBoundingClientRect().left;
-    for (const word of words) {
-        tooltip.innerHTML += (word + ' ');
-        if (left + tooltip.clientWidth > document.body.clientWidth - 20) {
-            // reset tooltip text and break into new lines
-            let idx = tooltip.innerHTML.lastIndexOf(' ', tooltip.innerHTML.length-2);
-            let temp = tooltip.innerHTML.substr(0, idx);
-            let other = tooltip.innerHTML.substr(idx + 1);
-
-            tooltip.innerHTML = '';
-            tooltip.innerHTML += temp;
-            tooltip.innerHTML += ('<br />' + other);
-        }
     }
 }
 
