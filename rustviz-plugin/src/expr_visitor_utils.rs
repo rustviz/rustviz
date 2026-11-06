@@ -890,7 +890,7 @@ pub fn builtin_binop_copied_operands<'tcx>(
 /// that names a column (a local, a struct field, or `*r`). Literals,
 /// calls, nested operators and indexing (`v[i]` copies an element, not
 /// `v`) have no column of their own.
-fn operand_names_column(e: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> bool {
+pub fn operand_names_column(e: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> bool {
   !e.span.from_expansion()
     && match e.kind {
       ExprKind::Path(_) | ExprKind::Field(..) => true,

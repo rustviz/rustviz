@@ -1115,9 +1115,88 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         self.visit_expr(exp);
       }
 
+      // Compound assignment `a op= b` (#260). It doesn't store `b` in
+      // `a`, so it isn't drawn like `a = b`:
+      // - On primitives (`acc += x` with i32s) it's built in: `acc` is
+      //   read, combined with `x`, and the result written back. Like
+      //   `acc + x` (#241), each operand that names a column (`acc`
+      //   and `x`) is copied into the operator, and `acc` then gets a
+      //   new value. Nothing is
+      //   dropped, and nothing is borrowed (a shared borrow of `acc`
+      //   that's still live makes it E0506 "cannot assign", not a
+      //   borrow conflict).
+      // - Otherwise it calls the trait method:
+      //   `s += &t` is `AddAssign::add_assign(&mut s, &t)`. `s` is
+      //   mutably borrowed for the call and modified in place (it
+      //   keeps its resource; nothing is dropped), and `&t` is an
+      //   argument like any other, borrowed for the call.
+      ExprKind::AssignOp(op, lhs_expr, rhs_expr) => {
+        self.visit_expr(lhs_expr);
+        self.visit_expr(rhs_expr);
+        let fn_name = op.node.as_str().to_owned();
+        let line_num = expr_to_line(&lhs_expr, &self.tcx);
+        if self.tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
+          self.add_fn(fn_name.clone());
+          let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
+          // `s += …` borrows `s` for the call, without a written `&`
+          // (like `s.len()`). A place reached through a reference
+          // (`*r += …`, `v[i] += …`) is an in-place update of what the
+          // reference points to, and says so on the reference's column
+          // ("modified through *r"), as for a number (2026-11-06
+          // decision); the operator isn't drawn reborrowing `r`.
+          match self.resource_of_lhs(lhs_expr) {
+            Some(ResourceTy::Value(rap)) => {
+              self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), false, false, ImplicitRef::Autoref);
+            }
+            Some(lhs_rty @ (ResourceTy::Deref(_) | ResourceTy::Index(..))) => {
+              let lhs_rty = match lhs_rty {
+                ResourceTy::Index(r, place, _) => ResourceTy::Index(r, place, PlaceWrite::Update),
+                other => other,
+              };
+              self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
+            }
+            _ => {}
+          }
+          self.match_arg(rhs_expr, fn_name);
+          return;
+        }
+        // Both operands are read, as in `acc = acc + x`: the old value
+        // of `acc` is copied into the operator too ("Copy from acc to
+        // +="), then `x`.
+        let operands: Vec<_> = [lhs_expr, rhs_expr].into_iter()
+          .filter(|e| operand_names_column(e, &self.tcx, &self.raps))
+          .collect();
+        if !operands.is_empty() {
+          self.add_fn(fn_name.clone());
+          for operand in operands {
+            self.match_arg(operand, fn_name.clone());
+          }
+        }
+        // `COUNTER += 1` on a `static mut`: no column to write to (see
+        // the Path arm below).
+        if let ExprKind::Path(QPath::Resolved(_, p)) = lhs_expr.kind {
+          if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) {
+            return;
+          }
+        }
+        // The write: "acc is bound to a value", or through a
+        // reference, "the resource r points to is modified through *r".
+        // An element (`v[i] += 1`) has no column of its own: the write
+        // goes on the receiver's, as an in-place update.
+        match self.resource_of_lhs(lhs_expr) {
+          Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_))) => {
+            self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
+          }
+          Some(ResourceTy::Index(r, place, _)) => {
+            self.add_ev(line_num, Evt::Bind, ResourceTy::Index(r, place, PlaceWrite::Update), ResourceTy::Anonymous, false);
+          }
+          _ => {}
+        }
+      }
+
       // assignment 
-      // ex a = <expr> or a += <expr>
-      ExprKind::Assign(lhs_expr, rhs_expr, _,) | ExprKind::AssignOp(_, lhs_expr, rhs_expr) => {
+      // ex a = <expr>
+      ExprKind::Assign(lhs_expr, rhs_expr, _,) => {
         self.visit_expr(lhs_expr);
         self.visit_expr(rhs_expr);
 
@@ -1130,7 +1209,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) {
             let rhs_ty = self.tcx.typeck(rhs_expr.hir_id.owner).node_type(rhs_expr.hir_id);
             let rhs_copy = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, rhs_expr.hir_id.owner), rhs_ty);
-            if matches!(expr.kind, ExprKind::Assign(..)) && !rhs_copy {
+            if !rhs_copy {
               self.match_rhs(ResourceTy::Anonymous, rhs_expr, Evt::Move);
             }
             return;
@@ -1177,19 +1256,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // itself isn't drawn, but for `=` the RHS still goes into that
         // place: `self.name = s` / `r.name = s` move `s`. Record that
         // against an anonymous destination, otherwise `s` would later
-        // be shown dropping a resource it no longer owns. (For `op=`
-        // the RHS is an operand, not a value stored in the place.)
+        // be shown dropping a resource it no longer owns.
         let lhs_rty = match self.resource_of_lhs(lhs_expr) {
           Some(rty) => rty,
           None => {
-            if let ExprKind::Assign(..) = expr.kind {
-              if let ExprKind::AddrOf(..) = rhs_expr.kind {
-                // `v[0] = &u` / `self.r = &x`: a borrow stored in a
-                // place with no column (#282).
-                self.store_borrow_in_unmodelled_place(lhs_expr, rhs_expr, e);
-              } else {
-                self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
-              }
+            if let ExprKind::AddrOf(..) = rhs_expr.kind {
+              // `v[0] = &u` / `self.r = &x`: a borrow stored in a
+              // place with no column (#282).
+              self.store_borrow_in_unmodelled_place(lhs_expr, rhs_expr, e);
+            } else {
+              self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
             }
             return;
           }

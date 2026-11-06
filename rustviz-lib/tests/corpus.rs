@@ -477,6 +477,8 @@ const EXPECTED_OK: &[&str] = &[
     // name, not all of the struct (#326).
     "struct_destructure_let",
     "struct_destructure_match",
+    // Compound assignment (`acc += x`, `s += &t`) isn't `a = b` (#260).
+    "compound_assign",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3262,8 +3264,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // column, so the write's tooltip is where it's said, in the words
         // of a plain assignment (2026-11-05 decision). `*n = 5` (i32) is
         // "assigned a new value", `*rq = q2` (nothing to drop) just
-        // acquires, and `*r += "x"` (an operator call) keeps "modified
-        // through".
+        // acquires, and `*r += "x"` (an operator call, nothing
+        // overwritten) keeps the update wording, "modified through *r"
+        // (2026-11-06 decision), not an operator reborrow of `r` (#260).
         must_contain: &[
             "*r acquires ownership of a new resource; its previous resource is dropped",
             "*q acquires ownership of a new resource; its previous resource is dropped",
@@ -3273,6 +3276,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource r points to is modified through *r",
         ],
         must_not_contain: &[
+            "+= reads from/writes to r (mutable reborrow",
             "its previous value is dropped",
             "(copied from",
             "(moved from",
@@ -3625,7 +3629,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z holds an immutable reference; it can read the borrowed value",
             "n holds a mutable reference; it can read and write the borrowed value",
             "k holds an immutable reference; it can read the borrowed value",
-            "Copy from *k to *n",
+            // `*n += *k` is an operator call (#260): both are copied
+            // into `+=`, not "assigned" from one to the other.
+            "Copy from *k to +=",
             "the value n points to is modified through *n",
             "s holds a mutable reference; it can read and write the borrowed resource",
             "*s acquires ownership of a new resource; its previous resource is dropped",
@@ -3638,6 +3644,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n holds a mutable reference; it can read and write the borrowed resource",
             "k holds an immutable reference; it can read the borrowed resource",
             "the value n points to is modified through *n (copied from *k)",
+            "Copy from *k to *n",
             "(copied from",
             "the resource s points to is modified through *s",
             "(moved from",
@@ -4857,6 +4864,55 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from o to y",
             "Move from o to tag",
             "o.inner.x goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "compound_assign",
+        // #260: `a op= b` used to be drawn as `a = b`. On i32s,
+        // `acc += x` reads `acc` and `x` and writes the sum back:
+        // both are copied into the operator and `acc` gets a new value.
+        // On a String, `s += &t` is `AddAssign::add_assign(&mut s,
+        // &t)`: `s` is mutably borrowed and appended to in place
+        // (nothing dropped, no borrow stored in `s`), `t` is borrowed
+        // for the call. Through a reference the update keeps its
+        // wording (2026-11-06 decision): `*r += "c"` is "the resource r
+        // points to is modified through *r", `*n += by` "the value n
+        // points to is modified through *n", `v[i] += k` "modified
+        // through v[0]"; the operator doesn't reborrow `r`.
+        must_contain: &[
+            "Copy from x to +=",
+            "x's value is copied",
+            "acc is assigned a new value",
+            // The old value of `acc` is read too, as in `acc = acc + x`.
+            "Copy from acc to +=",
+            "acc's value is copied",
+            // An i32 field: assigned a new value (#272), not "acquires ownership".
+            "Copy from a.total to +=",
+            "a.total is assigned a new value",
+            "+= reads from/writes to s (implicitly mutably borrowed)",
+            "s's resource is mutably borrowed by +=; s can't be used while the borrow is live",
+            "+= reads from t",
+            "t's resource is immutably borrowed by +=; t is read-only while the borrow is live",
+            "the resource r points to is modified through *r",
+            "the resource v points to is modified through v[0]",
+            "Copy from by to +=",
+            // `*n` is read too.
+            "Copy from *n to +=",
+            "the value n points to is modified through *n",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "acc is initialized by copy from x",
+            "Copy from x to acc",
+            "s immutably borrows a resource",
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "t's resource is immutably borrowed by s; t is read-only while the borrow is live",
+            "Immutable borrow from t to s",
+            "a.total acquires ownership of a resource",
+            "Copy from by to *n",
+            "the resource n points to is modified through *n (copied from by)",
+            "+= reads from/writes to r (mutable reborrow",
+            "r's resource is mutably borrowed by +=",
         ],
     },
 ];

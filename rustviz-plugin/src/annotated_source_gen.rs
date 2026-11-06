@@ -5,7 +5,7 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, overloaded_comparison, span_to_line, unary_op_operand}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, operand_names_column, overloaded_by_value_binop, overloaded_comparison, span_to_line, unary_op_operand}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
 use rustc_span::{BytePos, Span};
 
@@ -206,9 +206,24 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         }
       }
     }
-    ExprKind::Assign(exp1, exp2, _) | ExprKind::AssignOp(_, exp1, exp2) => {
+    ExprKind::Assign(exp1, exp2, _) => {
       self.annotate_expr(exp1);
       self.annotate_expr(exp2);
+    }
+    // `a op= b`: highlight the operator when the visitor gave it a
+    // function RAP (see its AssignOp arm).
+    ExprKind::AssignOp(op, exp1, exp2) => {
+      self.annotate_expr(exp1);
+      self.annotate_expr(exp2);
+      let op_name = op.node.as_str();
+      let drawn = self.tcx.typeck(expr.hir_id.owner).is_method_call(expr)
+        || operand_names_column(exp2, &self.tcx, &self.raps);
+      if drawn {
+        if let Some(rd) = self.raps.get(op_name) {
+          let hash = *rd.rap.hash();
+          self.annotate_src(op_name.to_owned(), op.span, true, hash);
+        }
+      }
     }
     ExprKind::Block(block, _) => {
       for stmt in block.stmts.iter() {
