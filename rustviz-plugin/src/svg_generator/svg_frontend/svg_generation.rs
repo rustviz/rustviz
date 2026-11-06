@@ -86,6 +86,9 @@ pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usi
     // split by `split_same_line_borrow_ends`: its later events go on
     // the row of the moved borrow ends, not the line's last row.
     let mut same_line_shift: Option<(usize, usize)> = None;
+    // Rows inserted below each (pre-shift) source line for stacked
+    // arrows; see the ClosureCall case below.
+    let mut extras_at_line: HashMap<usize, usize> = HashMap::new();
 
     // mutate actual events
     let mut i: usize = 0;
@@ -157,6 +160,12 @@ pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usi
                         }
                     };
                     extra_lines += ex;
+                    *extras_at_line.entry(line_num).or_insert(0) += ex;
+                } else if matches!(e, ExternalEvent::ClosureCall { .. }) {
+                    // Same as the top-level loop: a closure call's dot
+                    // stays on its line, above rows inserted for
+                    // stacked arrows on that line.
+                    *l -= extras_at_line.get(&line_num).copied().unwrap_or(0);
                 }
                 // no need for else since we already updated the line
             }
@@ -611,6 +620,16 @@ pub fn render_svg(
                 extras_at_source_line.push((line_num, ex));
             }
             extra_lines += ex;
+        }
+        else if matches!(event, ExternalEvent::ClosureCall { .. }) {
+            // Blank rows inserted for stacked arrows on this same
+            // source line go *below* it; the call's dot belongs on the
+            // line itself, not on the first inserted row.
+            let same_line: usize = extras_at_source_line.iter()
+                .filter(|(s, _)| *s == line_num)
+                .map(|(_, ex)| *ex)
+                .sum();
+            visualization_data.append_processed_external_event(event.clone(), final_line_num - same_line);
         }
         else {
             visualization_data.append_processed_external_event(event.clone(), final_line_num);

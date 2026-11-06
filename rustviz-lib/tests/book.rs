@@ -914,14 +914,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_02_fnonce_move_return",
-        status: Wrong,
-        note: "f() consumes f (FnOnce) and moves s out to t; f is still shown dropping its capture",
         must_contain: &[
             "Closure capture (move) from s to f",
             "s goes out of scope. No resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
+            // f() consumes f (FnOnce) and moves s out to t (#271).
+            "f goes out of scope. No resource is dropped.",
         ],
-        known_wrong: &["f goes out of scope. Its 1 captured resource is dropped."],
+        must_not_contain: &["f goes out of scope. Its 1 captured resource is dropped."],
         ..E
     },
     Snippet {

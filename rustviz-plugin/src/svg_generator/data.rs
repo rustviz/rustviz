@@ -801,6 +801,29 @@ pub enum ImplicitRef {
 /// ends it where the borrow checker does. Holds the place's name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoredIn(pub Option<String>);
+/// Where a value an `FnOnce` closure captured by value ends up when
+/// the closure is called, from the closure body's MIR (#271).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum CapturedEnd {
+    /// The body doesn't move it on, or passes it to `drop`: it is
+    /// dropped during the call.
+    Dropped,
+    /// The body returns it: it leaves the closure as the call's result.
+    Returned,
+    /// The body moves it somewhere else, or only on some paths: all we
+    /// can say is that the call uses it up.
+    Moved,
+}
+
+/// A by-value capture of an `FnOnce` closure that needs accounting for
+/// at its call: the captured place's name, what happens to it, and
+/// whether its type has drop glue.
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub struct CapturedFate {
+    pub name: String,
+    pub end: CapturedEnd,
+    pub needs_drop: bool,
+}
 
 /// A borrow that reaches a variable through the reference a call
 /// returned: `let w = first_word(&s);` makes `w` borrow `s`, and
@@ -1030,6 +1053,17 @@ pub enum ExternalEvent {
         in_pattern: Option<String>,
     },
     
+    // A call `f()` of a local closure that rustc inferred to be
+    // `FnOnce` (#271). The call is `FnOnce::call_once(f)`: `f` is moved
+    // into it, the body runs, and what `f` captured by value is dropped
+    // or moved out inside the call. `fates` has one entry per by-value
+    // capture, in capture order. No arrow; the event is a dot on `f`.
+    ClosureCall {
+        closure: ResourceTy,
+        fates: Vec<CapturedFate>,
+        id: usize
+    },
+
     // Branches are the most interesting event
     // they allow for events to be tree-like
     Branch {
@@ -1094,7 +1128,7 @@ impl ExternalEvent {
             &ExternalEvent::LoopExitMove { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
-            &ExternalEvent::InitRefParam { id, .. }=> id
+            &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
         }
     }
 }
@@ -1259,6 +1293,13 @@ pub enum Event {
         id: usize,
         own_param: Option<OwnParam>,
         in_pattern: Option<String>,
+    },
+    // `f()` of an `FnOnce` closure `is`: `is` is moved into the call
+    // (ExternalEvent::ClosureCall).
+    ClosureCall {
+        is: ResourceTy,
+        fates: Vec<CapturedFate>,
+        id: usize
     },
 }
 
@@ -1542,6 +1583,7 @@ impl Display for Event {
             Event::StaticDie{ to , ..} => { write!(f, "Partially returns resource to {}", to.name())},
             Event::StaticReacquire{ from , ..} => { write!(f, "Partially acquires resource from {}", from.name()) },
             Event::InitRefParam{ param: _ , ..} => { write!(f, "Function parameter is initialized") },
+            Event::ClosureCall{ is, .. } => { write!(f, "{} is moved into the call", is.name()) },
             Event::OwnerGoOutOfScope => {
                 write!(f, "Goes out of Scope as an owner of resource" ) }
             Event::RefGoOutOfScope => {
@@ -1576,7 +1618,7 @@ impl Event {
             Event::MutableLend {id: x, ..} | Event::MutableDie {id: x, ..} | Event::StaticDie {id: x, ..} |
             Event::Acquire { id: x, .. } | Event::Copy { id: x, .. } | Event::MutableBorrow { id: x, .. } |
             Event::StaticBorrow { id: x, .. } | Event::StaticReacquire { id: x, .. } | Event::MutableReacquire {id: x, ..}
-            | Event::Branch { id: x, .. } | Event::InitRefParam { id: x, .. } => {
+            | Event::Branch { id: x, .. } | Event::InitRefParam { id: x, .. } | Event::ClosureCall { id: x, .. } => {
                 *x
             }
             _ => 1000000000
@@ -1588,7 +1630,7 @@ impl Event {
             Event::MutableLend {is: x, ..} | Event::MutableDie {is: x, ..} | Event::StaticDie {is: x, ..} | 
             Event::Acquire { is: x, .. } | Event::Copy { is: x, .. } | Event::MutableBorrow { is: x, .. } |
             Event::StaticBorrow { is: x, .. } | Event::StaticReacquire { is: x, .. } | Event::MutableReacquire {is: x, ..}
-            | Event::Branch { is: x, .. } => {
+            | Event::Branch { is: x, .. } | Event::ClosureCall { is: x, .. } => {
                 x
             }
             _ => &ResourceTy::Anonymous
@@ -1626,6 +1668,9 @@ impl Event {
     pub fn print_message_with_name(&self, my_name: &mut String) -> String {
         match self {
             // no arrow involved
+            Event::ClosureCall { fates, .. } => {
+                hover_messages::event_dot_closure_call_once(my_name, fates)
+            }
             Event::OwnerGoOutOfScope => {
                 hover_messages::event_dot_owner_go_out_out_scope(my_name)
             }
@@ -2197,6 +2242,16 @@ impl Visualizable for VisualizationData {
             // The current RAP's resource is moved
             (State::FullPrivilege{..}, Event::Move{to: to_ro,..}) =>
                 State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
+
+            // Calling an `FnOnce` closure moves it into the call (#271):
+            // the body consumes what it captured, so there's nothing
+            // left for the closure to drop at scope end.
+            (State::FullPrivilege{..}, Event::ClosureCall{..}) =>
+                State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
+            // `let t = f();` also records the call's result as moving
+            // out of `f`, on the same line: `f` is already moved.
+            (State::ResourceMoved{ move_at_line, .. }, Event::Move{..}) if *move_at_line == event_line && event_line != 0 =>
+                (*previous_state).clone(),
 
             // The current RAP reaquires a resource 
             (State::ResourceMoved{ .. }, Event::Acquire{ .. }) => {
@@ -2779,6 +2834,11 @@ impl Visualizable for VisualizationData {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
             }
+            ExternalEvent::ClosureCall { closure, fates, id } => {
+                if closure.extract_rap() == Some(rap) {
+                    b_history.push((line_number, Event::ClosureCall { is: closure.clone(), fates: fates.clone(), id: *id }));
+                }
+            }
             _ => {
                 // `*rap` and `rap.f` (rap a reference) are drawn on
                 // rap's own column too.
@@ -3007,6 +3067,9 @@ impl Visualizable for VisualizationData {
                     maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
+            },
+            ExternalEvent::ClosureCall { closure, fates, id } => {
+                maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), fates, id }, line_number);
             },
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern}, line_number);

@@ -264,6 +264,13 @@ rather than listed here.
   closure (`let g = keep(|| s.len());`, an iterator adapter stored for
   later), or the capture is through a reference (`|| r.len()` with
   `r: &String`), that borrow isn't drawn.
+  Calling a closure that can only be called once (`f()` with `let f =
+  || drop(s);`) moves `f`, and the call's tooltip says what happens to
+  each value `f` captured by value: dropped, or returned as the call's
+  result, when the body shows that (`drop(s)`, `s` as its last
+  expression, or `s` untouched). If the body moves it on to another
+  function, or the body has a branch, it only says the call "moved on or
+  dropped" it.
 - Loops (`for`, `while`, `loop`) show a single iteration. A `for`
   loop's variable is drawn bound at the `for` line and going out of
   scope at the body's closing brace, like the body's own `let`s; Rust

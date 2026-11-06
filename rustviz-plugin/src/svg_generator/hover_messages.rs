@@ -1939,3 +1939,43 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
         )
     }
 }
+
+// `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
+// moved into the call, and each value it captured by value is dropped
+// or moved out of it inside the call. `fates` comes from the closure
+// body's MIR (see closure_capture_fates).
+pub fn event_dot_closure_call_once(
+    my_name: &String,
+    fates: &[crate::svg_generator::data::CapturedFate],
+) -> String {
+    use crate::svg_generator::data::CapturedEnd;
+    let f = fmt_style(my_name);
+    let mut msg = format!(
+        "{0} is moved into the call (an FnOnce closure can only be called once)", f);
+    for fate in fates {
+        let s = fmt_style(&fate.name);
+        let tail = match fate.end {
+            CapturedEnd::Dropped if fate.needs_drop =>
+                "is dropped during the call",
+            CapturedEnd::Dropped =>
+                "goes out of scope at the end of the call (it has nothing to drop)",
+            CapturedEnd::Returned =>
+                "is moved out of the closure as the call's result",
+            CapturedEnd::Moved =>
+                "is moved on or dropped by the call",
+        };
+        msg.push_str(&format!(". {0}, which {1} captured, {2}", s, f, tail));
+    }
+    msg
+}
+
+// Scope end of a closure that was called (and so moved) on some paths
+// of a conditional and not on others: whether its captured resources
+// are dropped here is decided at runtime by a drop flag (#179, #271).
+pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. Its captured resources are dropped here only if no branch above \
+         called it (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name)
+    )
+}
