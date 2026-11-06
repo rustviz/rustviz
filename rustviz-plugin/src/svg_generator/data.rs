@@ -1619,6 +1619,16 @@ impl Event {
                     _ => hover_messages::event_dot_write_through_deref(r.name(), &deref, true),
                 }
             }
+            // A copy out of a value with no name of its own (`let n =
+            // match o { Some(x) => x.len(), None => 0 };`): there is no
+            // source to name, and "Anonymous resource" is an internal
+            // placeholder, not something in the student's code (#547).
+            Event::Copy{ from: ResourceTy::Anonymous, is, ..} => {
+                match is.extract_rap().filter(|rap| rap.is_ref()) {
+                    Some(rap) => hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref()),
+                    None => hover_messages::event_dot_acquire_copyable(&self.deref_name(my_name), &String::new()),
+                }
+            }
             Event::Copy{ from ,..} => {
                 safe_message(hover_messages::event_dot_copy_from, &self.deref_name(my_name), from)
             }
