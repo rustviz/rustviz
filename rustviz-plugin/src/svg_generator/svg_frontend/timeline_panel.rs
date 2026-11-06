@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;

@@ -397,6 +397,8 @@ const EXPECTED_OK: &[&str] = &[
     "merge_bound_copy",
     // A write through `&mut` / `Box` says the old value is dropped.
     "deref_write_drops_old",
+    // `*r = e` reads like a plain assignment (#474).
+    "deref_assign_wording",
     // `drop(x)` states that it drops x.
     "mem_drop_states_drop",
     // Method chains: later calls act on temporaries, but their
@@ -902,7 +904,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r holds a mutable reference; it can read and write the borrowed value",
         ],
         must_not_contain: &[
-            "*r is assigned a new value",
             "(copied from",
             "(moved from",
             "the value r points to is modified through *r",
@@ -3519,7 +3520,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*n is assigned a new value",
             "*rq is assigned a new value",
             "the resource r points to is modified through *r",
-            "Copy from *z to *r",
         ],
         must_not_contain: &[
             "+= reads from/writes to r (mutable reborrow",
@@ -3531,6 +3531,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource q points to is modified through *q",
             "the resource b points to is modified through *b",
             "the resource rq points to is modified through *rq",
+        ],
+    },
+    TooltipExpect {
+        name: "deref_assign_wording",
+        // `*r = e` assigns to the place `*r` (2026-11-05 decision): a Copy
+        // value is "assigned a copy of y" when the source is a named
+        // place and "assigned a new value" otherwise, an owned value that
+        // needs drop says its previous resource is dropped (a Box's too),
+        // and a non-Copy value with nothing to drop (`Q` of an i32) is a
+        // plain assignment too: it is a value, not a resource (#484). No
+        // "(copied from" / "(moved from": the arrow says it. The in-place
+        // update `*r += 1` / `*r += y` keeps "modified through".
+        must_contain: &[
+            "Copy from y to *r",
+            "*r is assigned a copy of y",
+            "*r is assigned a copy of *z",
+            "*r is assigned a new value",
+            "Move from t to *ra",
+            "*ra acquires ownership of a new resource; its previous resource is dropped",
+            "Move from u to *b",
+            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "Move from q2 to *rq",
+            "*rq is assigned a new value",
+            "the value r points to is modified through *r",
+            "Copy from *z to *r",
+        ],
+        must_not_contain: &[
+            "(copied from",
+            "(moved from",
+            "the resource ra points to is modified through *ra",
+            "the resource b points to is modified through *b",
+            "the resource rq points to is modified through *rq",
+            "*r acquires ownership",
+            // Q has no drop glue: a value, not a resource (#484).
+            "*rq acquires ownership of a resource",
+            "*rq acquires ownership of a new resource",
         ],
     },
     TooltipExpect {
