@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{ExtBranchData, ExternalEvent, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, ExtBranchData, ExternalEvent, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -163,6 +163,22 @@ fn shift_event_lines<F: Fn(usize) -> usize>(ev: &mut ExternalEvent, shift: &F) {
     }
 }
 
+/// `(split_point, merge_point)` of every conditional in `ev` (nested
+/// ones included) whose branches share source lines and that draws
+/// branch columns (some variable is live in it).
+fn collect_collapsed_branches(ev: &ExternalEvent, out: &mut Vec<(usize, usize)>) {
+    if let ExternalEvent::Branch { branches, split_point, merge_point, live_vars, .. } = ev {
+        if branch_is_collapsed(*split_point, *merge_point) && !live_vars.is_empty() {
+            out.push((*split_point, *merge_point));
+        }
+        for branch in branches {
+            for (_, sub) in &branch.e_data {
+                collect_collapsed_branches(sub, out);
+            }
+        }
+    }
+}
+
 pub fn render_svg(
     annotated_src_str: &str,
     source_rs_str: &str,
@@ -272,6 +288,25 @@ pub fn render_svg(
             needs_blank_at.push(src_f);
         }
     }
+    // A conditional whose branches share lines gets a blank row above
+    // its first line and below its last, unless there already is one:
+    // its branches are drawn as a diamond whose top and bottom corners
+    // (the split and the join) sit on those rows (#117).
+    let mut collapsed: Vec<(usize, usize)> = Vec::new();
+    for (_, ev) in visualization_data.preprocess_external_events.iter() {
+        collect_collapsed_branches(ev, &mut collapsed);
+    }
+    let is_blank = |line: usize| a_lines_orig.get(line.wrapping_sub(1)).map_or(true, |s| s.trim().is_empty());
+    for (split, merge) in collapsed {
+        if split >= 2 && !is_blank(split - 1) {
+            needs_blank_at.push(split);
+        }
+        if merge < a_lines_orig.len() && !is_blank(merge + 1) {
+            needs_blank_at.push(merge + 1);
+        }
+    }
+    needs_blank_at.sort();
+    needs_blank_at.dedup();
 
     let new_a_str: String;
     let new_s_str: String;

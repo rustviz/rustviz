@@ -217,10 +217,6 @@ panic.
   u8, u8)`) render with a column per field.
 - Tuple destructuring assignment (`(a, b) = (b, a);`) draws an extra
   `lhs` column for the compiler's temporary.
-- A conditional written on one line (`if c { take(s); }`, or with an
-  `else` on the same line) is drawn as if its body always ran: a move
-  inside it is shown as unconditional. Written over several lines, an
-  `if`, `if`/`else` or `match` shows the move as conditional.
 
 **Crashes the plugin:** some valid programs do. The playground then shows
 "RustViz can't visualize this program yet" with a link to report it.

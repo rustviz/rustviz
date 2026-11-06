@@ -156,6 +156,14 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // what is still uninitialized at the end of each branch, so after
   // `if c { s = a } else { s = b }` a later `s = …` is a reassignment.
   pub uninit_locals: HashMap<rustc_hir::HirId, DeferredLet>,
+
+  // For `let x = if … { a } else { b };` (and `match`), the events that
+  // pair each branch's value with `x` are emitted before the branches
+  // are visited (see `process_let_binding`). Keyed by the branch body's
+  // HirId: the range of event ids `match_rhs` used for that branch, so
+  // the If / Match arm of `visit_expr` can put those events in the
+  // right branch (`branch_ids`).
+  pub rhs_arm_ids: HashMap<rustc_hir::HirId, (usize, usize)>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -637,6 +645,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None }
     }
+  }
+
+  /// `match_rhs` for one branch of an `if` / `match` whose value is
+  /// bound to `lhs`, recording the event ids it used (`rhs_arm_ids`).
+  fn match_rhs_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt) {
+    let lo = *self.unique_id;
+    self.match_rhs(lhs, body, evt);
+    self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
+  }
+
+  /// Removes from `preprocessed_events`, and returns in order, the
+  /// events of one branch: those whose id was handed out while the
+  /// branch was visited (`ids`), plus those `match_rhs_arm` emitted
+  /// for the branch's value (`body`). Events are put in branches by
+  /// where they came from, not by source line, so branches that share
+  /// a line (`if c { take(s); } else { … }`, a one-line `match`, or an
+  /// `else if`) get their own events (#117).
+  pub fn take_branch_events(&mut self, ids: std::ops::Range<usize>, body: Option<&'tcx Expr<'tcx>>) -> Vec<(usize, ExternalEvent)> {
+    let rhs = body.and_then(|b| self.rhs_arm_ids.get(&b.hir_id).copied());
+    let mine = |id: usize| ids.contains(&id) || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&id));
+    let mut taken = Vec::new();
+    self.preprocessed_events.retain(|(l, ev)| {
+      if mine(ev.get_id()) {
+        taken.push((*l, ev.clone()));
+        false
+      } else {
+        true
+      }
+    });
+    taken
   }
 
   pub fn add_ev(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, is_partial: bool) {
@@ -1688,9 +1726,9 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // their inner side-effects when visit_expr walked them earlier;
     // this arm is purely about pairing the branch result with `lhs`.
     ExprKind::If(_, if_block, else_block) => {
-      self.match_rhs(lhs.clone(), &if_block, evt.clone());
+      self.match_rhs_arm(lhs.clone(), &if_block, evt.clone());
       match else_block {
-        Some(e) => self.match_rhs(lhs, &e, evt),
+        Some(e) => self.match_rhs_arm(lhs, &e, evt),
         None => {}
       }
     }
@@ -1733,7 +1771,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         return;
       }
       for arm in arms.iter() {
-        self.match_rhs(lhs.clone(), arm.body, evt.clone());
+        self.match_rhs_arm(lhs.clone(), arm.body, evt.clone());
       }
     }
     ExprKind::DropTemps(exp) => {

@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchType, Event, ExternalEvent, ImplicitRef, LineState, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -893,16 +893,22 @@ fn render_dot(
             Event::RefDie { .. } => {
                 continue;
             }
-            Event::Branch { is, branch_history, ty, merge_point, .. } => {
+            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => {
                 // Top-of-branch dot on the parent column. Tooltip
                 // explains the variable's role ("X is live in a
                 // conditional expression"). Anchors the parent
                 // column visually at the line where the conditional
-                // begins.
+                // begins. When the branches share lines it sits on
+                // the top corner of their diamond (#117).
+                let collapsed = branch_is_collapsed(*split_point, *merge_point);
                 let b_data = EventDotData {
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,
-                    dot_y: get_y_axis_pos(*line_number),
+                    dot_y: if collapsed {
+                        get_y_axis_pos(*split_point) - COLLAPSED_APEX
+                    } else {
+                        get_y_axis_pos(*line_number)
+                    },
                     title: event.print_message_with_name(& mut is.real_name())
                 };
                 append_dot(b_data, timeline_data, dots, None);
@@ -961,7 +967,7 @@ fn render_dot(
                     )
                 });
                 let cx = timeline_data.x_val;
-                let cy = get_y_axis_pos(*merge_point);
+                let cy = get_y_axis_pos(*merge_point) + if collapsed { COLLAPSED_APEX } else { 0 };
                 if partly_initialized {
                     let m_data = EventDotData {
                         hash: *hash as u64,
@@ -2845,10 +2851,28 @@ fn render_branches(
         let Event::Branch { branch_history, split_point, merge_point, .. } = ev else { continue };
 
         let parent_x = timeline_data.x_val as f64;
-        let split_y = get_y_axis_pos(*split_point) as f64;
-        let merge_y = get_y_axis_pos(*merge_point) as f64;
-        let column_top_y = get_y_axis_pos(*split_point + 1) as f64;
-        let column_bot_y = get_y_axis_pos(merge_point.saturating_sub(1)) as f64;
+        // Branches that share lines (`let s = if c { a } else { b };`)
+        // have no rows between the split and the join. Their columns
+        // then run on the split..join rows, and the split and join
+        // move a row out (onto blank rows `render_svg` adds), so the
+        // arms form a diamond around those rows instead of crossing
+        // into an X (#117).
+        let (split_y, merge_y, column_top_y, column_bot_y) =
+            if branch_is_collapsed(*split_point, *merge_point) {
+                (
+                    (get_y_axis_pos(*split_point) - COLLAPSED_APEX) as f64,
+                    (get_y_axis_pos(*merge_point) + COLLAPSED_APEX) as f64,
+                    get_y_axis_pos(*split_point) as f64,
+                    get_y_axis_pos(*merge_point) as f64,
+                )
+            } else {
+                (
+                    get_y_axis_pos(*split_point) as f64,
+                    get_y_axis_pos(*merge_point) as f64,
+                    get_y_axis_pos(*split_point + 1) as f64,
+                    get_y_axis_pos(merge_point.saturating_sub(1)) as f64,
+                )
+            };
 
         // Parent's state at the split. The active arm uses this
         // directly; passive arms Gray-convert it so their leading
@@ -2888,12 +2912,13 @@ fn render_branches(
                 (parent_x, split_y), (branch_x, column_top_y),
                 leading_state, visualization_data,
             );
+            let apexes = CollapsedApexes::of(&branch.e_data);
             for (top, bot, state) in &branch.states {
-                if top == bot { continue; }
+                let Some((y1, y2)) = apexes.segment_ys(*top, *bot) else { continue };
                 push_seg_if_renderable(
                     &mut segs, rap,
-                    (branch_x, get_y_axis_pos(*top) as f64),
-                    (branch_x, get_y_axis_pos(*bot) as f64),
+                    (branch_x, y1 as f64),
+                    (branch_x, y2 as f64),
                     state.clone(), visualization_data,
                 );
             }
@@ -3136,22 +3161,66 @@ fn render_timeline(
     // as nothing).
     render_branches(hash, rap, history, states, output, visualization_data, timeline_data);
 
+    let apexes = CollapsedApexes::of(history);
     for (line_start, line_end, state) in states {
         // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
+        let Some((y1, y2)) = apexes.segment_ys(*line_start, *line_end) else { continue };
         let mut data = VerticalLineData {
                 line_class: String::new(),
                 hash: *hash,
                 x1: timeline_data.x_val as f64,
-                y1: get_y_axis_pos(*line_start),
+                y1,
                 x2: timeline_data.x_val as f64,
-                y2: get_y_axis_pos(*line_end),
+                y2,
                 title: timeline_segment_title(state, rap, visualization_data),
                 opacity: 1.0,
                 dasharray: "none".to_owned(),
         };
-        if *line_start != *line_end {
-            append_line(state, & mut data, rap, timeline_data, output, registry);
+        append_line(state, & mut data, rap, timeline_data, output, registry);
+    }
+}
+
+/// How far above its first row / below its last row the split and the
+/// join of a conditional whose branches share lines are drawn: one row,
+/// onto the blank rows `render_svg` puts around it (see
+/// `render_branches`).
+const COLLAPSED_APEX: i64 = 30;
+
+/// Lines where a column stops for, or resumes after, a conditional
+/// whose branches share lines. The column has to stop at the diamond's
+/// top corner (half a row above the line), not run on into it.
+struct CollapsedApexes {
+    splits: BTreeSet<usize>,
+    merges: BTreeSet<usize>,
+}
+
+impl CollapsedApexes {
+    fn of(history: &[(usize, Event)]) -> Self {
+        let mut apexes = CollapsedApexes { splits: BTreeSet::new(), merges: BTreeSet::new() };
+        for (_, ev) in history {
+            if let Event::Branch { split_point, merge_point, .. } = ev {
+                if branch_is_collapsed(*split_point, *merge_point) {
+                    apexes.splits.insert(*split_point);
+                    apexes.merges.insert(*merge_point);
+                }
+            }
         }
+        apexes
+    }
+
+    /// The y range of a column segment from line `top` to line `bot`,
+    /// or `None` when nothing is left to draw.
+    fn segment_ys(&self, top: usize, bot: usize) -> Option<(i64, i64)> {
+        if top == bot {
+            return None;
+        }
+        let (after_join, before_split) = (self.merges.contains(&top), self.splits.contains(&bot));
+        let y1 = get_y_axis_pos(top) + if after_join { COLLAPSED_APEX } else { 0 };
+        let y2 = get_y_axis_pos(bot) - if before_split { COLLAPSED_APEX } else { 0 };
+        if (after_join || before_split) && y1 >= y2 {
+            return None;
+        }
+        Some((y1, y2))
     }
 }
 

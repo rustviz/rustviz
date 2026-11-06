@@ -1260,12 +1260,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // history (the surrounding If arm already emits the
         // GoOutOfScope events from `if_decl`, so the helper skips
         // emitting them itself).
+        //
+        // Each branch's events are the ones whose ids are handed out
+        // while it is visited (`if_ids`, `else_ids`), see
+        // `take_branch_events`. An if-let's pattern bindings happen
+        // only when the branch is taken, so they start `if_ids`; the
+        // scrutinee is evaluated either way and stays outside.
+        let if_lo;
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
+            if_lo = *self.unique_id;
             self.register_iflet_let_bindings(let_expr, None)
           } else {
             self.visit_expr(&guard_expr);
+            if_lo = *self.unique_id;
             HashSet::new()
           };
         self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
@@ -1274,6 +1283,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let uninit_before = self.uninit_locals.clone();
         self.visit_expr(&if_expr);
         let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before);
+        let if_ids = if_lo..*self.unique_id;
         let else_decl = match else_expr {
           Some(e) => {
             self.visit_expr(e);
@@ -1283,6 +1293,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         };
         let uninit_after_else = std::mem::take(&mut self.uninit_locals);
         self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if), (else_expr, uninit_after_else)]);
+        let else_ids = if_ids.end..*self.unique_id;
         self.inside_branch = false;
 
         // compute split and merge points
@@ -1319,9 +1330,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // wind down at the closing brace as they would inside the
         // Branch.
         if else_expr.is_none() {
-            let lo = if iflet_bindings.is_empty() { split + 1 } else { split };
+            let rhs = self.rhs_arm_ids.get(&if_expr.hir_id).copied();
             let body_ev: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter()
-              .filter(|i| filter_ev(i, lo, if_end))
+              .filter(|(_, e)| if_ids.contains(&e.get_id())
+                || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
             if !events_move_out_of_outer(&body_ev, &if_decl) {
                 for var in in_decl_order(&if_decl) {
@@ -1335,52 +1347,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             }
         }
 
-        // Filter events that landed inside each branch's body. The
-        // ranges deliberately exclude the brace lines: `split` is the
-        // line of the if-body's opening `{` (which in normal Rust
-        // formatting is the same line as the guard), and the guard's
-        // events shouldn't be folded into the if-branch — the guard
-        // runs once before either branch, not as part of one. Same
-        // logic for the else side: the `} else {` line carries the
-        // closing of the if-body and the opening of the else-body,
-        // and any events on it are structural noise from either side.
-        // Single-line ifs (split == merge) collapse the ranges to
-        // empty, intentionally — line-based filtering can't separate
-        // body from guard there. The dropdown fix in #117 keeps the
-        // canonical examples multi-line for now.
+        // Take each branch's events out of the global timeline. They
+        // used to be picked by source line (the if-body's lines, then
+        // the else-body's), which put everything in the wrong place
+        // when branches share a line: a one-line `if c { take(s); }
+        // else { … }` drew the move as unconditional, and the `} else
+        // if c2 {` line put the inner `if` in the outer if-branch
+        // (#117). The guard's events were handed out before `if_ids`,
+        // so they stay on the global timeline.
         let _ = line_num; // no longer used for guard-live extension
-        // For plain `if cond { … }` we exclude the split line (the
-        // line of the body's opening `{`, normally the same line as
-        // the guard) so guard reads stay on the global timeline. For
-        // `if let pat = expr { … }` the destructure events emitted by
-        // `register_iflet_let_bindings` *are* on the split line and
-        // belong inside the if-branch — include split when an if-let
-        // is in play.
-        let if_filter_lo = if iflet_bindings.is_empty() { split + 1 } else { split };
-        let if_filter_hi = if_end;
-        let else_filter_lo = if_end + 1;
-        let else_filter_hi = merge;
-        let mut if_ev: Vec<(usize, ExternalEvent)> =
-          self.preprocessed_events.iter()
-            .filter(|i| filter_ev(i, if_filter_lo, if_filter_hi))
-            .cloned().collect();
-        let mut else_ev: Vec<(usize, ExternalEvent)> =
-          self.preprocessed_events.iter()
-            .filter(|i| filter_ev(i, else_filter_lo, else_filter_hi))
-            .cloned().collect();
-        // Align the global-event purge with the per-branch filters
-        // above. Removing the entire `[split, merge]` slab (the old
-        // behaviour) drops events that *didn't* make it into either
-        // branch — chiefly the let-as-rhs Moves emitted on the split
-        // line for single-line ifs, and a plain `if cond { … }`'s
-        // guard reads (also on the split line). Those events still
-        // belong on the global timeline; only the events the
-        // branches claimed should be evicted from there.
-        self.preprocessed_events.retain(|(l, _)| {
-          let in_if = *l >= if_filter_lo && *l <= if_filter_hi;
-          let in_else = *l >= else_filter_lo && *l <= else_filter_hi;
-          !(in_if || in_else)
-        });
+        let mut if_ev = self.take_branch_events(if_ids, Some(if_expr));
+        let mut else_ev = self.take_branch_events(else_ids, else_expr);
 
         // Compute liveness from the events actually inside the
         // branches — only variables touched by a real event get a
@@ -1434,13 +1411,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // Branch arm). Clamping the else-branch's end there keeps
         // it consistent with the column-trim done in
         // compute_branch_states.
+        //
+        // Branches that share lines (#117) are drawn on the split..merge
+        // rows themselves; each is active on its own lines.
         let merge_minus_one = merge.saturating_sub(1);
+        let collapsed = branch_is_collapsed(split, merge);
+        let if_slice = if collapsed { (split, if_end) } else { (split + 1, if_end) };
+        let else_slice = match else_expr {
+          Some(e) if collapsed => (self.tcx.sess.source_map().lookup_char_pos(e.span.lo()).line, merge),
+          _ if collapsed => (if_end, merge),
+          _ => (if_end, merge_minus_one),
+        };
         let (b_labels, b_slices, b_branches) = match else_expr {
           Some(_) => {
             let else_map = create_line_map(&else_ev);
             (
               vec!["If".to_owned(), "Else".to_owned()],
-              vec![(split + 1, if_end), (if_end, merge_minus_one)],
+              vec![if_slice, else_slice],
               vec![
                 ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl   },
                 ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl },
@@ -1452,7 +1439,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // variable as it was (#257).
           None => (
             vec!["If".to_owned(), "Else".to_owned()],
-            vec![(split + 1, if_end), (if_end, merge_minus_one)],
+            vec![if_slice, else_slice],
             vec![
               ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl },
               ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new() },
@@ -1756,7 +1743,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // visit expr
               self.inside_branch = true;
               self.uninit_locals = uninit_before.clone();
+              let body_lo = *self.unique_id;
               self.visit_expr(arm.body);
+              let body_ids = body_lo..*self.unique_id;
               uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
               self.inside_branch = false;
 
@@ -1764,25 +1753,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               let arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
 
 
-              // get events that occured in the arm
+              // get events that occured in the arm: those handed out
+              // while its body was visited, plus the ones pairing its
+              // value with a `let` (see `take_branch_events`). Picking
+              // them by source line gave every event on a shared line
+              // to the first arm (#117).
               if !inline {
-                branch_e_data.extend(
-                  self.preprocessed_events.iter().filter(|i| filter_ev(i, begin, end)).cloned()
-                );
+                let body_ev = self.take_branch_events(body_ids, Some(arm.body));
+                branch_e_data.extend(body_ev);
 
                 // contribute events-touched variables to liveness; the
                 // arm's own pat-decls are subtracted at the end.
                 collect_event_live_vars(&branch_e_data, &mut liveness);
-
-                // remove elements from global container
-                self.preprocessed_events.retain(|(l, _)|
-                  if *l <= end && *l >= begin {
-                    false
-                  }
-                  else {
-                    true
-                  }
-                );
               }
 
               // add callback events - events that need to happen at the end of an arm block
