@@ -1363,15 +1363,18 @@ impl Event {
                 }
             }
             // A borrow whose borrower isn't drawn and can't be named
-            // (stored through a reference, `self.r = &x`): don't call
-            // it "Anonymous resource" (#282).
+            // (stored in a field of a call's result,
+            // `v.last_mut().unwrap().r = &x`): don't call it "Anonymous
+            // resource" (#282).
             Event::StaticLend{ to: ResourceTy::Anonymous, is, ..} => {
                 let omit_read_only = is.extract_rap()
                     .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
-                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), false, omit_read_only)
+                let through_ref = ref_lender(is).map(|r| r.points_to_copy());
+                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), false, omit_read_only, through_ref)
             }
-            Event::MutableLend{ to: ResourceTy::Anonymous, ..} => {
-                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), true, false)
+            Event::MutableLend{ to: ResourceTy::Anonymous, is, ..} => {
+                let through_ref = ref_lender(is).map(|r| r.points_to_copy());
+                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), true, false, through_ref)
             }
             // arrow going out
             Event::Duplicate{ to, into_closure: true, ..} => {

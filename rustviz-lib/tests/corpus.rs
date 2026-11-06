@@ -4779,17 +4779,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "borrow_into_element",
         // `v[0] = &u` / `w[0] = &mut c`: the element is the borrower,
         // and the borrow ends at v's / w's last use, after which `c`
-        // owns (and drops) its String again. `h.r = &y` through a
-        // reference has no nameable column.
+        // owns (and drops) its String again. `h.r = &y` (h: &mut
+        // Holder, y: &String) stores a reborrow of the String y points
+        // to in the Holder h points to: h.r is the borrower, and the
+        // borrow outlives `point`, so it doesn't end there (it used to
+        // say "y's resource ... stored in a place that isn't drawn",
+        // and end on the same line). A field of a call's result
+        // (`hs.last_mut().unwrap().r = &z`) can't be named.
         must_contain: &[
             "u's resource is immutably borrowed by v[0]; u is read-only while the borrow is live",
             "u's resource is no longer immutably borrowed",
             "c's resource is mutably borrowed by w[0]; c can't be used while the borrow is live",
             "c's resource is no longer mutably borrowed",
             "c goes out of scope. Its resource is dropped.",
-            "y's resource is immutably borrowed, and the reference is stored in a place that isn't drawn",
+            "the resource y points to is immutably borrowed by h.r",
+            "the resource z points to is immutably borrowed, and the reference is stored in a place that isn't drawn",
         ],
         must_not_contain: &[
+            // y and z are references: they don't own the String.
+            "y's resource is immutably borrowed, and the reference is stored in a place that isn't drawn",
+            "z's resource is immutably borrowed, and the reference is stored in a place that isn't drawn",
+            // The reborrow lives on in the caller's Holder / Vec.
+            "the resource y points to is no longer borrowed through y",
+            "the resource z points to is no longer borrowed through z",
+            "h.r no longer borrows the resource y points to",
             "u's resource is immutably borrowed by Anonymous resource; u is read-only while the borrow is live",
             "c's resource is mutably borrowed by Anonymous resource; c can't be used while the borrow is live",
             "y's resource is immutably borrowed by Anonymous resource",
