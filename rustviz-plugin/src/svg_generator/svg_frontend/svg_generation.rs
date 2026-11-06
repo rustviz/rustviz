@@ -591,6 +591,15 @@ pub fn render_svg(
                 )
         });
     }
+    // A move into a call goes first: it sits on the line's own row, and
+    // the line's other arrows (a borrow's return) stack below it (#200).
+    for (_, event_vec) in &mut visualization_data.event_line_map {
+        event_vec.sort_by_key(|e| {
+            let into_fn = matches!(e, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
+                && ResourceAccessPoint_extract(e).1.extract_rap().map_or(false, |rap| rap.is_fn());
+            !into_fn
+        });
+    }
     // sort all the line maps in the branch events
     for (_, e) in visualization_data.preprocess_external_events.iter_mut() {
         match e {
