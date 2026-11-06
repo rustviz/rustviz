@@ -12,7 +12,7 @@ use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_middle::ty::adjustment::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
@@ -1252,31 +1252,39 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
         if_decl = &if_decl | &iflet_bindings;
 
-        // Single-arm `if cond { … }` and `if let pat = expr { … }`
-        // (both no-else): inline. Body events are already in
-        // `preprocessed_events` from the body visit above; the only
-        // thing the lone-arm Branch construction adds is a zigzag
-        // column off into a lone arm with no symmetric merge to
-        // counter-balance it. Skip it. Just emit GoOutOfScope events
-        // for any branch-local bindings (if-let pattern bindings,
-        // body-internal let-stmts) so they wind down at the closing
-        // brace as they would inside the Branch.
+        // `if cond { … }` / `if let pat = expr { … }` without an
+        // `else`. When the body moves a variable that outlives the
+        // `if`, the program has two paths: the body ran and moved it,
+        // or it didn't (the implicit empty `else`), so the variable is
+        // maybe-moved afterwards and dropped at scope end only if the
+        // body didn't run (#257). That's drawn exactly like
+        // `if cond { … } else {}`: the Branch below gets an empty
+        // `else` branch. The body's own range is the same one the
+        // if-branch filter below uses.
         //
-        // Tradeoff: the conditionality of the body ("only runs if
-        // cond is true") is no longer encoded — a Move inside the
-        // body shows as an unconditional Move on the parent
-        // timeline. Acceptable given the alternative is the
-        // single-arm zigzag, which obscured the same flow with a
-        // structural anomaly.
+        // Otherwise (reads, borrows, …: nothing that changes what the
+        // variable holds after the `if`) the body is drawn inline:
+        // its events are already in `preprocessed_events` from the
+        // body visit above, and a branch would only add columns. Just
+        // emit GoOutOfScope events for any branch-local bindings
+        // (if-let pattern bindings, body-internal let-stmts) so they
+        // wind down at the closing brace as they would inside the
+        // Branch.
         if else_expr.is_none() {
-            for var in in_decl_order(&if_decl) {
-                self.preprocessed_events.push((
-                    if_end,
-                    ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
-                ));
-                *self.unique_id += 1;
+            let lo = if iflet_bindings.is_empty() { split + 1 } else { split };
+            let body_ev: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter()
+              .filter(|i| filter_ev(i, lo, if_end))
+              .cloned().collect();
+            if !events_move_out_of_outer(&body_ev, &if_decl) {
+                for var in in_decl_order(&if_decl) {
+                    self.preprocessed_events.push((
+                        if_end,
+                        ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
+                    ));
+                    *self.unique_id += 1;
+                }
+                return;
             }
-            return;
         }
 
         // Filter events that landed inside each branch's body. The
@@ -1391,10 +1399,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               ],
             )
           }
+          // No `else` (and the body moves something, see above): the
+          // implicit empty `else` is a second path that leaves every
+          // variable as it was (#257).
           None => (
-            vec!["If".to_owned()],
-            vec![(split + 1, if_end)],
-            vec![ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl }],
+            vec!["If".to_owned(), "Else".to_owned()],
+            vec![(split + 1, if_end), (if_end, merge_minus_one)],
+            vec![
+              ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl },
+              ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new() },
+            ],
           ),
         };
         let b_ty = BranchType::If(b_labels, b_slices);

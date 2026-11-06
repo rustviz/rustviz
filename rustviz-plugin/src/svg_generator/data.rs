@@ -1735,6 +1735,15 @@ impl Visualizable for VisualizationData {
             if end < branch_end {
                 states.push((end, branch_end, branch_state_converter(&previous_state)));
             }
+            // A one-row column (`if c {\n take(s);\n }` with no
+            // `else`, or `} else {}`) pushes nothing above. Record the
+            // unchanged state anyway (zero-length, so nothing is drawn
+            // for it): the merge reads each branch's end state from
+            // `states.last()`, and with no entry an empty `else` read
+            // as having moved the value (#257).
+            if states.is_empty() {
+                states.push((begin, end, previous_state.clone()));
+            }
             return previous_state;
         }
 

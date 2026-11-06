@@ -562,6 +562,26 @@ pub fn collect_event_live_vars(
     }
 }
 
+/// True when some event in `events` (including inside nested
+/// conditionals) moves a value out of a variable that isn't declared
+/// in `decls`, i.e. one that outlives the conditional these events
+/// belong to. An `if` without `else` whose body does this leaves the
+/// variable maybe-moved afterwards (#257).
+pub fn events_move_out_of_outer(
+    events: &[(usize, ExternalEvent)],
+    decls: &HashSet<ResourceAccessPoint>,
+) -> bool {
+    events.iter().any(|(_, ev)| match ev {
+        ExternalEvent::Move { from: ResourceTy::Value(rap), .. } =>
+            !rap.is_fn() && !decls.contains(rap),
+        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| {
+            let inner: HashSet<ResourceAccessPoint> = decls | &b.decl_vars;
+            events_move_out_of_outer(&b.e_data, &inner)
+        }),
+        _ => false,
+    })
+}
+
 // Used for filtering events from the main event container
 pub fn filter_ev((line_num, _ev): &(usize, ExternalEvent), split: usize, merge: usize) -> bool {
   if *line_num <= merge && *line_num >= split {

@@ -357,6 +357,13 @@ const EXPECTED_OK: &[&str] = &[
     // — An explicit `ref` / `ref mut` binding on an owned value borrows
     //   the matched place; it isn't a copy or a move (#338).
     "ref_binding_borrows_owned",
+    // `if` without `else` whose body moves something: drawn like an
+    // `if` with an empty `else` (#257).
+    "if_no_else_partial_move",
+    "if_let_no_else_move",
+    "if_no_else_read_only",
+    "if_else_empty_same_line",
+    "if_no_else_nested_move",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1475,22 +1482,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "if_no_else",
-        // Plain `if cond { body }`: the Branch event is now
-        // skipped (single-arm conditional). The Move from `s` to
-        // `consume` shows inline on the parent timeline, with no
-        // merge tooltip and no "live in a conditional expression"
-        // labelling.
+        // Plain `if cond { body }` whose body moves `s`: `s` is moved
+        // only if `cond` holds, so it's maybe-moved afterwards and the
+        // drop at scope end is conditional. Drawn like an `if` with an
+        // empty `else` (#257; it used to be an unconditional move).
         must_contain: &[
             "Move from s to consume",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
-            "If",
-            "Else",
-            "merge",
+            "s goes out of scope. No resource is dropped.",
+            "s was moved or dropped in every branch above",
             "may have been moved",
-            "moved or dropped in every branch",
             "in branches where it was not",
-            "in a conditional expression",
             "acquired ownership of a resource (in all branches above)",
         ],
     },
@@ -3333,6 +3341,95 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "name's resource is moved",
             "name goes out of scope. No resource is dropped.",
             "Partial copy from num to k",
+        ],
+    },
+    // ─── `if` without `else` (#257) ─────────────────────────────────
+    TooltipExpect {
+        name: "if_no_else_partial_move",
+        // `let n = p.name;` inside an `if` with no `else`: `p.name` is
+        // moved only when `c` holds.
+        must_contain: &[
+            "Move from p.name to n",
+            "p.name was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when p.name goes out of scope.",
+            "p.name goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "p.nick goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "p.name goes out of scope. No resource is dropped.",
+            "p.name was moved or dropped in every branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_no_else_move",
+        // `if let Some(x) = opt { take(x); take(s); }`: the pattern
+        // moves out of `opt` and the body moves `s`, both only when
+        // `opt` is `Some`.
+        must_contain: &[
+            "Move from opt to x",
+            "Move from s to take",
+            "opt was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when opt goes out of scope.",
+            "opt goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "opt goes out of scope. No resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "if_no_else_read_only",
+        // Only reads `s`: nothing changes who owns it, so the body
+        // stays inline (no branch columns, no merge dot).
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            // (The plugin emits this one with a trailing space.)
+            "s is live in a conditional expression ",
+            "s isn't moved in any of the branches above",
+        ],
+    },
+    TooltipExpect {
+        name: "if_else_empty_same_line",
+        // `} else {}`: the empty `else` column is one row tall and
+        // used to count as having moved `s`.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s was moved or dropped in every branch above",
+            "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "if_no_else_nested_move",
+        // Both arms of the inner `if` move `s` (its merge says so),
+        // but the outer `if` has no `else`: maybe-moved after it.
+        must_contain: &[
+            "s was moved or dropped in every branch above",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped.",
         ],
     },
 ];
