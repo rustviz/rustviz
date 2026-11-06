@@ -5,9 +5,9 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, span_to_line}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, span_to_line, unary_op_operand}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
-use rustc_span::Span;
+use rustc_span::{BytePos, Span};
 
 
 
@@ -147,6 +147,18 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
               self.annotate_expr(a);
             }
           }
+      }
+    }
+    // `-x` / `!b`: highlight the operator when the visitor gave it a
+    // function RAP (see its Unary arm). Both are one character.
+    ExprKind::Unary(rustc_hir::UnOp::Neg | rustc_hir::UnOp::Not, ex) => {
+      self.annotate_expr(ex);
+      if let Some((op_name, _)) = unary_op_operand(expr, &self.tcx, &self.raps) {
+        if let Some(rd) = self.raps.get(op_name) {
+          let hash = *rd.rap.hash();
+          let op_span = expr.span.with_hi(expr.span.lo() + BytePos(1));
+          self.annotate_src(op_name.to_owned(), op_span, true, hash);
+        }
       }
     }
     ExprKind::Unary(_, ex) | ExprKind::AddrOf(_, _, ex) 

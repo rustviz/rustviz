@@ -339,6 +339,9 @@ const EXPECTED_OK: &[&str] = &[
     "method_addrof_receiver",
     // A moved-out reference's state isn't about ownership (#292).
     "moved_ref_state",
+    // Operands of `-x` / `!b` are copied in, or moved for an
+    // overloaded `Neg` on a non-Copy type (#262).
+    "unary_operand_copies",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3093,6 +3096,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "q's resource was moved, so q no longer has ownership",
             "q's resource was moved, so q no longer has ownership; cannot access data.",
+        ],
+    },
+    TooltipExpect {
+        name: "unary_operand_copies",
+        // `-x` is `Neg::neg(x)` and `!b` is `Not::not(b)`: the operand
+        // is taken by value. A primitive operand (local, field, `*r`)
+        // is copied and stays usable. An overloaded `Neg` on a
+        // non-Copy struct moves its operand, which then has nothing
+        // left to drop. A literal (`-5`) has no column.
+        must_contain: &[
+            "Copy from x to -",
+            "Copy from b to !",
+            "Copy from p.y to -",
+            "Copy from *r to -",
+            "b's resource is copied",
+            "Move from wave to -",
+            "wave's resource is moved",
+            "wave goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from x to -",
+            "Move from b to !",
+            "wave goes out of scope. Its resource is dropped.",
         ],
     },
 ];
