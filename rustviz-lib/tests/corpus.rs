@@ -616,6 +616,9 @@ const EXPECTED_OK: &[&str] = &[
     "field_write_through_ref_branch",
     // `*r = e` reads like a plain assignment (#474).
     "deref_assign_wording",
+    // `p.x += k` through a reference keeps "modified through", with no
+    // "(copied from k)" (#260).
+    "field_compound_assign_through_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6290,15 +6293,40 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*b acquires ownership of a new resource; its previous resource is dropped",
             "Move from q2 to *rq",
             "*rq acquires ownership of a resource",
-            "the resource r points to is modified through *r",
+            // r: &mut i32 points to a value (#312).
+            "the value r points to is modified through *r",
         ],
         must_not_contain: &[
             "(copied from",
             "(moved from",
+            "the resource r points to is modified through *r",
             "the resource ra points to is modified through *ra",
             "the resource b points to is modified through *b",
             "the resource rq points to is modified through *rq",
             "*r acquires ownership",
+        ],
+    },
+    TooltipExpect {
+        name: "field_compound_assign_through_ref",
+        // `p.x += k` / `r.x += k` / `p.name += "x"` through a reference
+        // update the borrowed struct in place: "modified through", as
+        // for `*r += k`. The copy of k is the arrow's job; the dot used
+        // to add "(copied from k)" (#260). Nothing is assigned or
+        // dropped.
+        must_contain: &[
+            "Copy from k to p.x",
+            "the resource p points to is modified through p.x",
+            "the resource p points to is modified through p.name",
+            "Copy from k to r.x",
+            "the resource r points to is modified through r.x",
+        ],
+        // (Tooltips are matched whole, so these are the full old texts.)
+        must_not_contain: &[
+            "the resource p points to is modified through p.x (copied from k)",
+            "the resource r points to is modified through r.x (copied from k)",
+            "p.x is assigned a copy of k",
+            "r.x is assigned a copy of k",
+            "p.name acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
 ];
