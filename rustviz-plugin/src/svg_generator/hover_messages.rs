@@ -248,6 +248,12 @@ pub fn event_dot_owner_init_from_caller_value(my_name: &String) -> String {
     format!("{0} is bound to a value from the caller", fmt_style(my_name))
 }
 
+// A Copy parameter (`n: i32`, `c: bool`, `a: Option<i32>`): the caller's
+// value is copied in; nothing is owned or moved (#505).
+pub fn event_dot_copy_init_from_caller(my_name: &String) -> String {
+    format!("{0} is a copy of the caller's value", fmt_style(my_name))
+}
+
 pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!("{0} acquires ownership from the caller", my_name_fmt)
@@ -345,6 +351,15 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String) -> String {
         "This temporary {0} is dropped {1}: nothing bound it to a variable or moved it on. Its resource is dropped",
         fmt_style(ty), when
     )
+}
+
+/// Whether `acquire` is the plain "acquires ownership of a resource" line
+/// that `reassign` (`event_dot_owner_drop_at_reassign`) already says, for
+/// the same variable, with more (#506).
+pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
+    const SUFFIX: &str = " acquires ownership of a new resource; its previous resource is dropped";
+    reassign.strip_suffix(SUFFIX)
+        .is_some_and(|name| acquire.strip_suffix(" acquires ownership of a resource") == Some(name))
 }
 
 //     0

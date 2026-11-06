@@ -667,6 +667,11 @@ const EXPECTED_OK: &[&str] = &[
     "holder_ref_param_iter",
     "holder_ref_param_iter_mut",
     "fn_ret_ref_through_param",
+    // Copy values aren't resources: a `for` element of an owned Vec<i32>
+    // (#504), a Copy parameter (#505); a reassignment says one thing (#506).
+    "for_copy_elements",
+    "copy_param_wording",
+    "reassign_one_bullet",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4035,7 +4040,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope",
             "s is an immutable borrow from the caller",
             "len reads from s",
-            "x acquires ownership from the caller",
+            // `x` is an i32 copied out of the caller's pair (#505).
+            "x is a copy of the caller's value",
             "y goes out of scope",
             "name acquires ownership from the caller",
             "len reads from name (implicitly borrowed)",
@@ -4044,6 +4050,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "s acquires ownership from the caller",
             "s goes out of scope. Its resource is dropped.",
+            "x acquires ownership from the caller",
         ],
     },
     TooltipExpect {
@@ -6853,6 +6860,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from w to *w",
         ],
     },
+    // #504: `x` is an i32 copied out of the Vec; `xs` is what is moved.
+    TooltipExpect {
+        name: "for_copy_elements",
+        must_contain: &[
+            "x is bound to a copyable value",
+            "xs acquires ownership of a resource",
+        ],
+        must_not_contain: &[
+            "x acquires ownership of a resource",
+            "x is bound to a value",
+        ],
+    },
+    // #505: a Copy parameter is a copy of the caller's value; a String
+    // parameter acquires ownership.
+    TooltipExpect {
+        name: "copy_param_wording",
+        must_contain: &[
+            "c is a copy of the caller's value",
+            "a is a copy of the caller's value",
+            "s acquires ownership from the caller",
+        ],
+        must_not_contain: &[
+            "c acquires ownership from the caller",
+            "a acquires ownership from the caller",
+            "c is bound to a value from the caller",
+        ],
+    },
+    TooltipExpect {
+        name: "reassign_one_bullet",
+        must_contain: &["s acquires ownership of a new resource; its previous resource is dropped"],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -8746,6 +8785,21 @@ fn reference_bracket_starts_below_the_branch_diamond() {
          diamond ends at y={})",
         y, join, join + 30.0
     );
+}
+
+/// #506: the dot of `s = String::from("b")` says the new resource is
+/// acquired and the old one dropped; it doesn't also say, as a separate
+/// bullet, that `s` "acquires ownership of a resource".
+#[test]
+fn reassignment_dot_has_one_line() {
+    let rv = run_with_local_backend("reassign_one_bullet");
+    let timeline = rv.timeline_panel_string();
+    let dot = tooltip_lines(&timeline).into_iter()
+        .find(|l| l.iter().any(|t| t.contains("its previous resource is dropped")))
+        .expect("a reassignment dot");
+    assert_eq!(dot, vec![
+        "s acquires ownership of a new resource; its previous resource is dropped".to_owned(),
+    ]);
 }
 
 /// cy of every timeline dot whose tooltip contains `needle` (the dot
