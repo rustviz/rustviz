@@ -3663,7 +3663,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // nothing.
         must_contain: &[
             "a acquires ownership from the caller",
-            "len reads from a",
+            "len reads from a (implicitly borrowed)",
             "a goes out of scope. Its resource is dropped.",
             "b goes out of scope",
             "s is an immutable borrow from the caller",
@@ -3671,7 +3671,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x acquires ownership from the caller",
             "y goes out of scope",
             "name acquires ownership from the caller",
-            "len reads from name",
+            "len reads from name (implicitly borrowed)",
             "name goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
