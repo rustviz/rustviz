@@ -484,6 +484,13 @@ const EXPECTED_OK: &[&str] = &[
     "partial_move_one_arm_tuple",
     "partial_move_one_arm_struct",
     "partial_move_if_branches",
+    // "resource" only for values that need drop (#484).
+    "no_drop_iter",
+    "non_copy_struct_move",
+    "string_resource_wording",
+    "sync_lock_resource",
+    "no_drop_reassign_branch",
+    "no_drop_partial_maybe",
     // A temporary a `let` borrows gets a column to the end of the block (#400).
     "extended_temporary",
     // A `&mut` passed to a generic `T` is moved, not reborrowed (#200);
@@ -773,9 +780,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // reference to a Cell/RefCell/Mutex can modify the referent, so
         // the lifeline must not claim r can't modify it, nor that r owns it.
         must_contain: &[
-            "r holds an immutable reference; it can read the borrowed resource",
+            "r holds an immutable reference; it can read the borrowed value",
         ],
         must_not_contain: &[
+            "r holds an immutable reference; it can read the borrowed resource",
             "r holds an immutable reference; it can read but not modify the borrowed resource",
             "r is the owner of the resource",
         ],
@@ -905,13 +913,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `&self` and mutate through it, so the lend dot must not
         // call the owner "read-only". A plain String still is.
         must_contain: &[
-            "c's resource is immutably borrowed by set",
+            "c's value is immutably borrowed by set",
             "r's resource is immutably borrowed by borrow_mut",
             "shared's resource is immutably borrowed by borrow",
             "m's resource is immutably borrowed by lock",
             "s's resource is immutably borrowed by len; s is read-only while the borrow is live",
         ],
         must_not_contain: &[
+            "c's resource is immutably borrowed by set",
             "c is read-only",
             "r is read-only",
             "shared is read-only",
@@ -1111,10 +1120,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // after the call — so no "reborrow / read-only until
             // area returns" note.
             "area reads from rect",
-            "r acquires ownership of a resource",
-            "r goes out of scope. Its resource is dropped.",
+            "r is bound to a value",
+            "r goes out of scope",
         ],
         must_not_contain: &[
+            "r goes out of scope. Its resource is dropped.",
+            "r acquires ownership of a resource",
             "area reads from rect (immutable reborrow — rect is read-only until area returns)",
         ],
     },
@@ -1976,12 +1987,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // that acquires from the caller; the match arms copy their
         // payloads out of it.
         must_contain: &[
-            "s acquires ownership from the caller",
+            "s is bound to a value from the caller",
             "Partial copy from s to r",
             "Partial copy from s to w",
             "Move from c to area",
         ],
         must_not_contain: &[
+            "s acquires ownership from the caller",
             // Pre-#131 the param was registered like a struct and
             // got a phantom column for the first variant's field.
             "s.0, immutable",
@@ -1995,11 +2007,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `black.1 = 10` lands on `black.1`. Pre-fix: panic.
         must_contain: &[
             "Move from Color to black",
-            "black acquires ownership of a resource",
+            "black is bound to a value",
             "Copy from black.0 to r",
             "r is initialized with a copy of black.0",
         ],
         must_not_contain: &[
+            "black acquires ownership of a resource",
             // The read must not lose its source.
             "r is bound to a copyable value",
         ],
@@ -2013,9 +2026,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from RefCell::new to c",
             "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)", // #203
-            "c goes out of scope. Its resource is dropped.",
+            "c goes out of scope",
         ],
         must_not_contain: &[
+            "c goes out of scope. Its resource is dropped.",
             "c's resource is moved",
             "c goes out of scope. No resource is dropped.",
         ],
@@ -2542,16 +2556,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "dbg! reads from a",
             "Move from a to b",
             "Immutable borrow from b to r",
-            "Return immutably borrowed resource from r to b",
+            "Return immutably borrowed value from r to b",
             "Move from c to dbg!",
             "Copy from x to dbg!",
-            "c goes out of scope. No resource is dropped.",
+            "c goes out of scope",
             // `write!(f, …)` inside the Debug impl: f is borrowed
             // mutably by write_fmt, self.w is read.
             "write! reads from/writes to f through an implicit mutable reference, so f isn't moved",
             "write! reads from self through an implicit reference, so self isn't moved",
         ],
         must_not_contain: &[
+            "c goes out of scope. No resource is dropped.",
+            "Return immutably borrowed resource from r to b",
             "r acquires ownership of a resource",
             "Return immutably borrowed resource from r to *r",
             // `dbg!(&a)`: the user wrote the `&`, so no "implicit" note.
@@ -3285,20 +3301,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `*q = String::from("t")` and a Box's `*b = …`. The place has no
         // column, so the write's tooltip is where it's said, in the words
         // of a plain assignment (2026-11-05 decision). `*n = 5` (i32) is
-        // "assigned a new value", `*rq = q2` (nothing to drop) just
-        // acquires, and `*r += "x"` (an operator call, nothing
-        // overwritten) keeps the update wording, "modified through *r"
-        // (2026-11-06 decision), not an operator reborrow of `r` (#260).
+        // "assigned a new value", `*rq = q2` (nothing to drop; #484: no
+        // "resource" for a value with no drop glue) the same, and `*r += "x"`
+        // (an operator call, nothing overwritten) keeps the update
+        // wording, "modified through *r" (2026-11-06 decision), not an
+        // operator reborrow of `r` (#260).
         must_contain: &[
             "*r acquires ownership of a new resource; its previous resource is dropped",
             "*q acquires ownership of a new resource; its previous resource is dropped",
             "*b acquires ownership of a new resource; its previous resource is dropped",
             "*n is assigned a new value",
-            "*rq acquires ownership of a resource",
+            "*rq is assigned a new value",
             "the resource r points to is modified through *r",
         ],
         must_not_contain: &[
             "+= reads from/writes to r (mutable reborrow",
+            "*rq acquires ownership of a resource",
             "its previous value is dropped",
             "(copied from",
             "(moved from",
@@ -4270,13 +4288,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // one-field struct used to panic (#74, #136). The call borrows
         // `h` for its duration and copies the i32 result out.
         must_contain: &[
-            "h's resource is immutably borrowed by get; h is read-only while the borrow is live",
+            // Holder { n: i32 } isn't Copy but has nothing to drop: a
+            // value, not a resource (#484).
+            "h's value is immutably borrowed by get; h is read-only while the borrow is live",
             "get reads from h (implicitly borrowed)",
             "Copy from get to v",
-            "h goes out of scope. Its resource is dropped.",
+            "h goes out of scope",
         ],
         must_not_contain: &[
             "h's resource is moved",
+            "h's resource is immutably borrowed by get",
+            "h goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -4481,7 +4503,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // is the subject, not the outermost collection.
             "grid[0][1] is assigned a copy of y",
             "Copy from y to grid[0][1]",
-            "grid's resource is modified through grid[1][1]",
+            "grid's value is modified through grid[1][1]",
             "cube[0][0][1] is assigned a new value",
             "rows[0][0] acquires ownership of a new resource; its previous resource is dropped",
             "Move from p to ps[0]",
@@ -4506,6 +4528,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(moved from",
             "v's resource is modified through v[0]",
             "v's resource is modified through v[2]",
+            "grid's resource is modified through grid[1][1]",
             "grid's resource is modified through grid[1][0]",
             "grid's resource is modified through grid[0][1]",
             "cube's resource is modified through cube[0][0][1]",
@@ -4685,12 +4708,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (#417). A collection by value (`for s in w`) still moves into
         // the loop variable's column.
         must_contain: &[
-            "it's resource is moved",
+            // A slice iterator has nothing to drop: a value (#484).
+            "it's value is moved",
             "x is bound to a mutable reference",
             "s is bound to an immutable reference",
             "Move from w to s",
         ],
         must_not_contain: &[
+            "it's resource is moved",
             "Move from it to x",
             "Return mutably borrowed resource from x to it",
             "Move from it2 to s",
@@ -4984,6 +5009,121 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "p goes out of scope. p.a and p.b were moved out earlier, so no resource is dropped.",
             "q goes out of scope. q.a and q.b were moved out earlier, so no resource is dropped.",
+        ],
+    },
+    // ─── "resource" only for values that need drop (#484) ────────────
+    // `w.iter()` is a `slice::Iter`: not Copy, but no drop glue.
+    TooltipExpect {
+        name: "no_drop_iter",
+        must_contain: &[
+            "it2 is bound to a value",
+            "it2 holds a value",
+            "it2 goes out of scope",
+            "it2's value is immutably borrowed by len; it2 is read-only while the borrow is live",
+            "w acquires ownership of a resource",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "it2 acquires ownership of a resource",
+            "it2 is the owner of the resource",
+            "it2 goes out of scope. Its resource is dropped.",
+            "it2's resource",
+            "No resource is dropped",
+        ],
+    },
+    // A struct of integers that doesn't derive Copy.
+    TooltipExpect {
+        name: "non_copy_struct_move",
+        must_contain: &[
+            "p is bound to a value from the caller",
+            "p is bound to a value",
+            "p's value is moved",
+            "p.x's value is moved",
+            "p holds a value",
+            "p goes out of scope",
+        ],
+        must_not_contain: &[
+            "p acquires ownership of a resource",
+            "p acquires ownership from the caller",
+            "p's resource is moved",
+            "p.x's resource is moved",
+            "p is the owner of the resource",
+            "p goes out of scope. Its resource is dropped.",
+            "p goes out of scope. No resource is dropped.",
+        ],
+    },
+    // A String still needs drop, so keeps the resource wording.
+    TooltipExpect {
+        name: "string_resource_wording",
+        must_contain: &[
+            "s acquires ownership from the caller",
+            "s acquires ownership of a resource",
+            "s's resource is moved",
+            "s is the owner of the resource",
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s's value is moved",
+            "s is bound to a value",
+            "t is bound to a value",
+        ],
+    },
+    // Overwriting, branches and merges for a no-drop struct: nothing is
+    // dropped, so nothing says so.
+    TooltipExpect {
+        name: "no_drop_reassign_branch",
+        must_contain: &[
+            "p is bound to a value",
+            "p is assigned a new value",
+            "p goes out of scope",
+            "r's value is moved",
+            "r was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+            "q is bound to a value (in all branches above)",
+        ],
+        must_not_contain: &[
+            "p acquires ownership of a new resource; its previous resource is dropped",
+            "p goes out of scope. Its resource is dropped.",
+            "r's resource is moved",
+            "its resource is dropped when r goes out of scope",
+            "q acquired ownership of a resource (in all branches above)",
+        ],
+    },
+    // std's lock types own an OS synchronization object. Their drop glue
+    // depends on the host's std (pthread on macOS, futex / SRW on Linux
+    // and Windows), so this wording must be the same on every platform:
+    // always "resource", never "value". CI runs Linux, Windows and macOS.
+    TooltipExpect {
+        name: "sync_lock_resource",
+        must_contain: &[
+            "m acquires ownership of a resource",
+            "m's resource is immutably borrowed by lock",
+            "rw acquires ownership of a resource",
+            "rw's resource is immutably borrowed by read",
+            "cv acquires ownership of a resource",
+            "sh acquires ownership of a resource",
+            "m goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "m is bound to a value",
+            "m's value is immutably borrowed by lock",
+            "rw's value is immutably borrowed by read",
+            "cv is bound to a value",
+            "sh is bound to a value",
+        ],
+    },
+    TooltipExpect {
+        name: "no_drop_partial_maybe",
+        // A struct of slice iterators (nothing to drop) with one field
+        // moved in a branch: no "dropped" claims (#484 with #395).
+        must_contain: &[
+            "w goes out of scope. w.a was moved out in at least one branch above.",
+            "it goes out of scope",
+        ],
+        must_not_contain: &[
+            "dropped here only if no branch above moved it",
+            "Its resource is dropped",
+            "it goes out of scope. Its resource is dropped.",
         ],
     },
     // ─── Temporary lifetime extension (#400) ─────────────────────────

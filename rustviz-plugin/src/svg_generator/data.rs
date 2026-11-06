@@ -146,6 +146,10 @@ pub struct Owner {
     /// going out of scope reclaims storage but doesn't run any
     /// drop glue; we surface that distinction visually.
     pub is_copy: bool,
+    /// True iff this owner's type is not Copy but has nothing to drop
+    /// (`ExprVisitor::ty_is_plain`): tooltips say "value", not
+    /// "resource" (#484).
+    pub is_plain_value: bool,
     /// True iff this owner's type can be mutated through a shared
     /// reference (`Cell`, `RefCell`, `Mutex`, `Rc<RefCell<T>>`, ...);
     /// see `ExprVisitor::ty_has_interior_mut`. An immutable borrow of
@@ -180,6 +184,8 @@ pub struct Struct {
     /// Copy-ness of this struct (or member's type). Same role as
     /// Owner::is_copy.
     pub is_copy: bool,
+    /// Same as Owner::is_plain_value.
+    pub is_plain_value: bool,
     /// Same as Owner::interior_mut.
     pub interior_mut: bool,
     /// Same as Owner::is_manually_drop, for a `ManuallyDrop<T>` field.
@@ -482,6 +488,19 @@ impl ResourceAccessPoint {
     pub fn points_to_copy(&self) -> bool {
         matches!(self, ResourceAccessPoint::MutRef(MutRef { pointee_copy: true, .. })
                      | ResourceAccessPoint::StaticRef(StaticRef { pointee_copy: true, .. }))
+    }
+
+    /// True iff this is an owner (or struct / field) whose type isn't
+    /// Copy but has no drop glue (#484).
+    pub fn is_plain_value(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_plain_value: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_plain_value: true, .. }))
+    }
+
+    /// True iff what this owner holds is called a "value" in tooltips:
+    /// a Copy type, or a non-Copy one with nothing to drop.
+    pub fn holds_value(&self) -> bool {
+        self.is_copy_owner() || self.is_plain_value()
     }
 
     pub fn is_copy_owner(&self) -> bool {
@@ -1110,11 +1129,12 @@ impl std::fmt::Display for State {
 }
 
 
-// Whether `rty` is a Copy-typed owner (`i32`, a Copy struct or field),
-// whose tooltips say "value" rather than "resource" (#274). A `*r`
+// Whether `rty` is an owner (`i32`, a Copy struct or field, or a non-Copy
+// one with nothing to drop), whose tooltips say "value" rather than
+// "resource" (#274, #484). A `*r`
 // place isn't: what it holds belongs to r's lender.
 fn holds_copy_value(rty: &ResourceTy) -> bool {
-    matches!(rty, ResourceTy::Value(r) if r.is_copy_owner())
+    matches!(rty, ResourceTy::Value(r) if r.holds_value())
         // A borrow from / returned to a reference r (or `*r`) is of
         // what r points to (#313), a value if that's Copy (#312).
         || matches!(rty, ResourceTy::Value(r) | ResourceTy::Deref(r) if r.points_to_copy())
@@ -1135,6 +1155,15 @@ fn borrower_name(rty: &ResourceTy) -> Option<String> {
         ResourceTy::Value(r) | ResourceTy::Deref(r) => Some(r.name().to_owned()),
         _ => None,
     }
+}
+
+// Whether `rty` is an owner whose contents are a "value", not a resource
+// (#484): of a non-Copy type with nothing to drop, or a Copy field that
+// moves along with its non-Copy parent (`takes(p)` moves `p.x: i32` too).
+// An ordinary Copy value is copied, never moved, so a Move or Acquire of
+// one only comes from that parent case.
+fn is_plain(rty: &ResourceTy) -> bool {
+    matches!(rty, ResourceTy::Value(r) if r.holds_value())
 }
 
 fn safe_message(
@@ -1401,7 +1430,11 @@ impl Event {
                 // the caller and get the parallel ref message.
                 match param {
                     ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
-                        hover_messages::event_dot_owner_init_from_caller(my_name)
+                        if param.is_plain_value() {
+                            hover_messages::event_dot_owner_init_from_caller_value(my_name)
+                        } else {
+                            hover_messages::event_dot_owner_init_from_caller(my_name)
+                        }
                     }
                     ResourceAccessPoint::MutRef(_) => {
                         hover_messages::event_dot_ref_init_from_caller(my_name, true)
@@ -1420,18 +1453,18 @@ impl Event {
                 let omit_read_only = is.extract_rap()
                     .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
                 let through_ref = ref_lender(is).map(|r| r.points_to_copy());
-                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), false, omit_read_only, through_ref)
+                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), false, omit_read_only, through_ref, is.extract_rap().map_or(false, |r| r.holds_value()))
             }
             Event::MutableLend{ to: ResourceTy::Anonymous, is, ..} => {
                 let through_ref = ref_lender(is).map(|r| r.points_to_copy());
-                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), true, false, through_ref)
+                hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), true, false, through_ref, is.extract_rap().map_or(false, |r| r.holds_value()))
             }
             // arrow going out
             Event::Duplicate{ to, into_closure: true, ..} => {
                 hover_messages::event_dot_copy_into_closure_arg(&self.deref_name(my_name), &to.name())
             }
-            Event::Move{ to, into_closure: true, ..} => {
-                hover_messages::event_dot_move_into_closure_arg(&self.deref_name(my_name), &to.name())
+            Event::Move{ to, is, into_closure: true, ..} => {
+                hover_messages::event_dot_move_into_closure_arg(&self.deref_name(my_name), &to.name(), is_plain(is))
             }
             Event::Duplicate{ to, is, ..} => {
                 match to {
@@ -1453,20 +1486,21 @@ impl Event {
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), ..} if !to.is_closure() => {
                 hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller))
             }
-            Event::Move{ to ,..} => {
+            Event::Move{ to, is, ..} => {
+                let v = is_plain(is);
                 match to {
-                    ResourceTy::Caller => safe_message(hover_messages::event_dot_move_to_caller, &self.deref_name(my_name), to),
+                    ResourceTy::Caller => safe_message(if v { hover_messages::event_dot_move_to_caller_value } else { hover_messages::event_dot_move_to_caller }, &self.deref_name(my_name), to),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
-                        hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name),
-                    _ if to.is_closure() => safe_message(hover_messages::event_dot_capture_move_to_closure, &self.deref_name(my_name), to),
-                    _ => safe_message(hover_messages::event_dot_move_to, &self.deref_name(my_name), to),
+                        hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v),
+                    _ if to.is_closure() => safe_message(if v { hover_messages::event_dot_capture_move_to_closure_value } else { hover_messages::event_dot_capture_move_to_closure }, &self.deref_name(my_name), to),
+                    _ => safe_message(if v { hover_messages::event_dot_move_to_value } else { hover_messages::event_dot_move_to }, &self.deref_name(my_name), to),
                 }
 
             }
             Event::StaticLend{ to, is, ..} => {
                 // Only an owner's own Copy value here: a reference
                 // lender is handled by event_dot_lend_through_ref.
-                let is_copy = matches!(is, ResourceTy::Value(r) if r.is_copy_owner());
+                let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 if to.is_closure() {
                     let target_name = safe_message(|_, t| t.clone(), my_name, to);
                     hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
@@ -1485,7 +1519,7 @@ impl Event {
                 }
             }
             Event::MutableLend{ to, is, ..} => {
-                let is_copy = matches!(is, ResourceTy::Value(r) if r.is_copy_owner());
+                let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 let target_name = safe_message(|_, t| t.clone(), my_name, to);
                 if to.is_closure() {
                     hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
@@ -1510,7 +1544,7 @@ impl Event {
                     // (the closure literal's own Bind) keeps the
                     // generic message because there's no captured
                     // upvar to name on the closure side yet.
-                    safe_message(hover_messages::event_dot_closure_capture_acquire, &self.deref_name(my_name), from)
+                    safe_message(if from.extract_rap().map_or(false, |r| r.holds_value()) { hover_messages::event_dot_closure_capture_acquire_value } else { hover_messages::event_dot_closure_capture_acquire }, &self.deref_name(my_name), from)
                 } else if let ResourceTy::Index(r, place, write) = is {
                     // `v[i] = s;` / `v[i] = 5;` assigns to the place
                     // `v[i]`: it reads like a plain assignment, and v
@@ -1519,8 +1553,10 @@ impl Event {
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place),
-                        PlaceWrite::AssignOwned => safe_message(hover_messages::event_dot_acquire, place, from),
-                        PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref()),
+                        // The old element has nothing to drop (that's what makes
+                        // it AssignOwned): a plain assignment (#484).
+                        PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
+                        PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() }),
                     }
                 } else if let ResourceTy::Deref(r) = is {
                     // `*r += 1;` modifies what r points to in place.
@@ -1529,7 +1565,9 @@ impl Event {
                     match r.place_write() {
                         PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name)),
-                        PlaceWrite::AssignOwned => safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from),
+                        // The old value has nothing to drop (that's what
+                        // makes it AssignOwned): a plain assignment (#484).
+                        PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
                         PlaceWrite::Update => hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy()),
                     }
                 } else if let Some(rap) = is.extract_rap().filter(|rap| rap.is_ref()) {
@@ -1553,6 +1591,12 @@ impl Event {
                     // mental model for Copy types — there's no heap
                     // resource to own.
                     safe_message(hover_messages::event_dot_acquire_copyable, &self.deref_name(my_name), from)
+                } else if is_plain(is) {
+                    // A non-Copy value with nothing to drop (an iterator
+                    // over borrowed data, a struct of integers), or a
+                    // Copy field that came along with its parent: a
+                    // value, not a resource (#484).
+                    safe_message(hover_messages::event_dot_acquire_value, &self.deref_name(my_name), from)
                 } else {
                     safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
                 }
@@ -1561,7 +1605,7 @@ impl Event {
                 // `v[i] = y;` with y: Copy assigns a new value to the
                 // place `v[i]`.
                 match write {
-                    PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref()),
+                    PlaceWrite::Update => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() }),
                     _ => place_assign_copy_message(place, from),
                 }
             }

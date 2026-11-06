@@ -337,8 +337,9 @@ const BOOK: &[Snippet] = &[
             "Move from Color to black",
             "Copy from black.0 to r",
             "println! reads from black.2 through an implicit reference, so black.2 isn't moved",
-            "black goes out of scope. Its resource is dropped.",
+            "black goes out of scope",
         ],
+        must_not_contain: &["black goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -347,9 +348,13 @@ const BOOK: &[Snippet] = &[
         note: "was a crash at c2037dd. `self.n += 1` through &mut self isn't drawn: c.n's column shows no write (#147)",
         must_contain: &[
             "self is a mutable borrow from the caller",
-            "self holds a mutable reference; it can read and write the borrowed resource",
+            "self holds a mutable reference; it can read and write the borrowed value",
             "inc reads from/writes to c (implicitly mutably borrowed)",
+            "c goes out of scope",
+        ],
+        must_not_contain: &[
             "c goes out of scope. Its resource is dropped.",
+            "self holds a mutable reference; it can read and write the borrowed resource",
         ],
         ..E
     },
@@ -374,7 +379,8 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c5_08_assoc_fn_square",
-        must_contain: &["Move from Rectangle::square to sq", "sq goes out of scope. Its resource is dropped."],
+        must_contain: &["Move from Rectangle::square to sq", "sq goes out of scope"],
+        must_not_contain: &["sq goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -401,11 +407,13 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c5_11_derive_debug",
         must_contain: &[
-            "rect1 acquires ownership of a resource",
+            "rect1 is bound to a value",
             "println! reads from rect1 through an implicit reference, so rect1 isn't moved",
-            "rect1 goes out of scope. Its resource is dropped.",
+            "rect1 goes out of scope",
         ],
         must_not_contain: &[
+            "rect1 goes out of scope. Its resource is dropped.",
+            "rect1 acquires ownership of a resource",
             "self is an immutable borrow from the caller",
             "f holds a mutable reference",
             "f is a mutable borrow from the caller",
@@ -417,9 +425,10 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "scale is bound to a copyable value",
             "dbg! reads from rect1",
-            "rect1 goes out of scope. Its resource is dropped.",
+            "rect1 goes out of scope",
         ],
         must_not_contain: &[
+            "rect1 goes out of scope. Its resource is dropped.",
             "self is an immutable borrow from the caller",
             "f holds a mutable reference",
             "f is a mutable borrow from the caller",
@@ -441,9 +450,13 @@ const BOOK: &[Snippet] = &[
         id: "c6_02_match_coin",
         must_contain: &[
             "Move from c to value_in_cents",
-            "coin goes out of scope. Its resource is dropped.",
+            "coin goes out of scope",
             "Copy from value_in_cents to v",
+            "c goes out of scope",
+        ],
+        must_not_contain: &[
             "c goes out of scope. No resource is dropped.",
+            "coin goes out of scope. Its resource is dropped.",
         ],
         ..E
     },
@@ -760,8 +773,9 @@ const BOOK: &[Snippet] = &[
             "s is an immutable borrow from the caller",
             "parse reads from s",
             "Move from double to r",
-            "r goes out of scope. Its resource is dropped.",
+            "r goes out of scope",
         ],
+        must_not_contain: &["r goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -1258,9 +1272,12 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "L6 c.n is bound to a copyable value",
             "L7 c.n is assigned a new value",
-            "c goes out of scope. Its resource is dropped.",
+            "c goes out of scope",
         ],
-        must_not_contain: &["c.n acquires ownership of a resource"],
+        must_not_contain: &[
+            "c goes out of scope. Its resource is dropped.",
+            "c.n acquires ownership of a resource",
+        ],
         ..E
     },
     Snippet {
@@ -1281,8 +1298,9 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "c is a mutable borrow from the caller",
             "inc reads from/writes to c",
-            "c goes out of scope. Its resource is dropped.",
+            "c goes out of scope",
         ],
+        must_not_contain: &["c goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -1300,9 +1318,12 @@ const BOOK: &[Snippet] = &[
             "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "Move from RefCell::new to c",
             "println! reads from c through an implicit reference, so c isn't moved",
-            "c goes out of scope. Its resource is dropped.",
+            "c goes out of scope",
         ],
-        must_not_contain: &["borrow_mut reads from c"],
+        must_not_contain: &[
+            "c goes out of scope. Its resource is dropped.",
+            "borrow_mut reads from c",
+        ],
         ..E
     },
     Snippet {

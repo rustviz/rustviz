@@ -848,14 +848,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let owner_hash = self.rap_hashes as u64;
             let muta = bool_of_mut(binding_annotation.1);
             let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-            self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+            self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_is_plain(ty, param.hir_id.owner), self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
             for (field, field_ty) in self.member_fields(ty) {
               // A reference element would need its own loan bookkeeping;
               // leave it without a column.
               if field_ty.is_ref() { continue; }
               let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
               let field_name = format!("{}.{}", name, field);
-              self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+              self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_is_plain(field_ty, param.hir_id.owner), self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
               self.mark_if_manually_drop(&field_name, field_ty);
             }
           }
@@ -870,7 +870,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               rustc_middle::ty::AdtKind::Struct => {
                 let owner_hash = self.rap_hashes as u64;
                 let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-                self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+                self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.ty_is_plain(ty, param.hir_id.owner), self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
                 // Nested struct fields get columns too (`r.tl.x`, #239).
                 // A reference field borrows from something in the
                 // caller's frame, like a reference parameter.
@@ -886,16 +886,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
                 let interior_mut = self.ty_has_interior_mut(ty, param.hir_id.owner);
                 if ty.is_union() {
-                  self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
+                  self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
                 } else {
-                  self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, interior_mut, self.current_scope, !self.inside_branch);
+                  self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
                 }
               }
             }
           }
           else {
             let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
-            self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+            self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
             self.mark_if_manually_drop(&name, ty);
           }
           self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id, own_param, in_pattern: None });
@@ -1430,7 +1430,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // Nor does overwriting a `ManuallyDrop<T>` drop the old `T` (#283).
         let lhs_is_manually_drop = lhs_ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
         let drop_target: Option<ResourceAccessPoint> =
-          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop {
+          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && lhs_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner)) {
             match &lhs_rty {
               ResourceTy::Value(rap) => {
                 // Plain reassign — only emit the drop if y currently
@@ -2405,7 +2405,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let is_copy = self.tcx.type_is_copy_modulo_regions(
                       rustc_middle::ty::TypingEnv::post_analysis(self.tcx, user_pat.hir_id.owner),
                       pat_ty);
-                    self.add_owner(pat_name.clone(), false, is_copy, self.ty_has_interior_mut(pat_ty, user_pat.hir_id.owner), self.current_scope, false);
+                    self.add_owner(pat_name.clone(), false, is_copy, self.ty_is_plain(pat_ty, user_pat.hir_id.owner), self.ty_has_interior_mut(pat_ty, user_pat.hir_id.owner), self.current_scope, false);
                     self.mark_if_manually_drop(&pat_name, pat_ty);
                   }
                   self.annotate_src(pat_name.clone(), pat_ident.span, false,
@@ -2543,7 +2543,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (#400): the label doesn't say which kind it is, the tooltips do.
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
-    self.add_owner(tmp_name.clone(), false, false, false, end_line, !self.inside_branch);
+    self.add_owner(tmp_name.clone(), false, false, false, false, end_line, !self.inside_branch);
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
       o.unbound_temp = true;
     }
@@ -3121,7 +3121,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             rustc_middle::ty::TypingEnv::post_analysis(self.tcx, hirid.owner),
             pat_ty,
           );
-          self.add_owner(name.clone(), false, is_copy, self.ty_has_interior_mut(pat_ty, hirid.owner), self.current_scope, false);
+          self.add_owner(name.clone(), false, is_copy, self.ty_is_plain(pat_ty, hirid.owner), self.ty_has_interior_mut(pat_ty, hirid.owner), self.current_scope, false);
           self.mark_if_manually_drop(&name, pat_ty);
         }
         self.annotate_src(name.clone(), ident.span, false,

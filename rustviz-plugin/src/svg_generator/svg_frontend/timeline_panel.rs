@@ -1038,7 +1038,10 @@ fn render_dot(
                         hash: *hash as u64,
                         dot_x: cx,
                         dot_y: cy,
-                        title: hover_messages::event_dot_branch_merge_moved_with_drop(&is.real_name()),
+                        title: hover_messages::event_dot_branch_merge_moved_with_drop(
+                            &is.real_name(),
+                            is.extract_rap().map_or(false, |r| r.holds_value()),
+                        ),
                     };
                     append_dot(m_data, timeline_data, dots, None);
                 } else if all_moved {
@@ -1080,6 +1083,12 @@ fn render_dot(
                 Event::OwnerGoOutOfScope => {
                     let ro = &visualization_data.timelines[hash].resource_access_point;
                     let is_copy = ro.is_copy();
+                    // Not Copy but nothing to drop (#484): a value, so
+                    // no drop triangle and no "resource" wording.
+                    // (A Copy field of a struct moved on some paths only
+                    // is a value to the drop flag too: nothing to drop.)
+                    let is_plain = ro.is_plain_value()
+                        || (is_copy && !resource_hold && maybe_moved_at_end(history));
                     let is_closure = ro.is_closure();
                     if is_closure {
                         // Closure value going out of scope: only
@@ -1115,6 +1124,14 @@ fn render_dot(
                         // Dropped by hand earlier: still nothing is
                         // dropped here (#283).
                         data.title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
+                    } else if is_plain {
+                        // Never a resource: going out of scope drops
+                        // nothing, whether or not it was moved earlier.
+                        data.title = match struct_partial_move_split(visualization_data, *hash) {
+                            Some(split) if resource_hold =>
+                                hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true),
+                            _ => event.print_message_with_name(&mut name),
+                        };
                     } else if !resource_hold && maybe_moved_at_end(history) {
                         // Moved in some branches of a conditional but
                         // not others (#179): the drop flag decides here.
@@ -1144,7 +1161,7 @@ fn render_dot(
                         // and those moved on some paths only maybe
                         // (#395).
                         let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                            &name, &split.moved, &split.maybe_moved, &split.dropped);
+                            &name, &split.moved, &split.maybe_moved, &split.dropped, false);
                         if split.dropped.is_empty() && split.maybe_moved.is_empty() {
                             data.title = title;
                         } else {
@@ -1248,7 +1265,7 @@ fn render_dot(
                     // (they'd stack on this one and the topmost
                     // tooltip would mask the rest).
                     let rap = &visualization_data.timelines[hash].resource_access_point;
-                    let copyable_assign = held_at_event && rap.is_copy_owner() && !rap.is_closure();
+                    let copyable_assign = held_at_event && rap.holds_value() && !rap.is_closure();
                     // A reference variable that already holds a
                     // reference is reassigned (`r = s;`), not
                     // initialized: the reference is copied (`&T`) or
@@ -1466,7 +1483,7 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
                 hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref(), some_diverge),
             // A Copy value (`let n = match x { 0 => 1, _ => 2 };`) isn't
             // a resource anyone owns (#316).
-            Some(rap) if rap.is_copy() =>
+            Some(rap) if rap.is_copy() || rap.is_plain_value() =>
                 hover_messages::event_dot_branch_merge_bound_copy(var_name, some_diverge),
             _ => hover_messages::event_dot_branch_merge_bound(var_name, some_diverge),
         },
@@ -1608,6 +1625,16 @@ fn timeline_segment_title(
             _ => {}
         }
     }
+    // A non-Copy owner with nothing to drop holds a value too (#484).
+    if rap.is_plain_value() {
+        match state {
+            State::FullPrivilege { .. } => return hover_messages::state_full_privilege_value(rap.name()),
+            State::PartialPrivilege { .. } => return hover_messages::state_partial_privilege(rap.name(), true),
+            State::ResourceMoved { dropped_by_hand: false, .. } => return hover_messages::state_value_moved(rap.name()),
+            State::RevokedPrivilege { .. } => return hover_messages::state_value_revoked(rap.name()),
+            _ => {}
+        }
+    }
     // References (`&mut T` / `&T` bindings, `&mut self`, ref params,
     // `for i in &mut v`) never own their referent, so the generic
     // "is the owner of the resource" FullPrivilege text is false.
@@ -1741,8 +1768,8 @@ fn struct_partial_move_split(
         .timelines
         .values()
         .filter_map(|t| match &t.resource_access_point {
-            ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, is_copy, .. })
-                if *owner == root && name.starts_with(&prefix) => Some((t, name, *is_copy)),
+            ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, is_copy, is_plain_value, .. })
+                if *owner == root && name.starts_with(&prefix) => Some((t, name, *is_copy || *is_plain_value)),
             _ => None,
         })
         .collect();
@@ -2122,7 +2149,11 @@ fn render_arrow (
             let bot_v2 = (head_x - 12.75, head_y);
             let bot_v3 = (head_x, head_y - 6.0);
 
-            let title = hover_messages::event_dot_owner_init_from_caller(&param.name().to_string());
+            let title = if param.is_plain_value() {
+                hover_messages::event_dot_owner_init_from_caller_value(&param.name().to_string())
+            } else {
+                hover_messages::event_dot_owner_init_from_caller(&param.name().to_string())
+            };
 
             // Reuses the regular arrow_template shape (one polygon
             // for the head) but emitted inline because we already
@@ -2216,6 +2247,7 @@ fn render_arrow (
                 ExternalEvent::Copy { .. } => hover_messages::event_dot_copy_to_caller,
                 ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), .. } =>
                     |name: &String, _: &String| hover_messages::event_dot_ref_moved(name, true),
+                _ if rap.holds_value() => hover_messages::event_dot_move_to_caller_value,
                 _ => hover_messages::event_dot_move_to_caller,
             };
             let title = message(
