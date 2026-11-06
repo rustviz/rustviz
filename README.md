@@ -237,7 +237,11 @@ rather than listed here.
   …)`), what it captures by value is drawn as moved / copied into the
   call; what it captures by reference (`apply(|x| x + k)`) isn't drawn.
 - Loops (`for`, `while`, `loop`) show a single iteration.
-- Method chains (`a.get_mut().push(x)`): only the first call renders.
+- Method chains (`v.iter().map(f).collect()`): only the first call
+  has `v` as its receiver and is drawn on `v`'s column. Each later
+  call's receiver is the previous call's result, a temporary with no
+  column, so it's drawn only through its arguments
+  (`v.last_mut().unwrap().push(s)` moves `s`).
 - Match guards (`pat if cond =>`, `pat if let … =>`): the guard's events
   are drawn in its own arm, since it only runs once that arm's pattern
   has matched. When the guard is false and a later arm runs, the guard

@@ -6,7 +6,7 @@
 //! See tcx: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html
 
 use log::{info, warn};
-use rustc_hir::{StmtKind, Stmt, Expr, ExprKind, UnOp, Param, QPath, Pat, PatKind, BindingMode, HirId, Mutability, LetStmt, def::*};
+use rustc_hir::{StmtKind, Stmt, Expr, ExprKind, PathSegment, UnOp, Param, QPath, Pat, PatKind, BindingMode, HirId, Mutability, LetStmt, def::*};
 use rustc_hir::intravisit::{self, Visitor};
 use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
@@ -88,6 +88,120 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       panic!("match guards that move or assign a variable declared outside the guard (`{}`, line {}) \
               aren't supported yet: the effect lasts even when the guard is false and a later arm runs",
         culprit.real_name(), expr_to_line(guard_part, &self.tcx));
+    }
+  }
+
+  /// What a method call does to its receiver (`self`): a borrow
+  /// (`&self` / `&mut self`), or a move / copy (`self` by value).
+  /// Emitted only when the receiver is a place with a column.
+  ///
+  /// In a chain such as `v.iter().map(f).collect()`, only `iter` acts
+  /// on `v`. `map` takes the iterator that `iter` returned (a
+  /// temporary) and `collect` takes the `Map` that `map` returned, so
+  /// neither borrows nor moves `v`, and neither gets an event: the
+  /// temporaries have no column (#132). Likewise in
+  /// `s.clone().into_bytes()` it is the clone that is moved, not `s`.
+  /// The same holds for any receiver we can't name (`f().push(..)`,
+  /// `self.items.push(..)` when `self.items` has no column).
+  fn method_receiver_events(
+    &mut self,
+    expr: &'tcx Expr<'tcx>,
+    name_and_generic_args: &'tcx PathSegment<'tcx>,
+    rcvr: &'tcx Expr<'tcx>,
+    fn_name: &String,
+    line_num: usize,
+  ) {
+    if let ExprKind::MethodCall(..) = rcvr.kind {
+      return;
+    }
+    // The receiver of `r.s.method()` is a Field expression, not
+    // a bare path, so `hirid_to_var_name` can't name it.
+    // `expr_to_rap_name` walks Path / Field / AddrOf chains and
+    // returns the qualified name we registered the receiver
+    // under (e.g. `r.s`).
+    let Some(rcvr_name) = expr_to_rap_name(rcvr, &self.tcx) else { return };
+    let rcvr_rap = match self.raps.get(&rcvr_name) {
+      Some(rd) => rd.rap.to_owned(),
+      None => return,
+    };
+    self.update_rap(&rcvr_rap, line_num);
+    let fn_rap = self.raps.get(&fn_key(fn_name)).unwrap().rap.to_owned();
+    // typecheck
+    // Annotate passByRef event, can check the type of borrow by looking at adjusments (usually borrows that are not explicit)
+    // for example, in rust you don't have to dereference a reference to access members
+    // https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/adjustment/struct.Adjustment.html
+    let adjustment_map = self.tcx.typeck(name_and_generic_args.hir_id.owner).adjustments();
+    // `s.len()` borrows `s` without a written `&` (rustc inserts
+    // it); `r.len()` with `r: &String` and `(&s).len()` don't.
+    let autoref = if is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) {
+      ImplicitRef::Autoref
+    } else {
+      ImplicitRef::No
+    };
+    match adjustment_map.get(rcvr.hir_id) {
+      Some(adj_vec) => { 
+        for a in adj_vec.iter() {
+          match a.kind {
+            Adjust::Borrow(AutoBorrow::Ref(m)) => {
+              match m {
+                AutoBorrowMutability::Mut{allow_two_phase_borrow: AllowTwoPhase::Yes} => {
+                  // `r.push_str(..)` with r: `&mut String` is
+                  // `String::push_str(&mut *r, ..)` — an implicit
+                  // reborrow of r. With r an owner it's a plain
+                  // autoref (`&mut s`), not a reborrow. A written
+                  // `(&mut s).push_str(..)` is a fresh borrow of s
+                  // (rustc reborrows the temporary `&mut s`, not
+                  // s), and `(&mut *r).push_str(..)` a reborrow of
+                  // r; decide by the `&mut` operand, as match_arg
+                  // does for `f(&mut s)` (#367).
+                  let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
+                  let is_reborrow = match rcvr.kind {
+                    ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, typeck),
+                    _ => is_implicit_mut_reborrow(rcvr, typeck),
+                  };
+                  let result_has_lifetime = call_result_has_lifetime(expr, typeck);
+                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref);
+                },
+                AutoBorrowMutability::Not => {
+                  let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
+                  self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), autoref, refcell_borrow_mut);
+                }
+                _ => {}
+              }
+            }
+            _ => {}
+          }
+        }
+      }
+      None => {}
+    }
+
+    // `self` taken by value (`v.into_iter()`, `opt.expect(..)`,
+    // `fn into_name(self)`): the receiver is moved into the call
+    // (or copied, if its type is Copy). The autoref branch above
+    // only covers `&self` / `&mut self`; without this, a consumed
+    // receiver looked untouched and got a false "Its resource is
+    // dropped." at scope end (issue #172).
+    //
+    // The adjusted receiver type is exactly what the callee's
+    // `self` parameter receives (the method signature instantiated
+    // at this call), so it is a reference iff the method takes
+    // `&self` / `&mut self`, or `self` where Self is itself a
+    // reference (`(&v).into_iter()`); neither moves the receiver.
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let self_ty = typeck.expr_ty_adjusted(rcvr);
+    if !self_ty.is_ref() && !self_ty.is_raw_ptr() {
+      let is_copy = self.tcx.type_is_copy_modulo_regions(
+        rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner), self_ty);
+      // A Copy value reached through auto-deref (`r.by_value()`
+      // with `r: &T`, `T: Copy`) is a copy of `*r`, not of `r`.
+      let from = if typeck.expr_ty(rcvr).is_ref() {
+        ResourceTy::Deref(rcvr_rap.clone())
+      } else {
+        ResourceTy::Value(rcvr_rap.clone())
+      };
+      let evt = if is_copy { Evt::Copy } else { Evt::Move };
+      self.add_ev(line_num, evt, ResourceTy::Value(fn_rap.clone()), from, false);
     }
   }
 
@@ -734,113 +848,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let line_num = expr_to_line(&rcvr, &self.tcx);
         let fn_name = name_and_generic_args.ident.as_str().to_owned();
         self.add_fn(fn_name.clone());
-        // need to recurse down to the variable calling the methods 
-        // necessary for chained method calls scenarios: ie a.get().unwrap()
+        // Recurse into the receiver first: in a chain like
+        // `v.iter().map(f).collect()` that visits `v.iter()` (and
+        // `.map(f)`) before this call, so events come out in
+        // evaluation order.
         self.visit_expr(rcvr);
-        match rcvr.kind {
-          ExprKind::MethodCall(p_seg, ..) => { // return early if not at the base
-            let _rcvr_name = p_seg.ident.as_str().to_owned();
-            return;
-          }
-          _ => {}
-        }
-        // The receiver of `r.s.method()` is a Field expression, not
-        // a bare path, so `hirid_to_var_name` can't name it.
-        // `expr_to_rap_name` walks Path / Field / AddrOf chains and
-        // returns the qualified name we registered the receiver
-        // under (e.g. `r.s`). If we can't resolve a RAP for the
-        // receiver — unregistered nested field, `self.field` in an
-        // impl method, etc. — bail out of the rest of the
-        // method-call processing rather than crash; the call site
-        // simply produces no event for this method.
-        let rcvr_name = match expr_to_rap_name(rcvr, &self.tcx) {
-          Some(n) => n,
-          None => return,
-        };
-        let rcvr_rap = match self.raps.get(&rcvr_name) {
-          Some(rd) => rd.rap.to_owned(),
-          None => return,
-        };
-        self.update_rap(&rcvr_rap, line_num);
-        let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
-        // typecheck
-        // Annotate passByRef event, can check the type of borrow by looking at adjusments (usually borrows that are not explicit)
-        // for example, in rust you don't have to dereference a reference to access members
-        // https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/adjustment/struct.Adjustment.html
-        let adjustment_map = self.tcx.typeck(name_and_generic_args.hir_id.owner).adjustments();
-        // `s.len()` borrows `s` without a written `&` (rustc inserts
-        // it); `r.len()` with `r: &String` and `(&s).len()` don't.
-        let autoref = if is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) {
-          ImplicitRef::Autoref
-        } else {
-          ImplicitRef::No
-        };
-        match adjustment_map.get(rcvr.hir_id) {
-          Some(adj_vec) => { 
-            for a in adj_vec.iter() {
-              match a.kind {
-                Adjust::Borrow(AutoBorrow::Ref(m)) => {
-                  match m {
-                    AutoBorrowMutability::Mut{allow_two_phase_borrow: AllowTwoPhase::Yes} => {
-                      // `r.push_str(..)` with r: `&mut String` is
-                      // `String::push_str(&mut *r, ..)` — an implicit
-                      // reborrow of r. With r an owner it's a plain
-                      // autoref (`&mut s`), not a reborrow. A written
-                      // `(&mut s).push_str(..)` is a fresh borrow of s
-                      // (rustc reborrows the temporary `&mut s`, not
-                      // s), and `(&mut *r).push_str(..)` a reborrow of
-                      // r; decide by the `&mut` operand, as match_arg
-                      // does for `f(&mut s)` (#367).
-                      let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
-                      let is_reborrow = match rcvr.kind {
-                        ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, typeck),
-                        _ => is_implicit_mut_reborrow(rcvr, typeck),
-                      };
-                      let result_has_lifetime = call_result_has_lifetime(expr, typeck);
-                      self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref);
-                    },
-                    AutoBorrowMutability::Not => {
-                      let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
-                      self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), autoref, refcell_borrow_mut);
-                    }
-                    _ => {}
-                  }
-                }
-                _ => {}
-              }
-            }
-          }
-          None => {}
-        }
-
-        // `self` taken by value (`v.into_iter()`, `opt.expect(..)`,
-        // `fn into_name(self)`): the receiver is moved into the call
-        // (or copied, if its type is Copy). The autoref branch above
-        // only covers `&self` / `&mut self`; without this, a consumed
-        // receiver looked untouched and got a false "Its resource is
-        // dropped." at scope end (issue #172).
-        //
-        // The adjusted receiver type is exactly what the callee's
-        // `self` parameter receives (the method signature instantiated
-        // at this call), so it is a reference iff the method takes
-        // `&self` / `&mut self`, or `self` where Self is itself a
-        // reference (`(&v).into_iter()`); neither moves the receiver.
-        let typeck = self.tcx.typeck(expr.hir_id.owner);
-        let self_ty = typeck.expr_ty_adjusted(rcvr);
-        if !self_ty.is_ref() && !self_ty.is_raw_ptr() {
-          let is_copy = self.tcx.type_is_copy_modulo_regions(
-            rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner), self_ty);
-          // A Copy value reached through auto-deref (`r.by_value()`
-          // with `r: &T`, `T: Copy`) is a copy of `*r`, not of `r`.
-          let from = if typeck.expr_ty(rcvr).is_ref() {
-            ResourceTy::Deref(rcvr_rap.clone())
-          } else {
-            ResourceTy::Value(rcvr_rap.clone())
-          };
-          let evt = if is_copy { Evt::Copy } else { Evt::Move };
-          self.add_ev(line_num, evt, ResourceTy::Value(fn_rap.clone()), from, false);
-        }
-
+        self.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
+        // The arguments are visited whether or not the receiver has a
+        // column. In `a.last_mut().unwrap().push(s)` the receiver of
+        // `push` is a temporary, but `s` is still moved into `push`
+        // (#132); in `self.items.push(s)` the receiver is a field we
+        // don't model, but `s` is still moved (#250).
         for arg in args.iter(){
           self.visit_expr(&arg);
           self.match_arg(&arg, fn_name.clone());
