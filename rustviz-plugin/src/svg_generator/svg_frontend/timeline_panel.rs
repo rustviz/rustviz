@@ -962,7 +962,17 @@ fn render_dot(
                 // communicated by column position; the join dot
                 // below speaks for what happened.
                 for branch in branch_history.iter() {
-                    render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, false, dots, held_at_event);
+                    // Whether the value is still owned when it goes out
+                    // of scope inside the branch: only at a `return`
+                    // (#363), where it's dropped if so.
+                    let hold = branch.states.iter()
+                        .position(|s| matches!(s.2, State::OutOfScope))
+                        .and_then(|i| i.checked_sub(1))
+                        .map_or(false, |i| matches!(
+                            branch.states[i].2,
+                            State::FullPrivilege { .. } | State::PartialPrivilege { .. }
+                        ));
+                                        render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, hold, dots, held_at_event);
                 }
 
                 // Per-variable merge dot, on the parent column at
