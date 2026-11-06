@@ -4043,7 +4043,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is bound to a copyable value",
             "f goes out of scope",
-            "a's resource is copied",
+            "a's value is copied",
             "Copy from a to f",
         ],
         must_not_contain: &[
@@ -4061,8 +4061,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from f to t",
         ],
         must_not_contain: &[
-            "f's resource is moved",
-            "f's resource is copied",
+            "f's value is moved",
+            "f's value is copied",
             "f acquires ownership",
         ],
     },
@@ -4074,7 +4074,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from add_one to y",
         ],
         must_not_contain: &[
-            "add_one's resource is copied",
+            "add_one's value is copied",
         ],
     },
 ];
