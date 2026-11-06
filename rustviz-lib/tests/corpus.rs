@@ -457,6 +457,8 @@ const EXPECTED_OK: &[&str] = &[
     // (#363); a `let` in a match arm is dropped at the arm's end (#409).
     "return_in_arm_drops",
     "match_arm_with_let",
+    // A pattern-bound struct's reference fields are references (#352).
+    "pattern_struct_ref_fields",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4541,6 +4543,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "match_arm_with_let",
         must_contain: &["s goes out of scope. Its resource is dropped."],
         must_not_contain: &["s goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "pattern_struct_ref_fields",
+        // `x.part` (a `&str` field of the struct bound by `if let
+        // Some(x) = o`) is a reference, never an owner. It holds the
+        // reference `o` held, a borrow of `s` that RustViz doesn't
+        // carry through `o`, so no lender is named: no "from the
+        // caller", no return arrow to x.part or *x.part. `q`, a copy of
+        // that reference, borrows what x.part borrows, not x.part.
+        must_contain: &[
+            "x.part holds an immutable reference (it came with the value matched into x)",
+            "Copy from x.part to q",
+            "q's immutable borrow ends",
+            "y.e.part's immutable borrow ends",
+            "y.m's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "x.part acquires ownership of a resource",
+            "x.part is the owner of the resource",
+            "x.part is an immutable borrow from the caller",
+            "Return immutably borrowed resource from q to x.part",
+            "Return immutably borrowed resource from x.part to *x.part",
+            "y.e.part acquires ownership of a resource",
+            "y.m acquires ownership of a resource",
+            "y.m is the owner of the resource",
+        ],
     },
 ];
 

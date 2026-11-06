@@ -286,6 +286,10 @@ rather than listed here.
   drawn as a borrow of the value `f` owns, but that value has no column
   of its own, so its drop when `f` returns is stated only in the
   binding's tooltip ("...; that value is dropped when f returns").
+- A reference field of a struct bound by a pattern (`if let Some(x) =
+  o` with `x.part: &str`) is drawn as a reference, but not linked to
+  what it borrows (whatever `o`'s field borrowed), and neither is a
+  reference copied out of it (`let q = x.part;`).
 
 The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).

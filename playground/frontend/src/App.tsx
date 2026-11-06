@@ -336,6 +336,11 @@ const Description: React.FC = () => (
         In <code>fn f(ref s: String)</code>, <code>s</code> borrows the String{' '}
         <code>f</code> owns; that String has no column, so its drop is stated only in the tooltip.
       </li>
+      <li>
+        A reference field of a struct bound by <code>if let</code>/
+        <code>match</code> (<code>x.part</code>) isn&apos;t linked to what it
+        borrows.
+      </li>
     </ul>
     <p>
       If you find an example that exposes a bug, please open an issue on the{' '}

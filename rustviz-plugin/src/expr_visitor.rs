@@ -53,8 +53,8 @@ pub enum Evt {
 /// `register_struct_members`): the HIR owner used for type queries, the
 /// line the value is bound on, the scope and globalness the members
 /// share with their struct, and the lender recorded for its
-/// reference-typed fields (`None`: no lender is known, see the
-/// pattern-binding site in `get_dec_of_pat2`).
+/// reference-typed fields (`None`: register them as plain members;
+/// no site does that since #352).
 #[derive(Clone)]
 pub struct MemberSite {
   pub owner_id: rustc_hir::OwnerId,
@@ -1305,7 +1305,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// same StaticRef/MutRef-member treatment as before, with the lender
   /// `site.ref_lender`: a placeholder Anonymous for a `let` that the
   /// Struct arm of `match_rhs` overwrites once it sees the
-  /// construction-site initializer, or the caller for a parameter.
+  /// construction-site initializer, the caller for a parameter, or
+  /// `Caller` as a "not tracked here" placeholder for a pattern
+  /// binding (what the matched value's field borrowed; #352).
   /// Owned struct fields recurse so `r.a.b.c` etc. land in `raps`
   /// under their qualified names; Field-arm lookups in
   /// `expr_visitor_utils` then find them and emit events instead of
@@ -1449,18 +1451,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                         // `String` / `Vec` / `Box` / … (`n.vec` for a
                         // `Some(n)` binding of a String). Nested struct
                         // fields get columns too (`r.tl.x`, #239).
-                        // A reference field's lender isn't known here
-                        // (it's whatever the matched value's field
-                        // borrowed), so reference fields keep the plain
-                        // column they had before (#352).
+                        // A reference field (`x.part: &str`) is a
+                        // reference, not an owner. What it borrows is
+                        // whatever the matched value's field borrowed,
+                        // which isn't known here, so it gets no lender
+                        // (the `Caller` placeholder: no return arrow,
+                        // like a parameter's reference field) and its
+                        // dot says where it came from instead (#352).
                         if !ty_is_special_owner(&ty) {
                             self.register_struct_members(&name, ty, owner_hash, muta, MemberSite {
                                 owner_id: pat.hir_id.owner,
                                 assigned_at: line_num,
                                 scope,
                                 is_global: false,
-                                ref_lender: None,
+                                ref_lender: Some(ResourceTy::Caller),
                             });
+                            let prefix = format!("{}.", name);
+                            #[expect(clippy::disallowed_methods, reason = "sorted by RAP hash below")]
+                            let mut ref_fields: Vec<ResourceAccessPoint> = self.raps.iter()
+                              .filter(|(n, rd)| n.starts_with(&prefix) && rd.rap.is_ref())
+                              .map(|(_, rd)| rd.rap.clone())
+                              .collect();
+                            ref_fields.sort_by_key(|r| *r.hash());
+                            for r in ref_fields {
+                              let id = *self.unique_id;
+                              *self.unique_id += 1;
+                              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id, own_param: None, in_pattern: Some(name.clone()) });
+                            }
                         }
                     },
                     // Unions render as opaque single-owner columns —
@@ -1565,6 +1582,19 @@ pub fn register_iflet_let_bindings(
                 id: *self.unique_id,
             });
             *self.unique_id += 1;
+        }
+        // A struct binding's reference fields (`x.part`) are declared
+        // by the pattern too, so in a Branch they're the arm's own
+        // columns and their init dot (#352) lands inside it, not on a
+        // pre-existing column that has no value yet.
+        if matches!(binding_rap, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
+            let prefix = format!("{}.", binding_rap.name());
+            #[expect(clippy::disallowed_methods, reason = "collected into a set")]
+            let refs: Vec<ResourceAccessPoint> = self.raps.iter()
+                .filter(|(n, rd)| n.starts_with(&prefix) && rd.rap.is_ref())
+                .map(|(_, rd)| rd.rap.clone())
+                .collect();
+            registered.extend(refs);
         }
         registered.insert(binding_rap);
     }

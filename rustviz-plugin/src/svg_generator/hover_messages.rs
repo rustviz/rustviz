@@ -196,9 +196,6 @@ pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
     format!("{0} acquires ownership from the caller", my_name_fmt)
 }
 
-// A reference function parameter receives a borrow from the caller.
-// Mirror message to `event_dot_owner_init_from_caller` for the ref
-// side: makes it clear that the lender lives outside this fn scope.
 // A `ref` / `ref mut` binding of a by-value parameter (`fn f(ref s:
 // String)`, `fn g((ref a, b): (String, i32))`). The caller's value was
 // moved (or copied) into `f`, which owns it; the binding borrows that,
@@ -218,6 +215,20 @@ pub fn event_dot_ref_init_own_param(my_name: &String, fn_name: &String, whole: b
     }
 }
 
+// A reference field of a struct bound by a pattern (`if let Some(x) =
+// o`, `x.part: &str`). It holds whatever reference the matched value
+// held; what that borrows isn't tracked at the pattern, so the message
+// doesn't name a lender, and never says "owns" (#352).
+pub fn event_dot_ref_init_in_pattern(my_name: &String, bound: &String, is_mut: bool) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let bound_fmt = fmt_style(bound);
+    let kind = if is_mut { "a mutable" } else { "an immutable" };
+    format!("{0} holds {1} reference (it came with the value matched into {2})", my_name_fmt, kind, bound_fmt)
+}
+
+// A reference function parameter receives a borrow from the caller.
+// Mirror message to `event_dot_owner_init_from_caller` for the ref
+// side: makes it clear that the lender lives outside this fn scope.
 pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     if is_mut {
