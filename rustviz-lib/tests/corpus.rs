@@ -484,6 +484,8 @@ const EXPECTED_OK: &[&str] = &[
     "partial_move_one_arm_tuple",
     "partial_move_one_arm_struct",
     "partial_move_if_branches",
+    // A temporary a `let` borrows gets a column to the end of the block (#400).
+    "extended_temporary",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4969,6 +4971,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "p goes out of scope. p.a and p.b were moved out earlier, so no resource is dropped.",
             "q goes out of scope. q.a and q.b were moved out earlier, so no resource is dropped.",
+        ],
+    },
+    // ─── Temporary lifetime extension (#400) ─────────────────────────
+    TooltipExpect {
+        name: "extended_temporary",
+        // `let r = &String::from("a");`: the String is a temporary that
+        // lives until the end of the block because r's `let` borrows
+        // it. It gets a column, r borrows from it, and it's dropped at
+        // scope end. `show(&String::from(..))` (dropped at the end of
+        // its statement) and `&Point { x: 4 }` (nothing to drop) get
+        // none, which is why inner's is `(temporary 4)`.
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "(temporary) acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
+            "Immutable borrow from (temporary) to r",
+            "Return immutably borrowed resource from r to (temporary)",
+            "(temporary) goes out of scope. Its resource is dropped.",
+            "Move from Vec::new to (temporary 2)",
+            "Mutable borrow from (temporary 2) to m",
+            "(temporary 2) goes out of scope. Its resource is dropped.",
+            "Immutable borrow from (temporary 3) to s",
+            "(temporary 3) goes out of scope. Its resource is dropped.",
+            "Immutable borrow from (temporary 4) to inner",
+            "(temporary 4) goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to String::from",
+            "Immutable borrow from (temporary 5) to inner",
         ],
     },
 ];

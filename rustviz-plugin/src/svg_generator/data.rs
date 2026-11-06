@@ -331,6 +331,18 @@ pub fn place_assign_copy_message(place: &String, from: &ResourceTy) -> String {
     }
 }
 
+/// Column label of the n-th (1-based) temporary in a fn that a `let`
+/// borrows and so keeps alive to the end of the block (#400):
+/// `(temporary)`, then `(temporary 2)`, … Not a Rust identifier, so it
+/// can't clash with a variable's name. "temporary" is the word rustc's
+/// own errors use ("temporary value dropped while borrowed").
+pub fn temporary_label(n: usize) -> String {
+    match n {
+        1 => "(temporary)".to_owned(),
+        n => format!("(temporary {})", n),
+    }
+}
+
 impl ResourceAccessPoint {
     /// A copy of this function RAP marked as `std::mem::drop` called on
     /// a value that needs drop.
@@ -361,6 +373,13 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::MutRef(m) => m.write,
             _ => PlaceWrite::Update,
         }
+    }
+
+    /// True iff this RAP is a lifetime-extended temporary (see
+    /// `temporary_label`), not a variable.
+    pub fn is_temporary(&self) -> bool {
+        let n = self.name();
+        n == "(temporary)" || (n.starts_with("(temporary ") && n.ends_with(')'))
     }
 
     // get the attribute hash
@@ -1487,6 +1506,11 @@ impl Event {
                     // variable is bound to a reference, which never
                     // owns its referent.
                     hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref())
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_temporary()) {
+                    // `let r = &String::from("a");`: say why this
+                    // temporary has a column until the end of the
+                    // block (#400).
+                    hover_messages::event_dot_temporary_acquire(&self.deref_name(my_name))
                 } else if matches!(from, ResourceTy::Anonymous)
                     && matches!(is.extract_rap(), Some(rap) if rap.is_copy_owner()) {
                     // i32 / bool / other primitive being assigned a

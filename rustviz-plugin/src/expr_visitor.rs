@@ -93,6 +93,10 @@ pub struct RapData {
   // RAPs across fns get distinct hashes so `BTreeMap<u64, Timeline>`
   // already disambiguates.
   pub fn_start_line: usize,
+  // `let r = &String::from("a");`: the column name of the temporary r
+  // borrows, which lives as long as r's `let` does (#400). Lets the
+  // branch / block code that ends r's scope end the temporary's too.
+  pub extended_temp: Option<String>,
 }
 
 /// A `let` binding with no initializer (`let x;`), remembered until
@@ -196,6 +200,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// loop variable of `for x in it`, #417): they get no lender, so no
   /// borrow is "returned" when they end.
   pub unlent_refs: HashSet<String>,
+  // Temporaries given a column of their own in this fn body because a
+  // `let` borrows them (`let r = &String::from("a");`, #400); numbers
+  // the next one's label.
+  pub temp_count: usize,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -424,7 +432,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
     self.raps.entry(key).or_insert_with(|| {
       self.rap_hashes += 1;
-      RapData { rap: r, scope, is_global, fn_start_line }
+      RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None }
     });
   }
 

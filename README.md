@@ -306,6 +306,13 @@ rather than listed here.
   reference copied out of it (`let q = x.part;`).
 - A pattern in a function parameter (`fn f((a, b): (String, i32))`)
   gives its names no columns.
+- Temporaries: a temporary that a `let` borrows (`let r =
+  &String::from("a");`) lives until the end of the block, so it gets
+  a column labelled `(temporary)` that is dropped there. Other
+  temporaries (`f(&String::from("a"))`, dropped at the end of their
+  statement) and temporaries with nothing to drop (`&Point { x: 4 }`)
+  get no column; nor does a temporary nested inside the borrowed value
+  (`let p = Wrapper { r: &String::new() };`).
 
 The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).

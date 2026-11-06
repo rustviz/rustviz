@@ -2547,6 +2547,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // visit_expr emits no Branch for it and match_rhs unwraps it to
     // `e`, so it wants the plain visit-then-bind order (visiting `e`
     // first registers the callee, which gives the bind its source).
+    // `let r = &String::from("a");`: the String gets a column of its
+    // own (#400).
+    if !is_skipped && self.bind_extended_temporary(pat, init) {
+      return;
+    }
     let init_is_branching = !is_skipped
       && match init.kind {
         ExprKind::If(..) => true,
@@ -2563,6 +2568,72 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       self.bind_pat(pat, init, is_skipped);
     }
+  }
+
+  /// `let r = &String::from("a");` (also `&mut`, `&s.clone()`,
+  /// `&User { .. }`): the `&` borrows a temporary, and because a `let`
+  /// borrows it, Rust extends the temporary's lifetime to the end of
+  /// the enclosing block (temporary lifetime extension). It is dropped
+  /// there, not at the end of the statement (#400). Draw it as
+  /// `let tmp = String::from("a"); let r = &tmp;` would be: a column
+  /// labelled `(temporary)` (numbered from the second one in a fn)
+  /// that acquires the value, lends it to r, and drops it at scope
+  /// end.
+  ///
+  /// Only for a temporary that owns a resource (its type needs
+  /// dropping): `&Point { x: 4 }` with Copy fields has nothing to
+  /// drop, and `&5` is promoted to a constant. Temporaries that die
+  /// at the end of their statement (`f(&String::from("a"))`) aren't
+  /// drawn. Returns false when `let pat = init` isn't this shape.
+  fn bind_extended_temporary(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) -> bool {
+    let PatKind::Binding(annotation, hirid, ident, None) = pat.kind else { return false };
+    if annotation.0 != rustc_hir::ByRef::No || init.span.from_expansion() {
+      return false;
+    }
+    let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) = init.kind else { return false };
+    // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary.
+    if matches!(operand.kind,
+      ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)
+      | ExprKind::AddrOf(..)) {
+      return false;
+    }
+    let typeck = self.tcx.typeck(hirid.owner);
+    let lhs_ty = typeck.node_type(hirid);
+    let tmp_ty = typeck.expr_ty(operand);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, hirid.owner);
+    if !lhs_ty.is_ref() || !tmp_ty.needs_drop(self.tcx, env) {
+      return false;
+    }
+    self.visit_expr(init);
+
+    let line_num = expr_to_line(init, &self.tcx);
+    self.temp_count += 1;
+    let tmp_name = temporary_label(self.temp_count);
+    // `&mut Vec::new()` writes through the borrow: the temporary is
+    // a mutable place.
+    self.define_lhs(tmp_name.clone(), borrow_mut == Mutability::Mut, operand, tmp_ty);
+    let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
+    let n_events = self.preprocessed_events.len();
+    self.match_rhs(ResourceTy::Value(tmp.clone()), operand, Evt::Move);
+    if self.preprocessed_events.len() == n_events {
+      // A shape match_rhs has nothing to say about: the temporary
+      // still holds the value from here on.
+      self.add_ev(line_num, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false);
+    }
+
+    let name = ident.to_string();
+    self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
+      line_num, ResourceTy::Value(tmp.clone()), VecDeque::new(), self.current_scope, !self.inside_branch,
+      self.ref_pointee_is_copy(lhs_ty, hirid.owner));
+    let r_data = self.raps.get_mut(&name).unwrap();
+    r_data.extended_temp = Some(tmp_name);
+    let r = r_data.rap.to_owned();
+    let evt = match borrow_mut {
+      Mutability::Mut => Evt::MBorrow,
+      Mutability::Not => Evt::SBorrow,
+    };
+    self.add_borrow_ev(line_num, evt, ResourceTy::Value(r), ResourceTy::Value(tmp), false);
+    true
   }
 
   /// Structural pat-against-init decomposition. When the pattern's
