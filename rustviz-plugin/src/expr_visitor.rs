@@ -1101,6 +1101,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
+    // A tuple built in the argument list (`show((s, 1))`,
+    // `v.push((s, n))`): each element is passed into the call with it,
+    // so `s` is moved into the call (#189).
+    if let ExprKind::Tup(elems) = arg.kind {
+      if !arg.span.from_expansion() {
+        for elem in elems.iter() {
+          self.match_arg(elem, fn_name.clone());
+        }
+        return;
+      }
+    }
     self.add_fn(fn_name.clone());
     if let ExprKind::Closure(closure) = arg.kind {
       let to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
@@ -1322,6 +1333,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.borrow_span = borrow_span_of(expr);
       }
     }
+    else if matches!(ty.kind(), TyKind::Tuple(_)) && self.has_member_columns(ty) {
+      // A tuple local gets a column per element (`t.0`, `t.1`), drawn
+      // like a struct's fields (#189): moving `t.0` out leaves `t.1`
+      // owned by `t`, and each element drops on its own.
+      let owner_hash = self.rap_hashes as u64;
+      let parent_is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
+      self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
+      self.register_struct_members(&name, ty, owner_hash, mutability, MemberSite {
+        owner_id: expr.hir_id.owner,
+        assigned_at: expr_to_line(&expr, &self.tcx),
+        scope: self.current_scope,
+        is_global: !self.inside_branch,
+        ref_lender: Some(ResourceTy::Anonymous),
+      });
+    }
     else if ty.is_adt() && !is_special {
       match ty.ty_adt_def().unwrap().adt_kind() {
         AdtKind::Struct => {
@@ -1378,6 +1404,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// Fields that get a column of their own under a value of type `ty`,
+  /// as (name, type) pairs in declaration order: a local struct's
+  /// fields (`p.name`), or a tuple's elements (`t.0`, `t.1`). Empty
+  /// for every other type (enums and unions are one opaque column;
+  /// `String`, `Vec`, … don't expose their internals; `()` has
+  /// nothing in it).
+  pub fn member_fields(&self, ty: Ty<'tcx>) -> Vec<(String, Ty<'tcx>)> {
+    match ty.kind() {
+      TyKind::Adt(adt_def, args)
+        if matches!(adt_def.adt_kind(), AdtKind::Struct) && !ty_is_special_owner(&ty) =>
+      {
+        adt_def.all_fields()
+          .map(|f| (f.name.as_str().to_owned(), f.ty(self.tcx, args)))
+          .collect()
+      }
+      TyKind::Tuple(elems) => elems.iter().enumerate()
+        .map(|(i, t)| (i.to_string(), t))
+        .collect(),
+      _ => Vec::new(),
+    }
+  }
+
+  /// True when a value of type `ty` is drawn as a group of member
+  /// columns (see `member_fields`).
+  pub fn has_member_columns(&self, ty: Ty<'tcx>) -> bool {
+    !self.member_fields(ty).is_empty()
+  }
+
   /// Register `prefix.field` RAPs for every field of a struct type,
   /// recursing into nested structs so accesses like `r.a.b` resolve.
   ///
@@ -1408,14 +1462,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     mutability: bool,
     site: MemberSite,
   ) {
-    let generic_args = match ty.kind() {
-      TyKind::Adt(_, args) => *args,
-      _ => unreachable!("register_struct_members called with non-Adt ty"),
-    };
     let owner_id = site.owner_id;
-    for field in ty.ty_adt_def().unwrap().all_fields() {
-      let field_name = format!("{}.{}", prefix, field.name.as_str());
-      let field_ty = field.ty(self.tcx, generic_args);
+    for (field, field_ty) in self.member_fields(ty) {
+      let field_name = format!("{}.{}", prefix, field);
       if let (true, Some(ref_lender)) = (field_ty.is_ref(), &site.ref_lender) {
         let ref_mutability = bool_of_mut(field_ty.ref_mutability().unwrap());
         let pointee_copy = self.ref_pointee_is_copy(field_ty, owner_id);
@@ -1444,22 +1493,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_struct(field_name.clone(), top_owner_hash, true, mutability, field_is_copy, self.ty_has_interior_mut(field_ty, owner_id),
             site.scope, site.is_global);
         self.mark_if_manually_drop(&field_name, field_ty);
-        // Recurse for nested struct fields. Skip enums / unions
-        // (only struct ADTs are flattened today) and skip the
-        // special-owner builtins like `String` whose internals
-        // we deliberately don't expose.
-        if field_ty.is_adt() && !ty_is_special_owner(&field_ty) {
-          if let Some(adt_def) = field_ty.ty_adt_def() {
-            if matches!(adt_def.adt_kind(), AdtKind::Struct) {
-              self.register_struct_members(
-                &field_name,
-                field_ty,
-                top_owner_hash,
-                mutability,
-                site.clone(),
-              );
-            }
-          }
+        // Recurse for nested struct / tuple fields. Skip enums /
+        // unions (only structs and tuples are flattened) and the
+        // special-owner builtins like `String` whose internals we
+        // deliberately don't expose.
+        if self.has_member_columns(field_ty) {
+          self.register_struct_members(
+            &field_name,
+            field_ty,
+            top_owner_hash,
+            mutability,
+            site.clone(),
+          );
         }
       }
     }
@@ -1517,6 +1562,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 let lender = if by_ref || parent_ty.is_ref() { parent.clone() } else { ResourceTy::Anonymous };
                 let pointee_copy = self.ref_pointee_is_copy(ty, id.owner);
                 self.add_ref(name.clone(), ref_mutability, muta, line_num, lender, VecDeque::new(), scope, false, pointee_copy);
+            } else if matches!(ty.kind(), TyKind::Tuple(_)) && self.has_member_columns(ty) {
+                // A tuple binding gets a column per element, like a
+                // struct binding's fields (#189).
+                let owner_hash = self.rap_hashes as u64;
+                let parent_is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
+                self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
+                for (field, field_ty) in self.member_fields(ty) {
+                    // A reference element would need its own loan
+                    // bookkeeping; leave it without a column.
+                    if field_ty.is_ref() { continue; }
+                    let field_is_copy = self.ty_is_copy(field_ty, pat.hir_id.owner);
+                    let field_name = format!("{}.{}", name, field);
+                    self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_has_interior_mut(field_ty, pat.hir_id.owner), scope, false);
+                    self.mark_if_manually_drop(&field_name, field_ty);
+                }
             } else if ty.is_adt() && !ty_is_special_owner(&ty) {
                 // Same rule as `define_lhs` and fn params: only
                 // user-defined (crate-local) structs get a struct
@@ -2074,6 +2134,72 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         }
       }
     },
+
+    // Tuple literal `(e0, e1, …)`. A tuple local has a column per
+    // element (`t.0`, `t.1`; see `member_fields`), so, like a struct
+    // literal, each element is moved / copied / borrowed into its own
+    // column (#189).
+    ExprKind::Tup(elems) if !elems.is_empty() => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      let typeck = self.tcx.typeck(rhs.hir_id.owner);
+      let elem_evt = |this: &Self, e: &Expr| {
+        let ty = typeck.node_type(e.hir_id);
+        if ty.is_ref() {
+          match ty.ref_mutability().unwrap() {
+            Mutability::Not => Evt::Copy,
+            Mutability::Mut => Evt::Move,
+          }
+        } else if this.ty_is_copy(ty, e.hir_id.owner) {
+          Evt::Copy
+        } else {
+          Evt::Move
+        }
+      };
+      // Element columns of the destination, when it has them.
+      let members: Option<Vec<Option<ResourceAccessPoint>>> = match &lhs {
+        ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => {
+          let m: Vec<Option<ResourceAccessPoint>> = (0..elems.len())
+            .map(|i| self.raps.get(&format!("{}.{}", rap.name(), i)).map(|rd| rd.rap.to_owned()))
+            .collect();
+          if m.iter().any(|r| r.is_some()) { Some(m) } else { None }
+        }
+        _ => None,
+      };
+      if !matches!(lhs, ResourceTy::Anonymous) {
+        self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+      }
+      for (i, elem) in elems.iter().enumerate() {
+        let e = elem_evt(self, elem);
+        match members.as_ref().and_then(|m| m[i].clone()) {
+          Some(member) => {
+            // A reference element: resolve its lender from the
+            // element expression, as the Struct arm does for
+            // reference fields.
+            if typeck.node_type(elem.hir_id).is_ref() {
+              let (lender, aliasing) = self.get_ref_data(elem);
+              if let Some(rd) = self.borrow_map.get_mut(member.name()) {
+                rd.lender = lender;
+                rd.aliasing = aliasing;
+              }
+            }
+            self.match_rhs(ResourceTy::Value(member), elem, e);
+          }
+          // No column for this element (the tuple is returned to the
+          // caller, written through a reference, …). A variable moved
+          // into it is still moved: record that, so it isn't shown
+          // dropping the value at its scope end.
+          None => {
+            let is_place = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..));
+            if is_place && matches!(e, Evt::Move) && !elem.span.from_expansion()
+              && !typeck.node_type(elem.hir_id).is_ref()
+            {
+              let dest = if matches!(lhs, ResourceTy::Caller) { ResourceTy::Caller } else { ResourceTy::Anonymous };
+              self.match_rhs(dest, elem, e);
+            }
+          }
+        }
+      }
+    }
 
     ExprKind::Field(inner, id) => {
       // Walk the receiver to a qualified name; emit the event only

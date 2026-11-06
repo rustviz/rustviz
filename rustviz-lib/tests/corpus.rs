@@ -176,7 +176,7 @@ const EXPECTED_OK: &[&str] = &[
     // — Tuple-field projections (`x.0`) used to panic in
     //   annotated_source_gen; fixed alongside #131.
     "tuple_struct_field",
-    "tuple_field_read",     // renders; the read itself isn't shown (known gap)
+    "tuple_field_read",     // `let a = t.0;`: Copy from t.0 (#189)
     // — Assignment through a deref of a method-call temporary
     //   (`*c.borrow_mut() += 1`, `*v.last_mut().unwrap() = 5`). Used
     //   to panic looking up a RAP for the temporary.
@@ -464,6 +464,12 @@ const EXPECTED_OK: &[&str] = &[
     "pattern_struct_fields_scope",
     // A write to a place with no column states the old value's drop (#458).
     "place_without_column",
+    // Tuples get a column per element, like struct fields (#189).
+    "tuple_element_move",
+    "tuple_create_copy",
+    "tuple_destructure_var",
+    "tuple_field_write",
+    "tuple_through_calls",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4653,6 +4659,116 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from x to it",
             "Move from it2 to s",
             "Return immutably borrowed resource from s to it2",
+        ],
+    },
+    // ─── Tuples (#189) ────────────────────────────────────────────────
+    // A tuple variable has a column per element (`t.0`, `t.1`), like a
+    // struct's fields, so moving one element out leaves the others
+    // owned by the tuple, and each element drops on its own.
+    TooltipExpect {
+        name: "tuple_element_move",
+        must_contain: &[
+            "Move from String::from to t.0",
+            "Move from t.0 to first",
+            "t.0's resource is moved",
+            "first goes out of scope. Its resource is dropped.",
+            "t.0 goes out of scope. No resource is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "t goes out of scope. t.0 was moved out earlier, so only t.1 is dropped.",
+        ],
+        must_not_contain: &[
+            "first goes out of scope. No resource is dropped.",
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_create_copy",
+        must_contain: &[
+            "Move from String::from to t.0",
+            "Copy from t.1 to n",
+            "n is initialized by copy from t.1",
+            "t.0 goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_destructure_var",
+        // `let (a, _) = t;` takes t.0 only; `_` doesn't move t.1.
+        // `let (x, .., z) = u;` takes u.0 and u.2.
+        must_contain: &[
+            "Move from t.0 to a",
+            "t.0 goes out of scope. No resource is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "t goes out of scope. t.0 was moved out earlier, so only t.1 is dropped.",
+            "Move from u.0 to x",
+            "Move from u.2 to z",
+            "u goes out of scope. u.0 and u.2 were moved out earlier, so no resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from t to a",
+            "Move from u to x",
+            "Move from u to z",
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_field_write",
+        must_contain: &[
+            "Move from s to t.0",
+            "t.0 acquires ownership of a new resource; its previous resource is dropped",
+            "s goes out of scope. No resource is dropped.",
+            // `t = (w, 2);` drops the old tuple, element by element.
+            "Move from w to t.0",
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "w goes out of scope. No resource is dropped.",
+            "t.0 goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "w goes out of scope. Its resource is dropped.",
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_through_calls",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "s goes out of scope. No resource is dropped.",
+            "Move from m to show",
+            "m goes out of scope. No resource is dropped.",
+            "Move from t.0 to u.0",
+            "t.0 goes out of scope. No resource is dropped.",
+            "u.0 goes out of scope. Its resource is dropped.",
+            "p.0 goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "m goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_field_read",
+        must_contain: &[
+            "Copy from t.0 to a",
+            "a is initialized by copy from t.0",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_tuple_destructure",
+        // Each sub-pattern takes its own element of `pair`.
+        must_contain: &[
+            "Move from pair.0 to x",
+            "Move from pair.1 to y",
+            "pair goes out of scope. pair.0 and pair.1 were moved out earlier, so no resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Partial move from pair to x",
+            "Partial move from pair to y",
         ],
     },
 ];

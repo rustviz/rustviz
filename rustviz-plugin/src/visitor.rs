@@ -758,10 +758,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               };
               
               let line_num = expr_to_line(e, &self.tcx);
-              if matches!(e.kind, ExprKind::Struct(..)) && !e.span.from_expansion() {
-                // `User { email, .. }` as the tail expression: the
-                // struct literal's field initialisers move/copy
-                // their sources into the returned value.
+              if matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..)) && !e.span.from_expansion() {
+                // `User { email, .. }` / `(s, 1)` as the tail
+                // expression: the literal's field initialisers
+                // move/copy their sources into the returned value.
                 self.match_rhs(to_ro, e, evt);
               } else {
                 self.add_ev(line_num, evt, to_ro, from_ro, false);
@@ -840,6 +840,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // ref-line trapezoid covers the full body.
             if let Some(rd) = self.borrow_map.get_mut(&name) {
               rd.lifetime = self.current_scope;
+            }
+          }
+          else if matches!(ty.kind(), rustc_middle::ty::TyKind::Tuple(_)) && self.has_member_columns(ty) {
+            // A by-value tuple parameter gets a column per element, like
+            // a struct parameter's fields (#189).
+            let owner_hash = self.rap_hashes as u64;
+            let muta = bool_of_mut(binding_annotation.1);
+            let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
+            self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+            for (field, field_ty) in self.member_fields(ty) {
+              // A reference element would need its own loan bookkeeping;
+              // leave it without a column.
+              if field_ty.is_ref() { continue; }
+              let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
+              let field_name = format!("{}.{}", name, field);
+              self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+              self.mark_if_manually_drop(&field_name, field_ty);
             }
           }
           else if ty.is_adt() && !is_special{ // kind of weird given we don't have a InitStructParam
@@ -1916,10 +1933,37 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // for i>0 panics with an index-out-of-bounds.
                 PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _)=> {
                   let same_arity = pat_list.len() == parents.len();
+                  // `match t { (a, b) => … }` on a tuple variable whose
+                  // elements have columns (#189): each sub-pattern
+                  // destructures its own element, `t.0` / `t.1`.
+                  let elem_parents: Option<Vec<Option<(ResourceTy, rustc_middle::ty::Ty<'tcx>)>>> =
+                    match arm.pat.kind {
+                      PatKind::Tuple(_, ddpos) => self.tuple_place_name(guard_expr).map(|name| {
+                        let elems = self.member_fields(parents_ty[0]);
+                        let gap = elems.len().saturating_sub(pat_list.len());
+                        (0..pat_list.len()).map(|k| {
+                          let i = match ddpos.as_opt_usize() {
+                            Some(d) if k >= d => k + gap,
+                            _ => k,
+                          };
+                          let (field, field_ty) = elems.get(i)?;
+                          if field_ty.is_ref() {
+                            return None;
+                          }
+                          let rd = self.raps.get(&format!("{}.{}", name, field))?;
+                          Some((ResourceTy::Value(rd.rap.to_owned()), *field_ty))
+                        }).collect()
+                      }),
+                      _ => None,
+                    };
                   for (i, p) in pat_list.iter().enumerate() {
                     let parent_idx = if same_arity { i } else { 0 };
+                    let (parent, parent_ty) = match elem_parents.as_ref().and_then(|v| v[i].clone()) {
+                      Some(pp) => pp,
+                      None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
+                    };
                     let mut associated_ro = Vec::new();
-                    self.get_dec_of_pat2(p, &typeck_res, &parents[parent_idx], &parents_ty[parent_idx], end, & mut associated_ro);
+                    self.get_dec_of_pat2(p, &typeck_res, &parent, &parent_ty, end, & mut associated_ro);
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -1928,7 +1972,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let is_partial = !(*parent_ty == typeck_res.node_type(p.hir_id));
                       let id = *self.unique_id;
                       *self.unique_id += 1;
-                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parents[parent_idx].clone(), id, is_partial);
+                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), parent.clone(), id, is_partial);
                       // add_external_event gives a struct's fields their
                       // part of a whole (non-partial) move; otherwise
                       // that's done below.
@@ -1942,10 +1986,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       }
                       match e {
                         Evt::SBorrow => {
-                          callback_events.push((parents[parent_idx].clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
+                          callback_events.push((parent.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
                         }
                         Evt::MBorrow => {
-                          callback_events.push((parents[parent_idx].clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
+                          callback_events.push((parent.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
                         }
                         _ => {}
                       }
@@ -2500,6 +2544,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
         }
       }
+      // `let (a, b) = t;` with `t` a tuple variable (or a tuple field
+      // of one): `t.0` and `t.1` have columns, so pair each sub-pattern
+      // with its element (#189). The other shapes fall through to
+      // bind_walk, which binds everything from the whole of `t`.
+      (PatKind::Tuple(..), ExprKind::Path(_) | ExprKind::Field(..))
+        if self.tuple_place_name(init).is_some() =>
+      {
+        let place = self.tuple_place_name(init).unwrap();
+        let ty = self.tcx.typeck(init.hir_id.owner).node_type(init.hir_id);
+        self.bind_pat_from_member(pat, &place, ty, init, is_skipped);
+      }
       // `let &x = &y;` — recurse through the borrow on both sides.
       (PatKind::Ref(inner_pat, _, _), ExprKind::AddrOf(_, _, inner_init)) => {
         self.bind_pat(inner_pat, inner_init, is_skipped);
@@ -2541,6 +2596,86 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // don't structurally decompose (slice, or, deref, …). Best
       // effort: register every Binding the pattern names so the
       // timeline isn't empty.
+      _ => self.bind_walk(pat, init, is_skipped),
+    }
+  }
+
+  /// `init` names a tuple-typed variable or field (`t`, `p.pair`)
+  /// whose elements have columns of their own: its RAP name.
+  fn tuple_place_name(&self, init: &'tcx Expr<'tcx>) -> Option<String> {
+    let ty = self.tcx.typeck(init.hir_id.owner).node_type(init.hir_id);
+    if !matches!(ty.kind(), rustc_middle::ty::TyKind::Tuple(_)) || init.span.from_expansion() {
+      return None;
+    }
+    // Only a chain of fields on a variable (`t`, `p.pair`, `t.0`):
+    // expr_to_rap_name also looks through `*`, `&` and indexing.
+    let mut cur = init;
+    while let ExprKind::Field(inner, _) = cur.kind {
+      cur = inner;
+    }
+    if !matches!(cur.kind, ExprKind::Path(QPath::Resolved(..))) {
+      return None;
+    }
+    let name = expr_to_rap_name(init, &self.tcx)?;
+    let has_members = (0..self.member_fields(ty).len())
+      .any(|i| self.raps.contains_key(&format!("{}.{}", name, i)));
+    has_members.then_some(name)
+  }
+
+  /// Destructure the element `member` (of type `member_ty`) of a tuple
+  /// place with per-element columns: `let (a, b) = t;` moves (or
+  /// copies) `t.0` into `a` and `t.1` into `b`, and a `_` leaves its
+  /// element where it is (it isn't moved, and is dropped with `t`).
+  /// Shapes this doesn't pair up fall back to [`bind_walk`] against
+  /// the whole `init`.
+  fn bind_pat_from_member(
+    &mut self,
+    pat: &'tcx Pat<'tcx>,
+    member: &str,
+    member_ty: rustc_middle::ty::Ty<'tcx>,
+    init: &'tcx Expr<'tcx>,
+    is_skipped: bool,
+  ) {
+    match pat.kind {
+      PatKind::Wild => {}
+      PatKind::Tuple(sub_pats, ddpos) => {
+        let elems = self.member_fields(member_ty);
+        // `(a, .., z)`: the sub-patterns after `..` line up with the
+        // last elements.
+        let gap = elems.len().saturating_sub(sub_pats.len());
+        for (k, sp) in sub_pats.iter().enumerate() {
+          let i = match ddpos.as_opt_usize() {
+            Some(d) if k >= d => k + gap,
+            _ => k,
+          };
+          match elems.get(i) {
+            Some((field, field_ty)) if self.raps.contains_key(&format!("{}.{}", member, field)) => {
+              let sub = format!("{}.{}", member, field);
+              self.bind_pat_from_member(sp, &sub, *field_ty, init, is_skipped);
+            }
+            _ => self.bind_walk(sp, init, is_skipped),
+          }
+        }
+      }
+      // A by-value binding of a non-reference element.
+      PatKind::Binding(annotation, hirid, ident, None)
+        if matches!(annotation.0, rustc_hir::ByRef::No) && !member_ty.is_ref()
+          && self.raps.contains_key(member) =>
+      {
+        let name = ident.to_string();
+        let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
+        let evt = if self.ty_is_copy(lhs_ty, hirid.owner) { Evt::Copy } else { Evt::Move };
+        self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+        if is_skipped {
+          self.skip_raps.insert(name);
+          return;
+        }
+        let line_num = span_to_line(&init.span, &self.tcx);
+        let from = self.raps.get(member).unwrap().rap.to_owned();
+        self.update_rap(&from, line_num);
+        let to = self.raps.get(&name).unwrap().rap.to_owned();
+        self.add_ev(line_num, evt, ResourceTy::Value(to), ResourceTy::Value(from), false);
+      }
       _ => self.bind_walk(pat, init, is_skipped),
     }
   }

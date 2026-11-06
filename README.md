@@ -212,11 +212,15 @@ panic.
   o` with `x.part: &str`) is drawn as owning a resource.
 - `Rc`: clones are shown as independent owners that each drop the value;
   reference counting isn't modelled.
-- Tuples: creating one (`let t = (1, String::new());`), reading a
-  field (`let a = t.0;`) and writing one (`t.0 = 5;`) produce no events,
-  so a tuple that holds a `String`, or a `String` moved out of one, is
-  shown as "No resource is dropped". Tuple structs (`struct Color(u8,
-  u8, u8)`) render with a column per field.
+- Destructuring a struct variable (`let P { a, b } = p;`, `match p {
+  P(x, y) => … }`) is drawn as moving all of `p` into each name, and
+  `p`'s field columns still drop their values at the end. (Tuples are
+  paired element by element: `let (a, b) = t;` moves `t.0` into `a`.)
+- `if let` with a tuple pattern (`if let (Some(a), Some(b)) = (x, y)`)
+  shows no bindings, and `x` / `y` as still owning their values.
+- A closure that uses one field or element (`move || p.name.len()`,
+  `move || t.0.len()`) is drawn as capturing the whole variable, so its
+  other fields are shown as moved.
 - Tuple destructuring assignment (`(a, b) = (b, a);`) draws an extra
   `lhs` column for the compiler's temporary.
 
@@ -299,6 +303,8 @@ rather than listed here.
   o` with `x.part: &str`) is drawn as a reference, but not linked to
   what it borrows (whatever `o`'s field borrowed), and neither is a
   reference copied out of it (`let q = x.part;`).
+- A pattern in a function parameter (`fn f((a, b): (String, i32))`)
+  gives its names no columns.
 
 The plugin has its own per-feature TODO checklist in
 [`rustviz-plugin/README.md`](rustviz-plugin/README.md).
