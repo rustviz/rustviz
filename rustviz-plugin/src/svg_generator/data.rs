@@ -577,6 +577,10 @@ pub enum StaticLender {
     /// no address of its own; the data its reference points to is
     /// `'static`.
     PointeeOfConst(String),
+    /// `&C` for a `const C` whose value has no destructor and no
+    /// interior mutability: Rust promotes the borrowed copy to a
+    /// `'static`.
+    PromotedConst(String),
 }
 
 /// Whether the `&` / `&mut` of a pass-by-reference event was written in
