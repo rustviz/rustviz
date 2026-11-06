@@ -1608,6 +1608,103 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// The parts of `parent` that the sub-patterns of `pat` match, when
+  /// `parent` is a place whose parts have columns of their own (a
+  /// struct's fields `p.a`, a tuple's elements `t.0`; see
+  /// `member_fields`) and `pat` destructures it (`P { a, .. }`,
+  /// `P(x, _)`, `(a, b)`). Each sub-pattern comes with
+  /// `Some((part, part_ty))`, or `None` for a part without a column of
+  /// its own (a reference field). `None` overall when `pat` doesn't
+  /// destructure such a place: an enum (`Some(x)`), a value matched
+  /// through a reference, a place without part columns.
+  pub fn pat_parts<'p>(
+    &self,
+    pat: &'p Pat<'tcx>,
+    parent: &ResourceTy,
+    parent_ty: Ty<'tcx>,
+  ) -> Option<Vec<(&'p Pat<'tcx>, Option<(ResourceTy, Ty<'tcx>)>)>> {
+    let ResourceTy::Value(parent_rap) = parent else { return None };
+    if parent_ty.is_ref() || self.tcx.typeck(pat.hir_id.owner).node_type(pat.hir_id) != parent_ty {
+      return None;
+    }
+    let fields = self.member_fields(parent_ty);
+    let part = |i: Option<usize>| -> Option<(ResourceTy, Ty<'tcx>)> {
+      let (field, field_ty) = fields.get(i?)?;
+      if field_ty.is_ref() {
+        return None;
+      }
+      let rd = self.raps.get(&format!("{}.{}", parent_rap.name(), field))?;
+      Some((ResourceTy::Value(rd.rap.to_owned()), *field_ty))
+    };
+    let subs: Vec<(&'p Pat<'tcx>, Option<(ResourceTy, Ty<'tcx>)>)> = match pat.kind {
+      PatKind::Tuple(sub_pats, ddpos) | PatKind::TupleStruct(_, sub_pats, ddpos) => {
+        // `(a, .., z)`: the sub-patterns after `..` line up with the
+        // last parts.
+        let gap = fields.len().saturating_sub(sub_pats.len());
+        sub_pats.iter().enumerate().map(|(k, sp)| {
+          let i = match ddpos.as_opt_usize() {
+            Some(d) if k >= d => k + gap,
+            _ => k,
+          };
+          (sp, part(Some(i)))
+        }).collect()
+      }
+      PatKind::Struct(_, pat_fields, _) => pat_fields.iter().map(|pf| {
+        let i = fields.iter().position(|(f, _)| f.as_str() == pf.ident.name.as_str());
+        (pf.pat, part(i))
+      }).collect(),
+      _ => return None,
+    };
+    subs.iter().any(|(_, p)| p.is_some()).then_some(subs)
+  }
+
+  /// The bindings of `pat` matched against `parent`, like
+  /// [`get_dec_of_pat2`], except that a sub-pattern matching a part of
+  /// `parent` with a column of its own (see [`pat_parts`]) binds from
+  /// that part: `P { a, b }` on `p` moves `p.a` into `a` and `p.b` into
+  /// `b`, rather than both "from p" (#326). Each result names the
+  /// parent it binds from. Its last element is `Some(is_partial)` for
+  /// a binding matched against a part (whether it takes only part of
+  /// that part), and `None` where the caller's own rule applies.
+  pub fn get_dec_of_pat_parts(
+    &mut self,
+    pat: &'tcx Pat<'tcx>,
+    ty_results: &'tcx TypeckResults<'tcx>,
+    parent: &ResourceTy,
+    parent_ty: Ty<'tcx>,
+    scope: usize,
+    res: &mut Vec<(ResourceAccessPoint, Evt, ResourceTy, Option<bool>)>,
+  ) {
+    match self.pat_parts(pat, parent, parent_ty) {
+      Some(subs) => {
+        for (sp, part) in subs {
+          match part {
+            Some((part_rty, part_ty)) => {
+              let mut sub = Vec::new();
+              self.get_dec_of_pat_parts(sp, ty_results, &part_rty, part_ty, scope, &mut sub);
+              let sp_ty = ty_results.node_type(sp.hir_id);
+              res.extend(sub.into_iter().map(|(r, e, from, partial)| {
+                (r, e, from, Some(partial.unwrap_or(part_ty != sp_ty)))
+              }));
+            }
+            // A part without a column: bind from the whole parent, as
+            // before.
+            None => {
+              let mut sub = Vec::new();
+              self.get_dec_of_pat2(sp, ty_results, parent, &parent_ty, scope, &mut sub);
+              res.extend(sub.into_iter().map(|(r, e, _)| (r, e, parent.clone(), None)));
+            }
+          }
+        }
+      }
+      None => {
+        let mut sub = Vec::new();
+        self.get_dec_of_pat2(pat, ty_results, parent, &parent_ty, scope, &mut sub);
+        res.extend(sub.into_iter().map(|(r, e, _)| (r, e, parent.clone(), None)));
+      }
+    }
+  }
+
   // Add a RAP for each variable bound in a pattern
   pub fn get_dec_of_pat2<'t>(
     &mut self,
@@ -1803,16 +1900,16 @@ pub fn register_iflet_let_bindings(
     // the binding's own RAP since is_global=false).
     let scope = emit_gos_at.unwrap_or(let_line);
 
-    let mut decls: Vec<(ResourceAccessPoint, Evt, Ty<'tcx>)> = Vec::new();
-    self.get_dec_of_pat2(let_expr.pat, typeck_res, &parent, &scrutinee_ty, scope, &mut decls);
+    let mut decls = Vec::new();
+    self.get_dec_of_pat_parts(let_expr.pat, typeck_res, &parent, scrutinee_ty, scope, &mut decls);
 
     let mut registered: HashSet<ResourceAccessPoint> = HashSet::new();
-    for (binding_rap, evt, parent_ty) in decls {
-        let is_partial = parent_ty != typeck_res.node_type(let_expr.pat.hir_id);
+    for (binding_rap, evt, from, partial) in decls {
+        let is_partial = partial.unwrap_or(scrutinee_ty != typeck_res.node_type(let_expr.pat.hir_id));
         let event = self.ext_ev_of_evt(
             evt,
             ResourceTy::Value(binding_rap.clone()),
-            parent.clone(),
+            from,
             *self.unique_id,
             is_partial,
         );
