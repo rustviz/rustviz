@@ -840,6 +840,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// Whether `e` is inside a closure of the function being visited.
+  fn in_closure(&self, e: &'tcx Expr<'tcx>) -> bool {
+    self.tcx.hir_parent_iter(e.hir_id)
+      .any(|(_, n)| matches!(n, rustc_hir::Node::Expr(Expr { kind: ExprKind::Closure(..), .. })))
+  }
+
+  /// Whether `e` is a statement or the tail of the function's own
+  /// body block (or of blocks directly in it): not inside a branch,
+  /// a loop, a closure or a `let`'s value. What follows it in the
+  /// body runs only if it does (#515).
+  fn at_fn_level(&self, e: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    for (_, node) in self.tcx.hir_parent_iter(e.hir_id) {
+      match node {
+        Node::Stmt(_) | Node::Block(_) => {}
+        Node::Expr(Expr { kind: ExprKind::Block(..), .. }) => {}
+        Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_) => return true,
+        _ => return false,
+      }
+    }
+    true
+  }
+
   /// Keep a `return`'s drops (`drop_locals_on_return`) only in a
   /// branch that diverges, i.e. one that always leaves through them;
   /// in one that doesn't (the `return` is in a nested `if` without
@@ -1726,7 +1749,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       ExprKind::Ret(ret) => {
         if let Some(e) = ret {
           self.visit_expr(e);
-          if self.fn_ret {
+          // Not the `return` a macro or `?` expands to, and not one in
+          // a closure (it returns from the closure) (#515).
+          if self.fn_ret && !expr.span.from_expansion() && !self.in_closure(expr) {
             self.return_to_caller(e);
           }
         }
@@ -2096,6 +2121,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             merge_point: merge,
             id: *self.unique_id });
             *self.unique_id += 1;
+        // Both branches leave the function: nothing after the `if` runs.
+        if else_expr.is_some() && if_diverges && else_diverges && self.at_fn_level(expr) {
+          self.all_paths_exit = true;
+        }
       }
 
       ExprKind::Loop(block, _, loop_ty, _span) => {
@@ -2535,6 +2564,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // `}`. Previously this used `merge - 1` (with a stale
             // TODO marker), which landed the join dot one row above
             // the `};`, on the last arm's body line.
+            if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
+              self.all_paths_exit = true;
+            }
             self.add_external_event(split, ExternalEvent::Branch {
               live_vars: liveness,
               branches: branch_data,

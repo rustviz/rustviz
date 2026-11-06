@@ -1028,6 +1028,12 @@ fn render_dot(
                 // { ... }` ends with ResourceMoved even though
                 // there's no syntactic Move directly in the outer
                 // branch's events.
+                // Every branch leaves the function (an `if` / `else` or
+                // `match` whose branches all `return` or panic): nothing
+                // reaches the merge, so there's no join to mark (#515).
+                if !branch_history.is_empty() && branch_history.iter().all(|b| b.diverges) {
+                    continue;
+                }
                 let (mixed_moved, all_moved) = merge_move_kind(branch_history, ty);
                 // `let s;` left unassigned on some path (#234): that
                 // branch ends with no value, not with a move, so

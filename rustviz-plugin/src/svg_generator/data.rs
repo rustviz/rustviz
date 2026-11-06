@@ -2645,6 +2645,12 @@ impl Visualizable for VisualizationData {
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
+                    // Every branch leaves the function (#515): nothing
+                    // follows the conditional, and the column ends in
+                    // the branches.
+                    if !branch_history.is_empty() && branch_history.iter().all(|b| b.diverges) {
+                        previous_state = State::OutOfScope;
+                    }
                     // Resume the parent timeline at `merge_point`,
                     // not `merge_point + 1`. The join dot sits at
                     // `merge_point` (see render_dot's Branch arm);
@@ -2715,6 +2721,12 @@ impl Visualizable for VisualizationData {
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
+                    // Every branch leaves the function (#515): nothing
+                    // follows the conditional, and the column ends in
+                    // the branches.
+                    if !branch_history.is_empty() && branch_history.iter().all(|b| b.diverges) {
+                        previous_state = State::OutOfScope;
+                    }
                     // Resume the parent timeline at `merge_point`,
                     // not `merge_point + 1`. The join dot sits at
                     // `merge_point` (see render_dot's Branch arm);
