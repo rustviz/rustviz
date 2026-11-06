@@ -389,6 +389,32 @@ pub fn render_svg(
     // stacked arrow would land its label on top of the previous fn's
     // last timeline row.
     let mut extras_at_source_line: Vec<(usize, usize)> = Vec::new();
+    // A variable moved / copied into a call (`take(y)`, `takes(s, r.len())`)
+    // on a line where another arrow lands (typically a borrow ending)
+    // joins that line's stacked arrows, so the two are drawn on separate
+    // rows instead of one covering the other (#200).
+    let into_fn_extra: Vec<(usize, ExternalEvent)> = visualization_data
+        .preprocess_external_events
+        .iter()
+        .filter(|(line, event)| {
+            event.is_arrow_ev()
+                && matches!(event, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
+                && visualization_data.event_line_map.get(line).map_or(false, |ev| {
+                    !ev.iter().any(|x| x.get_id() == event.get_id())
+                })
+                && {
+                    let (from, to) = ResourceAccessPoint_extract(event);
+                    from.extract_rap().map_or(false, |rap| !rap.is_fn())
+                        && to.extract_rap().map_or(false, |rap| rap.is_fn())
+                }
+        })
+        .map(|(line, event)| (*line, event.clone()))
+        .collect();
+    for (line, event) in into_fn_extra {
+        if let Some(ev) = visualization_data.event_line_map.get_mut(&line) {
+            ev.push(event);
+        }
+    }
     let mut skippable_ev: HashSet<usize> = HashSet::new();
     let mut line_insertion_map: HashMap<usize, usize> = HashMap::new();
     while i < size {
@@ -470,12 +496,7 @@ pub fn render_svg(
                 // in `r[0] = x;` / `*r = s;`.
                 let ref_param_ends = matches!(event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
                     && matches!(to, ResourceTy::Caller);
-                // A variable moved / copied into a call (`take(y)`,
-                // `takes(s, r.len())`, `*r + 1`) on the line where
-                // another arrow lands, typically a borrow ending.
-                let var_into_fn = from.extract_rap().map_or(false, |rap| !rap.is_fn())
-                    && to.extract_rap().map_or(false, |rap| rap.is_fn());
-                if (is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place || var_into_fn))
+                if (is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
                     || borrow_of_temporary
                     || ref_param_ends {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
