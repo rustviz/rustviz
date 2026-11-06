@@ -2623,7 +2623,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     let name = ident.to_string();
     self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
-      line_num, ResourceTy::Value(tmp.clone()), VecDeque::new(), self.current_scope, !self.inside_branch);
+      line_num, ResourceTy::Value(tmp.clone()), VecDeque::new(), self.current_scope, !self.inside_branch,
+      self.ref_pointee_is_copy(lhs_ty, hirid.owner));
     let r_data = self.raps.get_mut(&name).unwrap();
     r_data.extended_temp = Some(tmp_name);
     let r = r_data.rap.to_owned();
