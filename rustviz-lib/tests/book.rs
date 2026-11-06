@@ -1171,7 +1171,9 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_09_struct_destructure",
-        must_contain: &["Copy from p to x", "Copy from p to y"],
+        must_contain: &["Copy from p.x to x", "Copy from p.y to y"],
+        // Destructuring copies each i32 field out of p; it isn't a copy of p as a whole (#326).
+        must_not_contain: &["Copy from p to x", "Copy from p to y"],
         ..E
     },
     Snippet {
