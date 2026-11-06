@@ -394,6 +394,10 @@ const EXPECTED_OK: &[&str] = &[
     // A Copy variable bound in every branch is "bound to a value" at
     // the merge, not "acquired ownership of a resource" (#316).
     "merge_bound_copy",
+    // A write through `&mut` / `Box` says the old value is dropped.
+    "deref_write_drops_old",
+    // `drop(x)` states that it drops x.
+    "mem_drop_states_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3169,6 +3173,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "push_str reads from/writes to s (mutable reborrow — s can't be used until push_str returns)",
+        ],
+    },
+    // ─── Writes that overwrite a value state its drop ────────────────
+    TooltipExpect {
+        name: "deref_write_drops_old",
+        // `*r = s` over a String drops the String that was there; so do
+        // `*q = String::from("t")` and a Box's `*b = …`. The place has no
+        // column, so the write's tooltip is where it's said, in the words
+        // of a plain assignment (2026-11-05 decision). `*n = 5` (i32) is
+        // "assigned a new value", `*rq = q2` (nothing to drop) just
+        // acquires, and `*r += "x"` (an operator call) keeps "modified
+        // through".
+        must_contain: &[
+            "*r acquires ownership of a new resource; its previous resource is dropped",
+            "*q acquires ownership of a new resource; its previous resource is dropped",
+            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "*n is assigned a new value",
+            "*rq acquires ownership of a resource",
+            "the resource r points to is modified through *r",
+        ],
+        must_not_contain: &[
+            "its previous value is dropped",
+            "(copied from",
+            "(moved from",
+            "the resource n points to is modified through *n",
+            "the resource q points to is modified through *q",
+            "the resource b points to is modified through *b",
+            "the resource rq points to is modified through *rq",
+        ],
+    },
+    TooltipExpect {
+        name: "mem_drop_states_drop",
+        // `drop(s)` / `std::mem::drop(v)` is where the value is dropped
+        // (the arrow only says "Move from s to drop"). A Copy value has
+        // nothing to drop, and a user function that happens to be named
+        // `drop` isn't `std::mem::drop`.
+        must_contain: &[
+            "Move from s to drop",
+            "s's resource is moved into drop, which drops it",
+            "v's resource is moved into std::mem::drop, which drops it",
+            "Copy from n to drop",
+            "t's resource is moved",
+        ],
+        must_not_contain: &[
+            "t's resource is moved into mine::drop, which drops it",
+            "n's resource is moved into drop, which drops it",
         ],
     },
     // ─── A moved-out reference's state (#292) ────────────────────────
