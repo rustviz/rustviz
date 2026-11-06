@@ -1271,11 +1271,14 @@ pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
 /// an implicit-drop state. Distinct from the "may have been moved"
 /// wording: there's no maybe here, the variable definitely doesn't
 /// own anything after the conditional.
-pub fn event_dot_branch_merge_all_moved(my_name: &String) -> String {
+/// `some_diverge`: a branch has type `!` (`return`, `panic!()`) and
+/// never gets here; the claim is about the branches that do (#296).
+pub fn event_dot_branch_merge_all_moved(my_name: &String, some_diverge: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} was moved or dropped in every branch above",
-        my_name_fmt
+        "{0} was moved or dropped in every branch above{1}",
+        my_name_fmt,
+        if some_diverge { " that reaches this point" } else { "" }
     )
 }
 
@@ -1283,33 +1286,38 @@ pub fn event_dot_branch_merge_all_moved(my_name: &String) -> String {
 /// variable (the `let s = if … { … } else { … };` shape, plus the
 /// match-as-rhs analog). After the conditional the variable owns a
 /// freshly bound resource regardless of which branch ran.
-pub fn event_dot_branch_merge_bound(my_name: &String) -> String {
+/// `some_diverge`: an arm like `_ => unreachable!()` produces no
+/// value and never gets here; every arm that does bound a value (#296).
+pub fn event_dot_branch_merge_bound(my_name: &String, some_diverge: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} acquired ownership of a resource (in all branches above)",
-        my_name_fmt
+        "{0} acquired ownership of a resource (in all branches above{1})",
+        my_name_fmt,
+        if some_diverge { " that reach this point" } else { "" }
     )
 }
 
 /// `event_dot_branch_merge_bound` for a reference variable: every
 /// branch bound it to a reference, which never owns its referent.
-pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool) -> String {
+pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool, some_diverge: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let kind = if is_mut { "a mutable" } else { "an immutable" };
     format!(
-        "{0} is bound to {1} reference (in all branches above)",
-        my_name_fmt, kind
+        "{0} is bound to {1} reference (in all branches above{2})",
+        my_name_fmt, kind,
+        if some_diverge { " that reach this point" } else { "" }
     )
 }
 
 /// `event_dot_branch_merge_bound` for a Copy variable (`let n = match x
 /// { 0 => 1, _ => 2 };`): an `i32` holds a value, not a resource it
 /// owns (#316). Matches the per-arm `event_dot_acquire_copyable`.
-pub fn event_dot_branch_merge_bound_copy(my_name: &String) -> String {
+pub fn event_dot_branch_merge_bound_copy(my_name: &String, some_diverge: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} is bound to a value (in all branches above)",
-        my_name_fmt
+        "{0} is bound to a value (in all branches above{1})",
+        my_name_fmt,
+        if some_diverge { " that reach this point" } else { "" }
     )
 }
 

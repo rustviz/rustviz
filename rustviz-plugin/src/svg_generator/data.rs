@@ -559,7 +559,13 @@ pub struct ExtBranchData {
     pub line_map: BTreeMap<usize, Vec<ExternalEvent>>,
 
     // Variables declared within the branch
-    pub decl_vars: HashSet<ResourceAccessPoint>
+    pub decl_vars: HashSet<ResourceAccessPoint>,
+
+    // The branch's body has type `!` (`unreachable!()`, `panic!()`,
+    // `return`, `continue`, `break`): it never reaches the merge
+    // point, so it contributes nothing to the state after the
+    // conditional (#296).
+    pub diverges: bool,
 }
 
 pub fn string_of_branch(b: &BranchType, index: usize) -> String {
@@ -810,7 +816,9 @@ pub struct BranchData {
   pub t_data: TimelineColumnData,
   pub e_data: Vec<(usize, Event)>,
   pub width: usize,
-  pub states: Vec<(usize, usize, State)>
+  pub states: Vec<(usize, usize, State)>,
+  // See ExtBranchData::diverges.
+  pub diverges: bool,
 }
 
 
@@ -1967,9 +1975,12 @@ impl Visualizable for VisualizationData {
                 Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
-                    let mut ending_states: Vec<State> = Vec::new();
+                    // State of each branch that reaches the merge; a
+                    // diverging branch (#296) never gets there.
+                    let mut reaching_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
-                        ending_states.push(self.compute_branch_states(
+                        let diverges = branch.diverges;
+                        let end_state = self.compute_branch_states(
                             & mut branch.e_data,
                             & mut branch.states,
                             hash,
@@ -1979,8 +1990,20 @@ impl Visualizable for VisualizationData {
                             // bridges that last row — unless the
                             // branches share lines (#117).
                             branch_column_rows(*split_point, *merge_point),
-                            previous_state.clone()));
+                            previous_state.clone());
+                        if !diverges {
+                            reaching_states.push(end_state);
+                        }
                     }
+                    // If every recorded branch diverges, only a path
+                    // the user didn't write can get past the
+                    // conditional (the implicit empty `else` of an
+                    // `if`), and it leaves the state as it was.
+                    let mut ending_states = if reaching_states.is_empty() {
+                        vec![previous_state.clone()]
+                    } else {
+                        reaching_states
+                    };
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
@@ -2022,9 +2045,12 @@ impl Visualizable for VisualizationData {
                 Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
-                    let mut ending_states: Vec<State> = Vec::new();
+                    // State of each branch that reaches the merge; a
+                    // diverging branch (#296) never gets there.
+                    let mut reaching_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
-                        ending_states.push(self.compute_branch_states(
+                        let diverges = branch.diverges;
+                        let end_state = self.compute_branch_states(
                             & mut branch.e_data,
                             & mut branch.states,
                             hash,
@@ -2034,8 +2060,20 @@ impl Visualizable for VisualizationData {
                             // bridges that last row — unless the
                             // branches share lines (#117).
                             branch_column_rows(*split_point, *merge_point),
-                            previous_state.clone()));
+                            previous_state.clone());
+                        if !diverges {
+                            reaching_states.push(end_state);
+                        }
                     }
+                    // If every recorded branch diverges, only a path
+                    // the user didn't write can get past the
+                    // conditional (the implicit empty `else` of an
+                    // `if`), and it leaves the state as it was.
+                    let mut ending_states = if reaching_states.is_empty() {
+                        vec![previous_state.clone()]
+                    } else {
+                        reaching_states
+                    };
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
@@ -2230,7 +2268,7 @@ impl Visualizable for VisualizationData {
                             is_struct_group: false,
                             is_member: false, 
                             owner: 0
-                          }, e_data: new_b_history, width: 0, states: Vec::new() });
+                          }, e_data: new_b_history, width: 0, states: Vec::new(), diverges: b.diverges });
                     }
 
                     b_history.push((line_number,  
@@ -2344,7 +2382,7 @@ impl Visualizable for VisualizationData {
                             is_struct_group: false,
                             is_member: false, 
                             owner: 0
-                        }, e_data: b_history, width: 0, states: Vec::new() });
+                        }, e_data: b_history, width: 0, states: Vec::new(), diverges: branch.diverges });
                     }
                     maybe_append_event(self, &is.clone(), Event::Branch { 
                                         is: is, 

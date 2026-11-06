@@ -1185,10 +1185,8 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_11_unreachable_arm",
-        status: Wrong,
-        note: "s is shown acquiring ownership on the `_ => unreachable!()` arm (#179)",
-        must_contain: &["L4 Move from String::from to s", "L5 Move from String::from to s", "s goes out of scope. Its resource is dropped."],
-        known_wrong: &["L6 s acquires ownership of a resource"],
+        must_contain: &["L4 Move from String::from to s", "L5 Move from String::from to s", "s goes out of scope. Its resource is dropped.", "L7 s acquired ownership of a resource (in all branches above that reach this point)"],
+        must_not_contain: &["L6 s acquires ownership of a resource"],
         ..E
     },
     Snippet {

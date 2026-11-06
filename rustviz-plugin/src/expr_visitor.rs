@@ -1486,6 +1486,13 @@ pub fn register_iflet_let_bindings(
 
 // This function does the work of adding an event for let stmts
 pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
+  // An expression of type `!` (`unreachable!()`, `panic!()`, `return`,
+  // `continue`) never produces a value, so `lhs` gets nothing from it:
+  // `_ => unreachable!()` in `let s = match … { … }` doesn't bind `s`
+  // (#296). (`return v` hands `v` to the caller, not to `lhs`.)
+  if self.tcx.typeck(rhs.hir_id.owner).expr_ty_opt(rhs).is_some_and(|ty| ty.is_never()) {
+    return;
+  }
   // Macro-expanded RHS — `let v = vec![1, 2, 3]`, `let s = format!(...)`,
   // etc. — desugars into a `Call` whose function path was never registered
   // as a RAP (visit_expr's from_expansion guard skipped it). Treating

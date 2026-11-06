@@ -998,7 +998,7 @@ fn render_dot(
                 // "initialized in only some branches" would mislead
                 // when the other branch diverges (`panic!()`,
                 // `unreachable!()`), which this layer can't see.
-                let partly_initialized = branch_history.iter().any(|b| {
+                let partly_initialized = branch_history.iter().filter(|b| !b.diverges).any(|b| {
                     matches!(
                         b.states.last().map(|s| &s.2),
                         Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
@@ -1036,7 +1036,7 @@ fn render_dot(
                     // either by a direct move or by an implicit
                     // drop already inserted at a nested merge.
                     // Don't say "at least one"; pin it as "every".
-                    let title = hover_messages::event_dot_branch_merge_all_moved(&is.real_name());
+                    let title = hover_messages::event_dot_branch_merge_all_moved(&is.real_name(), any_diverges(branch_history));
                     let m_data = EventDotData {
                         hash: *hash as u64,
                         dot_x: cx,
@@ -1318,8 +1318,8 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
             Event::Acquire { .. } => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
                 let mut nested_any_moved = false;
-                let mut nested_all_acquired = !branch_history.is_empty();
-                for nb in branch_history {
+                let mut nested_all_acquired = branch_history.iter().any(|nb| !nb.diverges);
+                for nb in branch_history.iter().filter(|nb| !nb.diverges) {
                     let (m, a) = analyze_branch_for_join(&nb.e_data);
                     if m { nested_any_moved = true; }
                     if !a { nested_all_acquired = false; }
@@ -1345,14 +1345,16 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
 // `else` has an implicit untouched path), `all_moved` when every path
 // ended without the resource.
 fn merge_move_kind(branch_history: &[BranchData], ty: &BranchType) -> (bool, bool) {
-    let any_moved = branch_history.iter().any(|b| {
+    // A diverging branch (`_ => unreachable!()`, `return`) never reaches
+    // the merge, so it doesn't count (#296).
+    let any_moved = branch_history.iter().filter(|b| !b.diverges).any(|b| {
         b.states.last()
             .map(|s| !state_is_alive(&s.2))
             .unwrap_or(true)
     });
     // A branch that ends after a nested mixed merge is maybe-moved: it
     // counts as a path that still holds the value too.
-    let any_alive = branch_history.iter().any(|b| {
+    let any_alive = branch_history.iter().filter(|b| !b.diverges).any(|b| {
         b.states.last()
             .map(|s| state_is_alive(&s.2))
             .unwrap_or(false)
@@ -1360,7 +1362,9 @@ fn merge_move_kind(branch_history: &[BranchData], ty: &BranchType) -> (bool, boo
     });
     let has_implicit_untouched = !all_paths_present(ty, branch_history.len());
     let mixed = (any_moved && any_alive) || (any_moved && has_implicit_untouched);
-    let all_moved = !any_alive && !branch_history.is_empty() && !has_implicit_untouched;
+    let all_moved = !any_alive
+        && branch_history.iter().any(|b| !b.diverges)
+        && !has_implicit_untouched;
     (mixed, all_moved)
 }
 
@@ -1404,8 +1408,13 @@ fn all_paths_present(ty: &BranchType, n_branches: usize) -> bool {
 
 fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType) -> BranchJoin {
     let mut any_moved = false;
-    let mut all_acquired = !branch_history.is_empty();
-    for b in branch_history {
+    // Only branches that reach the merge count; a diverging one
+    // (`_ => unreachable!()`) produces no value and moves nothing
+    // that's still around afterwards (#296). `all_paths_present`
+    // still counts every branch: a diverging arm is a path, just not
+    // one that gets here.
+    let mut all_acquired = branch_history.iter().any(|b| !b.diverges);
+    for b in branch_history.iter().filter(|b| !b.diverges) {
         let (m, a) = analyze_branch_for_join(&b.e_data);
         if m { any_moved = true; }
         if !a { all_acquired = false; }
@@ -1419,20 +1428,27 @@ fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType) -> Branch
     }
 }
 
+// Some branch of the conditional has type `!` and never reaches the
+// merge (#296); the merge messages then speak of the branches that do.
+fn any_diverges(branch_history: &[BranchData]) -> bool {
+    branch_history.iter().any(|b| b.diverges)
+}
+
 fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &ResourceTy) -> String {
     let var_name = &is.real_name();
+    let some_diverge = any_diverges(branch_history);
     match compute_branch_join(branch_history, ty) {
         BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
         // A reference bound in every arm (`let msg = match n { .. => "a", .. }`)
         // holds a borrow, not ownership.
         BranchJoin::BoundHere => match is.extract_rap() {
             Some(rap) if rap.is_ref() =>
-                hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref()),
+                hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref(), some_diverge),
             // A Copy value (`let n = match x { 0 => 1, _ => 2 };`) isn't
             // a resource anyone owns (#316).
             Some(rap) if rap.is_copy() =>
-                hover_messages::event_dot_branch_merge_bound_copy(var_name),
-            _ => hover_messages::event_dot_branch_merge_bound(var_name),
+                hover_messages::event_dot_branch_merge_bound_copy(var_name, some_diverge),
+            _ => hover_messages::event_dot_branch_merge_bound(var_name, some_diverge),
         },
         // No branch moved it (#179: this used to be an empty tooltip).
         BranchJoin::Unchanged => hover_messages::event_dot_branch_merge_unchanged(var_name),
@@ -3460,6 +3476,7 @@ mod tests {
             e_data,
             width: 0,
             states: Vec::new(),
+            diverges: false,
         }
     }
 
