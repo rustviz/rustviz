@@ -3109,9 +3109,11 @@ fn render_branches(
                     // Only where the column is still drawn: a branch
                     // that moved the value away ended its column at
                     // the move already.
+                    // The bar is a marker, not a line of code: hovering it
+                    // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_bar = format!(
-                            "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
+                            "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
                             hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y,
                             hover_messages::branch_never_reaches_merge(&rap.name().to_string()),
                         );
@@ -3121,9 +3123,28 @@ fn render_branches(
 
             let runs = split_centerline_runs(&segs);
 
+            // The arm's own source lines, as the y-range that hovering
+            // its column underlines (#369). The column is also drawn
+            // dashed beside the other arms' code, and the diagonals
+            // pass it; neither underlines those lines. An arm with no
+            // lines of its own (the implicit `else`) underlines none.
+            let (own_first, own_last) = ty.get_start_end(i);
+            let own_y = (own_first <= own_last).then(|| (
+                get_y_axis_pos(own_first) as f64,
+                get_y_axis_pos(own_last) as f64,
+            ));
+
+            // `data-arm-rows`: the first and last row of those lines (the
+            // corpus tests check hover against it).
+            let arm_rows_attr = if own_y.is_some() {
+                format!(" data-arm-rows=\"{} {}\"", own_first, own_last)
+            } else {
+                String::new()
+            };
+
             let mut branch_svg = String::new();
             for run in &runs {
-                branch_svg.push_str(&render_branch_run(rap, *hash, run));
+                branch_svg.push_str(&render_branch_run(rap, *hash, run, own_y));
             }
             branch_svg.push_str(&stop_bar);
 
@@ -3131,8 +3152,8 @@ fn render_branches(
             // strip glows the whole arm via
             // `.branch-group:hover .tooltip-trigger` in the CSS.
             output.entry(-1).or_insert_with(empty_panel_pair).0.timelines.push_str(&format!(
-                "        <g class=\"branch-group\">\n{}        </g>\n",
-                branch_svg,
+                "        <g class=\"branch-group\"{}>\n{}        </g>\n",
+                arm_rows_attr, branch_svg,
             ));
 
             render_branches(
@@ -3158,6 +3179,31 @@ fn push_seg_if_renderable(
     }
     let title = timeline_segment_title(&state, rap, visualization_data);
     segs.push(BranchSeg { p1, p2, state, title });
+}
+
+/// The y-range of code to underline while hovering a segment: the part
+/// of a vertical segment that lies on the arm's own lines (`own_y`: the
+/// timeline y of its first and last line). A code line's text sits 5px
+/// below its timeline row, so the last line extends by 5. A diagonal
+/// (the split's or the join's connector), a segment beside another
+/// arm's code and an arm with no lines of its own give `None` (#369).
+fn seg_underline_y(seg: &BranchSeg, own_y: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    if (seg.p1.0 - seg.p2.0).abs() > 1e-6 { return None; }
+    let (own_top, own_bot) = own_y?;
+    let (top, bot) = (seg.p1.1.min(seg.p2.1), seg.p1.1.max(seg.p2.1));
+    let (top, bot) = (top.max(own_top), bot.min(own_bot));
+    // Touching an arm's first or last row only at its end isn't beside it.
+    if top >= bot { return None; }
+    Some((top, if bot >= own_bot { own_bot + 5.0 } else { bot }))
+}
+
+/// ` data-underline-y` / ` data-underline="none"` for one drawn line of
+/// a segment (read by `insertUnderline` in helpers.js).
+fn underline_attr(seg: &BranchSeg, own_y: Option<(f64, f64)>) -> String {
+    match seg_underline_y(seg, own_y) {
+        Some((t, b)) => format!(" data-underline-y=\"{} {}\"", t, b),
+        None => " data-underline=\"none\"".to_owned(),
+    }
 }
 
 /// Group segments into maximal centerline-contiguous runs.
@@ -3189,6 +3235,7 @@ fn render_branch_run(
     rap: &ResourceAccessPoint,
     hash: u64,
     run: &[&BranchSeg],
+    own_y: Option<(f64, f64)>,
 ) -> String {
     let mut svg = String::new();
 
@@ -3210,8 +3257,8 @@ fn render_branch_run(
         let dasharray = if *dashed { "4 4" } else { "none" };
         match style {
             OwnerLine::Solid => svg.push_str(&format!(
-                "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-dasharray: {};\"/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, dasharray,
+                "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} style=\"stroke-dasharray: {};\"/>\n",
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, underline_attr(seg, own_y), dasharray,
             )),
             OwnerLine::Hollow => {
                 let perp = perp_unit(seg.p1, seg.p2);
@@ -3219,8 +3266,8 @@ fn render_branch_run(
                     let ox = perp.0 * sign * BRANCH_HALF_W;
                     let oy = perp.1 * sign * BRANCH_HALF_W;
                     svg.push_str(&format!(
-                        "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-dasharray: {};\"/>\n",
-                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, dasharray,
+                        "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} style=\"stroke-dasharray: {};\"/>\n",
+                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, underline_attr(seg, own_y), dasharray,
                     ));
                 }
             }
@@ -3259,7 +3306,7 @@ fn render_branch_run(
                 || (prev_off.1 - curr_off.1).abs() > 1e-6
             {
                 svg.push_str(&format!(
-                    "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-dasharray: {};\"/>\n",
+                    "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-dasharray: {};\"/>\n",
                     hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, prev_seg.title, dasharray,
                 ));
             }
@@ -3277,9 +3324,21 @@ fn render_branch_run(
                 .collect::<Vec<_>>()
                 .join(" ");
             let title = run.first().map(|s| s.title.clone()).unwrap_or_default();
+            // The polygon covers the whole run and is what the mouse
+            // hits, so it underlines the union of the run's vertical
+            // segments that lie on the arm's own lines.
+            let own = run.iter()
+                .filter_map(|s| seg_underline_y(s, own_y))
+                .fold(None, |acc: Option<(f64, f64)>, (t, b)| {
+                    Some(acc.map_or((t, b), |(at, ab)| (at.min(t), ab.max(b))))
+                });
+            let underline = match own {
+                Some((t, b)) => format!(" data-underline-y=\"{} {}\"", t, b),
+                None => " data-underline=\"none\"".to_owned(),
+            };
             svg.push_str(&format!(
-                "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
-                hash, pts_str, title,
+                "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+                hash, pts_str, title, underline,
             ));
         }
     }

@@ -181,11 +181,27 @@ function displayTooltip(tooltip, classname) {
     }
 
     function insertUnderline(e) {
+        // A branch column's diagonal from the split or to the join
+        // passes other arms' lines; it underlines nothing (#369).
+        if (e.currentTarget.getAttribute('data-underline') === 'none') return;
+        // A branch column's hover polygon names the y-range of its
+        // arm's own lines.
+        let underline_y = e.currentTarget.getAttribute('data-underline-y');
         let code_obj = document.getElementsByClassName(classname + ' code_panel')[0];
         let code_root = panelRoot(code_obj);
         if (!code_root) return;
         let begin = 0, end = 0;
-        if (e.currentTarget.tagName === 'path') {
+        let by_row = false;
+        if (underline_y) {
+            let ys = underline_y.split(' ').map(parseFloat);
+            // The range names rows (a line's text y - 5), not text ys: a
+            // line belongs to the arm when its row lies inside it, both
+            // ends inclusive. The match below compares rows.
+            by_row = true;
+            begin = Math.min(ys[0], ys[1]);
+            end = Math.max(ys[0], ys[1]);
+        }
+        else if (e.currentTarget.tagName === 'path') {
             let arr = e.currentTarget.getAttribute('d').split(' ');
             if (e.currentTarget.parentNode.id === 'ref_line') {
                 begin = parseInt(arr[2]);
@@ -246,7 +262,9 @@ function displayTooltip(tooltip, classname) {
         let len = lines.length;
         for (let i=0; i<len; ++i) {
             let ly = parseInt(lines[i].getAttribute('y'));
-            if (ly >= begin && ly <= end) {
+            let in_range = by_row ? (ly - 5 >= begin - 2 && ly - 5 <= end + 2)
+                                  : (ly >= begin && ly <= end);
+            if (in_range) {
                 // Underline the whole line: one SVG line across the line's own
                 // measured box. (It used to be a row of '_' sized by assuming
                 // 8px per character, which fell short with the rendered font.)
@@ -258,7 +276,7 @@ function displayTooltip(tooltip, classname) {
                 emph.setAttribute('y1', ly + 4);
                 emph.setAttribute('y2', ly + 4);
                 emph.setAttribute('stroke', 'currentColor');
-                emph.setAttribute('stroke-width', '1');
+                emph.setAttribute('stroke-width', '2');
                 code_g.appendChild(emph);
             }
         }
