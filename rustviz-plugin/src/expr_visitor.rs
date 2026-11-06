@@ -1219,7 +1219,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 self.mark_if_manually_drop(&name, ty);
             }
 
-            let evt = if parent_ty.is_ref() {
+            // A binding whose effective mode is by-reference borrows
+            // the matched place, whatever the scrutinee's type: an
+            // explicit `ref` / `ref mut` (`Some(ref s)` on an owned
+            // `Option<String>`), or a default binding mode through a
+            // reference (`Some(s)` on `&opt`). Nothing is copied or
+            // moved (#338).
+            let binding_ref = match ty_results.pat_binding_modes().get(id).map(|m| m.0) {
+                Some(rustc_hir::ByRef::Yes(_, mutbl)) => Some(mutbl),
+                _ => None,
+            };
+            let evt = if let Some(mutbl) = binding_ref {
+                if bool_of_mut(mutbl) { Evt::MBorrow } else { Evt::SBorrow }
+            } else if parent_ty.is_ref() {
                 if bool_of_mut(parent_ty.ref_mutability().unwrap()) { Evt::MBorrow }
                 else { Evt::SBorrow }
             } else {
