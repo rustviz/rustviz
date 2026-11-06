@@ -260,7 +260,6 @@ function displayTooltip(tooltip, classname) {
         let code_g = code_root.querySelector('#code');
         let lines = code_g.children;
         let len = lines.length;
-        let colour = underlineColour(e.currentTarget);
         for (let i=0; i<len; ++i) {
             let ly = parseInt(lines[i].getAttribute('y'));
             let in_range = by_row ? (ly - 5 >= begin - 2 && ly - 5 <= end + 2)
@@ -276,7 +275,7 @@ function displayTooltip(tooltip, classname) {
                 emph.setAttribute('x2', box.x + box.width);
                 emph.setAttribute('y1', ly + 4);
                 emph.setAttribute('y2', ly + 4);
-                emph.setAttribute('stroke', colour);
+                emph.setAttribute('stroke', 'currentColor');
                 emph.setAttribute('stroke-width', '2');
                 code_g.appendChild(emph);
             }
@@ -290,27 +289,6 @@ function displayTooltip(tooltip, classname) {
 // maps them back to the page. With inline SVG (`rustviz html`, the
 // playground), evt.clientX/Y are already viewport coordinates and only the
 // scroll offset is needed (the tooltip is position:absolute).
-// The colour to underline with: the hovered element's own column colour
-// (its data-hash rule in the SVG's stylesheet), else currentColor. A probe
-// <line> with the same data-hash picks the rule up from the stylesheet.
-function underlineColour(el) {
-    try {
-        let node = el.closest ? el.closest('[data-hash]') : null;
-        let hash = node && node.getAttribute('data-hash');
-        if (!hash || hash === '0') return 'currentColor';
-        let doc = el.ownerDocument;
-        let probe = doc.createElementNS('http://www.w3.org/2000/svg', 'line');
-        probe.setAttribute('data-hash', hash);
-        probe.style.visibility = 'hidden';
-        el.ownerSVGElement.appendChild(probe);
-        let c = doc.defaultView.getComputedStyle(probe).stroke;
-        probe.remove();
-        return (c && c !== 'none') ? c : 'currentColor';
-    } catch (err) {
-        return 'currentColor';
-    }
-}
-
 function mousePos(evt, obj) {
     let x_pos, y_pos;
     if (obj && obj.contentDocument) {
