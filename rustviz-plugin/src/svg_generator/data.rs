@@ -1170,6 +1170,11 @@ impl Event {
             }
             Event::Duplicate{ to, is, ..} => {
                 match to {
+                    // A `move` closure capturing a Copy value copies it (#311).
+                    _ if to.is_closure() => {
+                        let is_ref = matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_)));
+                        hover_messages::event_dot_capture_copy_to_closure(&self.deref_name(my_name), &to.name(), is_ref)
+                    }
                     // Returning a `&T` copies the reference, not the referent.
                     ResourceTy::Caller if matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
                         safe_message(hover_messages::event_dot_copy_ref_to_caller, &self.deref_name(my_name), to),
@@ -1368,8 +1373,9 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         ExternalEvent::Bind{ .. } => {
             String::from("Bind")
         },
-        ExternalEvent::Copy{ is_partial,.. } => {
+        ExternalEvent::Copy{ is_partial, to, .. } => {
             if *is_partial { String::from("Partial copy") }
+            else if to.is_closure() { String::from("Closure capture (copy)") }
             else { String::from("Copy") }
         },
         // Move/StaticBorrow/MutableBorrow into a closure binding are

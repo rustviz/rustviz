@@ -1711,6 +1711,9 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // event shape:
     //   ByValue (always for `move`, sometimes for inferred captures)
     //     → Move(upvar → f). f now owns the captured resource.
+    //     If the captured place is Copy (`move || m + 1` with
+    //     m: i32), it's copied instead: Copy(upvar → f), and the
+    //     upvar stays usable (#311).
     //   ByRef(Immutable | UniqueImmBorrow) → SBorrow(upvar → f).
     //   ByRef(Mutable)                     → MBorrow(upvar → f).
     //   ByUse (`use` capture clause, recent feature) → Move,
@@ -1748,7 +1751,23 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         // counterpart on the source side; for now we just take the
         // root variable's name).
         let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
-        let upvar_rap = match self.raps.get(&upvar_name) {
+        let by_value = matches!(capture.info.capture_kind,
+          rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
+        // A by-value capture of a Copy place copies it into the
+        // closure (#311): `m` is still usable afterwards and the
+        // closure has nothing of m's to drop. A Copy field
+        // (`move || p.x`, which captures just `p.x`) is drawn on its
+        // own column when it has one, since `p` itself is untouched.
+        let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, rhs.hir_id.owner);
+        let copied = by_value && self.tcx.type_is_copy_modulo_regions(env, capture.place.ty());
+        let rap_name = if copied {
+          self.capture_rap_name(&capture.place, &upvar_name)
+            .filter(|n| self.raps.contains_key(n))
+            .unwrap_or_else(|| upvar_name.clone())
+        } else {
+          upvar_name.clone()
+        };
+        let upvar_rap = match self.raps.get(&rap_name) {
           Some(rd) => rd.rap.to_owned(),
           None => continue,
         };
@@ -1762,6 +1781,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         let from = ResourceTy::Value(upvar_rap);
         let to = lhs.clone();
         let evt_kind = match capture.info.capture_kind {
+          _ if copied => Evt::Copy,
           rustc_middle::ty::UpvarCapture::ByValue
           | rustc_middle::ty::UpvarCapture::ByUse => Evt::Move,
           rustc_middle::ty::UpvarCapture::ByRef(kind) => match kind {
