@@ -791,6 +791,7 @@ const EXPECTED_OK: &[&str] = &[
     // subdirectories. The plugin builds user code in edition 2024.
     "edition2024/if_let_chain",
     "edition2024/if_let_chain_move",
+    "edition2024/if_let_chain_first_part",
     "edition2024/while_let_chain",
 ];
 
@@ -6631,15 +6632,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "edition2024/if_let_chain_move",
-        // `let Some(a) = x` moves the String out of `x` (into `a`, then
-        // into `consume`), so `x` has nothing to drop at the end.
+        // The last `let` moves the String out of `x` (into `a`, then into
+        // `consume`) only when the whole condition holds. When `n > 0`
+        // is false, `x` keeps its String and drops it at the end, so
+        // neither "No resource is dropped" nor an unconditional drop is
+        // right.
         must_contain: &[
             "Move from x to a",
             "Move from a to consume",
-            "x goes out of scope. No resource is dropped.",
+            "x goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "x goes out of scope. Its resource is dropped.",
+            "x goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_first_part",
+        // The chain's first part, `wrap(s)`, runs whether or not the
+        // rest holds, so `s`'s move is drawn before the split and `s`
+        // has nothing to drop. (Before, the move was drawn in the if
+        // branch and the program was refused; main shows no `w`.)
+        must_contain: &[
+            "Move from s to wrap",
+            "s goes out of scope. No resource is dropped.",
+            "Move from wrap to w",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -10354,6 +10375,28 @@ fn if_let_chain_that_moves_is_refused() {
     let err = Rustviz::new(src).expect_err("a let-chain that moves, with an else, must not render");
     let msg = err.to_string();
     assert!(msg.contains("`if let` chains that move or assign a variable declared outside the condition (`x`"),
+        "expected the let-chain-move refusal, got:\n{}", msg);
+}
+
+/// Without an `else` too (#281): when `a.len() > 0` is false the body
+/// is skipped, but `x`'s String was already moved into `a` (and dropped
+/// with it). The move would be drawn in the if branch, with the empty
+/// path after the `if` still owning `x`'s String, and `x`'s scope end
+/// saying it's dropped there if the body didn't run: false.
+#[test]
+fn if_let_chain_without_else_that_moves_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    let src = "fn consume(_o: String) {}\n\
+               fn main() {\n\
+               \x20   let x = Some(String::from(\"a\"));\n\
+               \x20   if let Some(a) = x && a.len() > 0 {\n\
+               \x20       consume(a);\n\
+               \x20   }\n\
+               }\n";
+    let err = Rustviz::new(src).expect_err("a let-chain that moves, without an else, must not render");
+    let msg = err.to_string();
+    assert!(msg.contains("`if let` chains that move or assign a variable declared outside the condition (`x`, line 4)")
+        && msg.contains("the condition is false and the body is skipped"),
         "expected the let-chain-move refusal, got:\n{}", msg);
 }
 
