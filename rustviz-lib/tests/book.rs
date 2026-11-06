@@ -784,7 +784,7 @@ const BOOK: &[Snippet] = &[
         note: "result isn't linked to number_list, so number_list's borrow ends at L13 though result borrows it until L14 (#171)",
         must_contain: &[
             "list is an immutable borrow from the caller",
-            "Immutable borrow from list to largest",
+            "Immutable reborrow from list to largest",
             "a reference from largest is returned to the caller; the data it points to is not copied",
             "largest reads from number_list",
             "item's reference is copied (not the resource it points to)",
@@ -796,6 +796,7 @@ const BOOK: &[Snippet] = &[
         must_not_contain: &[
             "result is the owner of the resource",
             "item's resource is copied",
+            "Immutable borrow from list to largest",
             "Return immutably borrowed resource from result to *result",
             "L5 largest is initialized by copy from item",
         ],
