@@ -800,12 +800,14 @@ pub fn event_dot_ref_acquire(my_name: &String, is_mut: bool) -> String {
     }
 }
 
-// Write through a dereference: `*r = v;`, `*r += 1;`. The place
-// `*r` is the resource r points to (owned by r's lender, or by the
-// Box), so nothing is acquired; the existing resource is modified.
-// `ref_name` is r, `deref_name` is *r. `pointee_copy`: r is a
-// reference to a Copy type (`&mut i32`), so what it points to is a
-// "value", as on the lender's own column (#312).
+// In-place update through a dereference: `*r += 1;`, `r.f += 1;`. The
+// place `*r` / `r.f` is (part of) what r points to (owned by r's lender,
+// or by the Box), so nothing is acquired; the existing resource is
+// modified. `ref_name` is r, `deref_name` is *r / r.f. `pointee_copy`:
+// r is a reference to a Copy type (`&mut i32`), so what it points to is
+// a "value", as on the lender's own column (#312). An assignment
+// `*r = v` / `r.f = v` reads like a plain assignment instead (the place
+// is the subject; see `event_dot_copyable_assign` and friends).
 pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, pointee_copy: bool) -> String {
     format!(
         "the {2} {0} points to is modified through {1}",

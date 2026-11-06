@@ -1263,11 +1263,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         };
         // None means the LHS is a place the plugin doesn't model (a
-        // field through a reference `self.n` / `r.x` before #147,
-        // `(*p).f`, a tuple field `t.0`, an element that is itself a
-        // reference `v[i] = &s`, …) or an unregistered name. The write
-        // itself isn't drawn, but for `=` the RHS still goes into that
-        // place: `self.name = s` / `r.name = s` move `s`. Record that
+        // reference-typed field through a reference `h.r = &x`, a tuple
+        // field `t.0`, an element that is itself a reference
+        // `v[i] = &s`, …) or an unregistered name. The write itself
+        // isn't drawn, but for `=` the RHS still goes into that place:
+        // `t.1 = s` moves `s`. Record that
         // against an anonymous destination, otherwise `s` would later
         // be shown dropping a resource it no longer owns.
         let lhs_rty = match self.resource_of_lhs(lhs_expr) {
@@ -1283,20 +1283,27 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             return;
           }
         };
-        // `*r = v` assigns to the place `*r`: say so (2026-11-05
-        // decision, place assignments read like plain assignment).
-        // `*r += v` is an in-place update and keeps its wording.
+        // `*r = v` / `p.name = v` assign to a place behind a reference:
+        // they read like a plain assignment `y = e` (2026-11-05
+        // decision), with the place as the subject. The place has no
+        // column, so the tooltip also says the old value is dropped
+        // when its type needs drop. `*r += v` / `p.n += v` are in-place
+        // updates and keep their "modified through" wording.
+        let is_assign = matches!(expr.kind, ExprKind::Assign(..));
+        let assign_kind = || if is_copyable {
+          PlaceWrite::AssignCopy
+        } else if lhs_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner)) {
+          PlaceWrite::AssignDropsOld
+        } else {
+          PlaceWrite::AssignOwned
+        };
         let lhs_rty = match lhs_rty {
-          ResourceTy::Deref(rap) if matches!(expr.kind, ExprKind::Assign(..)) && !lhs_ty.is_ref() => {
-            let write = if is_copyable {
-              PlaceWrite::AssignCopy
-            } else if lhs_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, lhs_expr.hir_id.owner)) {
-              PlaceWrite::AssignDropsOld
-            } else {
-              PlaceWrite::AssignOwned
-            };
-            ResourceTy::Deref(rap.with_place_write(write))
-          }
+          ResourceTy::Deref(rap) if is_assign && !lhs_ty.is_ref() =>
+            ResourceTy::Deref(rap.with_place_write(assign_kind())),
+          // A reference-typed field (`h.r = &x`) is not an owned or Copy
+          // value; leave its wording alone.
+          ResourceTy::DerefField(rap, place, _) if is_assign && !lhs_ty.is_ref() =>
+            ResourceTy::DerefField(rap, place, assign_kind()),
           other => other,
         };
         // if we are pointing at a new piece of data

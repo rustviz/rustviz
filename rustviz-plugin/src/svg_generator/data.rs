@@ -112,12 +112,13 @@ impl PartialEq for DropsOld { fn eq(&self, _: &Self) -> bool { true } }
 impl Eq for DropsOld {}
 impl Hash for DropsOld { fn hash<H: Hasher>(&self, _: &mut H) {} }
 
-/// What a write through a place (`*r = e`, `v[i] = e`) does to the place's old
-/// value. Carried on the copy of the RAP a write event holds, and used
-/// only to pick the dot's tooltip (2026-11-05 decision: a place
-/// assignment reads like a plain assignment). It is not part of the
-/// RAP's identity: it compares equal and hashes to nothing, so a
-/// flagged copy is still the same RAP as the one in the table.
+/// What a write through a place (`*r = e`, `r.f = e`, `v[i] = e`) does to the place's
+/// old value. Carried on the copy of the RAP a write event holds (and on
+/// `ResourceTy::DerefField`), and used only to pick the dot's tooltip
+/// (2026-11-05 decision: a place assignment reads like a plain
+/// assignment). It is not part of the RAP's identity: it compares equal
+/// and hashes to nothing, so a flagged copy is still the same RAP as the
+/// one in the table.
 #[derive(Clone, Copy, Default, Debug)]
 pub enum PlaceWrite {
     /// An in-place update (`*r += 1`), or not an assignment at all.
@@ -259,6 +260,15 @@ pub struct Function {
 pub enum ResourceTy {
     Anonymous, // an anonymous resource holder
     Deref(ResourceAccessPoint), // Dereferencing a RAP
+    // A field reached through a reference RAP: `p.x` / `self.c` /
+    // `(*p).inner.v` where `p: &mut S`. Like `Deref`, the place is part
+    // of the resource the reference points to (owned by its lender),
+    // so the event is drawn on the reference's column. The String is
+    // the place as written in the source, used in messages.
+    // The PlaceWrite says whether the write is an assignment (and, if the
+    // field's type needs drop, that the old value is dropped: the field
+    // has no column to draw that on, so the write's tooltip says so).
+    DerefField(ResourceAccessPoint, String, PlaceWrite),
     Caller, // For expressing relationship between return expr and fn
     Value(ResourceAccessPoint),
     // A write to an element of the RAP's resource: the LHS of
@@ -280,6 +290,7 @@ impl ResourceTy {
             ResourceTy::Value(r) => r.name().to_owned(),
             ResourceTy::Deref(r) => format!("*{}", r.name()),
             ResourceTy::Index(_, place, _) => place.clone(),
+            ResourceTy::DerefField(_, place, _) => place.clone(),
             ResourceTy::Caller => "Caller".to_owned()
         }
     }
@@ -287,7 +298,7 @@ impl ResourceTy {
     pub fn real_name(&self) -> String {
         match self {
             ResourceTy::Anonymous => "Anonymous resource".to_owned(),
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) => r.name().to_owned(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.name().to_owned(),
             ResourceTy::Caller => "Caller".to_owned()
         }
     }
@@ -295,27 +306,27 @@ impl ResourceTy {
     pub fn hash(&self) -> &u64 {
         match self {
             ResourceTy::Caller | ResourceTy::Anonymous => &std::u64::MAX,
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) => r.hash(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.hash(),
         }
     }
 
     pub fn is_ref(&self) -> bool {
       match self {
-        ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) => r.is_ref(),
+        ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.is_ref(),
         _ => false
       }
     }
 
     pub fn is_mutref(&self) -> bool {
         match self {
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) => r.is_mutref(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.is_mutref(),
             _ => false
           }
     }
 
     pub fn is_closure(&self) -> bool {
         match self {
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) => r.is_closure(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.is_closure(),
             _ => false
         }
     }
@@ -323,7 +334,15 @@ impl ResourceTy {
     pub fn extract_rap(&self) -> Option<&ResourceAccessPoint> {
         match self {
             ResourceTy::Anonymous | ResourceTy::Caller => None,
-            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) => Some(r)
+            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => Some(r)
+        }
+    }
+
+    /// The reference RAP a write through `*r` / `r.f` goes through.
+    pub fn deref_rap(&self) -> Option<&ResourceAccessPoint> {
+        match self {
+            ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _) => Some(r),
+            _ => None,
         }
     }
 
@@ -1548,6 +1567,10 @@ impl Event {
                         name.insert(0, '*');
                         name
                     },
+                    ResourceTy::DerefField(_, place, _) => {
+                        *name = place.clone();
+                        name
+                    },
                     _ => name
                 }
             },
@@ -1721,11 +1744,18 @@ impl Event {
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     }
-                } else if let ResourceTy::Deref(r) = is {
-                    // `*r += 1;` modifies what r points to in place.
-                    // `*r = v;` is an assignment to the place `*r`: it
-                    // reads like a plain assignment.
-                    match r.place_write() {
+                } else if let Some(r) = is.deref_rap() {
+                    // `*r += 1;` / `r.f += 1;` modify the resource r
+                    // points to in place. `*r = v;` / `r.f = v;` are
+                    // assignments to the place `*r` / `r.f`: they read
+                    // like a plain assignment (2026-11-05 decision),
+                    // and the drop sentence of the old value is the
+                    // one plain assignment uses.
+                    let write = match is {
+                        ResourceTy::DerefField(_, _, w) => *w,
+                        _ => r.place_write(),
+                    };
+                    match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name)),
                         // The old value has nothing to drop (that's what
@@ -1772,14 +1802,20 @@ impl Event {
                     _ => place_assign_copy_message(place, from),
                 }
             }
-            Event::Copy{ from, is: ResourceTy::Deref(r), ..} => {
-                // `*r = y;` with y: Copy overwrites the resource r
-                // points to; it isn't an initialization of *r.
+            Event::Copy{ from, is: is @ (ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _)), ..} => {
+                // `*r = y;` / `r.f = y;` with y: Copy assigns a new value
+                // to the place; it isn't an initialization.
                 let deref = self.deref_name(my_name).clone();
-                match r.place_write() {
+                let write = match is {
+                    ResourceTy::DerefField(_, _, w) => *w,
+                    _ => r.place_write(),
+                };
+                match write {
                     PlaceWrite::AssignCopy => place_assign_copy_message(&deref, from),
-                    // `*r += y`: an in-place update; the arrow shows the copy.
-                    _ => hover_messages::event_dot_write_through_deref(r.name(), &deref, true),
+                    // `*r += y` / `r.f += y`: an in-place update; the arrow
+                    // shows the copy. `*r` is a Copy value here; `r.f`
+                    // is part of what r points to.
+                    _ => hover_messages::event_dot_write_through_deref(r.name(), &deref, matches!(is, ResourceTy::Deref(_)) || r.points_to_copy()),
                 }
             }
             Event::Copy{ from ,..} => {
@@ -2015,7 +2051,7 @@ impl Visualizable for VisualizationData {
             (State::OutOfScope, Event::Copy{ from: ro, is: is_ro, ..}) => {
                 match ro {
                     ResourceTy::Anonymous => State::FullPrivilege {s: LineState::Full},
-                    ResourceTy::Deref(r) | ResourceTy::Value(r) => {
+                    ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _) => {
                         // if we are copying a reference - then the State must be PartialPrivilege
                         // ex: 
                         // let a = &b; (ImmutableBorrow(b -> a))
@@ -2650,17 +2686,19 @@ impl Visualizable for VisualizationData {
                 }
             }
             _ => {
-                let could_be = ResourceTy::Deref(rap.clone());
+                // `*rap` and `rap.f` (rap a reference) are drawn on
+                // rap's own column too.
+                let through_rap = |r: &ResourceTy| r.deref_rap() == Some(rap);
                 let (from, to) = ResourceAccessPoint_extract(event);
                 // An element write (`v[i] = x`) lands on v's column.
                 // (A borrow stored in an element, `v[0] = &u`, stays
                 // off v's column: #282.)
                 let to_elem = matches!(to, ResourceTy::Index(r, _, _) if r == rap)
                     && !matches!(event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
-                if *from == *is || *from == could_be {
+                if *from == *is || through_rap(from) {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, false));
                 }
-                else if *to == *is || *to == could_be || to_elem {
+                else if *to == *is || through_rap(to) || to_elem {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
                 else if let Some(r) = event.is_gos_ev() {
@@ -2724,7 +2762,7 @@ impl Visualizable for VisualizationData {
         fn maybe_append_event (vd: & mut VisualizationData, resource_ty: &ResourceTy, event: Event, line_number: usize){
           match resource_ty {
             ResourceTy::Anonymous | ResourceTy::Caller => {}
-            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) => {
+            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => {
                 vd._append_event(&r, event, &line_number);
             }
           }

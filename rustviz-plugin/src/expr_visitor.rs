@@ -541,7 +541,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn event_touches_skipped(&self, event: &ExternalEvent) -> bool {
     let touches_ty = |r: &ResourceTy| -> bool {
       match r {
-        ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::Index(rap, _, _) => {
+        ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::Index(rap, _, _) | ResourceTy::DerefField(rap, _, _) => {
           self.skip_raps.contains(rap.name())
         }
         _ => false,
@@ -612,10 +612,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // A borrow stored in an element (`v[0] = &u`, #282) is drawn on
       // the lender's column only: v's column doesn't model it.
       (_, ResourceTy::Index(..), ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => {},
-      (ResourceTy::Value(_), ResourceTy::Value(_), _) // maybe change later
-      | (ResourceTy::Deref(_), ResourceTy::Deref(_), _) 
-      | (ResourceTy::Value(_), ResourceTy::Deref(_), _)
-      | (ResourceTy::Deref(_), ResourceTy::Value(_), _)
+      (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..),
+       ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..), _) // maybe change later
       // `v[i] = s` / `v[i] = y`: an arrow into v's column.
       | (ResourceTy::Value(_), ResourceTy::Index(..), _)
       | (ResourceTy::Deref(_), ResourceTy::Index(..), _) => {
@@ -1023,9 +1021,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // look it up. `register_struct_members` recursively registers
       // nested struct fields under qualified names like `r.a.b`, so
       // for value-typed locals chained-field LHS resolves directly.
-      // For ref-to-struct params, #147 adds per-field registration so
-      // `self.field = …` and `r.field = …` also resolve.
+      // A field reached through a reference (`self.c` in a `&mut self`
+      // method, `p.x` for `p: &mut P`, `r.a` after `let r = &mut s`)
+      // has no column of its own; it's a write through the reference,
+      // drawn on the reference's column like `*r = …` (#147).
       ExprKind::Path(_) | ExprKind::Field(..) => {
+        if let Some(rty) = self.field_through_ref(expr) {
+          // The write uses the reference: its borrow is live here.
+          if let Some(r) = rty.deref_rap() {
+            self.update_rap(&r.clone(), expr_to_line(&expr, &self.tcx));
+          }
+          return Some(rty);
+        }
         // `u._a = 5;` on a union-typed local: unions are one opaque
         // owner column with no per-field RAPs (see the AdtKind::Union
         // arms in define_lhs / the pat-binding site), so a field write
@@ -1503,6 +1510,49 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.plain_source_text(expr).unwrap_or_else(|| format!("{}[…]", rap_name))
   }
 
+  /// `expr` is a field projection whose place lies behind a reference
+  /// RAP: `p.x` / `p.inner.v` / `(*p).x` with `p: &mut P`, `self.c`
+  /// in a `&mut self` method, or `w.r.x` where the struct field `w.r`
+  /// is itself a reference. Returns `DerefField(<that reference>,
+  /// <place as written>)`.
+  ///
+  /// Only non-reference field types are handled: storing a reference
+  /// through a reference (`h.r = &x`) would need loan bookkeeping for
+  /// a place without a column, so it stays unmodelled.
+  fn field_through_ref(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    if typeck.node_type(expr.hir_id).is_ref() {
+      return None;
+    }
+    let mut cur = expr;
+    let ref_expr = loop {
+      let ExprKind::Field(recv, _) = cur.kind else { return None };
+      // `p.x` auto-derefs p: the receiver's own type is the reference.
+      if typeck.node_type(recv.hir_id).is_ref() {
+        break recv;
+      }
+      // `(*p).x`: an explicit deref of a reference.
+      if let ExprKind::Unary(UnOp::Deref, inner) = recv.kind {
+        if typeck.node_type(inner.hir_id).is_ref() {
+          break inner;
+        }
+      }
+      cur = recv;
+    };
+    if !matches!(ref_expr.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+      return None;
+    }
+    let ref_name = expr_to_rap_name(ref_expr, &self.tcx)?;
+    let rap = self.raps.get(&ref_name).map(|rd| rd.rap.to_owned())?;
+    if !rap.is_ref() {
+      return None;
+    }
+    let place = self.tcx.sess.source_map().span_to_snippet(expr.span).ok()
+      .filter(|s| !expr.span.from_expansion() && !s.contains('\n'))
+      .or_else(|| expr_to_rap_name(expr, &self.tcx))?;
+    Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     // A tuple built in the argument list (`show((s, 1))`,
@@ -1775,7 +1825,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let ty = self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id);
       if ty.builtin_deref(false).unwrap().is_ref() {
         match &lender {
-          ResourceTy::Anonymous | ResourceTy::Caller => { (lender, aliasing) }
+          // (get_rap never yields DerefField; it's an assignment-LHS place.)
+          ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) => { (lender, aliasing) }
           ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
             aliasing.push_front(x.name().to_owned()); // here the lender is added to the list of aliases 
             (lender, aliasing)

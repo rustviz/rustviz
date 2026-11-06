@@ -584,10 +584,16 @@ pub fn collect_event_live_vars(
             _ => {
                 let (from, to) = ResourceAccessPoint_extract(ev);
                 for rty in [from, to] {
-                    if let ResourceTy::Value(rap) = rty {
-                        if !rap.is_fn() && !rap.is_unbound_temporary() {
-                            out.insert(rap.clone());
+                    // A write through `*r` / `r.f` is drawn on r's
+                    // column, so r is live in the branch too.
+                    match rty {
+                        ResourceTy::Value(rap) | ResourceTy::Deref(rap)
+                        | ResourceTy::DerefField(rap, _, _) => {
+                            if !rap.is_fn() && !rap.is_unbound_temporary() {
+                                out.insert(rap.clone());
+                            }
                         }
+                        ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Index(..) => {}
                     }
                 }
             }
@@ -856,7 +862,7 @@ pub fn get_borrowers(borrower: &String, borrow_map: &HashMap<String, RefData>) -
 
 pub fn get_aliasing_data(r: &ResourceTy, borrow_map: &HashMap<String, RefData>) -> VecDeque<String> {
   match r {
-    ResourceTy::Anonymous | ResourceTy::Caller => VecDeque::new(),
+    ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) => VecDeque::new(),
     ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
       match borrow_map.get(x.name()) {
         Some(r_data) => r_data.aliasing.to_owned(),

@@ -196,8 +196,9 @@ const EXPECTED_OK: &[&str] = &[
     "chained_field_assign",
     "chained_field_assign_move",
     // — Assignment to a place with no column of its own (`self.f = …`,
-    //   `r.f = …` through a `&mut`, `v[i] = …`). The write isn't drawn;
-    //   these used to panic in `resource_of_lhs`.
+    //   `r.f = …` through a `&mut`, `v[i] = …`). These used to panic in
+    //   `resource_of_lhs`. Field writes through a reference are now
+    //   drawn on the reference's column (#147); index writes aren't.
     "assign_unmodelled_place",
     "assign_field_of_method_result",
     // — References never own their referent: `&mut` / `&` lifelines,
@@ -608,6 +609,13 @@ const EXPECTED_OK: &[&str] = &[
     "arm_call_no_blank_row",
     "arm_call_borrow_end_no_blank_row",
     "match_arm_call_no_blank_row",
+    // Writes to struct fields through a reference (`p.x = …` with
+    // `p: &mut P`, `self.c = …`, `r.x = …`) are drawn on the
+    // reference's column (#147), also inside if / match arms.
+    "field_write_through_ref",
+    "field_write_through_ref_branch",
+    // `*r = e` reads like a plain assignment (#474).
+    "deref_assign_wording",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6190,6 +6198,107 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "p still owns its resource here",
+        ],
+    },
+    TooltipExpect {
+        name: "field_write_through_ref",
+        // A field write through a reference is drawn on the reference's
+        // column (owned by the caller / lender); the reference never
+        // owns the field (#147). An assignment `p.x = e` reads like a
+        // plain assignment with the place as the subject (2026-11-05
+        // decision): "p.x is assigned a new value" for a Copy field
+        // written from a literal or expression, "p.x is assigned a copy
+        // of z" when it is copied from a named place,
+        // "p.name acquires ownership of a new resource; its previous
+        // resource is dropped" for a String. No "(moved from" /
+        // "(copied from": the arrow says it. The in-place updates
+        // `p.name += ..` / `p.inner.v += 1` keep "modified through".
+        must_contain: &[
+            "p.x is assigned a new value",
+            "Copy from z to p.x",
+            "p.x is assigned a copy of z",
+            "Move from a to p.name",
+            "p.name acquires ownership of a new resource; its previous resource is dropped",
+            "the resource p points to is modified through p.name",
+            "the resource p points to is modified through p.inner.v",
+            "(*p).x is assigned a new value",
+            "t.0 is assigned a new value",
+            "Move from String::from to t.1",
+            "t.1 acquires ownership of a new resource; its previous resource is dropped",
+            "r.x is assigned a new value",
+            "w.r.x is assigned a new value",
+            "self.c is assigned a new value",
+        ],
+        must_not_contain: &[
+            "p.x acquires ownership of a resource",
+            "p.name acquires ownership of a resource",
+            "self.c acquires ownership of a resource",
+            "p.x is the owner of the resource",
+            "self.c is the owner of the resource",
+            "the resource p points to is modified through *p",
+            // An assignment is not "modified through".
+            "the resource p points to is modified through p.x",
+            "the resource p points to is modified through (*p).x",
+            "the resource t points to is modified through t.0",
+            "the resource t points to is modified through t.1",
+            "the resource r points to is modified through r.x",
+            "the resource w.r points to is modified through w.r.x",
+            "the resource self points to is modified through self.c",
+            "its previous value is dropped",
+            "(copied from",
+            "(moved from",
+        ],
+    },
+    TooltipExpect {
+        name: "field_write_through_ref_branch",
+        // The same writes inside if / match arms, plus `*s = …` in both
+        // arms of an if/else, which used to panic ("Shouldn't be
+        // happening" in fetch_timeline).
+        must_contain: &[
+            "p.x is assigned a new value",
+            "Move from String::from to p.name",
+            "Move from v to p.name",
+            "p.name acquires ownership of a new resource; its previous resource is dropped",
+            "Move from String::from to *s",
+            "*s acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "p.x acquires ownership of a resource",
+            "p.name acquires ownership of a resource",
+            "the resource p points to is modified through p.x",
+            "its previous value is dropped",
+            "the resource s points to is modified through *s",
+            "(copied from",
+            "(moved from",
+        ],
+    },
+    TooltipExpect {
+        name: "deref_assign_wording",
+        // `*r = e` assigns to the place `*r` (2026-11-05 decision): a Copy
+        // value is "assigned a new value", an owned value says its
+        // previous resource is dropped (a Box's too), a non-Copy value
+        // with nothing to drop just acquires the new one. No
+        // "(copied from" / "(moved from": the arrow says it. The
+        // in-place update `*r += 1` keeps "modified through".
+        must_contain: &[
+            "Copy from y to *r",
+            "*r is assigned a copy of y",
+            "*r is assigned a new value",
+            "Move from t to *ra",
+            "*ra acquires ownership of a new resource; its previous resource is dropped",
+            "Move from u to *b",
+            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "Move from q2 to *rq",
+            "*rq acquires ownership of a resource",
+            "the resource r points to is modified through *r",
+        ],
+        must_not_contain: &[
+            "(copied from",
+            "(moved from",
+            "the resource ra points to is modified through *ra",
+            "the resource b points to is modified through *b",
+            "the resource rq points to is modified through *rq",
+            "*r acquires ownership",
         ],
     },
 ];

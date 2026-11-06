@@ -274,8 +274,7 @@ rather than listed here.
   (`v.last_mut().unwrap().n = 5`). The tooltip reads like a plain
   assignment (the place is the subject) and says the previous resource
   is dropped when its type needs drop, but the drop is not drawn on a
-  column. Not drawn: a field through a reference (`self.n += 1` in a
-  `&mut self` method, `c.n = …` where `c: &mut T`), a place that holds
+  column. Not drawn: a place that holds
   a reference (`v[i] = &s`, `h.r = &x`: overwriting a reference drops
   nothing), and a place not reached from a local variable. A value
   moved into such a place is still shown as moved, and a borrow stored
@@ -303,6 +302,15 @@ rather than listed here.
   (`*slots[0] += 10` with `slots: Vec<&mut i32>`) is drawn there too,
   as a modification of what `slots[0]` points to; the variable it
   points to isn't shown changing.
+- A write to a field through a reference (`self.n += 1` in a `&mut
+  self` method, `c.n = …` where `c: &mut T`) is drawn on the
+  reference's column, not on the column of the struct it borrows from.
+  An assignment reads like a plain assignment with the field as the
+  subject ("c.n is assigned a new value"); an update like `+=` says
+  "the resource c points to is modified through c.n". When the
+  assignment replaces a value that needs drop (a `String` field), the
+  tooltip says "its previous resource is dropped"; the field has no
+  column to draw that on.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
 - `async` / `await`, and user-defined macros (only standard-library
