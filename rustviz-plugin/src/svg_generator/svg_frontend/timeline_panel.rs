@@ -3550,22 +3550,24 @@ const COLLAPSED_APEX: i64 = 30;
 /// added.
 const PATTERN_SPLIT_RISE: i64 = 15;
 
-/// Whether the conditional `history[i]` is an `if let` (over several
-/// lines) whose pattern binds from this column: a borrow, copy or move
-/// out of it on the split line, the first thing its `if` arm does. The
-/// match happens as control enters that arm, so the arm's column starts
-/// on the split row with the binding's dot, and the split dot goes
-/// half a row above it (`PATTERN_SPLIT_RISE`) with the arms forking
-/// from there. Drawn from the split dot on the split row, the arm ran
-/// back up from its diagonal to the binding's dot, and the binding's
-/// arrow hopped over the split dot (#382).
+/// Whether the conditional `history[i]` (over several lines) has a
+/// first arm that starts on the split line, with an event of this column:
+/// an `if let` pattern's borrow, copy or move out of it, which is the
+/// first thing its `if` arm does (#382), or any event of an arm written
+/// on the `if` / `match` line itself, as in `if c { take(s); } else {`
+/// (#508). The arm's column then starts on the split row with that
+/// event's dot, and the split dot goes half a row above it
+/// (`PATTERN_SPLIT_RISE`) with the arms forking from there. Drawn from
+/// the split dot on the split row, the arm ran back up from its diagonal
+/// to the event's dot, and an arrow from that dot hopped over the split
+/// dot.
 ///
 /// Not when the column has a dot of its own on the split line (an
-/// event of the scrutinee): it would be left between the arms.
+/// event of the condition or scrutinee, as in `if s.len() > 1 { take(s); }`):
+/// it would be left between the arms.
 fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
-    let Event::Branch { branch_history, ty, split_point, merge_point, .. } = &history[i].1 else { return false };
-    ty.is_if_let()
-        && !branch_is_collapsed(*split_point, *merge_point)
+    let Event::Branch { branch_history, split_point, merge_point, .. } = &history[i].1 else { return false };
+    !branch_is_collapsed(*split_point, *merge_point)
         && branch_history.first().is_some_and(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
         && !history.iter().enumerate().any(|(j, (l, ev))| {
             j != i && l == split_point && !matches!(ev, Event::RefDie { .. })
