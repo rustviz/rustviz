@@ -3876,9 +3876,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // temporaries and get no event on `b` / `v` / `s`: in
         // particular `into_bytes` consumes the clone, not `s`.
         must_contain: &[
-            "get_mut reads from/writes to b",
-            "iter reads from v",
-            "clone reads from s",
+            "get_mut reads from/writes to b (implicitly mutably borrowed)",
+            "iter reads from v (implicitly borrowed)",
+            "clone reads from s (implicitly borrowed)",
             "Move from into_bytes to bytes",
             "s goes out of scope. Its resource is dropped.",
         ],
@@ -3899,15 +3899,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `n` and `default` were said to drop a String they no longer
         // own.
         must_contain: &[
-            "last_mut reads from/writes to names",
+            "last_mut reads from/writes to names (implicitly mutably borrowed)",
             "Move from n to push",
             "n's resource is moved",
             "n goes out of scope. No resource is dropped.",
-            "take reads from/writes to opt",
+            "take reads from/writes to opt (implicitly mutably borrowed)",
             "Move from default to unwrap_or",
             "default goes out of scope. No resource is dropped.",
             "opt goes out of scope. Its resource is dropped.",
-            "trim reads from text",
+            "trim reads from text (implicitly borrowed)",
             "contains reads from needle",
         ],
         must_not_contain: &[
@@ -3939,7 +3939,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // arguments only read `s`.
         must_contain: &[
             "clone reads from s",
-            "as_str reads from s",
+            "as_str reads from s (implicitly borrowed)",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
