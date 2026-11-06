@@ -60,6 +60,12 @@ pub struct RefData {
   // borrow data that lives for the whole program (a string literal,
   // a static); the borrow-end arrow then names it.
   pub static_lender: Option<StaticLender>,
+  /// Span of the `&x` / `&mut x` expression this reference was
+  /// assigned from, when it was one. `print_lifetimes` uses it to
+  /// pick this reference's own loan out of MIR's borrow data; two
+  /// references borrowing the same variable on one line (`let a = &x;
+  /// let b = &x;`) are otherwise indistinguishable (#233).
+  pub borrow_span: Option<rustc_span::Span>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,7 +311,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_static_ref_member(name.clone(), lhs_mut, scope, is_global, None, pointee_copy);
       }
     }
-    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None });
+    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None });
   }
   
   /// True iff `ref_ty` is `&T` / `&mut T` with `T: Copy` (`&i32`).
@@ -1076,6 +1082,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.current_scope, !self.inside_branch, pointee_copy);
       if let Some(rd) = self.borrow_map.get_mut(&name) {
         rd.static_lender = static_lender;
+        rd.borrow_span = borrow_span_of(expr);
       }
     }
     else if ty.is_adt() && !is_special {
@@ -1180,6 +1187,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           ref_mutability,
           aliasing: VecDeque::new(),
           static_lender: None,
+          borrow_span: None,
         });
       } else {
         let field_is_copy = self.ty_is_copy(field_ty, owner_id);
@@ -1996,9 +2004,25 @@ pub fn print_out_of_scope(&mut self){
     // this is necessary for some cases where we can't know where a lifetime actually ends
     // see tests/basic_if7.rs for an example
     let mir_b_data = self.gather_borrow_data(&self.bwf);
+    // A reference made by `&x` / `&mut x` takes the loan issued at that
+    // exact expression (#233). The others fall back to matching on
+    // (line, lender name), skipping loans already taken by span, so
+    // `let a = &x; let b = &x;` can't hand `b` the loan of `a`. Each
+    // pass is independent of borrow_map's iteration order.
+    let mut by_span: HashSet<usize> = HashSet::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each entry is refined on its own; the by_span set is order-independent")]
+    for (_name, data) in self.borrow_map.iter_mut() {
+      if let Some(m_data) = mir_b_data.iter().find(|m| ExprVisitor::borrow_span_match(data, m)) {
+        data.lifetime = m_data.region.1;
+        by_span.insert(m_data.borrow_idx);
+      }
+    }
     #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each entry is refined on its own from the mir_b_data Vec")]
     for (_name, data) in self.borrow_map.iter_mut() {
-      for m_data in mir_b_data.iter() {
+      if data.borrow_span.is_some_and(|sp| mir_b_data.iter().any(|m| m.span == sp)) {
+        continue; // refined above
+      }
+      for m_data in mir_b_data.iter().filter(|m| !by_span.contains(&m.borrow_idx)) {
         match ExprVisitor::borrow_match(data, m_data) {
           Some(kill) => {
             data.lifetime = kill;
