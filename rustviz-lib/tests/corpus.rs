@@ -388,6 +388,9 @@ const EXPECTED_OK: &[&str] = &[
     // Two refs borrowing the same variable on one line (#233).
     "two_refs_same_line",
     "two_refs_tuple",
+    // A closure captures only the fields it uses (Rust 2021; #328).
+    "closure_disjoint_field_capture",
+    "closure_whole_struct_capture",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3745,6 +3748,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from a to x",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_disjoint_field_capture",
+        // Rust 2021 closures capture disjoint fields: `move ||
+        // p.name.len()` moves only `p.name` into f; `p.nick` stays with
+        // p, is printed afterwards, and is dropped at the end of main.
+        // `|| q.nick.len()` borrows only `q.nick`, so `q.name` can be
+        // moved out while g is alive.
+        must_contain: &[
+            "p.name's resource is captured (moved) by closure f",
+            "Closure f captures: p.name (moved)",
+            "Closure capture (move) from p.name to f",
+            "p.nick goes out of scope. Its resource is dropped.",
+            "q.nick's resource is captured (immutably borrowed) by closure g",
+            "Return immutably borrowed resource from g to q.nick",
+            "Move from q.name to r",
+        ],
+        must_not_contain: &[
+            "p's resource is captured (moved) by closure f",
+            "Closure f captures: p (moved)",
+            "p.nick's resource is moved",
+            "p.nick goes out of scope. No resource is dropped.",
+            "q's resource is captured (immutably borrowed) by closure g",
+            "Closure g captures: q (immutably borrowed)",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_whole_struct_capture",
+        // `move || show(p)` uses all of p, so all of p (and both
+        // fields) moves into f.
+        must_contain: &[
+            "p's resource is captured (moved) by closure f",
+            "Closure f captures: p (moved)",
+            "p.nick's resource is moved",
+            "p.nick goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "p.nick goes out of scope. Its resource is dropped.",
         ],
     },
 ];
