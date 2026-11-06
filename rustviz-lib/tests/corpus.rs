@@ -405,6 +405,15 @@ const EXPECTED_OK: &[&str] = &[
     "method_chain_args",
     "method_arg_unnamed_receiver",
     "method_call_in_unnamed_receiver_arg",
+    // Arguments to a call of a local closure (or other callable
+    // variable) go to the call, not into the closure's column
+    // (#201, #210, #258, #284).
+    "closure_call_mutref_arg",
+    "closure_call_mutref_var",
+    "closure_call_shared_ref_arg",
+    "closure_call_copy_arg",
+    "closure_call_move_arg",
+    "generic_fn_param_call",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3944,6 +3953,86 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s's resource is moved",
+        ],
+    },
+    // ─── Arguments of a closure call go to the call (#201, #210, #258, #284) ─
+    // A call `f(args)` through a local variable used to send each
+    // argument into `f`'s own column: the renderer read that as a
+    // capture, an initialization, or (for `&x` / `&mut x` written at
+    // the call) an arrow it couldn't place and crashed on.
+    TooltipExpect {
+        name: "closure_call_mutref_arg",
+        // #210: used to crash in render_arrow.
+        must_contain: &[
+            "push reads from/writes to s",
+            "s's resource is mutably borrowed by push; s can't be used while the borrow is live",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "captured (mutably borrowed) by closure push",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_mutref_var",
+        // #201: `ru` is reborrowed for the call, once; `g` captures
+        // nothing.
+        must_contain: &[
+            "g reads from/writes to ru (mutable reborrow — ru can't be used until g returns)",
+        ],
+        must_not_contain: &[
+            "ru's resource is captured (mutably borrowed) by closure g",
+            "Pass by mutable reference from ru to g",
+            "g's mutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_shared_ref_arg",
+        // Used to crash like #210.
+        must_contain: &[
+            "print reads from s",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "captured (immutably borrowed) by closure print",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_copy_arg",
+        // #258: `5` is copied into the parameter `x`.
+        must_contain: &[
+            "Closure add_one is bound",
+        ],
+        must_not_contain: &[
+            "add_one is initialized by copy from Anonymous resource",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_call_move_arg",
+        // #284: `s` is moved into the call, not captured; `consume`
+        // owns nothing.
+        must_contain: &[
+            "Move from s to consume",
+            "s goes out of scope. No resource is dropped.",
+            "consume owns a closure",
+            "consume goes out of scope",
+        ],
+        must_not_contain: &[
+            "s's resource is captured (moved) by closure consume",
+            "Closure capture (move) from s to consume",
+            "consume owns a closure which owns 1 resource via capture",
+            "consume goes out of scope. Its 1 captured resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "generic_fn_param_call",
+        // `f(1)` inside `apply` calls the closure parameter; it
+        // doesn't initialize `f` (#179's "f is initialized by copy
+        // from Anonymous resource").
+        must_contain: &[
+            "f acquires ownership from the caller",
+        ],
+        must_not_contain: &[
+            "f is initialized by copy from Anonymous resource",
         ],
     },
 ];
