@@ -191,8 +191,13 @@ function displayTooltip(tooltip, classname) {
         let code_root = panelRoot(code_obj);
         if (!code_root) return;
         let begin = 0, end = 0;
+        let by_row = false;
         if (underline_y) {
             let ys = underline_y.split(' ').map(parseFloat);
+            // The range names rows (a line's text y - 5), not text ys: a
+            // line belongs to the arm when its row lies inside it, both
+            // ends inclusive. The match below compares rows.
+            by_row = true;
             begin = Math.min(ys[0], ys[1]);
             end = Math.max(ys[0], ys[1]);
         }
@@ -255,9 +260,12 @@ function displayTooltip(tooltip, classname) {
         let code_g = code_root.querySelector('#code');
         let lines = code_g.children;
         let len = lines.length;
+        let colour = underlineColour(e.currentTarget);
         for (let i=0; i<len; ++i) {
             let ly = parseInt(lines[i].getAttribute('y'));
-            if (ly >= begin && ly <= end) {
+            let in_range = by_row ? (ly - 5 >= begin - 2 && ly - 5 <= end + 2)
+                                  : (ly >= begin && ly <= end);
+            if (in_range) {
                 // Underline the whole line: one SVG line across the line's own
                 // measured box. (It used to be a row of '_' sized by assuming
                 // 8px per character, which fell short with the rendered font.)
@@ -268,8 +276,8 @@ function displayTooltip(tooltip, classname) {
                 emph.setAttribute('x2', box.x + box.width);
                 emph.setAttribute('y1', ly + 4);
                 emph.setAttribute('y2', ly + 4);
-                emph.setAttribute('stroke', 'currentColor');
-                emph.setAttribute('stroke-width', '1');
+                emph.setAttribute('stroke', colour);
+                emph.setAttribute('stroke-width', '2');
                 code_g.appendChild(emph);
             }
         }
@@ -282,6 +290,27 @@ function displayTooltip(tooltip, classname) {
 // maps them back to the page. With inline SVG (`rustviz html`, the
 // playground), evt.clientX/Y are already viewport coordinates and only the
 // scroll offset is needed (the tooltip is position:absolute).
+// The colour to underline with: the hovered element's own column colour
+// (its data-hash rule in the SVG's stylesheet), else currentColor. A probe
+// <line> with the same data-hash picks the rule up from the stylesheet.
+function underlineColour(el) {
+    try {
+        let node = el.closest ? el.closest('[data-hash]') : null;
+        let hash = node && node.getAttribute('data-hash');
+        if (!hash || hash === '0') return 'currentColor';
+        let doc = el.ownerDocument;
+        let probe = doc.createElementNS('http://www.w3.org/2000/svg', 'line');
+        probe.setAttribute('data-hash', hash);
+        probe.style.visibility = 'hidden';
+        el.ownerSVGElement.appendChild(probe);
+        let c = doc.defaultView.getComputedStyle(probe).stroke;
+        probe.remove();
+        return (c && c !== 'none') ? c : 'currentColor';
+    } catch (err) {
+        return 'currentColor';
+    }
+}
+
 function mousePos(evt, obj) {
     let x_pos, y_pos;
     if (obj && obj.contentDocument) {

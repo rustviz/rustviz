@@ -208,8 +208,13 @@ function displayTooltip(tooltip, classname) {
         let codeGroup = codeRoot.getElementById ? codeRoot.getElementById('code') : codeRoot.querySelector('#code');
         if (!codeGroup) return;
         let begin = 0, end = 0;
+        let by_row = false;
         if (underline_y) {
             let ys = underline_y.split(' ').map(parseFloat);
+            // The range names rows (a line's text y - 5), not text ys: a
+            // line belongs to the arm when its row lies inside it, both
+            // ends inclusive. The match below compares rows.
+            by_row = true;
             begin = Math.min(ys[0], ys[1]);
             end = Math.max(ys[0], ys[1]);
         }
@@ -269,9 +274,12 @@ function displayTooltip(tooltip, classname) {
         // add underlining to every relevant line
         let lines = codeGroup.children;
         let len = lines.length; // prevent len from changing
+        let colour = underlineColour(e.currentTarget);
         for (let i=0; i<len; ++i) {
             let ly = parseInt(lines[i].getAttribute('y'));
-            if (ly >= begin && ly <= end) { // only underline relevant code
+            let in_range = by_row ? (ly - 5 >= begin - 2 && ly - 5 <= end + 2)
+                                  : (ly >= begin && ly <= end);
+            if (in_range) { // only underline relevant code
                 // Underline the whole line: one SVG line across the line's own
                 // measured box. (It used to be a row of '_' sized by assuming
                 // 8px per character, which fell short with the rendered font.)
@@ -282,8 +290,8 @@ function displayTooltip(tooltip, classname) {
                 emph.setAttribute('x2', box.x + box.width);
                 emph.setAttribute('y1', ly + 4);
                 emph.setAttribute('y2', ly + 4);
-                emph.setAttribute('stroke', 'currentColor');
-                emph.setAttribute('stroke-width', '1');
+                emph.setAttribute('stroke', colour);
+                emph.setAttribute('stroke-width', '2');
                 codeGroup.appendChild(emph);
             }
         }
@@ -296,6 +304,27 @@ function displayTooltip(tooltip, classname) {
 // viewport coordinates — we only need to add scroll to anchor against
 // document.body (since the tooltip is position:absolute with no positioned
 // ancestor).
+// The colour to underline with: the hovered element's own column colour
+// (its data-hash rule in the SVG's stylesheet), else currentColor. A probe
+// <line> with the same data-hash picks the rule up from the stylesheet.
+function underlineColour(el) {
+    try {
+        let node = el.closest ? el.closest('[data-hash]') : null;
+        let hash = node && node.getAttribute('data-hash');
+        if (!hash || hash === '0') return 'currentColor';
+        let doc = el.ownerDocument;
+        let probe = doc.createElementNS('http://www.w3.org/2000/svg', 'line');
+        probe.setAttribute('data-hash', hash);
+        probe.style.visibility = 'hidden';
+        el.ownerSVGElement.appendChild(probe);
+        let c = doc.defaultView.getComputedStyle(probe).stroke;
+        probe.remove();
+        return (c && c !== 'none') ? c : 'currentColor';
+    } catch (err) {
+        return 'currentColor';
+    }
+}
+
 function mousePos(evt, obj) {
     if (obj && obj.contentDocument) {
         let x_pos = evt.clientX + obj.getBoundingClientRect().x + 15;
