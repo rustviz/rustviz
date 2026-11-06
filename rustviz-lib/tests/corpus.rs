@@ -434,6 +434,10 @@ const EXPECTED_OK: &[&str] = &[
     "inherent_method_receivers",
     "inherent_method_unit_struct",
     "nested_struct_moved_into_fn",
+    // `ref` / `ref mut` in a `let` pattern borrows (#380).
+    "let_ref_binding_borrows",
+    // `let ref d = *r;` used to panic in find_lender (#422).
+    "let_ref_deref_reborrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4265,6 +4269,59 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o.inner.v goes out of scope. Its resource is dropped.",
             "q.inner.v goes out of scope. Its resource is dropped.",
         ],
+    },
+    // ─── `ref` / `ref mut` bindings in `let` (#380) ─────────────────
+    TooltipExpect {
+        name: "let_ref_binding_borrows",
+        // `let ref r = s;` is `let r = &s;` (rustc: "cannot move out
+        // of `s` because it is borrowed" if s is moved while r is
+        // live), `let ref mut m = w;` is `let m = &mut w;`, and `let P
+        // { ref name, .. } = p;` borrows `p.name`. Against a value
+        // (`String::from("tmp")`) the binding borrows a temporary. In
+        // `let (ref a, b) = (u, 1);` the tuple literal is a temporary
+        // that `u` is moved into (rustc: "borrow of moved value: `u`"),
+        // and `a` borrows the temporary, not `u`. (`a`'s borrow end
+        // still reads "from a to *a"; that wording is #178.)
+        must_contain: &[
+            "Immutable borrow from s to r",
+            "s's resource is immutably borrowed by r; s is read-only while the borrow is live",
+            "Mutable borrow from w to m",
+            "w goes out of scope. Its resource is dropped.",
+            "Immutable borrow from p.name to name",
+            "Return immutably borrowed resource from name to p.name",
+            "Immutable borrow from x to k",
+            "t immutably borrows a resource",
+            "u's resource is moved",
+            "u goes out of scope. No resource is dropped.",
+            "a immutably borrows a resource",
+        ],
+        must_not_contain: &[
+            "Copy from s to r",
+            "r is initialized by copy from s",
+            "s's resource is copied",
+            "Move from w to m",
+            "w's resource is moved",
+            "w goes out of scope. No resource is dropped.",
+            "Copy from p to name",
+            "p's resource is copied",
+            "Return immutably borrowed resource from name to p",
+            "Copy from x to k",
+            "Copy from String::from to t",
+            "Copy from u to a",
+            "u's resource is copied",
+            "Return immutably borrowed resource from a to u",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // `let ref d = *r;` is `let d = &*r;`, a reborrow of `s` through
+    // `r`. It used to panic (#422).
+    TooltipExpect {
+        name: "let_ref_deref_reborrow",
+        must_contain: &[
+            "Immutable reborrow from *r to d",
+            "Return immutably borrowed resource from r to s",
+        ],
+        must_not_contain: &[],
     },
 ];
 
