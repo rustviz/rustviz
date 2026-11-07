@@ -335,7 +335,13 @@ pub enum ExitFrame {
   // the `else` is visited, and, for `let x = if … / match …`, the
   // events binding each branch's value to `x` (`rhs_arm_ids`), which
   // only happen once the conditional has finished.
-  Branch { len: usize, hide: Vec<std::ops::Range<usize>> },
+  //
+  // `binds`: events on the path into the branch that aren't in
+  // `preprocessed_events` while it's visited (a match arm's pattern
+  // bindings and guard, kept in the arm's own list), and `binds_at`
+  // the length `preprocessed_events` had when they happened. See
+  // `owns_value_here`.
+  Branch { len: usize, hide: Vec<std::ops::Range<usize>>, binds: Vec<(usize, ExternalEvent)>, binds_at: usize },
   Loop { id: rustc_hir::HirId, len: usize },
 }
 

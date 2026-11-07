@@ -1250,7 +1250,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // inner match before what an outer one holds.
     let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.iter()
       .filter(|t| t.frame >= frame_floor).cloned().collect();
-    for (idx, rap) in self.droppable_locals_at(from, end, &moved, true, line) {
+    for (idx, rap) in self.droppable_locals_at(from, end, &moved, true, line, false) {
       // A tuple is dropped before the locals declared before its match.
       while tuples.last().is_some_and(|t| idx < t.len) {
         let t = tuples.pop().unwrap();
@@ -1301,13 +1301,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a name declared twice (shadowing) once. `moved` are the ones the
   /// exit's value hands on; `refs` says whether to include
   /// non-`Copy` references (`&mut T`). A temporary whose scope ended
-  /// before `line` was dropped already.
-  fn droppable_locals(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<ResourceAccessPoint> {
-    self.droppable_locals_at(from, end, moved, refs, line).into_iter().map(|(_, r)| r).collect()
+  /// before `line` was dropped already. `binds`: see `owns_value_here`.
+  fn droppable_locals(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool) -> Vec<ResourceAccessPoint> {
+    self.droppable_locals_at(from, end, moved, refs, line, binds).into_iter().map(|(_, r)| r).collect()
   }
 
   /// `droppable_locals`, each with its index in `in_scope`.
-  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<(usize, ResourceAccessPoint)> {
+  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool) -> Vec<(usize, ResourceAccessPoint)> {
     if from >= end {
       return Vec::new();
     }
@@ -1327,7 +1327,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rd.rap.is_temporary() && rd.scope < line {
         continue;
       }
-      if !self.owns_value_here(*rd.rap.hash()) {
+      if !self.owns_value_here(*rd.rap.hash(), binds) {
         continue;
       }
       out.push((idx, rd.rap.clone()));
@@ -1342,7 +1342,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn note_try(&mut self, try_expr: &'tcx Expr<'tcx>) {
     let line = span_end_line(&try_expr.span, &self.tcx);
     let end = self.in_scope.len();
-    for rap in self.droppable_locals(0, end, &BTreeSet::new(), false, line) {
+    for rap in self.droppable_locals(0, end, &BTreeSet::new(), false, line, true) {
       let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
         && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
       if dup {
@@ -1453,7 +1453,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// conditional above moved it, or gave it a value, on some paths
   /// only, it's false: whether it's dropped here then depends on the
   /// path (Rust's drop flag), which an exit's drop dot can't say.
-  fn owns_value_here(&self, hash: u64) -> bool {
+  ///
+  /// With `binds`, a match arm's pattern bindings count too (#636):
+  /// `Some(s) =>` moved the String out of the scrutinee into `s`.
+  /// (Without, an exit in the arm still emits a scope end for the
+  /// scrutinee, whose dot says from the column's state that nothing is
+  /// dropped.)
+  fn owns_value_here(&self, hash: u64, binds: bool) -> bool {
     #[derive(Clone, Copy, PartialEq)]
     enum Own { Yes, No, Maybe }
     fn step(events: &[(usize, ExternalEvent)], hash: u64, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
@@ -1489,7 +1495,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExitFrame::Branch { hide, .. } => hide.clone(),
       ExitFrame::Loop { .. } => Vec::new(),
     }).collect();
-    step(self.preprocessed_events, hash, &hide, Own::No) == Own::Yes
+    let frame_binds: Vec<(usize, &Vec<(usize, ExternalEvent)>)> = if binds {
+      self.exit_frames.iter().filter_map(|f| match f {
+        ExitFrame::Branch { binds, binds_at, .. } if !binds.is_empty() => Some((*binds_at, binds)),
+        _ => None,
+      }).collect()
+    } else {
+      Vec::new()
+    };
+    if frame_binds.is_empty() {
+      return step(self.preprocessed_events, hash, &hide, Own::No) == Own::Yes;
+    }
+    // The events in the order they happened: each arm's bindings
+    // where its body starts.
+    let mut events: Vec<(usize, ExternalEvent)> = Vec::new();
+    let mut from = 0;
+    for (at, b) in frame_binds {
+      let at = at.clamp(from, self.preprocessed_events.len());
+      events.extend_from_slice(&self.preprocessed_events[from..at]);
+      events.extend_from_slice(b);
+      from = at;
+    }
+    events.extend_from_slice(&self.preprocessed_events[from..]);
+    step(&events, hash, &hide, Own::No) == Own::Yes
   }
 
   /// Keep an exit's drops (`drop_locals_on_exit`) only in a
@@ -2672,7 +2700,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // An exit in a branch sees neither the other branch's events
         // nor the binding of the `if`'s value to a `let` (#410).
         let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
-        self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide });
+        self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0 });
         // An exit in the if branch drops the tuple scrutinee (#327).
         let live_tuple = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()).map(|let_expr| LiveTuple {
           frame: self.exit_frames.len() - 1,
@@ -3211,7 +3239,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let entry_len = self.in_scope.len();
             let match_lo = *self.unique_id;
             let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
-            self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide });
+            self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0 });
             // `match (x, y) { … }` moves `x` and `y` into the tuple
             // whatever arm is taken (#327).
             let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
@@ -3502,9 +3530,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   at: TupleDropAt::MatchArmExit,
                 });
               }
+              // A `?` in the body sees the pattern's bindings (#636).
+              let binds_at = self.preprocessed_events.len();
+              if let Some(ExitFrame::Branch { binds: b, binds_at: at, .. }) = self.exit_frames.last_mut() {
+                b.clone_from(&branch_e_data);
+                *at = binds_at;
+              }
               self.visit_expr(arm.body);
               if live {
                 self.live_tuples.pop();
+              }
+              if let Some(ExitFrame::Branch { binds: b, .. }) = self.exit_frames.last_mut() {
+                b.clear();
               }
               let body_ids = body_lo..*self.unique_id;
               uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
