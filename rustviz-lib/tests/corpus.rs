@@ -752,6 +752,7 @@ const EXPECTED_OK: &[&str] = &[
     // An `else if let` reusing the `if let` binding's name used to panic
     // in fetch_timeline (#525).
     "else_if_let_same_name",
+    "else_if_let_same_name_else_let",
     // An arm's binding on the line where a nested `match` / `if` splits
     // holds its value in every inner branch (#502).
     "nested_match_arm_binding",
@@ -5404,8 +5405,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // A subscript means "shadows an earlier variable still in
         // scope". `s₂` shadows `s`; the two inner blocks each shadow `s₂`
         // and share the column `s₃`, whose header lists both lines. The
-        // arms of an `if` shadow nothing: one column `x`, no `x₂`.
+        // arms of an `if` shadow nothing: one column `x`, no `x₂`. The
+        // second block's `let s = 6;` initializes a new variable in the
+        // shared column; it isn't an assignment to the first block's.
         must_contain: &[
+            "s₃ is bound to a copyable value",
             "s₂, immutable. s₂ shadows s: it is a new variable named s, declared on line 9",
             "s₃, immutable. s₃ shadows s₂: it is a new variable named s, declared on lines 11 and 15 (in different branches or blocks, so only one exists at a time)",
             "x, immutable",
@@ -5414,6 +5418,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s₂, immutable. s₂ is a different variable from s: the 2nd variable named s in this function",
             "s₄, immutable",
             "x₂, immutable",
+            "s₃ is assigned a new value",
         ],
     },
     TooltipExpect {
@@ -5887,11 +5892,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Pattern bindings that reuse a name are new variables. Main
         // crashes on this file (#253). Known wrong, not asserted (same
         // as main with the bindings renamed): `for y in ys` says y₂
-        // "acquires ownership of a resource" (#504), the `else if let`
-        // binding z₂ gets a column across the whole `if` (#501), the
-        // outer arm's w "has no value yet" in the inner match (#502),
-        // and `let P { n, .. } = p` moves "from p" with p.n still
-        // dropping (#326).
+        // "acquires ownership of a resource" (#504) and
+        // `let P { n, .. } = p` moves "from p" with p.n still dropping
+        // (#326).
         must_contain: &[
             // if_let_same_name
             "Move from s to s₂",
@@ -5906,7 +5909,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y goes out of scope. Its resource is dropped.",
             // else_if_let
             "z is initialized with a copy of a",
-            "z₂ is initialized with a copy of b",
+            "z is initialized with a copy of b",
             // tuple_swap
             "Move from g to f₂",
             "Move from f to g₂",
@@ -5915,16 +5918,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // struct_pattern
             "n₂, immutable. n₂ shadows n: it is a new variable named n, declared on line 66",
             "n₂ goes out of scope. Its resource is dropped.",
-            // else_if_let: `z` of `else if let` isn't in scope with the first `z`
-            // (they're in different branches), so it doesn't shadow it; it has
-            // a column of its own because the timeline can't draw one variable
-            // declared in both branches of an `else if` chain.
-            "z₂, immutable. z₂ is a different variable from z: it is another variable named z, declared on line 45. z and z₂ are in different branches, so only one of them exists at a time",
+            // else_if_let: the second `z` is in a different branch from the
+            // first, so it doesn't shadow it and shares its column: no `z₂`,
+            // no header note.
             // nested_match
             "w₂ is initialized with a copy of b",
         ],
         must_not_contain: &[
-            "z₂, immutable. z₂ shadows z: it is a new variable named z, declared on line 45",
+            "z₂",
+            "z is assigned a copy of b",
             // Not "a different variable": the earlier one is still in scope.
             "n₂, immutable. n₂ is a different variable from n: the 2nd variable named n in this function",
             "=Move from s to s",
@@ -8262,20 +8264,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "else_if_let_same_name",
-        // #525: the `z` of the `else if let` is declared in a different
-        // branch from the first `z` and doesn't shadow it, but the
-        // timeline can't yet draw one variable declared in both branches
-        // of an `else if` chain, so it gets its own column `z₂` (#308).
+        // #525, #308: the `z` of the `else if let` is a new variable in
+        // a different branch from the first `z`, so it doesn't shadow it:
+        // both share one column (no `z₂`, no "different variable" note)
+        // and the second binding is an initialization, not an assignment.
         must_contain: &[
             "z is initialized with a copy of a",
-            "Copy from b to z₂",
-            "z₂ is initialized with a copy of b",
+            "z is initialized with a copy of b",
+            "Copy from b to z",
             "z goes out of scope",
-            "z₂ goes out of scope",
         ],
         must_not_contain: &[
+            "z₂",
+            "z is assigned a copy of b",
+            "z is assigned a copy of a",
+            "is a different variable from",
             "z is live in a conditional expression ",
             "z has no value yet",
+        ],
+    },
+    TooltipExpect {
+        name: "else_if_let_same_name_else_let",
+        // The same, ending in an `else` that declares `let z`: every `z`
+        // is a new variable of its own branch, so initializing it is
+        // never an assignment ("z is assigned a new value" was the false
+        // text for the last one).
+        must_contain: &[
+            "z is initialized with a copy of a",
+            "z is initialized with a copy of b",
+            "z is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "z₂",
+            "z is assigned a copy of b",
+            "z is assigned a new value",
+            "is a different variable from",
         ],
     },
     // ─── An arm binding on the line its nested branch splits on (#502) ──
