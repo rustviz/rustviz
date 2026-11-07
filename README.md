@@ -369,6 +369,16 @@ rather than listed here.
   `vec!`, `assert!` are unwrapped, and a user macro that only forwards
   a variable to one of them (`show!(w)` → `println!`) is shown as that
   read; a macro that uses no variable renders.
+- An or-pattern arm whose alternatives bind the same name from different
+  places (`match (a, b) { (Some(x), _) | (_, Some(x)) => … }`, `match t {
+  (x, _) | (_, x) => … }`) draws `x` as a new value with no arrow, since
+  which place it comes from is decided at run time. Each place that
+  moves into `x` gets a dot saying so only if its alternative matched,
+  and is maybe-moved afterwards (dropped at scope end only if nothing
+  moved it, by a drop flag). A copied `x` is just bound. If `x` is a
+  reference (`(ref x, _) | (_, ref x)`) or a tuple or struct with
+  columns of its own, the program is refused with "can't visualize this
+  program yet" rather than drawn.
 - A `for` loop variable taken from a range or a call (`for i in 0..n`,
   `for c in s.chars()`) has no start or end on its timeline, only the
   reads in the body.

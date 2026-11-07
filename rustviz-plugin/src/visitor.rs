@@ -716,6 +716,13 @@ fn place_rap(expr: &Expr, tcx: &rustc_middle::ty::TyCtxt, raps: &std::collection
 #[derive(Clone, Copy, PartialEq)]
 enum ManuallyDropFn { Drop, Take }
 
+/// A name an or-pattern arm binds from a different place in each
+/// alternative (#533): the places, in the order of the alternatives.
+struct OrConflict {
+  name: String,
+  places: Vec<ResourceAccessPoint>,
+}
+
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// If `fn_expr` names the inherent `ManuallyDrop::drop` or
   /// `ManuallyDrop::take` (resolved through the callee's DefId, not
@@ -830,6 +837,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     fn moved_from(events: &[(usize, ExternalEvent)], name: &str) -> bool {
       events.iter().any(|(_, e)| match e {
         ExternalEvent::Move { from, .. } => from.extract_rap().map_or(false, |r| r.name() == name),
+        ExternalEvent::OrAltMove { ro, .. } => ro.name() == name,
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| moved_from(&b.e_data, name)),
         _ => false,
       })
@@ -2390,7 +2398,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // via `add_external_event` (single-arm inline: events
               // join the global timeline before `visit_expr` so they
               // appear in source order with the body).
-              let arm_pat = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, pat_line);
+              let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, pat_line, typeck_res);
               match arm_pat.kind {
                 // (<pat>, <pat>, ..) => <expr>
                 // First need to annotate events that occur between parents (the variables being matched upon)
@@ -2426,6 +2434,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     };
                     let mut associated_ro = Vec::new();
                     self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
+                    for ev in self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line) {
+                      if inline {
+                        self.add_external_event(pat_line, ev);
+                      } else {
+                        branch_e_data.push((pat_line, ev));
+                      }
+                    }
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -2465,6 +2480,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     // `P { a, b } => …` on a struct variable: `a` / `b`
                     // come from `p.a` / `p.b` (#326).
                     self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
+                    for ev in self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line) {
+                      if inline {
+                        self.add_external_event(pat_line, ev);
+                      } else {
+                        branch_e_data.push((pat_line, ev));
+                      }
+                    }
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -3953,38 +3975,115 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// value of a tuple of several matched values (`match (a, b) {
   /// (Some(x), _) | (_, Some(x)) => … }`), or a part of a tuple or
   /// struct with element / field columns (`match t { (x, _) | (_, x)
-  /// => … }`, #189). Which one `x` comes from is then decided at run
-  /// time, so that panics (reported as "can't visualize this yet")
-  /// rather than draw `x` as taken from the first.
+  /// => … }`, #189). Which one `x` comes from is decided at run time.
+  /// Those names are returned as `OrConflict`s: the arm draws `x`
+  /// as a new value and each place as moved into it only if its
+  /// alternative matched (#533), see `or_conflict_events`. What can't
+  /// be drawn that way panics (reported as "can't visualize this yet")
+  /// rather than draw `x` as taken from the first place.
   fn or_arm_stand_in(
     &self,
     pat: &'tcx Pat<'tcx>,
     parents: &[ResourceTy],
     parents_ty: &[rustc_middle::ty::Ty<'tcx>],
     line: usize,
-  ) -> &'tcx Pat<'tcx> {
-    let PatKind::Or(alts) = pat.kind else { return pat };
-    let first = self.or_alt_sources(&alts[0], parents, parents_ty);
-    for alt in &alts[1..] {
-      let other = self.or_alt_sources(alt, parents, parents_ty);
-      if let Some(name) = first.keys().find(|n| other.get(*n) != first.get(*n)) {
-        panic!("or-patterns that bind `{}` from different places in the value being matched (line {}) \
-                aren't supported yet",
-          name, line);
+    typeck_res: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+  ) -> (&'tcx Pat<'tcx>, Vec<OrConflict>) {
+    let PatKind::Or(alts) = pat.kind else { return (pat, Vec::new()) };
+    let sources: Vec<BTreeMap<String, (String, Option<ResourceTy>)>> =
+      alts.iter().map(|alt| self.or_alt_sources(alt, parents, parents_ty)).collect();
+    let mut conflicts = Vec::new();
+    for name in sources[0].keys() {
+      let mut places: Vec<(String, Option<ResourceTy>)> = Vec::new();
+      for m in &sources {
+        if let Some(src) = m.get(name) {
+          if !places.iter().any(|(k, _)| *k == src.0) {
+            places.push(src.clone());
+          }
+        }
       }
+      if places.len() < 2 {
+        continue;
+      }
+      let refuse = |why: &str| -> ! {
+        panic!("or-patterns that bind {} `{}` from different places in the value being matched (line {}) \
+                aren't supported yet", why, name, line)
+      };
+      let mut bs = Vec::new();
+      binding_pats(&alts[0], &mut bs);
+      // A reference bound from different places (`ref x`, or a match
+      // on `&t`) would be a borrow of one of them, which has no
+      // maybe-moved drawing.
+      let is_ref = bs.iter().any(|b| matches!(b.kind, PatKind::Binding(_, _, ident, _)
+        if ident.to_string() == *name && typeck_res.node_type(b.hir_id).is_ref()));
+      if is_ref {
+        refuse("the reference");
+      }
+      let mut raps = Vec::new();
+      for (_, place) in &places {
+        match place.as_ref().and_then(|p| p.extract_rap()) {
+          Some(rap) => raps.push(rap.clone()),
+          None => refuse("the name"),
+        }
+      }
+      conflicts.push(OrConflict { name: name.clone(), places: raps });
     }
-    self.or_arm_stand_in(&alts[0], parents, parents_ty, line)
+    let (inner, _) = self.or_arm_stand_in(&alts[0], parents, parents_ty, line, typeck_res);
+    (inner, conflicts)
+  }
+
+  /// The events for the names an or-pattern binds from different
+  /// places (#533), replacing what the first alternative alone would
+  /// draw in `bound` (a name, how it's bound, from where): each such
+  /// name is bound as a new value (`Evt::Bind`, no arrow), and each
+  /// place it may come from, when the value moves (rather than is
+  /// copied), gets an `OrAltMove`: its resource moves into the name if
+  /// its alternative is the one that matched, so it's maybe-moved
+  /// afterwards.
+  fn or_conflict_events(
+    &mut self,
+    conflicts: &[OrConflict],
+    bound: &mut Vec<(ResourceAccessPoint, Evt, ResourceTy, Option<bool>)>,
+    line: usize,
+  ) -> Vec<ExternalEvent> {
+    let mut out = Vec::new();
+    for entry in bound.iter_mut() {
+      let Some(c) = conflicts.iter().find(|c| c.name == entry.0.name().as_str()) else { continue };
+      // The bound name's own parts (a tuple or struct, with its own
+      // columns) would need drawing too.
+      if matches!(entry.0, ResourceAccessPoint::Struct(_)) {
+        panic!("or-patterns that bind the struct or tuple `{}` from different places in the value being matched \
+                (line {}) aren't supported yet", c.name, line);
+      }
+      if !matches!(entry.1, Evt::Move | Evt::Copy) {
+        panic!("or-patterns that bind the reference `{}` from different places in the value being matched \
+                (line {}) aren't supported yet", c.name, line);
+      }
+      if matches!(entry.1, Evt::Move) {
+        let names: Vec<String> = c.places.iter().map(|r| r.name().to_string()).collect();
+        for place in &c.places {
+          let id = *self.unique_id;
+          *self.unique_id += 1;
+          out.push(ExternalEvent::OrAltMove {
+            ro: place.clone(), into: c.name.clone(), from: names.clone(), id,
+          });
+        }
+      }
+      *entry = (entry.0.clone(), Evt::Bind, ResourceTy::Anonymous, None);
+    }
+    out
   }
 
   /// Each binding of a match arm's pattern `alt`, and the place it's
-  /// bound from, the way the arm code below picks it (one parent per
-  /// element of a tuple-literal scrutinee, then `pat_parts`).
+  /// bound from (as a key that tells places apart, and the place), the
+  /// way the arm code below picks it (one parent per element of a
+  /// tuple-literal scrutinee, then `pat_parts`).
   fn or_alt_sources(
     &self,
     alt: &'tcx Pat<'tcx>,
     parents: &[ResourceTy],
     parents_ty: &[rustc_middle::ty::Ty<'tcx>],
-  ) -> BTreeMap<String, String> {
+  ) -> BTreeMap<String, (String, Option<ResourceTy>)> {
     let mut out = BTreeMap::new();
     match alt.kind {
       PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) if parents.len() > 1 && ps.len() == parents.len() => {
@@ -3998,7 +4097,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         binding_pats(alt, &mut bs);
         for b in bs {
           if let PatKind::Binding(_, _, ident, _) = b.kind {
-            out.insert(ident.to_string(), "*".to_owned());
+            out.insert(ident.to_string(), ("*".to_owned(), None));
           }
         }
       }
@@ -4013,14 +4112,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     parent: &ResourceTy,
     parent_ty: rustc_middle::ty::Ty<'tcx>,
     prefix: &str,
-    out: &mut BTreeMap<String, String>,
+    out: &mut BTreeMap<String, (String, Option<ResourceTy>)>,
   ) {
-    let whole = |p: &'tcx Pat<'tcx>, out: &mut BTreeMap<String, String>| {
+    let whole = |p: &'tcx Pat<'tcx>, out: &mut BTreeMap<String, (String, Option<ResourceTy>)>| {
       let mut bs = Vec::new();
       binding_pats(p, &mut bs);
       for b in bs {
         if let PatKind::Binding(_, _, ident, _) = b.kind {
-          out.insert(ident.to_string(), format!("{}{}", prefix, parent.real_name()));
+          out.insert(ident.to_string(), (format!("{}{}", prefix, parent.real_name()), Some(parent.clone())));
         }
       }
     };
@@ -4398,6 +4497,13 @@ fn moved_out_of_outer(
         match out.iter_mut().find(|(r, _)| r == rap) {
           Some(e) => e.1 = true,
           None => out.push((rap.clone(), true)),
+        }
+      }
+      // Moved only if the or-pattern alternative that binds from it
+      // matched (#533): not on every path.
+      ExternalEvent::OrAltMove { ro, .. } if outer(ro) => {
+        if !out.iter().any(|(r, _)| r == ro) {
+          out.push((ro.clone(), false));
         }
       }
       ExternalEvent::Branch { branches, .. } => {

@@ -695,6 +695,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExternalEvent::GoOutOfScope { ro, .. }
       | ExternalEvent::ManuallyDropByHand { ro, .. }
       | ExternalEvent::LoopExitMove { ro, .. }
+      | ExternalEvent::OrAltMove { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. } => {
         self.skip_raps.contains(ro.name())
@@ -4528,6 +4529,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // events above, and makes it `Maybe` (#335).
       ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro.name() == rap_name => {
         return Some(Ownership::None);
+      }
+      // Moved into a name an or-pattern binds, if its alternative
+      // matched (#533): moved on some paths.
+      ExternalEvent::OrAltMove { ro, .. } if ro.name() == rap_name => {
+        return Some(Ownership::Maybe);
       }
       ExternalEvent::Move { from, to, .. } => {
         if is_rap(to) {
