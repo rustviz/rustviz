@@ -395,7 +395,22 @@ rather than listed here.
   result that nothing binds or moves on (`make();`, `let _ = make();`,
   `make().len()`, `f(&make())`, a `match` scrutinee) gets a short
   `(temporary)` column too (numbered in one sequence with the others:
-  `(temporary 2)`, ...), dropped where Rust drops it. Left out
+  `(temporary 2)`, ...), dropped where Rust drops it. So does the
+  literal a `let` pattern is matched against, when the pattern leaves
+  some of it behind (`let (ref a, ..) = (s, t);`, `let (x, _) = (m, n);`,
+  an omitted struct field, an array's middle): the variables moved into
+  it are drawn moving into the column, which is dropped at the end of
+  the statement, or with a `ref` binding at the end of the block. Only
+  variables are drawn moving in (`let (x, _) = (m, String::new());`
+  doesn't show the `String::new()`, though it is dropped with the
+  temporary), and a literal inside a one-line `if` / `match` is not
+  drawn (its drop is not stated). A `ref` binding of a value (`let ref
+  t = String::from("a");`, `let P { ref name, .. } = make_p();`)
+  borrows a `(temporary)` column that lives to the end of the block,
+  and a literal of only fresh values (`let (ref a, _) = (make(),
+  make());`) is a temporary column too, with nothing drawn moving in. A
+  pattern that also moves a part of the value out by value (`let (ref
+  a, b) = make_pair();`) gets no temporary column. Left out
   (their drops are not stated): temporaries that aren't a call's result
   (`vec![..];`, `format!(..);`, a struct literal), the scrutinee of
   `if let` / `while let`, a `for` loop's head (`for x in make().iter()`),

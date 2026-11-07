@@ -1107,10 +1107,13 @@ pub enum ExternalEvent {
     // `f(&make())`), is dropped (#457). Plays the part of GoOutOfScope
     // for that RAP. `ty` is the value's type as written in messages;
     // `when` says when ("at the end of this statement").
+    // `literal` is true for the temporary of a tuple / struct / array
+    // literal a `let` pattern is matched against (#439).
     TemporaryDrop {
         ro: ResourceAccessPoint,
         ty: String,
         when: String,
+        literal: bool,
         id: usize
     },
     // At the end of a loop: `ro` (declared outside the loop) was moved
@@ -1375,7 +1378,7 @@ pub enum Event {
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
-    TemporaryDrop { ty: String, when: String },
+    TemporaryDrop { ty: String, when: String, literal: bool },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, labeled_block: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
@@ -1688,7 +1691,7 @@ impl Display for Event {
             Event::ManuallyDropByHand => {
                 write!(f, "Value is dropped by hand")
             },
-            Event::TemporaryDrop { ty, when } => {
+            Event::TemporaryDrop { ty, when, .. } => {
                 write!(f, "Temporary {} is dropped {}", ty, when)
             },
             Event::LoopExitMove { .. } => {
@@ -1788,8 +1791,8 @@ impl Event {
             Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
                 hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
             }
-            Event::TemporaryDrop { ty, when } => {
-                hover_messages::event_dot_temporary_drop(ty, when)
+            Event::TemporaryDrop { ty, when, literal } => {
+                hover_messages::event_dot_temporary_drop(ty, when, *literal)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -1985,6 +1988,17 @@ impl Event {
                     // variable is bound to a reference, which never
                     // owns its referent.
                     hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref())
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_temporary() || rap.is_unbound_temporary())
+                    && matches!(from, ResourceTy::Value(f) if !f.is_fn()) {
+                    // `let (ref a, ..) = (s, t);`: s is moved into the
+                    // temporary the literal builds (#439).
+                    let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
+                    let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
+                    hover_messages::event_dot_literal_temporary_acquire(&from_name, ends_with_statement)
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) && matches!(from, ResourceTy::Anonymous) {
+                    // `let (x, _) = (m(), n());`: the literal's own value
+                    // (#483).
+                    hover_messages::event_dot_literal_temporary_start()
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
                     // `make();`, `make().len()`: nothing takes the value.
                     safe_message(hover_messages::event_dot_unbound_temporary_acquire, &self.deref_name(my_name), from)
@@ -2936,8 +2950,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
         },
-        ExternalEvent::TemporaryDrop{ ty, when, .. } => {
-          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone() })]
+        ExternalEvent::TemporaryDrop{ ty, when, literal, .. } => {
+          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal })]
         },
         ExternalEvent::LoopExitMove{definite, labeled_block, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, labeled_block: *labeled_block })]
@@ -3250,8 +3264,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
             },
-            ExternalEvent::TemporaryDrop{ro, ty, when, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when }, line_number);
+            ExternalEvent::TemporaryDrop{ro, ty, when, literal, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal }, line_number);
             },
             ExternalEvent::LoopExitMove{ro, definite, labeled_block, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, labeled_block }, line_number);

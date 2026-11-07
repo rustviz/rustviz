@@ -393,7 +393,13 @@ const Description: React.FC = () => (
         call&apos;s result that nothing binds or moves on (
         <code>make();</code>, <code>make().len()</code>,{' '}
         <code>f(&amp;make())</code>) gets a short{' '}
-        <code>(temporary)</code> column too (numbered together). Other temporaries (
+        <code>(temporary)</code> column too (numbered together), and so does the
+        literal in <code>let (ref a, ..) = (s, t);</code>, which <code>s</code>{' '}
+        and <code>t</code> are moved into (only variables are drawn moving in),
+        a <code>ref</code> binding of a value (
+        <code>let ref t = String::from(&quot;a&quot;);</code>) borrows one, and
+        so does a literal of only fresh values (
+        <code>let (ref a, _) = (make(), make());</code>). Other temporaries (
         <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
         <code>for</code> head) drop without being drawn or mentioned.
       </li>
