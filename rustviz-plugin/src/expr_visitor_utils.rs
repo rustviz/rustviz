@@ -1225,7 +1225,15 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
         rustc_hir::UnOp::Deref => {
           match find_lender(expr, tcx, raps, borrow_map) {
             ResourceTy::Deref(r) | ResourceTy::Value(r) => {
-              borrow_map.get(r.name()).unwrap().to_owned().lender
+              // `*rr` where rr is a borrower: what rr's target
+              // borrows. When rr isn't a borrower (`*rr[0]` with
+              // rr: `Vec<&&i32>`: the inner reference is stored in
+              // a collection, so which variable it points to isn't
+              // known statically; #453) there is no lender to name.
+              match borrow_map.get(r.name()) {
+                Some(data) => data.lender.to_owned(),
+                None => ResourceTy::Anonymous,
+              }
             }
             _ => { ResourceTy::Anonymous }
           }
