@@ -1856,9 +1856,18 @@ fn timeline_segment_title(
     state: &State,
     rap: &ResourceAccessPoint,
     visualization_data: &VisualizationData,
+    line: Option<usize>,
 ) -> String {
     if let State::FullPrivilege { s: LineState::Uninit } = state {
         return state.print_message_with_name(rap.name());
+    }
+    // A place an or-pattern's reference may borrow (#565): borrowed
+    // only if its alternative matched, though the borrow checker treats
+    // it as borrowed either way.
+    if matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) && !rap.is_ref() {
+        if let Some((into, mutable)) = or_alt_lend_at(visualization_data, rap, line) {
+            return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
+        }
     }
     if rap.is_closure() {
         if let State::FullPrivilege { .. } = state {
@@ -1936,6 +1945,47 @@ fn timeline_segment_title(
         return hover_messages::state_mut_ref_partial_privilege(rap.name(), rap.points_to_copy());
     }
     state.print_message_with_name(rap.name())
+}
+
+// The or-pattern reference (and whether its borrow is mutable) whose
+// possible borrow puts `rap` in a lent state on the segment starting
+// after `line` (#565): the last borrow of `rap` that starts at or
+// before `line` is an `OrAltLend`. Without a line, `rap` must be lent
+// only that way.
+fn or_alt_lend_at<'a>(
+    visualization_data: &'a VisualizationData,
+    rap: &ResourceAccessPoint,
+    line: Option<usize>,
+) -> Option<(&'a ResourceAccessPoint, bool)> {
+    fn lends<'a>(history: &'a [(usize, Event)], out: &mut Vec<(usize, &'a Event)>) {
+        for (l, e) in history {
+            match e {
+                Event::StaticLend { .. } | Event::MutableLend { .. }
+                | Event::OrAltLend { end: false, .. } => out.push((*l, e)),
+                Event::Branch { branch_history, .. } => {
+                    for b in branch_history {
+                        lends(&b.e_data, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let timeline = visualization_data.timelines.get(rap.hash())?;
+    let mut all = Vec::new();
+    lends(&timeline.history, &mut all);
+    let found = match line {
+        Some(line) => {
+            all.sort_by_key(|(l, _)| *l);
+            all.iter().rev().find(|(l, _)| *l <= line).map(|(_, e)| *e)
+        }
+        None if all.iter().all(|(_, e)| matches!(e, Event::OrAltLend { .. })) => all.first().map(|(_, e)| *e),
+        None => None,
+    };
+    match found {
+        Some(Event::OrAltLend { into, mutable, .. }) => Some((into, *mutable)),
+        _ => None,
+    }
 }
 
 fn matches_closure(rty: &ResourceTy, closure_hash: u64) -> bool {
@@ -2139,6 +2189,7 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         // ends: the end is drawn where r is reassigned (#414).
         | Event::StaticBorrow { is: ResourceTy::Value(_), .. }
         | Event::MutableBorrow { is: ResourceTy::Value(_), .. }
+        | Event::OrAltBorrow { end: false, .. }
         | Event::InitRefParam { .. } => true,
         Event::Move { .. } | Event::LoopExitMove { definite: true, .. } | Event::ClosureCall { .. } => false,
         // A variable that has gone out of scope holds nothing. When
@@ -3670,7 +3721,7 @@ fn push_seg_if_renderable(
     if matches!(determine_owner_line_styles(rap, &state), OwnerLine::Empty | OwnerLine::Dotted) {
         return;
     }
-    let title = timeline_segment_title(&state, rap, visualization_data);
+    let title = timeline_segment_title(&state, rap, visualization_data, None);
     segs.push(BranchSeg { p1, p2, state, title });
 }
 
@@ -3926,7 +3977,7 @@ fn render_timeline(
                 y1,
                 x2: timeline_data.x_val as f64,
                 y2,
-                title: timeline_segment_title(state, rap, visualization_data),
+                title: timeline_segment_title(state, rap, visualization_data, Some(*line_start)),
                 opacity: 1.0,
                 dasharray: "none".to_owned(),
         };

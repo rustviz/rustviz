@@ -336,9 +336,14 @@ const Description: React.FC = () => (
         <code>(x, _) | (_, x)</code>) draws the name as a new value with no
         arrow, and each place it may move from as maybe-moved (in{' '}
         <code>match (a, b)</code>, what the name didn't take is dropped with the
-        tuple). If the name is a
-        reference (<code>ref x</code>) or a tuple or struct, the program is
-        refused rather than drawn.
+        tuple). A reference (<code>(ref x, _) | (_, ref x)</code>) draws each
+        place as borrowed until the reference&apos;s last use. A few shapes are
+        refused, such as matching on two reference variables. The same pattern
+        in an <code>if let</code> or <code>let</code> is drawn wrongly.
+      </li>
+      <li>
+        A <code>ref</code> binding in a <code>match</code> arm keeps what it
+        borrows borrowed to the end of the arm, not just to its last use.
       </li>
       <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}

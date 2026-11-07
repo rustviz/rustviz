@@ -887,6 +887,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExternalEvent::InitRefParam { param, .. } => {
         self.skip_raps.contains(param.name())
       }
+      ExternalEvent::OrAltBorrow { ro, into, .. } => {
+        self.skip_raps.contains(ro.name()) || self.skip_raps.contains(into.name())
+      }
       ExternalEvent::ClosureCall { closure, .. } => touches_ty(closure),
       // Branch events bundle child events; we don't recurse into
       // them here. A skipped variable that only appears inside a

@@ -908,6 +908,16 @@ const EXPECTED_OK: &[&str] = &[
     "box_contents_move_string",
     "box_contents_move_pattern",
     "box_whole_move",
+    // Or-pattern arms that bind a reference, tuple or struct from
+    // different places (#565).
+    "or_pattern_ref_different_places",
+    "or_pattern_ref_last_use",
+    "or_pattern_ref_mut_different_places",
+    "or_pattern_ref_through_refs",
+    "or_pattern_struct_different_places",
+    "or_pattern_tuple_different_places",
+    "or_pattern_shadowed_name",
+    "or_pattern_ref_tuple_scrutinee",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9918,6 +9928,164 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "heap allocation is freed",
         ],
     },
+    // ─── Or-pattern arms that bind a reference, tuple or struct from
+    // different places (#565) ─────────────────────────────────────────
+    TooltipExpect {
+        name: "or_pattern_ref_different_places",
+        // `(ref x, _) | (_, ref x)`: x borrows t.0 or t.1, whichever
+        // alternative matches. The borrow checker can't tell which, so
+        // both are borrowed until x's borrow ends. (#566 refused the
+        // program; a plain borrow arrow from t.0 would say x always
+        // borrows t.0 and that t.1 is never borrowed.)
+        must_contain: &[
+            "x immutably borrows t.0 or t.1, whichever alternative of the pattern matches",
+            "x borrows t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is immutably borrowed by x here. Which alternative matches is decided at run time, so the borrow checker treats t.0 as borrowed either way: t.0 is read-only while x's borrow is live.",
+            "x borrows t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is immutably borrowed by x here. Which alternative matches is decided at run time, so the borrow checker treats t.1 as borrowed either way: t.1 is read-only while x's borrow is live.",
+            "x's borrow ends here, so t.0's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whichever alternative of the pattern matched)",
+            "x's borrow ends here, so t.1's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whichever alternative of the pattern matched)",
+            "x's immutable borrow ends",
+            "t.0 goes out of scope. Its resource is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Partial immutable borrow from t.0 to x",
+            "Partial immutable borrow from t.1 to x",
+            "Return immutably borrowed resource from x to t.0",
+            "=t.0's resource is immutably borrowed by x; t.0 is read-only while the borrow is live",
+            "=x immutably borrows a resource",
+            "x is bound to an immutable reference",
+            "drop flag",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_ref_last_use",
+        // x's last use is the `println!`: the borrow checker ends both
+        // possible borrows there, so `t.1.push_str` on the next line
+        // compiles. They end on that line, not at the end of the arm.
+        must_contain: &[
+            "x's borrow ends here, so t.1's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whichever alternative of the pattern matched)",
+            "t.1's resource is immutably borrowed by x if the alternative that binds x from t.1 matched; either way, t.1 is read-only until x's borrow ends",
+            "t.1's resource is mutably borrowed by push_str; t.1 can't be used while the borrow is live",
+            "x's immutable borrow ends",
+        ],
+        must_not_contain: &[
+            "Partial immutable borrow from t.0 to x",
+            "=t.0's resource is being shared by one or more variables",
+            "=t.1's resource is being shared by one or more variables",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_ref_mut_different_places",
+        // `ref mut`: neither place can be used while x's borrow is
+        // live; `println!("{}", t.0)` comes after x's last use.
+        must_contain: &[
+            "x mutably borrows t.0 or t.1, whichever alternative of the pattern matches",
+            "x borrows t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is mutably borrowed by x here. Which alternative matches is decided at run time, so the borrow checker treats t.0 as borrowed either way: t.0 can't be used while x's borrow is live.",
+            "x borrows t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is mutably borrowed by x here. Which alternative matches is decided at run time, so the borrow checker treats t.1 as borrowed either way: t.1 can't be used while x's borrow is live.",
+            "x's borrow ends here, so t.0's resource is no longer mutably borrowed (the borrow checker counted it as borrowed whichever alternative of the pattern matched)",
+            "x's mutable borrow ends",
+            "t.0's resource is immutably borrowed by println!; t.0 is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            "Partial Mutable borrow from t.0 to x",
+            "Return mutably borrowed resource from x to t.0",
+            "=t.0's resource is mutably borrowed by x; t.0 can't be used while the borrow is live",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_ref_through_refs",
+        // `match (&a, &b) { (Some(x), _) | (_, Some(x)) }`: x borrows a's
+        // or b's String through the reference being matched. A Copy
+        // place's reference borrows a value.
+        must_contain: &[
+            "x immutably borrows a or b, whichever alternative of the pattern matches",
+            "x borrows a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is immutably borrowed by x here. Which alternative matches is decided at run time, so the borrow checker treats b as borrowed either way: b is read-only while x's borrow is live.",
+            "k borrows n.0 or n.1, whichever alternative of the pattern matches. If it's the alternative that binds k from n.0, n.0's value is immutably borrowed by k here. Which alternative matches is decided at run time, so the borrow checker treats n.0 as borrowed either way: n.0 is read-only while k's borrow is live.",
+            "k's borrow ends here, so n.1's value is no longer immutably borrowed (the borrow checker counted it as borrowed whichever alternative of the pattern matched)",
+            "a goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from a to x",
+            "n.0's resource",
+            "moved into",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_struct_different_places",
+        // A struct `x` bound from t.0 or t.1 moves its fields with it:
+        // each field of each place is maybe-moved too. A plain (no
+        // drop) struct moves a value, with no drop flag; a Copy tuple
+        // is just copied.
+        must_contain: &[
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1.n's resource is moved into x.n here; otherwise t.1.n still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0.k's value is moved into x.k here; otherwise t.0.k still holds it.",
+            "t.0.n goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x.n acquires ownership of a resource",
+            "x.k is bound to a copyable value",
+            "y is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds y from u.0, u.0's value is moved into y here; otherwise u.0 still holds it.",
+            "z is bound to a copyable value",
+            "z.0 is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "Move from t.0 to x",
+            "Move from t.0.n to x.n",
+            "=t.0.n goes out of scope. Its resource is dropped.",
+            "=t.1.n goes out of scope. Its resource is dropped.",
+            "u.0's resource",
+            "moved into z",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_tuple_different_places",
+        // A tuple `x` bound from t.0 or t.1: each element moves with it.
+        must_contain: &[
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1.0's resource is moved into x.0 here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "t.1.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x.0 acquires ownership of a resource",
+            "x.1 acquires ownership of a resource",
+        ],
+        must_not_contain: &[
+            "Move from t.0 to x",
+            "Move from t.0.0 to x.0",
+            "=t.1.0 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_shadowed_name",
+        // The second and third `x` are columns `x₂` and `x₃`; they are
+        // still the names bound from different places. (#566 drew x₂
+        // as a definite `Move from u.0 to x₂`.)
+        must_contain: &[
+            "x₂ is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x₂ from u.1, u.1's resource is moved into x₂ here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "x₃ mutably borrows w.0 or w.1, whichever alternative of the pattern matches",
+            "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Move from u.0 to x₂",
+            "Partial Mutable borrow from w.0 to x₃",
+            "=u.1 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_ref_tuple_scrutinee",
+        // `match (a, b) { (Some(ref x), _) | (_, Some(ref x)) }`: a and b
+        // are moved into the temporary tuple, and x borrows the tuple
+        // whichever alternative matched, as without an or-pattern (#580).
+        // Not a borrow of a or b, and nothing about a or b is maybe.
+        must_contain: &[
+            "x immutably borrows a resource",
+            "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it a's and b's resources",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "x borrows a or b",
+            "a's resource is immutably borrowed by x",
+            "Immutable borrow from a to x",
+            "drop flag",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -12086,24 +12254,27 @@ fn guard_that_moves_is_refused() {
         "expected the guard-move refusal, got:\n{}", msg);
 }
 
-/// An or-pattern arm that binds a name from different places can't be
-/// drawn when the name is a reference (`ref x`, a borrow of one of the
-/// places) or a tuple / struct with columns of its own: refused with a
-/// message that says why, rather than drawn as taken from the first
-/// place (#533).
+/// What an or-pattern arm that binds a name from different places
+/// still can't draw (#565) is refused with a message that says which
+/// case it is, rather than drawn as taken from the first place: a
+/// binding through different references, a `&mut` moved out of one of
+/// the places, and a struct moved into the tuple being matched.
 #[test]
-fn or_pattern_binding_a_reference_or_struct_from_different_places_is_refused() {
+fn or_pattern_binding_from_different_places_refusals() {
     env::set_var("RV_RUNNER", "local");
     for (src, what) in [
-        ("fn main() {\n    let t = (String::from(\"a\"), String::from(\"b\"));\n    match t {\n        (ref x, _) | (_, ref x) => println!(\"{}\", x),\n    }\n}\n",
-         "the reference `x`"),
-        ("struct P { n: String }\nfn main() {\n    let t = (P { n: String::from(\"a\") }, P { n: String::from(\"b\") });\n    match t {\n        (x, _) | (_, x) => println!(\"{}\", x.n),\n    }\n}\n",
-         "the struct or tuple `x`"),
+        ("fn main() {\n    let a = Some(String::from(\"a\"));\n    let b = Some(String::from(\"b\"));\n    let (r1, r2) = (&a, &b);\n    match (r1, r2) {\n        (Some(x), _) | (_, Some(x)) => println!(\"{}\", x),\n        _ => {}\n    }\n}\n",
+         "or-patterns that bind `x` through different references being matched"),
+        ("fn main() {\n    let mut a = String::from(\"a\");\n    let mut b = String::from(\"b\");\n    let t = (Some(&mut a), Some(&mut b));\n    match t {\n        (Some(x), _) | (_, Some(x)) => x.push('!'),\n        _ => {}\n    }\n}\n",
+         "or-patterns that bind the mutable reference `x` from different places in the value being matched"),
+        // A struct moved into the tuple being matched: the tuple isn't
+        // drawn for it (#327), so x would look taken from a itself.
+        ("struct P { n: String }\nfn main() {\n    let a = P { n: String::from(\"a\") };\n    let b = P { n: String::from(\"b\") };\n    match (a, b) {\n        (x, _) | (_, x) => println!(\"{}\", x.n),\n    }\n}\n",
+         "or-patterns that bind `x` from different values of a tuple being matched, when a value is a struct or tuple"),
     ] {
         let err = Rustviz::new(src).expect_err("an or-pattern binding of this kind must not render");
         let msg = err.to_string();
-        assert!(msg.contains(&format!("or-patterns that bind {} from different places in the value being matched", what)),
-            "expected the or-pattern refusal, got:\n{}", msg);
+        assert!(msg.contains(what), "expected the or-pattern refusal {:?}, got:\n{}", what, msg);
     }
 }
 
