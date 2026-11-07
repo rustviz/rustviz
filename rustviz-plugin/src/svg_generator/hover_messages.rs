@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, ResourceAccessPoint};
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, StaticLender, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, RcCall, RcDrop, StaticLender, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -304,11 +304,11 @@ pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String 
 // is drawn on top of the regular Acquire dot at the same position,
 // so this tooltip is the only one a user can hover; it has to
 // communicate both events.
-pub fn event_dot_owner_drop_at_reassign(my_name: &String) -> String {
+pub fn event_dot_owner_drop_at_reassign(my_name: &String, rc: Option<RcDrop>) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
-        "{0} acquires ownership of a new resource; its previous resource is dropped",
-        my_name_fmt
+        "{0} acquires ownership of a new resource; its previous resource is dropped{1}",
+        my_name_fmt, rc_drop_note(rc)
     )
 }
 
@@ -356,8 +356,61 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String) -> String {
 /// the same variable, with more (#506).
 pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
     const SUFFIX: &str = " acquires ownership of a new resource; its previous resource is dropped";
-    reassign.strip_suffix(SUFFIX)
-        .is_some_and(|name| acquire.strip_suffix(" acquires ownership of a resource") == Some(name))
+    // (an Rc / Arc / Weak's drop note may follow the suffix, #373)
+    reassign.split_once(SUFFIX)
+        .is_some_and(|(name, _)| acquire.strip_suffix(" acquires ownership of a resource") == Some(name))
+}
+
+// A drop of an `Rc` / `Arc` / `Weak` doesn't necessarily free the value
+// it points to: it lowers a count, and only the last `Rc` / `Arc` frees
+// the value (#373). Appended wherever a drop of such an owner is
+// stated; empty for any other owner. RustViz doesn't count references,
+// so it can't say whether this is the last one.
+pub fn rc_drop_note(rc: Option<RcDrop>) -> String {
+    match rc {
+        None => String::new(),
+        Some(RcDrop::Own(k)) if k.is_weak() => String::from(
+            " (a Weak doesn't keep the value alive; dropping it frees only the Weak itself)"),
+        Some(RcDrop::Own(k)) => format!(
+            " (for an {0}, that lowers the reference count; the shared value is freed only when its last {0} is dropped)",
+            k.strong_name()),
+        Some(RcDrop::Fields(k)) if k.is_weak() => String::from(
+            " (its Weak fields don't keep their values alive; dropping them frees only the Weaks)"),
+        Some(RcDrop::Fields(k)) => format!(
+            " (its {} fields only lower their reference counts)", k.strong_name()),
+    }
+}
+
+// `let b = Rc::clone(&a);` / `a.clone()` / `Rc::downgrade(&a)`: the new
+// owner points to the same value; nothing is copied (#373).
+pub fn event_dot_rc_call_acquire(my_name: &String, call: RcCall) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    match call {
+        RcCall::Clone(k) if k.is_weak() => format!(
+            "{0} is another Weak pointing to the same value (Weak::clone increases the weak count; nothing is copied)",
+            my_name_fmt),
+        RcCall::Clone(k) => format!(
+            "{0} is another {1} to the same value ({1}::clone increases the reference count; nothing is copied)",
+            my_name_fmt, k.strong_name()),
+        RcCall::Downgrade(k) => format!(
+            "{0} is a Weak pointing to the same value ({1}::downgrade increases the weak count; nothing is copied)",
+            my_name_fmt, k.strong_name()),
+    }
+}
+
+pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String {
+    let (fn_fmt, to_fmt) = (fmt_style(fn_name), fmt_style(to_name));
+    match call {
+        RcCall::Clone(k) if k.is_weak() => format!(
+            "{0} makes another Weak pointing to the same value (nothing is copied), now owned by {1}",
+            fn_fmt, to_fmt),
+        RcCall::Clone(k) => format!(
+            "{0} makes another {1} to the same value (nothing is copied), now owned by {2}",
+            fn_fmt, k.strong_name(), to_fmt),
+        RcCall::Downgrade(k) => format!(
+            "{0} makes a Weak pointing to the same value ({1}'s strong count is unchanged; nothing is copied), now owned by {2}",
+            fn_fmt, k.strong_name(), to_fmt),
+    }
 }
 
 //     0
@@ -443,12 +496,13 @@ pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> Str
 }
 
 // `drop(s);`: the value is moved into `std::mem::drop`, which drops it.
-pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool) -> String {
+pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool, rc: Option<RcDrop>) -> String {
     format!(
-        "{0}'s {2} is moved into {1}, which drops it",
+        "{0}'s {2} is moved into {1}, which drops it{3}",
         fmt_style(my_name),
         fmt_style(fn_name),
-        held(value)
+        held(value),
+        rc_drop_note(rc)
     )
 }
 
@@ -1846,7 +1900,7 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // keeps a runtime "drop flag" and, at the end of the variable's scope,
 // drops the value only if it wasn't moved (#179). The scope-end dot
 // says that (`event_dot_go_out_of_scope_maybe_moved`).
-pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool) -> String {
+pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, rc: Option<RcDrop>) -> String {
     let my_name_fmt = fmt_style(my_name);
     if value {
         return format!(
@@ -1858,8 +1912,8 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool) -> 
     format!(
         "{0} was moved in at least one branch above, so it can't be used after the branches \
          (until it's assigned again). If the branch that ran didn't move it, its resource is \
-         dropped when {0} goes out of scope.",
-        my_name_fmt
+         dropped{1} when {0} goes out of scope.",
+        my_name_fmt, rc_drop_note(rc)
     )
 }
 
@@ -1878,11 +1932,11 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String 
 // Scope end of a variable that was moved on some paths of a conditional
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).
-pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String) -> String {
+pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, rc: Option<RcDrop>) -> String {
     format!(
-        "{0} goes out of scope. Its resource is dropped here only if no branch above moved it \
+        "{0} goes out of scope. Its resource is dropped{1} here only if no branch above moved it \
          (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name)
+        fmt_style(my_name), rc_drop_note(rc)
     )
 }
 

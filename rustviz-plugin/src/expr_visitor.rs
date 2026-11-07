@@ -407,29 +407,71 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None}), scope, is_global);
   }
 
-  // Marks the owner (or struct field) just registered as `name` as a
-  // `ManuallyDrop<T>` when `ty` is one, so its scope end and
-  // reassignments don't claim to drop the `T` (#283). Call right after
-  // `add_owner` / `add_struct`, before any event clones the RAP. A name
-  // that was already registered (and so not re-added by `add_rap`) is
-  // left alone.
-  pub fn mark_if_manually_drop(&mut self, name: &str, ty: Ty<'tcx>) {
-    if !ty.ty_adt_def().map_or(false, |d| d.is_manually_drop()) {
+  /// `Some(kind)` iff `ty` is `Rc<T>`, `Arc<T>` or one of their
+  /// `Weak<T>`s, identified by std diagnostic item (not by name).
+  pub fn rc_kind(&self, ty: Ty<'tcx>) -> Option<RcKind> {
+    let did = ty.ty_adt_def()?.did();
+    let tcx = self.tcx;
+    if tcx.is_diagnostic_item(rustc_span::sym::Rc, did) { Some(RcKind::Rc) }
+    else if tcx.is_diagnostic_item(rustc_span::sym::Arc, did) { Some(RcKind::Arc) }
+    else if tcx.is_diagnostic_item(rustc_span::sym::RcWeak, did) { Some(RcKind::RcWeak) }
+    else if tcx.is_diagnostic_item(rustc_span::sym::ArcWeak, did) { Some(RcKind::ArcWeak) }
+    else { None }
+  }
+
+  /// `Some(k)` iff `ty` is a struct without a `Drop` impl whose fields
+  /// that need drop are all `Rc`/`Arc`/`Weak`s of one kind `k` (at least
+  /// one), so dropping it only lowers counts (#373).
+  pub fn rc_fields_kind(&self, ty: Ty<'tcx>) -> Option<RcKind> {
+    let adt = ty.ty_adt_def().filter(|d| d.is_struct())?;
+    if adt.has_dtor(self.tcx) || adt.is_manually_drop() { return None; }
+    let rustc_middle::ty::TyKind::Adt(_, args) = ty.kind() else { return None };
+    let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+    let mut kind = None;
+    for field in adt.all_fields() {
+      let fty = field.ty(self.tcx, args);
+      if !fty.needs_drop(self.tcx, typing_env) { continue; }
+      let k = self.rc_kind(fty)?;
+      if kind.is_some_and(|o| o != k) { return None; }
+      kind = Some(k);
+    }
+    kind
+  }
+
+  // Marks the owner (or struct field) just registered as `name` from
+  // its type: as a `ManuallyDrop<T>` so its scope end and
+  // reassignments don't claim to drop the `T` (#283), and as an
+  // `Rc` / `Arc` / `Weak` so they say that dropping it only lowers a
+  // count (#373). Call right after `add_owner` / `add_struct`, before
+  // any event clones the RAP. A name that was already registered (and
+  // so not re-added by `add_rap`) is left alone.
+  pub fn mark_owner_type(&mut self, name: &str, ty: Ty<'tcx>) {
+    let rc = self.rc_kind(ty);
+    let manually_drop = ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
+    let rc_fields = self.rc_fields_kind(ty);
+    if rc.is_none() && !manually_drop && rc_fields.is_none() {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
     match self.raps.get_mut(name).map(|rd| &mut rd.rap) {
-      Some(ResourceAccessPoint::Owner(o)) if o.hash == just_added => o.is_manually_drop = true,
-      Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => s.is_manually_drop = true,
+      Some(ResourceAccessPoint::Owner(o)) if o.hash == just_added => {
+        o.is_manually_drop = manually_drop;
+        o.rc = rc;
+      }
+      Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => {
+        s.is_manually_drop = manually_drop;
+        s.rc = rc;
+        s.rc_fields = rc_fields;
+      }
       _ => {}
     }
   }
@@ -438,7 +480,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false, rc: None}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -530,7 +572,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds a function RAP
   pub fn add_fn(&mut self, name: String) {
-    self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64, drops_arg: Default::default() }), self.current_scope, true);
+    self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None }), self.current_scope, true);
   }
 
   // Adds a struct RAP
@@ -547,7 +589,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_copy,
       is_plain_value,
       interior_mut,
-      is_manually_drop: false }),
+      is_manually_drop: false, rc: None, rc_fields: None }),
       scope, is_global);
   }
 
@@ -2091,6 +2133,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let owner_hash = self.rap_hashes as u64;
           let parent_is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
           self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope,!self.inside_branch);
+          self.mark_owner_type(&name, ty);
           self.register_struct_members(
             &name,
             ty,
@@ -2139,7 +2182,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // Call arm like calls to a named function (#254).
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
-      self.mark_if_manually_drop(&name, ty);
+      self.mark_owner_type(&name, ty);
       self.register_holder(&name, expr, ty);
     }
   }
@@ -2470,7 +2513,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let field_is_copy = self.ty_is_copy(field_ty, owner_id);
         self.add_struct(field_name.clone(), top_owner_hash, true, mutability, field_is_copy, self.ty_is_plain(field_ty, owner_id), self.ty_has_interior_mut(field_ty, owner_id),
             site.scope, site.is_global);
-        self.mark_if_manually_drop(&field_name, field_ty);
+        self.mark_owner_type(&field_name, field_ty);
         // Recurse for nested struct / tuple fields. Skip enums /
         // unions (only structs and tuples are flattened) and the
         // special-owner builtins like `String` whose internals we
@@ -2650,7 +2693,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                     let field_is_copy = self.ty_is_copy(field_ty, pat.hir_id.owner);
                     let field_name = format!("{}.{}", name, field);
                     self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_is_plain(field_ty, pat.hir_id.owner), self.ty_has_interior_mut(field_ty, pat.hir_id.owner), scope, false);
-                    self.mark_if_manually_drop(&field_name, field_ty);
+                    self.mark_owner_type(&field_name, field_ty);
                 }
             } else if ty.is_adt() && !ty_is_special_owner(&ty) {
                 // Same rule as `define_lhs` and fn params: only
@@ -2667,6 +2710,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                         let owner_hash = self.rap_hashes as u64; // Assuming self.rap_hashes exists
                         let parent_is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                         self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_is_plain(ty, pat.hir_id.owner), self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
+                        self.mark_owner_type(&name, ty);
                         // Like define_lhs: don't expose the internals of
                         // `String` / `Vec` / `Box` / … (`n.vec` for a
                         // `Some(n)` binding of a String). Nested struct
@@ -2715,7 +2759,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             } else {
                 let is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                 self.add_owner(name.clone(), muta, is_copy, self.ty_is_plain(ty, pat.hir_id.owner), self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
-                self.mark_if_manually_drop(&name, ty);
+                self.mark_owner_type(&name, ty);
             }
 
             // A binding whose effective mode is by-reference borrows
@@ -3199,7 +3243,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             self.add_fn(n.clone());
           }
           self.raps.get(&fn_key(&n))
-            .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+            .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.to_owned(), &self.tcx)))
             .unwrap_or(ResourceTy::Anonymous)
         }
         None => ResourceTy::Anonymous,
@@ -3305,7 +3349,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Same Anonymous fallback as the Call arm — chained / macro /
       // desugared method calls may not have a registered name.
       let from = hirid_to_var_name(name_and_generic_args.hir_id, &self.tcx)
-        .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned()))
+        .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| fn_result_rap(rhs, rd.rap.to_owned(), &self.tcx)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value);
       self.add_ev(line_num, evt, lhs.clone(), from, false);
       self.emit_struct_field_borrows(&lhs, rhs, name_and_generic_args.ident.as_str().to_owned(), line_num);

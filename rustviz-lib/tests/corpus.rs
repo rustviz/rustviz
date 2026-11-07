@@ -704,6 +704,15 @@ const EXPECTED_OK: &[&str] = &[
     // A write through a local `&mut` drops the old value on the
     // lender's field column (`s.a`), also for `*w = S { .. }` (#152).
     "field_write_through_local_ref",
+    // Rc / Arc / Weak: a drop lowers a count, clones share the value,
+    // and the callee (not the name `clone`) decides (#373).
+    "rc_handles",
+    "rc_branch",
+    "rc_clone_by_callee",
+    // The same wording for an Rc/Arc that is a struct field, and for
+    // Weak::clone (#373).
+    "rc_fields",
+    "rc_weak_clone",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1477,14 +1486,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "rc_clone",
         // `Rc::clone(&r)` is just a regular function call: `&r` is
         // a static borrow into Rc::clone, the return value moves
-        // into r2. Shared-ownership semantics aren't visualized
-        // (per the issue's "out of scope for the panic fix" note).
+        // into r2. Reference counts aren't modelled, but the clone is
+        // described as another Rc to the same value, not a copy (#373).
         must_contain: &[
             "Move from Rc::new to r",
-            "Move from Rc::clone to r2",
+            "Rc::clone makes another Rc to the same value (nothing is copied), now owned by r2",
+            "r2 is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+            "r2 goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
             "Rc::clone reads from r",
         ],
         must_not_contain: &[
+            "Move from Rc::clone to r2",
+            "r2 acquires ownership of a resource",
+            "r2 goes out of scope. Its resource is dropped.",
             "r.ptr, immutable",
             "r.ptr.pointer, immutable",
             "r.phantom, immutable",
@@ -2298,12 +2312,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Book ch15 Rc<RefCell<T>>: `*value.borrow_mut() += 10`.
         must_contain: &[
             "Rc::clone borrows value immutably (a shared borrow); value has interior mutability, so its contents can change even through a shared borrow", // #203
-            "Move from Rc::clone to a",
+            "Rc::clone makes another Rc to the same value (nothing is copied), now owned by a",
             "borrow_mut borrows value immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)", // #203
-            "value goes out of scope. Its resource is dropped.",
+            "value goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
         ],
         must_not_contain: &[
             "value's resource is moved",
+            "Move from Rc::clone to a",
+            "value goes out of scope. Its resource is dropped.",
+            "a goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -7363,6 +7381,133 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(copied from",
             "(moved from",
             "s.n acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    // ─── Rc / Arc / Weak (#373) ──────────────────────────────────────
+    // Only the last Rc/Arc frees the value, and RustViz doesn't count
+    // references, so every drop of one says what is always true. Clones
+    // are found from the resolved callee, not from the name `clone`.
+    TooltipExpect {
+        name: "rc_handles",
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "c goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "s goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped).",
+            "t goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped).",
+            "w goes out of scope. Its resource is dropped (a Weak doesn't keep the value alive; dropping it frees only the Weak itself).",
+            "t acquires ownership of a new resource; its previous resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped)",
+            "b is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+            "c is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+            "t is another Arc to the same value (Arc::clone increases the reference count; nothing is copied)",
+            "w is a Weak pointing to the same value (Rc::downgrade increases the weak count; nothing is copied)",
+            "Rc::clone makes another Rc to the same value (nothing is copied), now owned by b",
+            "clone makes another Rc to the same value (nothing is copied), now owned by c",
+            "Arc::clone makes another Arc to the same value (nothing is copied), now owned by t",
+            "Rc::downgrade makes a Weak pointing to the same value (Rc's strong count is unchanged; nothing is copied), now owned by w",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped.",
+            // Whole-tooltip match (#518): the correct text continues with the Arc note.
+            "=t acquires ownership of a new resource; its previous resource is dropped",
+            "handle",
+            "Move from Rc::clone to b",
+            "Move from clone to c",
+            "Move from Arc::clone to t",
+            "Move from Rc::downgrade to w",
+            "b acquires ownership of a resource",
+            "w acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_branch",
+        must_contain: &[
+            "a was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped) when a goes out of scope.",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "r goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+        ],
+        must_not_contain: &[
+            "its resource is dropped when a goes out of scope.",
+            "a goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "r goes out of scope. Its resource is dropped.",
+            "handle",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_clone_by_callee",
+        // `Maker::clone` and `String::clone` aren't `Rc::clone`, even
+        // though a method named `clone` returns an `Rc` in one of them.
+        must_contain: &[
+            "r goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+            "Move from clone to r",
+            "Move from clone to t",
+            "a's resource is moved into drop, which drops it (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped)",
+        ],
+        must_not_contain: &[
+            "r is another Rc to the same value",
+            "t is another Rc to the same value",
+            "makes another Rc to the same value (nothing is copied), now owned by r",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_fields",
+        // An Rc/Arc that is a struct field says the same as a local one;
+        // a struct whose only droppable fields are Rcs says so; a struct
+        // that also owns a String keeps main's sentence.
+        must_contain: &[
+            "p.shared goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "m.shared goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "c.hits goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped).",
+            "p goes out of scope. Its resource is dropped (its Rc fields only lower their reference counts).",
+            "c goes out of scope. Its resource is dropped (its Arc fields only lower their reference counts).",
+            "m goes out of scope. Its resource is dropped.",
+            "m.name goes out of scope. Its resource is dropped.",
+            "p.shared is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+            "m.shared is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+            "q is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+            "r is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+            "Rc::clone makes another Rc to the same value (nothing is copied), now owned by q",
+            "clone makes another Rc to the same value (nothing is copied), now owned by r",
+            "clone makes another Rc to the same value (nothing is copied), now owned by m.shared",
+        ],
+        must_not_contain: &[
+            "p.shared goes out of scope. Its resource is dropped.",
+            "m.shared goes out of scope. Its resource is dropped.",
+            "c.hits goes out of scope. Its resource is dropped.",
+            "p goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "m goes out of scope. Its resource is dropped (",
+            "m.name goes out of scope. Its resource is dropped (",
+            "p.shared acquires ownership of a resource",
+            "Move from Rc::clone to q",
+            "Move from clone to r",
+            "Move from Rc::clone to p.shared",
+            "Move from clone to m.shared",
+        ],
+    },
+    TooltipExpect {
+        name: "rc_weak_clone",
+        // `Weak::clone` makes another Weak and raises the weak count.
+        must_contain: &[
+            "w2 is another Weak pointing to the same value (Weak::clone increases the weak count; nothing is copied)",
+            "w3 is another Weak pointing to the same value (Weak::clone increases the weak count; nothing is copied)",
+            "clone makes another Weak pointing to the same value (nothing is copied), now owned by w2",
+            "Weak::clone makes another Weak pointing to the same value (nothing is copied), now owned by w3",
+            "w2 goes out of scope. Its resource is dropped (a Weak doesn't keep the value alive; dropping it frees only the Weak itself).",
+        ],
+        must_not_contain: &[
+            "Move from clone to w2",
+            "Move from Weak::clone to w3",
+            "w2 acquires ownership of a resource",
+            "w3 acquires ownership of a resource",
+            "w2 goes out of scope. Its resource is dropped.",
         ],
     },
 ];
