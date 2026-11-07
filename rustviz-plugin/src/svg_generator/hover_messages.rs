@@ -344,7 +344,14 @@ pub fn event_dot_temporary_go_out_of_scope(my_name: &String) -> String {
     )
 }
 
-pub fn event_dot_temporary_drop(ty: &String, when: &String) -> String {
+pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool) -> String {
+    if literal {
+        // `let (x, _) = (m, n);`: m went into x, n stayed in the literal.
+        return format!(
+            "This temporary {0}, built by the literal on the right of the let, is dropped {1}. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            fmt_style(ty), when
+        );
+    }
     format!(
         "This temporary {0} is dropped {1}: nothing bound it to a variable or moved it on. Its resource is dropped",
         fmt_style(ty), when
@@ -424,6 +431,23 @@ pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String
             "{0} makes a Weak pointing to the same value ({1}'s strong count is unchanged; nothing is copied), now owned by {2}",
             fn_fmt, k.strong_name(), to_fmt),
     }
+}
+
+// A variable moved (or copied) into the temporary that a tuple / struct
+// / array literal on the right of a `let` builds, where the pattern
+// doesn't bind it by value (`_`, `..`, a `ref` binding): #439. The
+// temporary is dropped at the end of the statement, unless a `ref`
+// binding borrows from it, which extends it to the end of the block.
+pub fn event_dot_literal_temporary_acquire(from_name: &String, ends_with_statement: bool) -> String {
+    let when = if ends_with_statement {
+        "No `ref` binding borrows from it, so Rust drops it at the end of this statement"
+    } else {
+        "A `ref` binding borrows from it, so it lives until the end of the enclosing block, not just to the end of the statement"
+    };
+    format!(
+        "The temporary that the literal on the right of this let builds takes the value of {0}. {1}",
+        fmt_style(from_name), when
+    )
 }
 
 //     0

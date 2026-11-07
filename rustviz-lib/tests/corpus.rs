@@ -773,6 +773,10 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    // Elements a `let` pattern ignores (`..`, `_`) are still moved into
+    // the literal's temporary, which has a `(temporary N)` column (#439).
+    "let_pattern_literal_unbound_moves",
+    "let_pattern_literal_temp_scopes",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8355,6 +8359,99 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    // ─── `let` patterns that ignore parts of a literal (#439) ───────
+    TooltipExpect {
+        name: "let_pattern_literal_unbound_moves",
+        // In `let (ref a, ..) = (s, t);` the tuple literal is a temporary
+        // that both `s` and `t` are moved into (rustc: "borrow of moved
+        // value" on either); `..` and `_` don't leave them behind. The
+        // same for `let (x, _) = (m, n);`, a struct literal's omitted
+        // field, and an array's `..`. `let _ = z;` moves nothing. The
+        // temporary has a `(temporary N)` column, like #400's and #457's;
+        // it is dropped at the end of the statement, or with a `ref`
+        // binding at the end of the block (rustc, Drop-printing program),
+        // and its tooltips say which. It holds what was moved into it,
+        // so its drop is "Its resource is dropped", never "No resource".
+        must_contain: &[
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "The temporary that the literal on the right of this let builds takes the value of s. A `ref` binding borrows from it, so it lives until the end of the enclosing block, not just to the end of the statement",
+            "The temporary that the literal on the right of this let builds takes the value of t. A `ref` binding borrows from it, so it lives until the end of the enclosing block, not just to the end of the statement",
+            "The temporary that the literal on the right of this let builds takes the value of n. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "Move from s to (temporary)",
+            "Move from t to (temporary)",
+            "Move from n to (temporary 4)",
+            "Move from m to x",
+            "Immutable borrow from (temporary) to a",
+            "s's resource is moved",
+            "t's resource is moved",
+            "c's resource is moved",
+            "d's resource is moved",
+            "f's resource is moved",
+            "g's resource is moved",
+            "h's resource is moved",
+            "m's resource is moved",
+            "n's resource is moved",
+            "q's resource is moved",
+            "r's resource is moved",
+            "u's resource is moved",
+            "w's resource is moved",
+            "z goes out of scope. Its resource is dropped.",
+            "a immutably borrows a resource",
+            "e immutably borrows a resource",
+            "i immutably borrows a resource",
+            "name immutably borrows a resource",
+            "k immutably borrows a resource",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "(temporary) goes out of scope. No resource is dropped.",
+            "(temporary 2) goes out of scope. No resource is dropped.",
+            "(temporary 3) goes out of scope. No resource is dropped.",
+            "(temporary 5) goes out of scope. No resource is dropped.",
+            "(temporary 6) goes out of scope. No resource is dropped.",
+            "Move from n to x",
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "f goes out of scope. Its resource is dropped.",
+            "g goes out of scope. Its resource is dropped.",
+            "h goes out of scope. Its resource is dropped.",
+            "m goes out of scope. Its resource is dropped.",
+            "n goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+            "r goes out of scope. Its resource is dropped.",
+            "u goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "let_pattern_literal_temp_scopes",
+        // The temporary lives in the block of its `let`: dropped at the
+        // end of the statement (`(x, _) = (a, b)`, b), or with a `ref`
+        // binding at the end of the block (`(_, ref y) = (c, d)`). A
+        // literal of Copy values (`(i, j)`) owns nothing to drop, so it
+        // gets no column and nothing claims a drop.
+        must_contain: &[
+            "Move from b to (temporary)",
+            "Move from a to x",
+            "The temporary that the literal on the right of this let builds takes the value of b. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+            "Move from c to (temporary 2)",
+            "Move from d to (temporary 2)",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "j's value is copied",
+        ],
+        must_not_contain: &[
+            "Move from b to x",
+            "b goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "Move from i to (temporary 3)",
+            "(temporary 3)",
+        ],
     },
 ];
 

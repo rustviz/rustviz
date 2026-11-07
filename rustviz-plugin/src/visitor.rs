@@ -2977,7 +2977,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
     let ty = strip_module_paths(&ty.to_string());
     let id = *self.unique_id;
-    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), id });
+    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), literal: false, id });
     *self.unique_id += 1;
   }
 
@@ -3475,6 +3475,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       self.bind_pat(pat, init, is_skipped);
     }
+    self.keep_literal_temp_with_refs(pat);
   }
 
   /// `let r = &String::from("a");` (also `&mut`, `&s.clone()`,
@@ -3558,15 +3559,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     is_skipped: bool,
   ) {
     match (pat.kind, init.kind) {
-      // `let (a, b) = (e1, e2);` — Issue #86. We require an exact
-      // arity match with no `..` so the field-to-pattern correspondence
-      // is unambiguous; mismatched-arity / `..`-bearing tuples fall
-      // through to bind_walk.
+      // `let (a, b) = (e1, e2);` — Issue #86. Sub-patterns pair with
+      // the literal's elements by position. With a `..` (`let (a, ..) =
+      // (e1, e2, e3);`) the patterns after it pair with the last
+      // elements, and the elements it covers are paired with nothing.
+      // Those, like an element matched by `_`, are still moved into the
+      // tuple temporary (#439).
       (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(sub_exprs))
-        if ddpos.as_opt_usize().is_none()
-          && sub_pats.len() == sub_exprs.len() =>
+        if sub_pats.len() <= sub_exprs.len()
+          && (ddpos.as_opt_usize().is_some() || sub_pats.len() == sub_exprs.len()) =>
       {
-        for (sp, se) in sub_pats.iter().zip(sub_exprs.iter()) {
+        let d = ddpos.as_opt_usize().unwrap_or(sub_pats.len());
+        let tail = sub_pats.len() - d;
+        let tail_start = sub_exprs.len() - tail;
+        let pairs: Vec<_> = sub_pats[..d].iter().zip(sub_exprs.iter())
+          .chain(sub_pats[d..].iter().zip(sub_exprs[tail_start..].iter()))
+          .collect();
+        self.premove_into_literal(&pairs, sub_exprs[d..tail_start].iter().collect(), is_skipped);
+        for (sp, se) in pairs {
           self.bind_pat(sp, se, is_skipped);
         }
       }
@@ -3586,6 +3596,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // field (struct-update syntax `..base`) fall through to
       // bind_walk against the whole init.
       (PatKind::Struct(_, pat_fields, _), ExprKind::Struct(_, expr_fields, _)) => {
+        // A field the pattern leaves out (`..`) is still moved into the
+        // struct temporary (#439).
+        let pairs: Vec<_> = pat_fields.iter()
+          .filter_map(|pf| expr_fields.iter().find(|f| f.ident.name == pf.ident.name).map(|ef| (pf.pat, ef.expr)))
+          .collect();
+        let ignored: Vec<_> = expr_fields.iter()
+          .filter(|ef| !pat_fields.iter().any(|pf| pf.ident.name == ef.ident.name))
+          .map(|ef| ef.expr)
+          .collect();
+        self.premove_into_literal(&pairs, ignored, is_skipped);
         for pf in pat_fields {
           match expr_fields.iter().find(|f| f.ident.name == pf.ident.name) {
             Some(ef) => self.bind_pat(pf.pat, ef.expr, is_skipped),
@@ -3620,15 +3640,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           && before.len() + after.len() <= elems.len()
           && (mid.is_some() || before.len() + after.len() == elems.len()) =>
       {
-        for (sp, se) in before.iter().zip(elems.iter()) {
-          self.bind_pat(sp, se, is_skipped);
-        }
         let after_start = elems.len() - after.len();
-        for (sp, se) in after.iter().zip(elems[after_start..].iter()) {
+        // mid-Wild: middle elements are discarded by the pattern; their
+        // side effects were captured by the entry visit_expr, and they
+        // are still moved into the array temporary (#439).
+        let pairs: Vec<_> = before.iter().zip(elems.iter())
+          .chain(after.iter().zip(elems[after_start..].iter()))
+          .collect();
+        self.premove_into_literal(&pairs, elems[before.len()..after_start].iter().collect(), is_skipped);
+        for (sp, se) in pairs {
           self.bind_pat(sp, se, is_skipped);
         }
-        // mid-Wild: middle elements are explicitly discarded; their
-        // side effects were captured by the entry visit_expr.
       }
       // Canonical leaf: a single named binding consuming the init.
       (PatKind::Binding(annotation, hirid, _, sub_pat), _) => {
@@ -3640,7 +3662,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       // `let _ = expr;` — value discarded. The RHS visit at entry
       // already covered side effects; nothing else to register.
-      (PatKind::Wild, _) => {}
+      // An element of a literal it is paired with (`let (_, b) = (s,
+      // 1);`) is still moved into the literal's temporary (#439);
+      // `let _ = s;` on a place moves nothing.
+      (PatKind::Wild, _) => { self.move_into_literal(init, is_skipped); }
       // Shape mismatch (e.g. tuple pat against a non-tuple init), or
       // a refutable pattern under `let-else`, or a pattern shape we
       // don't structurally decompose (slice, or, deref, …). Best
@@ -4078,6 +4103,150 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// `e` is an element of a tuple / struct / array literal that a `let`
+  /// pattern is matched against (`(s, t)` in `let (ref a, ..) = (s,
+  /// t);`). Building the literal moves (or copies) a variable element
+  /// into the literal's temporary, whether the pattern binds it by
+  /// value, by `ref`, or not at all (`_`, `..`): rustc rejects a later
+  /// use of `s` ("borrow of moved value"). This is called for the
+  /// elements the pattern doesn't bind by value; they go into a
+  /// `(temporary N)` column (see `literal_temp`) and return it.
+  /// Does nothing for the whole initializer (`let _ = s;` moves
+  /// nothing) or for a non-variable element, whose events the entry
+  /// visit already drew. With no column to put it in (the literal
+  /// owns nothing to drop, or sits in a one-line branch) the move has
+  /// no target.
+  fn move_into_literal(&mut self, e: &'tcx Expr<'tcx>, is_skipped: bool) -> Option<ResourceAccessPoint> {
+    if is_skipped
+      || matches!(self.tcx.parent_hir_node(e.hir_id), rustc_hir::Node::LetStmt(_))
+      || e.span.from_expansion()
+      || !matches!(
+        e.kind,
+        ExprKind::Path(QPath::Resolved(_, rustc_hir::Path { res: Res::Local(_), .. }))
+          | ExprKind::Field(..)
+          | ExprKind::Index(..)
+          | ExprKind::Unary(UnOp::Deref, _)
+      )
+    {
+      return None;
+    }
+    let src = fetch_rap(e, &self.tcx, &self.raps)?;
+    let line_num = expr_to_line(e, &self.tcx);
+    let src_ty = self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id);
+    let ev = if src_ty.is_ref() || self.ty_is_copy(src_ty, e.hir_id.owner) { Evt::Copy } else { Evt::Move };
+    let tmp = self.literal_temp(e);
+    if self.premoved.contains(&e.hir_id) {
+      return tmp;
+    }
+    self.update_rap(&src, line_num);
+    let to = tmp.clone().map_or(ResourceTy::Anonymous, ResourceTy::Value);
+    self.add_ev(line_num, ev, to, ResourceTy::Value(src), false);
+    tmp
+  }
+
+  /// A `let` whose pattern has `ref` bindings and whose literal got a
+  /// `(temporary N)` column (see `literal_temp`): the temporary lives
+  /// as long as those bindings do, so it is declared, and goes out of
+  /// scope, with them (like #400's `let r = &String::from(..);`).
+  fn keep_literal_temp_with_refs(&mut self, pat: &'tcx Pat<'tcx>) {
+    let rustc_hir::Node::LetStmt(l) = self.tcx.parent_hir_node(pat.hir_id) else { return };
+    let Some(tmp) = self.literal_temps.get(&l.hir_id) else { return };
+    if tmp.is_unbound_temporary() {
+      return;
+    }
+    let tmp_name = tmp.name().to_owned();
+    let mut refs = Vec::new();
+    pat.each_binding(|ann, _, _, ident| {
+      if matches!(ann.0, rustc_hir::ByRef::Yes(..)) { refs.push(ident.to_string()); }
+    });
+    for r in refs {
+      if let Some(rd) = self.raps.get_mut(&r) {
+        rd.extended_temp = Some(tmp_name.clone());
+      }
+    }
+  }
+
+  /// The elements of the literal in `let PAT = LITERAL;` that the
+  /// pattern doesn't bind by value go into the literal's temporary
+  /// (#439): the `ignored` ones (`..`, an omitted field, an array's
+  /// middle) and those `pairs` matches with `_` or a `ref` binding.
+  /// All of them are moved before any `ref` binding borrows the
+  /// temporary, so the borrow isn't drawn in the middle of the moves.
+  fn premove_into_literal(&mut self, pairs: &[(&'tcx Pat<'tcx>, &'tcx Expr<'tcx>)], ignored: Vec<&'tcx Expr<'tcx>>, is_skipped: bool) {
+    for &(sp, se) in pairs {
+      let not_by_value = match sp.kind {
+        PatKind::Wild => true,
+        PatKind::Binding(ann, ..) => matches!(ann.0, rustc_hir::ByRef::Yes(..)),
+        _ => false,
+      };
+      if not_by_value && self.move_into_literal(se, is_skipped).is_some() {
+        self.premoved.insert(se.hir_id);
+      }
+    }
+    for se in ignored {
+      self.move_into_literal(se, is_skipped);
+    }
+  }
+
+  /// The `(temporary N)` column of the literal that `e` is an element
+  /// of, in `let PAT = LITERAL;`, made on first use (#439). It holds
+  /// what the pattern doesn't take by value. Rust drops it at the end
+  /// of the statement, or, when a `ref` / `ref mut` binding borrows
+  /// from it, at the end of the block (temporary lifetime extension):
+  /// - the first is drawn like an unbound temporary (#457), dropped
+  ///   by a `TemporaryDrop` where the statement ends;
+  /// - the second like a `let`-extended one (#400): the `ref` bindings
+  ///   borrow it and it goes out of scope with them.
+  /// None when the literal's type has nothing to drop, or it sits in a
+  /// one-line `if` / `match` (the limit `note_temporary_drop` has).
+  fn literal_temp(&mut self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    use rustc_hir::Node;
+    let let_stmt = self.tcx.hir_parent_iter(e.hir_id).find_map(|(_, n)| match n {
+      Node::LetStmt(l) => Some(l),
+      _ => None,
+    })?;
+    if let Some(t) = self.literal_temps.get(&let_stmt.hir_id) {
+      return Some(t.clone());
+    }
+    let literal = self.tcx.hir_parent_iter(e.hir_id).find_map(|(_, n)| match n {
+      Node::Expr(p) => Some(p),
+      _ => None,
+    })?;
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    let ty = typeck.expr_ty(literal);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner);
+    if !ty.needs_drop(self.tcx, env) || self.inside_one_line_branch(e) {
+      return None;
+    }
+    let (mut extended, mut mutable) = (false, false);
+    let_stmt.pat.each_binding(|ann, _, _, _| {
+      if let rustc_hir::ByRef::Yes(_, m) = ann.0 {
+        extended = true;
+        mutable |= m == Mutability::Mut;
+      }
+    });
+    self.temp_count += 1;
+    let tmp_name = temporary_label(self.temp_count);
+    if extended {
+      self.add_owner(tmp_name.clone(), mutable, false, false, false, self.current_scope, !self.inside_branch);
+    } else {
+      let (when, end_line, owner) = self.temporary_scope_end(e)?;
+      self.add_owner(tmp_name.clone(), false, false, false, false, end_line, !self.inside_branch);
+      if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
+        o.unbound_temp = true;
+      }
+      self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
+      let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
+      let ty = strip_module_paths(&ty.to_string());
+      let id = *self.unique_id;
+      self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), literal: true, id });
+      *self.unique_id += 1;
+    }
+    let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
+    self.literal_temps.insert(let_stmt.hir_id, tmp.clone());
+    Some(tmp)
+  }
+
   /// The mutability of the reference a `let` pattern's binding `hirid`
   /// makes when it's an explicit `ref` / `ref mut` on a value that
   /// isn't behind a reference (`let ref r = s;`, `let P { ref name, ..
@@ -4227,15 +4396,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       // A literal's element moves (or copies) into the literal's
       // temporary; the binding borrows the temporary.
-      if !whole_init && is_place && !is_skipped {
-        if let Some(src) = fetch_rap(init, &self.tcx, &self.raps) {
-          let src_ty = typeck.node_type(init.hir_id);
-          let e = if src_ty.is_ref() || self.ty_is_copy(src_ty, hirid.owner) { Evt::Copy } else { Evt::Move };
-          self.update_rap(&src, line_num);
-          self.add_ev(line_num, e, ResourceTy::Anonymous, ResourceTy::Value(src), false);
-        }
-      }
-      (ResourceTy::Anonymous, false)
+      let lender = match self.move_into_literal(init, is_skipped) {
+        Some(tmp) => ResourceTy::Value(tmp),
+        None => ResourceTy::Anonymous,
+      };
+      (lender, false)
     };
     // Registered like `define_lhs` registers `let r = &init;`, with the
     // lender and aliasing `get_ref_data` gives `&init` (define_lhs

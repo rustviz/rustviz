@@ -253,6 +253,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
   pub all_paths_exit: bool,
+
+  // The `(temporary N)` RAP of a `let` whose initializer is a tuple /
+  // struct / array literal that the pattern doesn't fully take by value
+  // (`let (ref a, ..) = (s, t);`, #439), by the `let`'s HirId.
+  pub literal_temps: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
+  // The elements of such a literal already moved into its temporary.
+  pub premoved: HashSet<rustc_hir::HirId>,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
