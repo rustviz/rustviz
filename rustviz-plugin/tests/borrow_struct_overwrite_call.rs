@@ -26,7 +26,7 @@ fn main() {
 }
 
 // Overwritten with another variable: a's borrow ends at the write too.
-// (b's borrow stays drawn on other.r, as for `let hold = other;`.)
+// b's borrow moves on to hold.r with the value (#637).
 fn from_variable() {
     let mut a = String::from("a");
     let b = String::from("b");

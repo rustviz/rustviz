@@ -754,13 +754,16 @@ pub fn event_dot_copy_ref_to_caller(my_name: &String, _target_name: &String) -> 
 // copied; the resource it points to stays where it is, still owned by
 // its lender (#178).
 // `pointee_copy`: the referent doesn't need drop, so it's a "value"
-// (`&i32`, `&str`), not a "resource" (#551).
-pub fn event_dot_ref_moved(my_name: &String, to_caller: bool, pointee_copy: bool) -> String {
+// (`&i32`, `&str`), not a "resource" (#551). A `&T` is moved only as
+// a field of a struct that is moved (`let hold = other;`, #637):
+// `other.r` can't be used after that either.
+pub fn event_dot_ref_moved(my_name: &String, to_caller: bool, pointee_copy: bool, is_mut: bool) -> String {
     format!(
-        "{0}'s mutable reference is moved{1} (not the {2} it points to)",
+        "{0}'s {3} reference is moved{1} (not the {2} it points to)",
         fmt_style(my_name),
         if to_caller { " to the caller" } else { "" },
-        held(pointee_copy)
+        held(pointee_copy),
+        if is_mut { "mutable" } else { "immutable" }
     )
 }
 

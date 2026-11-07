@@ -2176,9 +2176,13 @@ impl Event {
                     _ => safe_message(hover_messages::event_dot_copy_to, &self.deref_name(my_name), to)
                 }
             }
-            // Moving a `&mut` moves the reference, not its referent.
+            // Moving a `&mut` moves the reference, not its referent; so
+            // does moving a struct with a `&T` field (#637).
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(r)), ..} if !to.is_closure() => {
-                hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller), r.pointee_copy)
+                hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller), r.pointee_copy, true)
+            }
+            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::StaticRef(r)), ..} if !to.is_closure() => {
+                hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller), r.pointee_copy, false)
             }
             Event::Move{ is: ResourceTy::Index(_, place, _), ..} if place.starts_with('*') => {
                 hover_messages::event_dot_move_through_element(place)
