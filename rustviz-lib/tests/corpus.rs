@@ -603,6 +603,11 @@ const EXPECTED_OK: &[&str] = &[
     "join_after_early_exit",
     // The same, for a value with nothing to drop (#484).
     "return_early_no_drop",
+    // A call inside an arm adds no blank row (#419);
+    // `arm_calls_add_no_blank_rows` checks.
+    "arm_call_no_blank_row",
+    "arm_call_borrow_end_no_blank_row",
+    "match_arm_call_no_blank_row",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7113,6 +7118,45 @@ fn an_arm_whose_first_event_is_on_the_split_line_starts_there() {
     let row = code_row_y(&code, "if s.len() > 1 { take(s); } else {");
     let raised = format!("cy=\"{}\"", row - 15.0);
     assert!(!timeline.contains(&raised), "a dot is half a row above the `if` row although the condition has an event there");
+}
+
+/// Rows of the code panel that carry no source line number: the blank
+/// rows the renderer inserts, below a line with stacked arrows, around a
+/// conditional whose branches share lines, between functions.
+fn unnumbered_code_rows(code: &str) -> usize {
+    let mut n = 0;
+    let mut rest = code;
+    let open = r##"<text class="code" "##;
+    let gutter = r##"<tspan fill="#AAA">"##;
+    while let Some(i) = rest.find(open) {
+        rest = &rest[i + open.len()..];
+        let Some(g) = rest.find(gutter) else { break };
+        let after = &rest[g + gutter.len()..];
+        let end = after.find("</tspan>").unwrap_or(0);
+        if after[..end].trim().is_empty() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// #419: inside an `if` / `match` arm, a line whose call takes or returns
+/// a value got a blank row below it. The arm's line map counted the arrows
+/// to and from the function as stacked; at the top level they aren't
+/// counted (`event_line_map` holds variable-to-variable arrows only), and
+/// nothing is drawn in the row. These fixtures have no other reason for a
+/// blank row.
+#[test]
+fn arm_calls_add_no_blank_rows() {
+    for name in [
+        "arm_call_no_blank_row",
+        "arm_call_borrow_end_no_blank_row",
+        "match_arm_call_no_blank_row",
+    ] {
+        let rv = run_with_local_backend(name);
+        let blanks = unnumbered_code_rows(&rv.code_panel_string());
+        assert_eq!(blanks, 0, "{}: {} blank row(s) in the code panel", name, blanks);
+    }
 }
 
 /// #355: the inner `if` of an `else if` belongs to the outer `else`
