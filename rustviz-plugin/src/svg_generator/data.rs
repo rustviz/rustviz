@@ -499,6 +499,16 @@ pub fn temporary_label(n: usize) -> String {
     }
 }
 
+/// Column label of the n-th (1-based) by-value parameter value that a
+/// `ref` binding borrows (`fn f(ref s: String)`, #691): `(parameter)`,
+/// then `(parameter 2)`, … Not a Rust identifier, like `temporary_label`.
+pub fn parameter_label(n: usize) -> String {
+    match n {
+        1 => "(parameter)".to_owned(),
+        n => format!("(parameter {})", n),
+    }
+}
+
 impl ResourceAccessPoint {
     /// `Some` iff this RAP is an owner whose own type is `Rc` / `Arc` /
     /// `Weak`.
@@ -2219,6 +2229,10 @@ impl Event {
                     (true, false) => hover_messages::event_dot_static_return(my_name, my_name),
                     (true, true) => hover_messages::event_dot_mut_return(my_name, my_name),
                 }
+            }
+            // The column of the value a `ref` binding borrows (#691).
+            Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
+                hover_messages::event_dot_param_value_init(my_name, &own.fn_name, own.whole)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)

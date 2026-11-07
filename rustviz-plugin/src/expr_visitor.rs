@@ -256,6 +256,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
   pub temp_count: usize,
+  /// By-value parameter values given a `(parameter N)` column (#691).
+  pub param_value_count: usize,
+  /// The `ref` bindings' borrows of those columns, added after the
+  /// last parameter (line, mutable, borrower, lender).
+  pub pending_param_borrows: Vec<(usize, bool, ResourceTy, ResourceTy)>,
 
   // Calls whose temporary result's drop has been stated (#457), so a
   // call the visitor reaches twice says it once.

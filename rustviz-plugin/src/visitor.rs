@@ -1788,6 +1788,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     for param in body.params {
       self.visit_param(param);
     }
+    for (line, is_mut, r, lender) in std::mem::take(&mut self.pending_param_borrows) {
+      self.add_borrow_ev(line, if is_mut { Evt::MBorrow } else { Evt::SBorrow }, r, lender, false);
+    }
 
     self.visit_expr(body.value); // visit fn body
     match body.value { // handle return expression if there is one
@@ -1864,14 +1867,48 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // tooltip "Return immutably borrowed resource from s
             // to *s".
             let pointee_copy = self.ref_pointee_is_copy(ty, param.hir_id.owner);
+            // `ref s` on a by-value parameter (or part of one: `(ref a,
+            // b)`), whose type needs drop: the value `f` owns gets a
+            // column of its own, which `s` borrows and which is dropped
+            // when `f` returns (#691, #698). (Without drop, `s` borrows
+            // a value with no column and `Caller` stands in.)
+            let value_col = own_param.as_ref().filter(|o| o.drops).map(|_| {
+              let pointee = ty.builtin_deref(false).unwrap();
+              self.param_value_count += 1;
+              let col = parameter_label(self.param_value_count);
+              let owner_id = param.hir_id.owner;
+              let is_mut = bool_of_mut(ty.ref_mutability().unwrap());
+              self.add_owner(col.clone(), is_mut, false, self.ty_is_plain(pointee, owner_id), self.ty_has_interior_mut(pointee, owner_id), self.current_scope, !self.inside_branch);
+              self.mark_owner_type(&col, pointee);
+              col
+            });
+            let lender = match &value_col {
+              Some(col) => ResourceTy::Value(self.raps.get(col).unwrap().rap.to_owned()),
+              None => ResourceTy::Caller,
+            };
             self.add_ref(name.clone(),
             bool_of_mut(ty.ref_mutability().unwrap()),
             bool_of_mut(binding_annotation.1), line_num,
-            ResourceTy::Caller, VecDeque::new(), self.current_scope, !self.inside_branch, pointee_copy);
+            lender.clone(), VecDeque::new(), self.current_scope, !self.inside_branch, pointee_copy);
             // Stretch the loan to the closing brace so the dashed
             // ref-line trapezoid covers the full body.
             if let Some(rd) = self.borrow_map.get_mut(&name) {
               rd.lifetime = self.current_scope;
+            }
+            if let Some(col) = value_col {
+              // The caller's value arrives in the column, and `s`
+              // borrows it, both on the signature's line.
+              let col_rap = self.raps.get(&col).unwrap().rap.to_owned();
+              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: col_rap, id: *self.unique_id, own_param: own_param.clone(), in_pattern: None });
+              *self.unique_id += 1;
+              // The borrows are added once every parameter is
+              // registered (`visit_body`): arrows on one line are
+              // stacked together, which would push the next
+              // parameter's init dot down a row.
+              let r = self.raps.get(&name).unwrap().rap.to_owned();
+              self.pending_param_borrows.push((line_num, ty.ref_mutability().unwrap() == Mutability::Mut, ResourceTy::Value(r), lender));
+              self.annotate_src(name.clone(), ident.span, false, *self.raps.get(&name).unwrap().rap.hash());
+              continue;
             }
           }
           else if let Some(inner) = self.box_with_field_moved_out(&name, ty) {

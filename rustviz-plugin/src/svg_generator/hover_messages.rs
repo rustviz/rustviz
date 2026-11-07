@@ -324,6 +324,16 @@ pub fn event_dot_ref_init_in_pattern(my_name: &String, bound: &String, is_mut: b
     format!("{0} holds {1} reference (it came with the value matched into {2})", my_name_fmt, kind, bound_fmt)
 }
 
+// The column of a by-value parameter's value that a `ref` binding
+// borrows (`fn f(ref s: String)`, #691): the caller's argument was moved
+// into `f`, which owns it until it returns.
+pub fn event_dot_param_value_init(my_name: &String, fn_name: &String, whole: bool) -> String {
+    format!(
+        "{0} is {2} the value the caller passed to {1}. {1} owns it, and a ref binding borrows it",
+        fmt_style(my_name), fmt_style(fn_name), if whole { "" } else { "part of" }
+    ).replace("  ", " ")
+}
+
 // A reference function parameter receives a borrow from the caller.
 // Mirror message to `event_dot_owner_init_from_caller` for the ref
 // side: makes it clear that the lender lives outside this fn scope.
