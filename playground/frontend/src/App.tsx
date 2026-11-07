@@ -266,9 +266,9 @@ const Description: React.FC = () => (
     <p><strong>Some of what&apos;s drawn is wrong</strong>, so don&apos;t rely on it for:</p>
     <ul>
       <li>
-        A reference bound by a pattern out of a value that holds a borrow (
-        <code>Some(x)</code> in a <code>match</code> on{' '}
-        <code>v.get(2)</code>) isn&apos;t linked to <code>v</code>, and a
+        A reference bound by a pattern out of a value that holds borrows of
+        several variables (<code>Some(x)</code> on{' '}
+        <code>pick(&amp;a, &amp;b)</code>) isn&apos;t linked to them, and a
         collection filled by <code>extend</code> isn&apos;t drawn as
         borrowing what its references point to (<code>vec![&amp;s]</code>,{' '}
         <code>collect()</code> and <code>push(&amp;s)</code> are). (What a call returns, like{' '}

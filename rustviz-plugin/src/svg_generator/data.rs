@@ -965,6 +965,11 @@ pub enum ViaCarrier {
     /// The borrower is the receiver a `&mut self` method stored the
     /// borrow in (`refs.push(&s)`; #392). `func` names the method.
     StoredBy,
+    /// The borrower is a reference a pattern copied (or, for `&mut`,
+    /// moved) out of a value that holds one (`Some(x)` on `third =
+    /// v.get(2)`; #391). `func` names that value, or the function whose
+    /// result was matched when `from_call`.
+    PatternBinding { from_call: bool, moved: bool },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

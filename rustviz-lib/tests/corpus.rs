@@ -773,6 +773,11 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    // — A reference a pattern copies out of a value that holds a
+    //   borrow (`Some(x)` on `v.get(2)`) borrows what that value
+    //   borrows (#391); tooltips pinned below.
+    "holder_match_pattern",
+    "holder_iflet_call",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3823,13 +3828,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "match_copy_ref_out_of_option",
         // Book ch. 8.1: `x` is a copy of the `&i32` stored in `third`.
         // It borrows an element of `v`, not `third`; nothing borrows
-        // `third`. (What `third` holds isn't tracked, so x's lender is
-        // left out rather than named.)
+        // `third`. `third` holds a borrow of `v` (#336), so x's lender
+        // is `v` (#391).
         must_contain: &[
             "x is initialized with a copy of third",
             "Partial copy from third to x",
+            "Return immutably borrowed resource from x to v",
         ],
         must_not_contain: &[
+            "Return immutably borrowed resource from x to *x",
             "Return immutably borrowed resource from x to third",
             "third's resource is no longer immutably borrowed",
         ],
@@ -3856,8 +3863,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x is initialized with a copy of head",
             "y is initialized with a copy of get",
+            "Return immutably borrowed resource from x to v",
+            "Return immutably borrowed resource from y to v",
         ],
         must_not_contain: &[
+            "Return immutably borrowed resource from x to *x",
+            "Return immutably borrowed resource from y to *y",
             "Return immutably borrowed resource from x to head",
             "head's resource is no longer immutably borrowed",
             "Return immutably borrowed resource from y to get",
@@ -8355,6 +8366,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    // ─── References a pattern copies out of a borrow holder (#391) ───
+    TooltipExpect {
+        name: "holder_match_pattern",
+        // #391's repro (Book ch. 8.1). `x` is a copy of the `&i32` in
+        // `third`, which borrows `v`: so x borrows `v`, until line 5.
+        must_contain: &[
+            "Partial copy from third to x",
+            "Immutable borrow from v to x: x is a reference copied out of third",
+            "Return immutably borrowed resource from x to v",
+            "Return immutably borrowed resource from third to v",
+        ],
+        must_not_contain: &[
+            ", through the reference copied out of",
+            ", through the reference moved out of",
+            "Return immutably borrowed resource from x to *x",
+            "Return immutably borrowed resource from x to third",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_iflet_call",
+        // `if let` / `while let` on a call: the bound reference is the
+        // one stored in the call's result, so it borrows `v` (mutably,
+        // for `get_mut`), and v stays borrowed past the call.
+        must_contain: &[
+            "Immutable borrow from v to y: y is a reference copied out of the value get returned",
+            "Return immutably borrowed resource from y to v",
+            "Mutable borrow from v to x: x is a reference moved out of the value get_mut returned",
+            "Return mutably borrowed resource from x to v",
+            "Immutable borrow from v to n: n is a reference copied out of the value next returned",
+        ],
+        must_not_contain: &[
+            ", through the reference copied out of",
+            ", through the reference moved out of",
+            "Return immutably borrowed resource from y to *y",
+            "Return mutably borrowed resource from x to *x",
+            "Return immutably borrowed resource from n to *n",
+            "Return immutably borrowed resource from y to get",
+        ],
     },
 ];
 

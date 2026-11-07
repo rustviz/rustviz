@@ -200,9 +200,11 @@ panic.
 
 **Renders, but some of what's shown is wrong:**
 
-- A reference bound by a pattern out of a value that holds a borrow
-  (`Some(x)` in a `match` on `let third = v.get(2);`) isn't linked to
-  `v`. (A reference or a value returned by a call *is* drawn as
+- A reference bound by a pattern out of a value that holds borrows of
+  several variables (`Some(x)` on `pick(&a, &b)`) isn't linked to any
+  of them. With one variable it is: `Some(x)` in a `match` on `let third
+  = v.get(2);`, or `if let Some(y) = v.get(1)`, borrows `v`. (A
+  reference or a value returned by a call *is* drawn as
   borrowing what the callee's signature ties it to: `first_word(&s)`,
   `longest(&a, &b)`, `let it = v.iter();`, `let third = v.get(2);`,
   `it.next().unwrap()`, `Excerpt::new(&novel)`. Through a reference

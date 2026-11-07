@@ -2435,16 +2435,25 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let id = *self.unique_id;
                       *self.unique_id += 1;
                       let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+                      // A reference copied out of a value that holds a
+                      // borrow also borrows what that value borrows (#391).
+                      let scrutinee = match guard_expr.kind {
+                        ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
+                        _ => guard_expr,
+                      };
+                      let borrow = self.pattern_ref_copy_borrow(to_ro, e, scrutinee);
                       // add_external_event gives a struct's fields their
                       // part of a whole (non-partial) move; otherwise
                       // that's done below.
                       if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
                         member_binds.push(to_ro.clone());
                       }
-                      if inline {
-                        self.add_external_event(pat_line, ext_ev);
-                      } else {
-                        branch_e_data.push((pat_line, ext_ev));
+                      for ev in std::iter::once(ext_ev).chain(borrow) {
+                        if inline {
+                          self.add_external_event(pat_line, ev);
+                        } else {
+                          branch_e_data.push((pat_line, ev));
+                        }
                       }
                       match e {
                         Evt::SBorrow => {
@@ -2472,13 +2481,20 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let id = *self.unique_id;
                       *self.unique_id += 1;
                       let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+                      let scrutinee = match guard_expr.kind {
+                        ExprKind::Tup(fields) if fields.len() == parents.len() => &fields[i],
+                        _ => guard_expr,
+                      };
+                      let borrow = self.pattern_ref_copy_borrow(to_ro, e, scrutinee);
                       if matches!(e, Evt::Move | Evt::Copy) && !inline {
                         member_binds.push(to_ro.clone());
                       }
-                      if inline {
-                        self.add_external_event(pat_line, ext_ev);
-                      } else {
-                        branch_e_data.push((pat_line, ext_ev));
+                      for ev in std::iter::once(ext_ev).chain(borrow) {
+                        if inline {
+                          self.add_external_event(pat_line, ev);
+                        } else {
+                          branch_e_data.push((pat_line, ev));
+                        }
                       }
                       match e {               // A borrow, mut/immut must be returned at the end of the block
                         Evt::SBorrow => {
