@@ -331,6 +331,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (out, unnamed)
   }
 
+  /// Whether every reference in `call`'s result has the same lifetime
+  /// in the callee's signature: its type names exactly one lifetime
+  /// (`Option<&'a String>`), and no type parameter that could bring
+  /// others. Then a reference copied out of the result has the lifetime
+  /// `call_arg_tie` describes; with `(&'a str, &'b str)` it has only
+  /// one of them (#681).
+  pub fn call_result_has_one_lifetime(&self, call: &'tcx Expr<'tcx>) -> bool {
+    let Some((sig, _, _, _)) = self.callee_sig(call) else { return false };
+    let mut regions: Vec<ty::Region<'tcx>> = Vec::new();
+    for g in sig.output().walk() {
+      match g.kind() {
+        GenericArgKind::Lifetime(r) => {
+          if !regions.contains(&r) {
+            regions.push(r);
+          }
+        }
+        GenericArgKind::Type(t) if matches!(t.kind(), ty::Param(_)) => return false,
+        _ => {}
+      }
+    }
+    regions.len() == 1 && !regions[0].is_static()
+  }
+
   /// Which of `call`'s arguments its signature ties the result to,
   /// and how many of those have no column (see `ArgTie`).
   pub fn call_arg_tie(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> ArgTie {
@@ -379,6 +402,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).iter().any(|(_, m)| *m),
       ExprKind::Array(elems) => elems.iter().any(|x| self.value_borrow_is_mut(x)),
       ExprKind::Repeat(x, _) => self.value_borrow_is_mut(x),
+      // `Holder { r: &mut z }` (#692).
+      ExprKind::Struct(_, fields, tail) => fields.iter().any(|f| self.value_borrow_is_mut(f.expr))
+        || matches!(tail, rustc_hir::StructTailExpr::Base(b) if self.value_borrow_is_mut(b)),
       ExprKind::Block(b, _) => b.expr.is_some_and(|x| self.value_borrow_is_mut(x)),
       ExprKind::DropTemps(inner) => self.value_borrow_is_mut(inner),
       _ => false,
@@ -529,6 +555,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
       }
       ExprKind::Repeat(e, _) => self.value_lenders(e),
+      // A struct literal holds its fields' borrows (`Some(Part { part:
+      // &s })` holds `s`'s; #692), and those of the fields it takes
+      // from the base of a struct update.
+      // A holder records one kind of borrow, so a literal mixing `&s`
+      // and `&mut k` is left untracked.
+      ExprKind::Struct(_, fields, tail) => {
+        let mut out: Vec<ResourceTy> = Vec::new();
+        let base = match tail {
+          rustc_hir::StructTailExpr::Base(b) => Some(b),
+          _ => None,
+        };
+        let mut kinds: Vec<bool> = Vec::new();
+        for e in fields.iter().map(|f| f.expr).chain(base) {
+          let ls = self.value_lenders(e);
+          if !ls.is_empty() {
+            kinds.push(self.value_borrow_is_mut(e));
+          }
+          for l in ls {
+            if !out.contains(&l) {
+              out.push(l);
+            }
+          }
+        }
+        if kinds.iter().any(|m| *m) && kinds.iter().any(|m| !*m) {
+          return Vec::new();
+        }
+        out
+      }
       // A closure value holds a borrow of each variable it captures
       // by reference (the `match_rhs` closure arm draws the same).
       ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).into_iter().map(|(l, _)| l).collect(),
