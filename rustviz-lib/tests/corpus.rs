@@ -827,6 +827,8 @@ const EXPECTED_OK: &[&str] = &[
     // the literal's temporary, which has a `(temporary N)` column (#439).
     "let_pattern_literal_unbound_moves",
     "let_pattern_literal_temp_scopes",
+    "edition2024/if_let_chain_cond_reads_x",
+    "edition2024/else_if_let_chain_two_bindings",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9862,7 +9864,8 @@ fn assert_arm_starts_on_split_line(name: &str, var: &str, line: &str, bind_text:
     let row = code_row_y(&code, line);
     let bind = dots_with_tooltip(&timeline, bind_text);
     let arrow = arrow_points(&timeline, arrow_text);
-    let split = dots_with_tooltip(&timeline, &format!("{} is live in a conditional expression ", var));
+    // (`dots_listing`: a condition's event on the line shares the split dot, #509.)
+    let split = dots_listing(&timeline, &format!("{} is live in a conditional expression ", var));
     assert_eq!((bind.len(), arrow.len(), split.len()), (1, 1, 1), "{} {}: dots / arrow", name, var);
     let (bind, split) = (bind[0], split[0]);
     // The binding is on its own source row, and its arrow runs level
@@ -10009,9 +10012,7 @@ fn outer_borrow_end_is_drawn_in_each_arm() {
 /// #508: the same for a plain `if` or `match` whose first arm is written
 /// on the split line (`if c { take(s); } else {`): the arm's column used to
 /// start at the split row while the diagonal reached it a row lower, so it
-/// ran back up to the move's dot. A condition with an event of its own on
-/// that line (`if s.len() > 1 { take(s); } else {`) keeps its old drawing:
-/// no dot is raised half a row above the `if` row.
+/// ran back up to the move's dot.
 #[test]
 fn an_arm_whose_first_event_is_on_the_split_line_starts_there() {
     assert_arm_starts_on_split_line(
@@ -10020,13 +10021,30 @@ fn an_arm_whose_first_event_is_on_the_split_line_starts_there() {
     assert_arm_starts_on_split_line(
         "match_arm_on_split_line", "s", "match n { 0 => take(s),",
         "s's resource is moved", "Move from s to take");
+}
 
-    // The condition reads `s` on the `if` line: no raised split dot.
-    let rv = run_with_local_backend("if_arm_on_split_line_cond_event");
-    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-    let row = code_row_y(&code, "if s.len() > 1 { take(s); } else {");
-    let raised = format!("cy=\"{}\"", row - 15.0);
-    assert!(!timeline.contains(&raised), "a dot is half a row above the `if` row although the condition has an event there");
+/// #509: when the condition also has an event of the column's own on the
+/// split line (`if s.len() > 1 { take(s); } else {`, or a let-chain whose
+/// first part reads the variable the later `let` binds from: `if
+/// x.is_some() && let Some(a) = &x {`), that event runs before either
+/// arm. It's drawn on the split dot, raised half a row above the `if`
+/// row, and the `if` arm starts on the row as without it. These columns
+/// used to keep the old drawing: the arm ran back up to its first event's
+/// dot (a Z), and that event's arrow hopped over the split dot.
+#[test]
+fn a_condition_event_on_the_split_line_is_on_the_raised_split_dot() {
+    for (name, var, line, bind_text, arrow_text, cond) in [
+        ("if_arm_on_split_line_cond_event", "s", "if s.len() > 1 { take(s); } else {",
+         "s's resource is moved", "Move from s to take", "len reads from s (implicitly borrowed)"),
+        ("edition2024/if_let_chain_cond_reads_x", "x", "if x.is_some() && let Some(a) = &x {",
+         "x's resource is immutably borrowed by a; x is read-only while the borrow is live",
+         "Partial immutable borrow from x to a", "is_some reads from x (implicitly borrowed)"),
+    ] {
+        assert_arm_starts_on_split_line(name, var, line, bind_text, arrow_text);
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        let split = dots_listing(&timeline, &format!("{} is live in a conditional expression ", var));
+        assert_eq!(dots_listing(&timeline, cond), split, "{}: {:?} is not on the split dot", name, cond);
+    }
 }
 
 /// #557: `if let Msg::Pair(n, s) = msg` copies `n` out of `msg` before the
@@ -10074,6 +10092,53 @@ fn an_if_let_arm_that_moves_out_on_the_split_row_starts_there() {
     for &(x1, y1, x2, y2) in &lines {
         if near(x1, moved.0) && near(x2, moved.0) && (x1 - x2).abs() < 1.0 {
             assert!(y2 > y1, "a zero-height or backwards segment on the arm's column: ({}, {}) -> ({}, {})", x1, y1, x2, y2);
+        }
+    }
+}
+
+/// #510: two pattern bindings on one if-let-chain line, `if let Some(a) =
+/// &x && let Some(b) = y {`. Their columns came after both sources (x, y,
+/// a, b), so the arrows overlapped: `x -> a` ran along the row and hopped
+/// over y's binding dot, and `y -> b` was a trapezoid through a blank row
+/// added below the line, which pushed the body a row away from its code.
+/// Each binding's column now comes right after its source's (x, a, y, b),
+/// and both arrows run straight along the `if let` row.
+#[test]
+fn two_bindings_on_one_let_chain_line_are_drawn_side_by_side() {
+    // (fixture, the line, its arrows, the next line, the bindings' dots
+    // on the sources' arms)
+    for (name, line, arrows, next, binds) in [
+        ("edition2024/if_let_chain", "if let Some(a) = &x && let Some(b) = y {",
+         ["Partial immutable borrow from x to a", "Copy from y to b"], "show(a);",
+         ["x's resource is immutably borrowed by a; x is read-only while the borrow is live", "y's value is copied"]),
+        ("edition2024/else_if_let_chain_two_bindings", "} else if let Some(a) = &x && let Some(b) = &y {",
+         ["Partial immutable borrow from x to a", "Partial immutable borrow from y to b"], "show(a);",
+         ["x's resource is immutably borrowed by a; x is read-only while the borrow is live",
+          "y's resource is immutably borrowed by b; y is read-only while the borrow is live"]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let xs: Vec<f64> = ["x", "a", "y", "b"].iter().map(|l| label_x(&timeline, l)).collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "{}: columns x, a, y, b at {:?}", name, xs);
+        let row = code_row_y(&code, line);
+        for text in arrows {
+            let arrow = arrow_points(&timeline, text);
+            assert_eq!(arrow.len(), 1, "{}: {:?}", name, text);
+            assert!(arrow[0].len() == 2 && arrow[0].iter().all(|p| p.1 == row),
+                "{}: {:?} isn't a straight arrow along the `if let` row y={}: {:?}", name, text, row, arrow[0]);
+        }
+        assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
+        let hops: Vec<&str> = start_tags(&timeline, "path")
+            .into_iter()
+            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+            .collect();
+        assert_eq!(hops, Vec::<&str>::new(), "{}: an arrow hops over a dot", name);
+        // No row added below the line: the body stays on the rows of its code.
+        assert_eq!(code_row_y(&code, next), row + 30.0, "{}: a row is added below the `if let` line", name);
+        for text in binds {
+            let bind = dots_with_tooltip(&timeline, text);
+            assert_eq!(bind.len(), 1, "{}: {}", name, text);
+            assert_eq!(bind[0].1, row, "{}: {:?} isn't on the `if let` row", name, text);
         }
     }
 }
