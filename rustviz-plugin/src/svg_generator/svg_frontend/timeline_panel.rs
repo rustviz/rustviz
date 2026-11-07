@@ -3430,7 +3430,7 @@ fn render_branches(
                     // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_at = Some((branch_x, stop_y));
-                        let title = hover_messages::branch_never_reaches_merge(&rap.name().to_string());
+                        let title = hover_messages::branch_never_reaches_merge();
                         stop_bar = format!(
                             "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
                             hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y, title,
