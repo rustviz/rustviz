@@ -361,9 +361,9 @@ const Description: React.FC = () => (
         changes;
         a read through one (<code>let n = *slots[0];</code>) is an arrow out of
         <code>slots</code>&apos;s column, likewise without naming the variable.
-        Reads of a field through a reference (<code>let a = p.x;</code>) are
-        drawn on the reference&apos;s column; a mutable borrow of such a field
-        (<code>&amp;mut r.a</code>) isn&apos;t.
+        Reads and mutable borrows of a field through a reference (
+        <code>let a = p.x;</code>, <code>&amp;mut r.a</code>) are drawn on the
+        reference&apos;s column.
       </li>
       <li>
         A reference to a slice or <code>str</code> (<code>&amp;[i32]</code>) still

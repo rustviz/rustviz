@@ -1873,21 +1873,54 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// The resource read by `expr` (`p.x`, `&p.name`, `self.n`) when it
-  /// is a field reached through a reference: `DerefField(p, "p.x")`,
-  /// drawn on p's column like a read of `*p` (#266). `None` for
-  /// anything else, including `&mut p.f`: a mutable reborrow of a field
-  /// isn't drawn yet (#202).
+  /// The resource read or borrowed by `expr` (`p.x`, `&p.name`,
+  /// `&mut r.a`, `self.n`) when it is a field reached through a
+  /// reference: `DerefField(p, "p.x")`, drawn on p's column like a
+  /// read or reborrow of `*p` (#266, #202). `None` for anything else.
   pub fn field_access_through_ref(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
     let mut place = expr;
-    loop {
-      match place.kind {
-        ExprKind::AddrOf(_, Mutability::Mut, _) => return None,
-        ExprKind::AddrOf(_, _, inner) | ExprKind::DropTemps(inner) => place = inner,
-        _ => break,
-      }
+    while let ExprKind::AddrOf(_, _, inner) | ExprKind::DropTemps(inner) = place.kind {
+      place = inner;
     }
     self.field_through_ref(place)
+  }
+
+  /// The owner's column for the place a reference `r` points to, plus
+  /// the field path `suffix` (`""` or `".a.b"`): follows `r`'s lender
+  /// through reborrows (`&mut *q`) and field reborrows (`&mut q.a`)
+  /// until it reaches a local owner, e.g. `s.a` for `let q = &mut s;
+  /// let r = &mut q.a;`. `None` when the chain ends anywhere else (a
+  /// parameter's caller, an anonymous temporary) or the field has no
+  /// column. A reference is never returned: it doesn't own (#323).
+  pub fn owner_behind_ref(&self, r: &ResourceAccessPoint, suffix: &str) -> Option<ResourceAccessPoint> {
+    self.owner_behind_ref_at(r, suffix, 0)
+  }
+
+  fn owner_behind_ref_at(&self, r: &ResourceAccessPoint, suffix: &str, depth: usize) -> Option<ResourceAccessPoint> {
+    // `cur = &mut cur.next;` makes cur its own lender; give up rather
+    // than loop.
+    if depth > 16 {
+      return None;
+    }
+    match &self.borrow_map.get(r.name())?.lender {
+      ResourceTy::Value(l) if !l.is_ref() => {
+        if suffix.is_empty() {
+          return Some(l.clone());
+        }
+        self.raps.get(&format!("{}{}", l.name(), suffix))
+          .map(|rd| rd.rap.clone())
+          .filter(|f| matches!(f, ResourceAccessPoint::Struct(_)))
+      }
+      // `let r = q;` with q a reference (a copy or move of q), or
+      // `&mut *q`: r points where q points.
+      ResourceTy::Value(q) | ResourceTy::Deref(q) => self.owner_behind_ref_at(q, suffix, depth + 1),
+      // `&mut q.a`: r points to q's pointee's field `.a`.
+      ResourceTy::DerefField(q, place, _) => {
+        let field = place.strip_prefix(q.name().as_str()).filter(|f| f.starts_with('.'))?;
+        self.owner_behind_ref_at(q, &format!("{}{}", field, suffix), depth + 1)
+      }
+      ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Index(..) | ResourceTy::Temporary { .. } => None,
+    }
   }
 
   // add events for arguments in a function call
@@ -1984,7 +2017,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // Reborrow if written `f(&mut *r)`, or if rustc inserted
           // the reborrow for `f(r)` (param type `&mut T`). `take(r)`
           // into a generic `T` has no such adjustment: r is moved.
-          let is_reborrow = match arg.kind {
+          // `f(&mut r.a)` with r a reference reborrows through r too.
+          let is_reborrow = matches!(from_ro, ResourceTy::DerefField(..)) || match arg.kind {
             ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, tycheck_results),
             _ => is_implicit_mut_reborrow(arg, tycheck_results),
           };
