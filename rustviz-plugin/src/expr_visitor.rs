@@ -406,6 +406,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // operand), by HirId: each goes to the caller when its branch runs,
   // drawn where `visit_expr` visits it, inside its branch (#674).
   pub tail_values: HashSet<rustc_hir::HirId>,
+  // Where the arms of each if/else and match leave to when they exit
+  // early, by the Branch event's id (see `end_borrows_at_exits`).
+  pub exit_scopes: HashMap<usize, ExitScope>,
 }
 
 /// See `ExprVisitor::live_tuples`.
@@ -420,6 +423,18 @@ pub struct LiveTuple<'tcx> {
   pub pat: &'tcx Pat<'tcx>,
   // `MatchArmExit` or `IfExit`.
   pub at: TupleDropAt,
+}
+
+/// What an early exit (`return`, panic, `break`, `continue`) in an arm
+/// of a conditional leaves, recorded when the conditional is built.
+#[derive(Debug, Clone, Copy)]
+pub struct ExitScope {
+  /// The conditional is in a closure: a `return` there leaves only
+  /// the closure.
+  pub in_closure: bool,
+  /// First and last line of the innermost loop around the conditional,
+  /// which a `break` / `continue` in it leaves.
+  pub loop_lines: Option<(usize, usize)>,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -5570,6 +5585,27 @@ pub fn print_out_of_scope(&mut self){
     // own references too: `if c { let h2 = h; .. }` hands h's borrow
     // to h2 in the arm, and h2's end belongs there (#637).
     self.nest_borrow_ends_in_arms();
+    self.end_borrows_at_exits();
+  }
+
+  /// A reference declared before an `if` / `match` whose borrow ends
+  /// after it, on a path through an arm that leaves early (`return`,
+  /// a panic, a `break` / `continue` the borrow doesn't outlive): the
+  /// reference is never used again on that path, so its borrow ends
+  /// there, after the arm's last use of it, or where the arm starts if
+  /// it doesn't use it. `print_lifetimes` drew the end only at the
+  /// later use, which that path never reaches, so the arm left the
+  /// lender lent, and an exit that drops the lender dropped it while
+  /// lent (#663). Give each such arm its own end of the borrow, ahead
+  /// of the exit's drops; several ending on one line end in reverse
+  /// declaration order.
+  fn end_borrows_at_exits(&mut self) {
+    #[expect(clippy::disallowed_methods, reason = "collected into a map")]
+    let assigned: HashMap<String, usize> = self.borrow_map.iter()
+      .map(|(n, d)| (n.clone(), d.assigned_at))
+      .collect();
+    let mut cx = ExitCtx { scopes: &self.exit_scopes, assigned: &assigned, unique_id: self.unique_id };
+    end_borrows_at_exits_in(self.preprocessed_events, &[], &mut cx);
   }
 
   /// For a reference `k` that a pattern copied (or moved) out of a
@@ -5778,6 +5814,169 @@ fn end_borrow_in_arms(
     };
     arm.e_data.insert(at.1, (at.0, copy));
   }
+}
+
+/// What `end_borrows_at_exits_in` needs from the visitor.
+struct ExitCtx<'b> {
+  scopes: &'b HashMap<usize, ExitScope>,
+  /// Each reference's `RefData::assigned_at`.
+  assigned: &'b HashMap<String, usize>,
+  unique_id: &'b mut usize,
+}
+
+/// `(r, lender)` if `e` ends the borrow the reference `r` holds;
+/// `lender` is what it gives the value back to (none for a `RefDie`).
+fn borrow_end_of(e: &ExternalEvent) -> Option<(&ResourceAccessPoint, &ResourceTy)> {
+  match e {
+    ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
+    | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
+    | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } => Some((r, to)),
+    _ => None,
+  }
+}
+
+/// The borrow ends among `events` and inside their conditionals' arms,
+/// in order.
+fn borrow_ends_in(events: &[(usize, ExternalEvent)], out: &mut Vec<(usize, ExternalEvent)>) {
+  for (line, e) in events {
+    match e {
+      ExternalEvent::Branch { branches, .. } => {
+        for b in branches {
+          borrow_ends_in(&b.e_data, out);
+        }
+      }
+      _ if borrow_end_of(e).is_some() => out.push((*line, e.clone())),
+      _ => {}
+    }
+  }
+}
+
+/// Whether every path through `events` ends `r`'s borrow of `to`.
+fn ends_on_every_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, to: &ResourceTy) -> bool {
+  events.iter().any(|(_, e)| match e {
+    ExternalEvent::Branch { branches, branch_type, .. } => !matches!(branch_type, BranchType::Loop(..))
+      && !branches.is_empty()
+      && branches.iter().all(|b| ends_on_every_path(&b.e_data, r, to)),
+    _ => borrow_end_of(e) == Some((r, to)),
+  })
+}
+
+/// See `ExprVisitor::end_borrows_at_exits`. `after`: the borrow ends
+/// that come after `events` on the path through them. Returns the
+/// variables this gave events in `events`' conditionals, which need a
+/// column in a conditional around them too.
+fn end_borrows_at_exits_in(
+  events: &mut [(usize, ExternalEvent)],
+  after: &[(usize, ExternalEvent)],
+  cx: &mut ExitCtx,
+) -> HashSet<ResourceAccessPoint> {
+  let mut out = HashSet::new();
+  for k in 0..events.len() {
+    if !matches!(events[k].1, ExternalEvent::Branch { .. }) {
+      continue;
+    }
+    // The borrow ends after this conditional: later in `events`, then
+    // after them.
+    let mut later = Vec::new();
+    borrow_ends_in(&events[k + 1..], &mut later);
+    later.extend(after.iter().cloned());
+    let scope = cx.scopes.get(&events[k].1.get_id()).copied();
+    let ExternalEvent::Branch { branches, live_vars, branch_type, split_point, merge_point, .. } = &mut events[k].1 else {
+      unreachable!("checked above")
+    };
+    #[expect(clippy::disallowed_methods, reason = "collected into a set")]
+    let declared: HashSet<ResourceAccessPoint> = branches.iter()
+      .flat_map(|b| b.decl_vars.iter().cloned())
+      .collect();
+    let mut added: HashSet<ResourceAccessPoint> = HashSet::new();
+    for (b, arm) in branches.iter_mut().enumerate() {
+      // Exits in conditionals nested in the arm first.
+      added.extend(end_borrows_at_exits_in(&mut arm.e_data, &later, cx).into_iter()
+        .filter(|v| !arm.decl_vars.contains(v)));
+      let Some(scope) = scope else { continue };
+      if !arm.diverges || arm.exits.is_empty() || scope.in_closure || matches!(branch_type, BranchType::Loop(..)) {
+        continue;
+      }
+      // Whether the arm's exits leave a borrow that ends on `line`
+      // and was made on `made`: a `return` or a panic leaves the
+      // function; a `break` the loop, so only a borrow not used after
+      // the loop; a `continue` the iteration, so only a borrow also
+      // made in it.
+      let leaves = |line: usize, made: usize| arm.exits.iter().all(|x| match x {
+        BranchExit::Return | BranchExit::Panic | BranchExit::Other => true,
+        BranchExit::Break => scope.loop_lines.is_some_and(|(_, hi)| line <= hi),
+        BranchExit::Continue => scope.loop_lines.is_some_and(|(lo, hi)| lo <= made && line <= hi),
+        BranchExit::BreakBlock => false,
+      });
+      let mut seen: HashSet<(ResourceAccessPoint, ResourceTy)> = HashSet::new();
+      // (line, index in the arm, r's declaration, the end).
+      let mut ends: Vec<(usize, usize, u64, ExternalEvent)> = Vec::new();
+      for (line, e) in &later {
+        let Some((r, to)) = borrow_end_of(e) else { continue };
+        if !seen.insert((r.clone(), to.clone())) {
+          continue; // only the next end of this borrow
+        }
+        let Some(&made) = cx.assigned.get(r.name()) else { continue };
+        // An end on the conditional's own lines that wasn't put into
+        // its arms (`end_outer_borrows_in_arms`) can't be told apart
+        // from the conditional; leave it.
+        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made)
+          || to.extract_rap().is_some_and(|l| l.is_fn())
+          || ends_on_every_path(&arm.e_data, r, to)
+        {
+          continue;
+        }
+        // After the arm's last use of r. An exit's own drop of r (a
+        // `&mut` reference) isn't a use: the borrow ends before it.
+        let last = arm.e_data.iter().rposition(|(_, ev)|
+          !matches!(ev, ExternalEvent::GoOutOfScope { ro, .. } if ro == r) && touches(ev, r));
+        let (at_line, at) = match last {
+          Some(i) => (match &arm.e_data[i].1 {
+            ExternalEvent::Branch { merge_point, .. } => *merge_point,
+            _ => arm.e_data[i].0,
+          }, i + 1),
+          // The arm doesn't use r: on this path the borrow ended
+          // before the arm.
+          None => {
+            let start = branch_type.get_start_end(b).0;
+            (start, arm.e_data.iter().position(|(el, _)| *el >= start).unwrap_or(arm.e_data.len()))
+          }
+        };
+        let mut copy = e.clone();
+        match &mut copy {
+          ExternalEvent::StaticDie { id, .. } | ExternalEvent::MutableDie { id, .. } | ExternalEvent::RefDie { id, .. } => {
+            *id = *cx.unique_id;
+            *cx.unique_id += 1;
+          }
+          _ => unreachable!("borrow_end_of matched"),
+        }
+        added.insert(r.clone());
+        if let ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. } = copy {
+          if let Some(l) = to.extract_rap().filter(|l| *l != r) {
+            added.insert(l.clone());
+          }
+        }
+        ends.push((at_line, at, *r.hash(), copy));
+      }
+      // Ends on one line all go after its last use, in reverse
+      // declaration order (inserting each in declaration order at the
+      // same index puts the later one first).
+      for i in 0..ends.len() {
+        let last_at = ends.iter().filter(|e| e.0 == ends[i].0).map(|e| e.1).max().unwrap_or(ends[i].1);
+        ends[i].1 = last_at;
+      }
+      ends.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+      for (line, at, _, ev) in ends {
+        arm.e_data.insert(at, (line, ev));
+      }
+    }
+    // What the arms' new events are on has a column in the conditional.
+    added.retain(|v| !declared.contains(v));
+    #[expect(clippy::disallowed_methods, reason = "inserted into a set")]
+    live_vars.extend(added.iter().cloned());
+    out.extend(added);
+  }
+  out
 }
 
 /// Whether a variable owns a resource at some point of the walk.

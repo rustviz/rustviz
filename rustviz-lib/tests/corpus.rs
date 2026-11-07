@@ -1063,6 +1063,11 @@ const EXPECTED_OK: &[&str] = &[
     "return_if_value",
     "return_tail_if_refs",
     "mutref_moved_in_branch",
+    // A reference made before a conditional and used after it gets its
+    // borrow ended on the path through an arm that leaves early (#663).
+    "exit_outer_borrow_return",
+    "exit_outer_borrow_unused",
+    "exit_outer_borrow_loop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11920,6 +11925,50 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "its resource is dropped when z goes out of scope",
         ],
     },
+    // #663: `let r = &t;` before an `if`, used again after it. The arm
+    // that returns (or panics) is r's last use on its path, but #666
+    // ended r's borrow only at the later use, so the exit dropped `t`
+    // while the diagram still showed it lent. For `t` that dot read
+    // right ("Its resource is dropped."); for the `&mut` borrow of `v`
+    // the drop was worded from the lent state, falsely: "v goes out of
+    // scope. No resource is dropped." The end's place on each exit row
+    // is checked in `outer_borrow_ends_at_exit`.
+    TooltipExpect {
+        name: "exit_outer_borrow_return",
+        must_contain: &[
+            "t's resource is no longer immutably borrowed",
+            "r's immutable borrow ends",
+            "u's resource is no longer immutably borrowed",
+            "q's immutable borrow ends",
+            "v's resource is no longer mutably borrowed",
+            "m's mutable borrow ends",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=v goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "exit_outer_borrow_unused",
+        must_contain: &[
+            "t's resource is no longer immutably borrowed",
+            "s's resource is no longer immutably borrowed",
+            "a's resource is no longer immutably borrowed",
+            "b's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "=t goes out of scope. No resource is dropped.",
+            "=s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "exit_outer_borrow_loop",
+        must_contain: &[
+            "t's resource is no longer immutably borrowed",
+            "r's immutable borrow ends",
+            "u's resource is no longer immutably borrowed",
+            "q's immutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -14497,6 +14546,66 @@ fn borrow_ends_before_lender_drop_at_exit() {
             "{}: no dot on the {:?} row lists {:?} after {:?}; dots listing the drop: {:?}",
             name, row, drop, before, dots_listing_tooltip(&timeline, drop));
     }
+}
+
+/// A reference made before an `if` / `match` and used after it: on the
+/// path through an arm that leaves early its borrow ends in that arm,
+/// after the arm's last use of it (where the arm starts if it doesn't
+/// use it), and before the exit drops the lender (#663). #666 ended it
+/// only at the later use, which that path never reaches. Each entry:
+/// the row, and the lines one dot on it lists, in order.
+#[test]
+fn outer_borrow_ends_at_exit() {
+    let t_back = "t's resource is no longer immutably borrowed";
+    let t_drop = "t goes out of scope. Its resource is dropped.";
+    for (name, row, want) in [
+        ("exit_outer_borrow_return", "return r.len();", &[t_back, t_drop][..]),
+        ("exit_outer_borrow_return", "return r.len();", &["r's immutable borrow ends"][..]),
+        ("exit_outer_borrow_return", "return q.len() + 1;", &["u's resource is no longer immutably borrowed",
+            "u goes out of scope. Its resource is dropped."][..]),
+        ("exit_outer_borrow_return", "return q.len() + 1;", &["q's immutable borrow ends"][..]),
+        ("exit_outer_borrow_return", "panic!(\"{}\", m);", &["v's resource is no longer mutably borrowed",
+            "v goes out of scope. Its resource is dropped."][..]),
+        ("exit_outer_borrow_return", "panic!(\"{}\", m);", &["m's mutable borrow ends"][..]),
+        // The arm doesn't use r: the borrow ends on its first row, and
+        // t is dropped at the `return` below it.
+        ("exit_outer_borrow_unused", "println!(\"early\");", &[t_back][..]),
+        ("exit_outer_borrow_unused", "println!(\"early\");", &["r's immutable borrow ends"][..]),
+        ("exit_outer_borrow_unused", "return 0;", &[t_drop][..]),
+        ("exit_outer_borrow_unused", "None => return w.len(),", &["s's resource is no longer immutably borrowed",
+            "s goes out of scope. Its resource is dropped."][..]),
+        ("exit_outer_borrow_unused", "None => return w.len(),", &["w's immutable borrow ends"][..]),
+        ("exit_outer_borrow_unused", "return ra.len() + rb.len();", &["a's resource is no longer immutably borrowed",
+            "a goes out of scope. Its resource is dropped."][..]),
+        ("exit_outer_borrow_unused", "return ra.len() + rb.len();", &["b's resource is no longer immutably borrowed",
+            "b goes out of scope. Its resource is dropped."][..]),
+        // `break` / `continue` leave the body that declares r / q.
+        ("exit_outer_borrow_loop", "continue;", &["u's resource is no longer immutably borrowed"][..]),
+        ("exit_outer_borrow_loop", "continue;", &["q's immutable borrow ends"][..]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+        let y = code_row_y(&code, row);
+        let ok = dots_where(&timeline, |lines| {
+            let mut at = 0;
+            want.iter().all(|w| match lines[at..].iter().position(|l| l == w) {
+                Some(i) => { at += i + 1; true }
+                None => false,
+            })
+        });
+        assert!(ok.iter().any(|(_, dy)| *dy == y),
+            "{}: no dot on the {:?} row lists {:?} in order; dots listing {:?}: {:?}",
+            name, row, want, want[0], dots_listing_tooltip(&timeline, want[0]));
+    }
+    // The `break` in `brk` ends r's borrow, so t has one end per path:
+    // at the `break` and at `n += r.len();`. `k` was made before the loop
+    // and is used after it: the `break` in `kept` leaves it lent.
+    let rv = run_with_local_backend("exit_outer_borrow_loop");
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    let count = |t: &str| tips.iter().filter(|l| *l == t).count();
+    assert_eq!(count("r's immutable borrow ends"), 2, "{:?}", tips);
+    assert_eq!(count("k's immutable borrow ends"), 1, "{:?}", tips);
+    assert_eq!(count("w's resource is no longer immutably borrowed"), 1, "{:?}", tips);
 }
 
 /// The `if` counterpart of `guard_that_moves_is_refused` (#198, #281):

@@ -1716,6 +1716,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// Record what an exit in the conditional `expr`, whose Branch event
+  /// gets the next id, leaves (see `ExitScope`).
+  fn note_exit_scope(&mut self, expr: &'tcx Expr<'tcx>) {
+    let sm = self.tcx.sess.source_map();
+    let loop_lines = self.exit_frames.iter().rev()
+      .find_map(|f| match f {
+        ExitFrame::Loop { id, .. } => Some(self.tcx.hir_span(*id)),
+        ExitFrame::Branch { .. } => None,
+      })
+      .map(|sp| (sm.lookup_char_pos(sp.lo()).line, sm.lookup_char_pos(sp.hi()).line));
+    self.exit_scopes.insert(*self.unique_id, ExitScope { in_closure: self.in_closure(expr), loop_lines });
+  }
+
   /// Whether `e` is inside a closure of the function being visited.
   fn in_closure(&self, e: &'tcx Expr<'tcx>) -> bool {
     self.tcx.hir_parent_iter(e.hir_id)
@@ -3555,6 +3568,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           b_labels[0] = IF_LET_ARM.to_owned();
         }
         let b_ty = BranchType::If(b_labels, b_slices);
+        self.note_exit_scope(expr);
         self.add_external_event(line_num,
           ExternalEvent::Branch {
             live_vars: liveness,
@@ -4254,6 +4268,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
               self.all_paths_exit = true;
             }
+            self.note_exit_scope(expr);
             self.add_external_event(split, ExternalEvent::Branch {
               live_vars: liveness,
               branches: branch_data,
