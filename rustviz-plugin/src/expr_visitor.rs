@@ -2081,6 +2081,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
   }
 
+  /// `expr` is `*r` (or `**r`, ...) with `r` a reference RAP: the value
+  /// read is the one `r` points to, never `r` itself (#670). Returns
+  /// `DerefField(r, "*r")`, drawn on r's column like `p.x` above.
+  /// The value read is Copy (moving out from behind a reference is
+  /// E0507), so a return copies it.
+  pub fn deref_of_ref(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let ExprKind::Unary(UnOp::Deref, mut inner) = expr.kind else { return None };
+    // Every operand of a `*` here must be a reference; `*b` with b a
+    // Box or an `Rc` is not a read through a borrow.
+    let mut depth = 1;
+    loop {
+      if !typeck.node_type(inner.hir_id).is_ref() {
+        return None;
+      }
+      match inner.kind {
+        ExprKind::Unary(UnOp::Deref, i) => { inner = i; depth += 1; }
+        _ => break,
+      }
+    }
+    if !matches!(inner.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+      return None;
+    }
+    let ref_name = expr_to_rap_name(inner, &self.tcx)?;
+    let rap = self.raps.get(&ref_name).map(|rd| rd.rap.to_owned())?;
+    if !rap.is_ref() {
+      return None;
+    }
+    let place = self.plain_source_text(expr)
+      .filter(|p| p.starts_with('*'))
+      .unwrap_or_else(|| format!("{}{}", "*".repeat(depth), ref_name));
+    Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
+  }
+
   /// The elements of an array literal (or `vec![…]`) going into `lhs`.
   /// Each element that is a variable (`[s, t]`, `vec![x, y]`) is moved
   /// into `lhs` (copied if its type is Copy), drawn as an arrow from the

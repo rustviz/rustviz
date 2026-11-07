@@ -220,6 +220,12 @@ panic.
 - A reference returned by a call in one branch of an `if` / `match`
   that initializes a variable (`let w = if c { first_word(&s) } else {
   "none" };`) isn't linked to `s`.
+- A variable a branch of a function's final `if` / `else` yields (`if b
+  { s } else { String::new() }` as the body's last expression) isn't
+  drawn going to the caller, and its scope end says its resource is
+  dropped; Rust drops it only on the paths that didn't return it
+  ([#674](https://github.com/rustviz/rustviz/issues/674)). `return s;`
+  in a branch is drawn.
 - A variable assigned in only some branches (`let mut s; if c { s = …
   }`) is drawn as owning a value after the `if`, and a later `s = …` as
   dropping the old value; Rust drops it only on paths that assigned it.

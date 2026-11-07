@@ -2151,6 +2151,10 @@ impl Event {
             Event::Duplicate{ is: ResourceTy::Index(r, place, _), .. } => {
                 hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
             }
+            // `*r` returned with r a reference (#670).
+            Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::DerefField(r, place, _), ..} if place.starts_with('*') => {
+                hover_messages::event_dot_copy_deref_to_caller(r.name(), place)
+            }
             Event::Duplicate{ to, is: ResourceTy::DerefField(r, place, _), ..} => {
                 // `let a = p.x;` with p a reference: the field is
                 // copied out of the resource p points to (#266).
