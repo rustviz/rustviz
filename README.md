@@ -237,8 +237,6 @@ panic.
   its own buffer is freed). A type that also owns other droppable data
   (`Vec<(Rc<T>, String)>`, `HashMap<String, Rc<T>>`), has its own `Drop`
   impl, or mixes `Rc` and `Arc` keeps the plain wording.
-- `if let` with a tuple pattern (`if let (Some(a), Some(b)) = (x, y)`)
-  shows no bindings, and `x` / `y` as still owning their values.
 - A closure that uses one field or element (`move || p.name.len()`,
   `move || t.0.len()`) is drawn as capturing the whole variable, so its
   other fields are shown as moved.
