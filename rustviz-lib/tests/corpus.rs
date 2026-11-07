@@ -13512,3 +13512,74 @@ fn match_ref_binding_borrow_ends_at_last_use() {
             name, lender, reach, back);
     }
 }
+
+/// The `(temporary)` columns whose drop dot says the temporary is
+/// dropped before an `if let`'s `else` block runs (#469, #604): each
+/// column's `data-hash` and the drop dot's y.
+fn else_path_temporary_drops(timeline: &str) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for tag in start_tags(timeline, "g") {
+        let Some(hash) = attr(tag, "data-hash") else { continue };
+        let lines = timeline_tooltips(&format!("{}>", tag));
+        if !lines.iter().any(|l| l.starts_with("This temporary") && l.contains("before the `else` block")) {
+            continue;
+        }
+        let at = timeline.find(tag).unwrap() + tag.len();
+        let body = &timeline[at..at + timeline[at..].find("</g>").unwrap()];
+        let Some(cy) = start_tags(body, "circle").first().and_then(|c| attr(c, "cy")?.parse::<f64>().ok()) else { continue };
+        out.push((hash.to_owned(), cy));
+    }
+    out
+}
+
+/// The lowest y that an element of the column `hash` (segment line,
+/// hover polygon or dot) reaches.
+fn column_bottom(timeline: &str, hash: &str) -> f64 {
+    let mut bottom = f64::MIN;
+    for kind in ["line", "polygon", "circle"] {
+        for tag in start_tags(timeline, kind) {
+            if attr(tag, "data-hash") != Some(hash) {
+                continue;
+            }
+            let ys: Vec<f64> = match kind {
+                "line" => ["y1", "y2"].iter().filter_map(|k| attr(tag, k)?.parse().ok()).collect(),
+                "circle" => attr(tag, "cy").and_then(|v| v.parse().ok()).into_iter().collect(),
+                _ => attr(tag, "points").unwrap_or("").split_whitespace()
+                    .filter_map(|p| p.split(',').nth(1)?.parse().ok()).collect(),
+            };
+            for y in ys {
+                bottom = bottom.max(y);
+            }
+        }
+    }
+    bottom
+}
+
+/// #571 follow-up: an `if let`'s scrutinee temporary is dropped before
+/// the `else` block runs (edition 2024), so it isn't alive in the else
+/// branch. Its column used to run on from that drop into the else
+/// branch and down to a join dot ("(temporary) isn't moved in any of
+/// the branches above"), its segments saying "(temporary) is the owner
+/// of the resource" there. Now nothing of the column is drawn below the
+/// drop, and it gets no join.
+#[test]
+fn if_let_scrutinee_temporary_ends_at_its_else_drop() {
+    for name in ["if_let_scrutinee_move", "temporary_drop_early_exit"] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let drops = else_path_temporary_drops(&timeline);
+        assert!(!drops.is_empty(), "{}: no drop dot before an `else` block", name);
+        for (hash, y) in drops {
+            let bottom = column_bottom(&timeline, &hash);
+            assert!(bottom <= y + 6.0,
+                "{}: the temporary column {} runs to y={}, below its drop before the `else` block at y={}",
+                name, hash, bottom, y);
+            let joins: Vec<String> = start_tags(&timeline, "circle").into_iter()
+                .filter(|t| attr(t, "data-hash") == Some(hash.as_str()))
+                .flat_map(|t| timeline_tooltips(&format!("{}>", t)))
+                .filter(|t| t.contains("branches above"))
+                .collect();
+            assert!(joins.is_empty(), "{}: the temporary column {} has a join dot: {:?}", name, hash, joins);
+        }
+    }
+}

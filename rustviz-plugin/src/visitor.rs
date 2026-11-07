@@ -1280,8 +1280,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         format!("here, where `{}` leaves early", how)
       };
       match temp_ty {
-        Some((ty, literal)) => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, id }),
-        None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, id }),
+        Some((ty, literal)) => {
+          let early = self.unbranched_temps.contains(&rap);
+          self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, early, id })
+        }
+        None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, early: false, id }),
         None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id }),
       }
     }
@@ -2726,6 +2729,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // The scrutinee's temporaries (#469) outlive the pattern match,
         // so an exit in a branch drops them (#410).
         let frame_len = self.hoist_unbound_temporaries(entry_len);
+        // In edition 2024 those of an `if let` (or a let chain) are
+        // dropped before the `else` block runs (#469, #604): they aren't
+        // alive on the else path. They get no column in the branches and
+        // no join; an exit in the else branch doesn't drop them again.
+        let else_drops_temps = is_let_chain(guard_expr)
+          && !matches!(expr.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop))
+          && expr.span.edition() >= rustc_span::edition::Edition::Edition2024;
+        let scrutinee_temps: HashSet<ResourceAccessPoint> = if else_drops_temps {
+          self.in_scope[entry_len..frame_len].iter()
+            .filter_map(|n| self.raps.get(n).map(|rd| rd.rap.clone()))
+            .collect()
+        } else {
+          HashSet::new()
+        };
+        #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
+        self.unbranched_temps.extend(scrutinee_temps.iter().cloned());
         self.exit_frames.push(ExitFrame::Branch { len: frame_len, hide, binds: Vec::new(), binds_at: 0 });
         // An exit in the if branch drops the tuple scrutinee (#327).
         let live_tuple = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()).map(|let_expr| LiveTuple {
@@ -2774,6 +2793,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         }
         let else_decl = match else_expr {
           Some(e) => {
+            // The scrutinee's temporaries are gone by now (see
+            // `scrutinee_temps`).
+            if !scrutinee_temps.is_empty() && self.in_scope.len() >= frame_len {
+              self.in_scope.drain(entry_len..frame_len);
+              if let Some(ExitFrame::Branch { len, .. }) = self.exit_frames.last_mut() {
+                *len = entry_len;
+              }
+            }
             // The if-body's events stay in `preprocessed_events` until
             // both branches are visited; they aren't on the `else`'s
             // path.
@@ -2816,7 +2843,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // ended by a construct nested in the branch (it draws their
         // GoOutOfScope itself): none of them is live across the `if`,
         // and the branch's events for them go on their own columns.
-        let if_scope = &if_decl | &if_inner;
+        let if_scope = &(&if_decl | &if_inner) | &scrutinee_temps;
         let else_scope = &else_decl | &else_inner;
 
         // `if cond { … }` / `if let pat = expr { … }` without an
@@ -4208,7 +4235,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
     let id = *self.unique_id;
-    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), literal: false, id });
+    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), literal: false, early: false, id });
     *self.unique_id += 1;
   }
 
@@ -5857,7 +5884,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
       let ty = strip_module_paths(&ty.to_string());
       let id = *self.unique_id;
-      self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), literal: true, id });
+      self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), literal: true, early: false, id });
       *self.unique_id += 1;
     }
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();

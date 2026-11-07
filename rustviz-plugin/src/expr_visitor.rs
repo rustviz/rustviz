@@ -232,6 +232,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // Calls whose temporary result's drop has been stated (#457), so a
   // call the visitor reaches twice says it once.
   pub temp_drops_noted: HashSet<rustc_hir::HirId>,
+  // Scrutinee temporaries of an `if let` / let chain that are dropped
+  // before its `else` block runs (edition 2024, #469, #604). They are
+  // never split into a conditional's branches: their column ends at
+  // that drop, and a drop at an early exit inside the matched block is
+  // a dot on it (see `take_branch_events`).
+  pub unbranched_temps: HashSet<ResourceAccessPoint>,
   // State for the destructuring assignment being visited
   // (`(a, b) = (b, a);`, see `visit_destructuring_assign`). rustc
   // lowers it to `{ let (lhs, lhs) = (b, a); a = lhs; b = lhs; }`;
@@ -1322,8 +1328,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn take_branch_events(&mut self, ids: std::ops::Range<usize>, body: Option<&'tcx Expr<'tcx>>, keep: &HashSet<usize>) -> Vec<(usize, ExternalEvent)> {
     let rhs = body.and_then(|b| self.rhs_arm_ids.get(&b.hir_id).copied());
     let mine = |id: usize| (ids.contains(&id) && !keep.contains(&id)) || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&id));
+    let unbranched = &self.unbranched_temps;
     let mut taken = Vec::new();
     self.preprocessed_events.retain(|(l, ev)| {
+      // A drop of a temporary in `unbranched_temps` (at an early exit)
+      // stays on its own, unsplit column.
+      if matches!(ev, ExternalEvent::TemporaryDrop { ro, .. } if unbranched.contains(ro)) {
+        return true;
+      }
       if mine(ev.get_id()) {
         taken.push((*l, ev.clone()));
         false
@@ -4886,8 +4898,12 @@ pub fn print_out_of_scope(&mut self){
   // (a bare `return` in a loop body, an `if` without `else`, a
   // single-arm match) is drawn as before, without them: on the
   // function's own column they'd cut it short for the other paths.
+  //
+  // Except the drop of an `unbranched_temps` temporary, which is
+  // `early`: a dot that doesn't end its column.
   let exit_drops = std::mem::take(&mut self.exit_drops);
-  self.preprocessed_events.retain(|(_, e)| !exit_drops.contains(&e.get_id()));
+  self.preprocessed_events.retain(|(_, e)| !exit_drops.contains(&e.get_id())
+    || matches!(e, ExternalEvent::TemporaryDrop { early: true, .. }));
   // Visit RAPs in declaration order, not `self.raps`' hash order, so
   // the GoOutOfScope events (and their ids) come out the same on
   // every run (#211).
