@@ -835,6 +835,10 @@ pub fn collect_event_live_vars(
             ExternalEvent::ClosureCall { closure: ResourceTy::Value(rap), .. } => {
                 out.insert(rap.clone());
             }
+            // The owner whose drop the `?` may cause is live there.
+            ExternalEvent::OwnerDropIfTryReturns { ro, .. } => {
+                out.insert(ro.clone());
+            }
             _ => {
                 let (from, to) = ResourceAccessPoint_extract(ev);
                 for rty in [from, to] {

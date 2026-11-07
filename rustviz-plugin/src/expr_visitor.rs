@@ -730,6 +730,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ManuallyDropByHand { ro, .. }
       | ExternalEvent::LoopExitMove { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
+      | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. } => {
         self.skip_raps.contains(ro.name())
       }
