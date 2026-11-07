@@ -735,6 +735,10 @@ const EXPECTED_OK: &[&str] = &[
     // An `else if let` reusing the `if let` binding's name used to panic
     // in fetch_timeline (#525).
     "else_if_let_same_name",
+    // An arm's binding on the line where a nested `match` / `if` splits
+    // holds its value in every inner branch (#502).
+    "nested_match_arm_binding",
+    "match_arm_binding_if_same_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7778,6 +7782,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z is live in a conditional expression ",
             "z has no value yet",
         ],
+    },
+    // ─── An arm binding on the line its nested branch splits on (#502) ──
+    TooltipExpect {
+        name: "nested_match_arm_binding",
+        // `x` is bound by `Some(x)` on the line the inner `match b`
+        // splits on; it holds 1 in both inner arms, including the
+        // `Some(y)` arm that doesn't use it.
+        must_contain: &[
+            "x is initialized with a copy of a",
+            "x is live in a conditional expression ",
+            "x holds a copyable value",
+        ],
+        must_not_contain: &["x has no value yet"],
+    },
+    TooltipExpect {
+        name: "match_arm_binding_if_same_line",
+        // `Some(x) => if c {`: x owns the String in both branches of the
+        // `if`; the `else` branch moves it into `drop`.
+        must_contain: &[
+            "x acquires ownership of a resource",
+            "x is the owner of the resource",
+            "x's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &["x has no value yet"],
     },
 ];
 
