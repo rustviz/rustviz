@@ -1722,11 +1722,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// closure by value, so after the call `f` is gone and has nothing
   /// left to drop at its scope end. `Fn` / `FnMut` closures are only
   /// borrowed by their calls; nothing is recorded for them.
+  ///
+  /// The same for an `FnOnce` closure stored in a struct field (`(h.f)()`,
+  /// #725): the call moves `h.f` out of `h`.
   pub fn closure_call_events(&mut self, callee: &'tcx Expr<'tcx>, line_num: usize) {
-    let ExprKind::Path(QPath::Resolved(None, path)) = callee.kind else { return };
-    if !matches!(path.res, Res::Local(_)) {
-      return;
-    }
+    let name = match callee.kind {
+      ExprKind::Path(QPath::Resolved(None, path)) if matches!(path.res, Res::Local(_)) => path_name(path, &self.tcx),
+      ExprKind::Field(..) => match expr_to_rap_name(callee, &self.tcx) {
+        Some(n) => n,
+        None => return,
+      },
+      _ => return,
+    };
     let typeck = self.tcx.typeck(callee.hir_id.owner);
     let rustc_middle::ty::Closure(closure_def_id, closure_args) = typeck.expr_ty(callee).kind() else { return };
     if closure_args.as_closure().kind() != rustc_middle::ty::ClosureKind::FnOnce {
@@ -1738,9 +1745,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.tcx.typeck_root_def_id(*closure_def_id) != callee.hir_id.owner.to_def_id() {
       return;
     }
-    let name = path_name(path, &self.tcx);
     let closure_rap = match self.raps.get(&name) {
       Some(rd) if rd.rap.is_closure() => rd.rap.to_owned(),
+      // A field's column (`h.f`) is a struct member, not a closure binding.
+      Some(rd) if matches!(callee.kind, ExprKind::Field(..)) && !rd.rap.is_ref() => rd.rap.to_owned(),
       _ => return,
     };
     // What the body does with each capture (all captures, to keep the

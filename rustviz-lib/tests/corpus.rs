@@ -1128,6 +1128,8 @@ const EXPECTED_OK: &[&str] = &[
     "closure_moved_or_copied",
     // `dyn Fn()` doesn't say whether there's interior mutability (#706).
     "interior_mut_opaque",
+    // An `FnOnce` closure called out of a struct field (#725).
+    "closure_field_call_once",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12771,6 +12773,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "fns has interior mutability",
             "fns is read-only",
+        ],
+    },
+    // #725: `(h.f)()` with an `FnOnce` closure in `h.f` moves `h.f` into
+    // the call; `u` comes back as `e`. With only the #703 fix, nothing was
+    // drawn for the call and both `h` and `h.f` were said to drop their
+    // resource at the end, a second drop of the String `e` drops.
+    TooltipExpect {
+        name: "closure_field_call_once",
+        must_contain: &[
+            "h.f is moved into the call (an FnOnce closure can only be called once). u, which h.f captured, is moved out of the closure as the call's result",
+            "h goes out of scope. h.f was moved out earlier, so no resource is dropped.",
+            "h.f goes out of scope. No resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "h goes out of scope. Its resource is dropped",
+            "h.f goes out of scope. Its resource is dropped",
         ],
     },
 ];
