@@ -374,6 +374,19 @@ pub fn rc_drop_note(rc: Option<RcDrop>) -> String {
         Some(RcDrop::Own(k)) => format!(
             " (for an {0}, that lowers the reference count; the shared value is freed only when its last {0} is dropped)",
             k.strong_name()),
+        Some(RcDrop::Inside { kind, buffer: true, .. }) if kind.is_weak() => String::from(
+            " (each Weak in it doesn't keep its value alive; its own buffer is freed)"),
+        Some(RcDrop::Inside { kind, buffer: true, .. }) => format!(
+            " (each {} in it only lowers its reference count; its own buffer is freed)",
+            kind.strong_name()),
+        Some(RcDrop::Inside { kind, many: false, .. }) if kind.is_weak() => String::from(
+            " (the Weak inside doesn't keep its value alive)"),
+        Some(RcDrop::Inside { kind, many: true, .. }) if kind.is_weak() => String::from(
+            " (the Weaks inside don't keep their values alive)"),
+        Some(RcDrop::Inside { kind, many: false, .. }) => format!(
+            " (the {} inside only lowers its reference count)", kind.strong_name()),
+        Some(RcDrop::Inside { kind, many: true, .. }) => format!(
+            " (the {}s inside only lower their reference counts)", kind.strong_name()),
         Some(RcDrop::Fields(k)) if k.is_weak() => String::from(
             " (its Weak fields don't keep their values alive; dropping them frees only the Weaks)"),
         Some(RcDrop::Fields(k)) => format!(
