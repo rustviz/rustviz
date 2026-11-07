@@ -205,6 +205,11 @@ pub struct Owner {
     /// For a collection / `Option` / `Box` whose elements need drop: the
     /// phrase a drop of it adds, e.g. `every String it holds` (#542).
     pub holds: Option<String>,
+    /// True iff this owner is a `Box<T>` whose whole contents are moved
+    /// out somewhere in the body (`take(*b)`, #609): the contents' drop
+    /// isn't the box's, but its heap allocation is still freed at scope
+    /// end.
+    pub box_contents_moved: bool,
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std
@@ -573,6 +578,11 @@ impl ResourceAccessPoint {
     /// result that nothing binds, dropped by an event of its own. It
     /// is labelled like a lifetime-extended one (`temporary_label`),
     /// so the label can't tell the two apart.
+    /// See `Owner::box_contents_moved`.
+    pub fn box_contents_moved(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { box_contents_moved: true, .. }))
+    }
+
     pub fn is_unbound_temporary(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { unbound_temp: true, .. }))
     }

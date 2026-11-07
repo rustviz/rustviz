@@ -99,6 +99,16 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
     )
 }
 
+// A `Box` whose whole contents were moved out (`take(*b)`, #609) goes
+// out of scope: the contents' drop isn't the box's, but the heap
+// allocation is still freed.
+pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String {
+    format!(
+        "{} goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+        fmt_style(my_name)
+    )
+}
+
 // A struct whose fields were partly moved out goes out of scope. Rust
 // drops only the fields that still hold a value (`dropped`); the
 // moved-out ones (`moved`) are already gone, and the struct as a whole

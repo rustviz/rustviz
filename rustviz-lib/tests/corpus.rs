@@ -904,6 +904,10 @@ const EXPECTED_OK: &[&str] = &[
     "box_field_move_param",
     // A whole struct overwritten by a call or a variable (#569).
     "borrow_struct_overwrite_call",
+    "box_contents_move",
+    "box_contents_move_string",
+    "box_contents_move_pattern",
+    "box_whole_move",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9871,6 +9875,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from u to h.r: M::new's signature",
             // A field of a struct handed its borrow back at the write.
             "Return immutably borrowed resource from o.inner.r to e",
+        ],
+    },
+    // #609: the whole contents of a Box moved out (`take(*b)`): the contents'
+    // drop isn't b's, but the Box's heap allocation is still freed at b's
+    // scope end, so "No resource is dropped" would be false.
+    TooltipExpect {
+        name: "box_contents_move",
+        must_contain: &[
+            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "=b goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "box_contents_move_string",
+        must_contain: &[
+            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "=b goes out of scope. No resource is dropped.",
+        ],
+    },
+    // A Box bound by a pattern.
+    TooltipExpect {
+        name: "box_contents_move_pattern",
+        must_contain: &[
+            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "=b goes out of scope. No resource is dropped.",
+        ],
+    },
+    // The Box itself moved (not its contents): b's scope end frees nothing.
+    TooltipExpect {
+        name: "box_whole_move",
+        must_contain: &[
+            "b goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "heap allocation is freed",
         ],
     },
 ];
