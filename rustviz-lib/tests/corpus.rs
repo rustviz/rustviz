@@ -793,6 +793,7 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_move",
     "edition2024/if_let_chain_first_part",
     "edition2024/while_let_chain",
+    "anonymous_copy_source",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8544,6 +8545,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "anonymous_copy_source",
+        // #547: `n` is a `usize` copied out of the match's result. That
+        // value isn't in any variable, so there is no source to name;
+        // "Anonymous resource" is an internal placeholder (and a usize
+        // isn't a resource).
+        must_contain: &[
+            "n is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "n is initialized with a copy of Anonymous resource",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -8586,6 +8600,12 @@ fn run_with_local_backend(name: &str) -> Rustviz {
 fn assert_well_formed(name: &str, rv: &Rustviz) {
     let code = rv.code_panel_string();
     let timeline = rv.timeline_panel_string();
+    // "Anonymous resource" is the plugin's internal name for a value
+    // with no place of its own; no tooltip may show it to a student
+    // (#547).
+    if let Some(t) = timeline_tooltips(&timeline).iter().find(|t| t.contains("Anonymous")) {
+        panic!("{}: tooltip leaks the internal placeholder name: {:?}", name, t);
+    }
     assert!(
         code.trim_start().starts_with("<svg"),
         "{}: code panel is not SVG (starts with: {:?})",
