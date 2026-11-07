@@ -2350,8 +2350,9 @@ pub struct VisualizationData {
 
     /// (source, binding) column pairs of pattern bindings that are drawn
     /// side by side on their `if let` line, each binding's column right
-    /// after its source's (see `side_by_side_bindings`, #510). Filled in
-    /// by `render_svg`.
+    /// after its source's (see `side_by_side_bindings`, #510). Starts with
+    /// the let-chain bindings the plugin found (`chain_binding_columns`,
+    /// #583, #584); `render_svg` adds the arms' pattern bindings.
     pub binding_columns: Vec<(u64, u64)>,
 }
 

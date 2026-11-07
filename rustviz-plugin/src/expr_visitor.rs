@@ -293,6 +293,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `return`, `break`, `continue` or panic that leaves the arm drops
   // the tuple, and what of the variables' values is still in it.
   pub live_tuples: Vec<LiveTuple<'tcx>>,
+
+  // (source, binding) column pairs of a let-chain's bindings to draw
+  // side by side, each binding's column right after its source's
+  // (`chain_binding_columns`, #583, #584); handed to the renderer's
+  // `VisualizationData::binding_columns`.
+  pub binding_columns: Vec<(u64, u64)>,
 }
 
 /// See `ExprVisitor::live_tuples`.
@@ -1260,10 +1266,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// for the branch's value (`body`). Events are put in branches by
   /// where they came from, not by source line, so branches that share
   /// a line (`if c { take(s); } else { … }`, a one-line `match`, or an
-  /// `else if`) get their own events (#117).
-  pub fn take_branch_events(&mut self, ids: std::ops::Range<usize>, body: Option<&'tcx Expr<'tcx>>) -> Vec<(usize, ExternalEvent)> {
+  /// `else if`) get their own events (#117). Those in `keep` stay
+  /// where they are, before the split (a let-chain's copy out of a
+  /// variable, #583).
+  pub fn take_branch_events(&mut self, ids: std::ops::Range<usize>, body: Option<&'tcx Expr<'tcx>>, keep: &HashSet<usize>) -> Vec<(usize, ExternalEvent)> {
     let rhs = body.and_then(|b| self.rhs_arm_ids.get(&b.hir_id).copied());
-    let mine = |id: usize| ids.contains(&id) || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&id));
+    let mine = |id: usize| (ids.contains(&id) && !keep.contains(&id)) || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&id));
     let mut taken = Vec::new();
     self.preprocessed_events.retain(|(l, ev)| {
       if mine(ev.get_id()) {

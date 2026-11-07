@@ -28,6 +28,7 @@ impl Rustviz {
     num_raps: usize,
     fn_start_lines: HashMap<u64, usize>,
     shadow_notes: HashMap<u64, ShadowNote>,
+    binding_columns: Vec<(u64, u64)>,
     hidden_source_lines: HashSet<usize>,
   ) -> Result<Rustviz>{
     /* ******************************************
@@ -41,7 +42,7 @@ impl Rustviz {
       num_valid_raps: num_raps,
       fn_start_lines,
       shadow_notes,
-      binding_columns: Vec::new(),
+      binding_columns,
     };
     /* ******************************************
             --- Render SVG images ---
