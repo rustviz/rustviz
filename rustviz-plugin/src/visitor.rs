@@ -1332,19 +1332,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `break` / `continue` (`loop_id` is its target), those declared
   /// inside the loop. Copy values and references own nothing to drop.
   ///
-  /// Only variables declared before the innermost if/else or match
-  /// began are dropped here: the exit is drawn on that branch's
-  /// columns, and one declared inside the branch already gets its own
-  /// GoOutOfScope at the branch's end. `value` is the expression the
-  /// exit carries out (`return e`, `break e`); what it may move isn't
-  /// dropped. `how`: `return`, `break`, `continue` or `panic`, for the
-  /// drop of a temporary.
+  /// The exit is drawn on the columns of the innermost if/else or
+  /// match arm it's in. What that branch declared (its `let`s, an
+  /// `if let` / arm pattern's bindings) is dropped here too, first, as
+  /// Rust drops in reverse declaration order (#630); the branch then
+  /// doesn't drop it again at its closing brace (`ends_at_exits`). A
+  /// loop inside the branch ends what its body declares itself.
+  /// `value` is the expression the exit carries out (`return e`,
+  /// `break e`); what it may move isn't dropped. `how`: `return`,
+  /// `break`, `continue` or `panic`, for the drop of a temporary.
   ///
   /// A tuple-literal scrutinee whose arm or if branch the exit leaves
-  /// (`live_tuples`) is dropped too, before the locals declared before
-  /// its match / `if let` (#327). It has no column, and its drop
-  /// doesn't end one, so it is stated even where the locals' drops
-  /// aren't drawn (the exit is in an `if` without `else`).
+  /// (`live_tuples`) is dropped too, after what the arm or branch
+  /// declared and before the locals declared before its match /
+  /// `if let` (#327). It has no column, and its drop doesn't end one,
+  /// so it is stated even where the locals' drops aren't drawn (the
+  /// exit is in an `if` without `else`).
   fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, labeled: bool, how: &str) {
     let Some(branch_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
@@ -1369,13 +1372,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       },
     };
     let moved = value.map(|e| locals_moved_by(self.tcx, e)).unwrap_or_default();
-    let end = branch_len.min(self.in_scope.len());
+    let end = self.exit_frames[branch_at + 1..].iter()
+      .find_map(|f| match f {
+        ExitFrame::Loop { len, .. } => Some(*len),
+        ExitFrame::Branch { .. } => None,
+      })
+      .unwrap_or(self.in_scope.len())
+      .max(branch_len)
+      .min(self.in_scope.len());
     // Innermost last, so popped first: Rust drops the tuple of an
     // inner match before what an outer one holds.
     let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.iter()
       .filter(|t| t.frame >= frame_floor).cloned().collect();
     for (idx, rap) in self.droppable_locals_at(from, end, &moved, true, line, false) {
-      // A tuple is dropped before the locals declared before its match.
+      // A tuple is dropped after what its arm declared, before the
+      // locals declared before its match.
       while tuples.last().is_some_and(|t| idx < t.len) {
         let t = tuples.pop().unwrap();
         self.drop_tuple_on_exit(&t, line);
@@ -1765,6 +1776,60 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     events.extend_from_slice(&self.preprocessed_events[from..]);
     step(&events, hash, &hide, Own::No) == Own::Yes
+  }
+
+  /// Whether every path through `e` leaves at an exit that drops what
+  /// `e` declares, so its closing brace is never reached and states no
+  /// drop (#630, #631): a `return`, a panic, or a `break` / `continue`
+  /// out of a loop, each of whose drops `drop_locals_on_exit` draws.
+  /// `branch`: `e` is an if/else branch or the arm of a match with
+  /// several arms, whose columns an exit directly in it ends. A loop
+  /// body (`branch` false) is drawn inline, so only an exit in an
+  /// if/else or match nested in it is drawn with its drops.
+  fn ends_at_exits(&self, e: &'tcx Expr<'tcx>, branch: bool) -> bool {
+    use rustc_hir::Node;
+    match e.kind {
+      ExprKind::Ret(_) | ExprKind::Continue(_) => branch,
+      // A `break` out of a labelled block drops nothing drawn.
+      ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
+        matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
+      ExprKind::Call(..) => branch && self.panic_line(e).is_some(),
+      ExprKind::If(_, then, Some(els)) if !e.span.from_expansion() =>
+        self.ends_at_exits(then, true) && self.ends_at_exits(els, true),
+      ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) if !e.span.from_expansion() =>
+        arms.len() > 1 && arms.iter().all(|a| self.ends_at_exits(a.body, true)),
+      ExprKind::DropTemps(x) => self.ends_at_exits(x, branch),
+      ExprKind::Block(b, _) => self.block_ends_at_exits(b, branch),
+      _ => false,
+    }
+  }
+
+  /// `ends_at_exits` for a block: what runs first that never completes
+  /// decides.
+  fn block_ends_at_exits(&self, b: &'tcx rustc_hir::Block<'tcx>, branch: bool) -> bool {
+    for st in b.stmts {
+      match st.kind {
+        StmtKind::Expr(x) | StmtKind::Semi(x) if self.expr_diverges(x) => return self.ends_at_exits(x, branch),
+        StmtKind::Let(l) if l.init.is_some_and(|i| self.expr_diverges(i)) => return false,
+        _ => {}
+      }
+    }
+    b.expr.is_some_and(|t| self.ends_at_exits(t, branch))
+  }
+
+  /// The variables of `decls` whose GoOutOfScope at the end of a body
+  /// is left out because no path reaches that end (`ends`, from
+  /// `ends_at_exits`): each one that owns a value is dropped at the
+  /// exits, or was moved away before them. A Copy value or a reference
+  /// has no drop at an exit, and keeps its scope end (as at the end of
+  /// a function every path left, #515).
+  fn left_at_exits(ends: bool, decls: &HashSet<ResourceAccessPoint>) -> HashSet<ResourceAccessPoint> {
+    if !ends {
+      return HashSet::new();
+    }
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let left = decls.iter().filter(|v| !v.is_copy()).cloned().collect();
+    left
   }
 
   /// Keep an exit's drops (`drop_locals_on_exit`) only in a
@@ -3132,6 +3197,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             if let Some(ExitFrame::Branch { hide, .. }) = self.exit_frames.last_mut() {
               hide.push(if_ids.clone());
             }
+            // Nor are the if-body's `if let` bindings: an exit in the
+            // `else` doesn't drop them.
+            self.in_scope.truncate(entry_len);
             self.visit_expr(e);
             get_decl_of_expr(e, &self.tcx, &self.raps)
           }
@@ -3275,13 +3343,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           &(&if_scope | &else_scope) | &(&if_scoped | &else_scoped);
         liveness = &liveness - &declared_in_branches;
 
-        // add gos events for variables declared in each block
-        for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v)) {
+        // add gos events for variables declared in each block, except
+        // where every path through the branch leaves it at an exit
+        // that drops them (#630)
+        let if_left = Self::left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
+        let else_left = Self::left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
+        for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
           if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
 
-        for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v)) {
+        for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
           else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
           *self.unique_id += 1;
         }
@@ -3488,6 +3560,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   .lookup_char_pos(then_body.span.hi()).line;
                 let mut decls = get_decl_of_expr(then_body, &self.tcx, &self.raps);
                 decls.extend(bindings);
+                // Not where every path breaks or continues first (#631).
+                let decls = &decls - &Self::left_at_exits(self.ends_at_exits(then_body, false), &decls);
                 self.emit_scope_end(decls, body_end);
                 // A `while` also ends when its condition is false.
                 self.emit_loop_exit_moves(expr, None, &before, true);
@@ -3520,6 +3594,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let body_end = self.tcx.sess.source_map()
               .lookup_char_pos(block.span.hi()).line;
             let decls = get_decl_of_block(block, &self.tcx, &self.raps);
+            // Not where every path breaks or continues first (#631).
+            let decls = &decls - &Self::left_at_exits(self.block_ends_at_exits(block, false), &decls);
             self.emit_scope_end(decls, body_end);
             // A bare `loop` ends only through a `break`.
             self.emit_loop_exit_moves(expr, None, &before, false);
@@ -3904,6 +3980,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
                 pat_decls.extend(guard_decls);
               }
+              // While the body is visited, the pattern's and the guard's
+              // events are on the global list too, so that an exit in it
+              // sees the bindings own their values and drops them
+              // (#630). They're taken off again after the body.
+              let pat_ids: HashSet<usize> = branch_e_data.iter().map(|(_, e)| e.get_id()).collect();
+              self.preprocessed_events.extend(branch_e_data.iter().cloned());
 
               // visit expr. inside_branch is restored, not reset: the
               // match may sit inside another branch (#410).
@@ -3958,6 +4040,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // value with a `let` (see `take_branch_events`). Picking
               // them by source line gave every event on a shared line
               // to the first arm (#117).
+              self.preprocessed_events.retain(|(_, e)| !pat_ids.contains(&e.get_id()));
               if !inline {
                 let body_ev = self.take_branch_events(body_ids, Some(arm.body), &HashSet::new());
                 branch_e_data.extend(body_ev);
@@ -4028,8 +4111,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
               }
 
-              // add gos events
-              for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v)) {
+              // add gos events, except in an arm that always leaves at
+              // an exit that drops them (#630)
+              let arm_left = Self::left_at_exits(!inline && self.ends_at_exits(arm.body, true), &arm_decls);
+              for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
                 let id = *self.unique_id;
                 *self.unique_id += 1;
                 let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
@@ -4385,6 +4470,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   .lookup_char_pos(body_expr.span.hi()).line;
                 let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
                 collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut loop_decls);
+                // Not where every path breaks or continues first (#631).
+                let loop_decls = &loop_decls - &Self::left_at_exits(self.ends_at_exits(body_expr, false), &loop_decls);
                 self.emit_scope_end(loop_decls, body_end);
                 // `break`s in the body target the desugared `loop`
                 // (the outer arm's body), which also ends when the

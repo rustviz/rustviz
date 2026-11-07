@@ -1037,6 +1037,17 @@ const EXPECTED_OK: &[&str] = &[
     // A `ref` binding of a by-value parameter borrows a `(parameter)`
     // column of its own (#691).
     "param_ref_value_column",
+    // What a branch declares is dropped at its exit, not at its closing
+    // brace (#630); a loop body every path of which breaks or continues
+    // drops nothing at its closing brace (#631).
+    "exit_branch_local_return",
+    "exit_arm_local_return",
+    "exit_branch_local_nested",
+    "exit_branch_local_moved",
+    "exit_loop_body_all_exit",
+    "exit_loop_body_temporary",
+    "exit_branch_local_panic",
+    "exit_if_let_local_break",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11677,6 +11688,48 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=p may have been moved: when the condition moves p to a₂ and then turns out false, the else branch runs after that move, so p can't be used here",
         ],
     },
+    // #630: what a returning branch declared is dropped at the
+    // `return`. On main the drop text was the same but drawn on the
+    // branch's closing-brace row, which the returning path never
+    // reaches; `drops_at_exits_not_at_unreached_braces` pins the rows.
+    TooltipExpect {
+        name: "exit_branch_local_return",
+        must_contain: &[
+            "x goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "exit_arm_local_return",
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "y goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    // `return x` moves `x` out: main said this at the `} else {` row,
+    // which the returning path never reaches.
+    TooltipExpect {
+        name: "exit_branch_local_moved",
+        must_contain: &[
+            "t goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=x goes out of scope. No resource is dropped."],
+    },
+    // #631: `w` / `v` are dropped at the `break` and the `continue`
+    // only (counts in `return_drops_what_the_branch_owns`, rows in
+    // `drops_at_exits_not_at_unreached_braces`).
+    TooltipExpect {
+        name: "exit_loop_body_all_exit",
+        must_contain: &[
+            "w goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -14114,6 +14167,20 @@ fn return_drops_what_the_branch_owns() {
         // and at the end; `u` (declared in the body) once (#630). `v` is
         // a Vec of Strings, so its drop says so (#542).
         ("try_in_branch", &[("t", 2), ("v:Strings", 2), ("u", 1)][..]),
+        // #630: a branch's own `x` (an arm's `s` and `y`) once, at the
+        // `return`, not again at the branch's closing brace.
+        ("exit_branch_local_return", &[("x", 1), ("t", 2)][..]),
+        ("exit_arm_local_return", &[("s", 1), ("y", 1), ("t", 2)][..]),
+        // At each inner `return`; the outer branch's brace is unreached.
+        ("exit_branch_local_nested", &[("x", 2), ("t", 3)][..]),
+        // `x` is moved out by `return x`: nothing said for it at the
+        // brace (main: "x goes out of scope. No resource is dropped.").
+        ("exit_branch_local_moved", &[("x", 0), ("x:No", 0), ("t", 1), ("s", 1), ("u", 2)][..]),
+        // #631: at the `break` and the `continue`, not at the body's end.
+        ("exit_loop_body_all_exit", &[("w", 2), ("v", 2)][..]),
+        // #630 at a panic, a `break` and a `continue`: once, there.
+        ("exit_branch_local_panic", &[("t", 1), ("s", 2)][..]),
+        ("exit_if_let_local_break", &[("a", 1), ("b", 1), ("c", 1)][..]),
     ] {
         let rv = run_with_local_backend(name);
         let tooltips = timeline_tooltips(&rv.timeline_panel_string());
@@ -14147,6 +14214,67 @@ fn return_drops_what_the_branch_owns() {
 /// part that can be false. Each lasts on the path into the `else`, where
 /// RustViz can't show which borrow is live, or that the variable may
 /// hold no value.
+/// What a let-chain still can't draw (#579): a part that assigns a new
+/// reference to, writes through, or gives a first value to a variable
+/// declared outside the condition, followed by a part that can be false.
+/// Each lasts on the path into the `else`, where RustViz can't show
+/// which borrow is live, or that the variable may hold no value.
+/// What a let-chain still can't draw (#579): a part that assigns a new
+/// reference to, writes through, or gives a first value to a variable
+/// declared outside the condition, followed by a part that can be false.
+/// Each lasts on the path into the `else`, where RustViz can't show
+/// which borrow is live, or that the variable may hold no value.
+/// What a let-chain still can't draw (#281): a part that assigns to a
+/// variable declared outside the condition, followed by a part that can
+/// be false. The assignment lasts on the path into the `else`, which
+/// would need the variable's old and new values on one column.
+/// #630, #631: an exit (`return`, a panic, `break`, `continue`) drops
+/// what the branch or loop body it leaves declared (`if let` bindings
+/// too), on the exit's own row, and the closing brace that no path
+/// reaches states nothing. Main drew a branch's own variables' drops on
+/// its closing-brace row (`} else {`, an arm's `}`), and a loop body's
+/// on the body's `}` as well as at each `break` / `continue`.
+/// (fixture, drop tooltip, the source lines of every row it's on); a
+/// tooltip ending in `…` is a prefix.
+#[test]
+fn drops_at_exits_not_at_unreached_braces() {
+    // Its wording at an exit ("at the end of the block") is #553's.
+    const TEMP: &str = "(temporary) goes out of scope …";
+    for (name, drop, rows) in [
+        ("exit_branch_local_return", "x goes out of scope. Its resource is dropped.", &["return t.len() + x.len();"][..]),
+        ("exit_arm_local_return", "s goes out of scope. Its resource is dropped.", &["return s.len() + y.len() + t.len();"][..]),
+        ("exit_arm_local_return", "y goes out of scope. Its resource is dropped.", &["return s.len() + y.len() + t.len();"][..]),
+        ("exit_branch_local_nested", "x goes out of scope. Its resource is dropped.", &["return x.len();", "return 2;"][..]),
+        ("exit_branch_local_moved", "s goes out of scope. Its resource is dropped.", &["return u.len() + s.len();"][..]),
+        ("exit_loop_body_all_exit", "w goes out of scope. Its resource is dropped.", &["break;", "continue;"][..]),
+        ("exit_loop_body_all_exit", "v goes out of scope. Its resource is dropped.", &["5 => break,", "_ => continue,"][..]),
+        ("exit_loop_body_temporary", TEMP, &["break;", "continue;"][..]),
+        ("exit_branch_local_panic", "t goes out of scope. Its resource is dropped.", &["panic!(\"bad {}\", t);"][..]),
+        ("exit_if_let_local_break", "a goes out of scope. Its resource is dropped.", &["break;"][..]),
+        ("exit_if_let_local_break", "b goes out of scope. Its resource is dropped.", &["continue;"][..]),
+        ("exit_if_let_local_break", "c goes out of scope. Its resource is dropped.", &["continue;"][..]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+        let mut got: Vec<f64> = match drop.strip_suffix('…') {
+            Some(prefix) => dots_where(&timeline, |lines| lines.iter().any(|l| l.starts_with(prefix))),
+            None => dots_listing_tooltip(&timeline, drop),
+        }.into_iter().map(|(_, y)| y).collect();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut want: Vec<f64> = rows.iter().map(|r| code_row_y(&code, r)).collect();
+        want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got, want, "{}: rows of {:?} (wanted on {:?})", name, drop, rows);
+    }
+}
+
+/// The `if` counterpart of `guard_that_moves_is_refused` (#198, #281):
+/// `let Some(a) = x` moves out of `x` as soon as it matches, so when
+/// `a.len() > 5` is then false the `else` branch runs with `x` already
+/// partially moved (rustc rejects using `x` there). The chain's events
+/// are drawn in the if branch only, so the plugin refuses instead of
+/// showing the else branch still owning `x`. (main used to render it
+/// with no move at all and "x goes out of scope. Its resource is
+/// dropped.")
 #[test]
 fn if_let_chain_lasting_effects_still_refused() {
     env::set_var("RV_RUNNER", "local");

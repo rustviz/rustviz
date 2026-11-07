@@ -312,7 +312,8 @@ const Description: React.FC = () => (
       <li>
         Loops show one iteration (a <code>for</code> loop&apos;s variable is
         drawn from the <code>for</code> line to the body&apos;s closing
-        brace); closures show
+        brace, or to the <code>break</code>/<code>continue</code> every path
+        leaves by); closures show
         their captures but not their bodies (for a closure passed straight to
         a function, what it moves or copies in, and what it borrows only if
         that borrow ends with the call; calling a once-only closure says what
