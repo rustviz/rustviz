@@ -236,7 +236,15 @@ panic.
   `Rc` inside only lowers its reference count (and, for a collection, that
   its own buffer is freed). A type that also owns other droppable data
   (`Vec<(Rc<T>, String)>`, `HashMap<String, Rc<T>>`), has its own `Drop`
-  impl, or mixes `Rc` and `Arc` keeps the plain wording.
+  impl, or mixes `Rc` and `Arc` keeps the plain wording (a collection says
+  what it holds instead, below).
+- A drop of a `Vec` / `VecDeque` / `HashMap` / `BTreeMap` (also sets,
+  `BinaryHeap`, `LinkedList`), an `Option` or a `Box` whose contents need
+  drop adds what it holds, without a count: "(including every `String` it
+  holds)", "(including the `String` it holds, if any)", "(including every
+  key and value it holds)". Other types that own droppable parts (a user
+  struct, a tuple, a `Result`) don't say it. An array of `String`s is
+  shown as "No resource is dropped" (#544).
 - `if let` with a tuple pattern (`if let (Some(a), Some(b)) = (x, y)`)
   shows no bindings, and `x` / `y` as still owning their values.
 - A closure that uses one field or element (`move || p.name.len()`,
