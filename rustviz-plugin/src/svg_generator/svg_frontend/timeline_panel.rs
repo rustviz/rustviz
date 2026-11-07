@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{rc_call_of, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{rc_call_of, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -2729,6 +2729,13 @@ fn render_arrow (
                 (_, ResourceTy::Index(..))
                     if matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => return,
                 _ => {}
+            }
+            // The end of a borrow of a temporary tuple's element: the
+            // tuple has no column, so there's nothing to draw an arrow
+            // to; only the end dot on the reference's column (#658).
+            if let ExternalEvent::StaticDie { static_lender: Some(StaticLender::TupleTemporary), .. }
+                 | ExternalEvent::MutableDie { static_lender: Some(StaticLender::TupleTemporary), .. } = external_event {
+                return;
             }
             let mut title = string_of_external_event(external_event);
             // complete title
