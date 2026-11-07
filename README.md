@@ -224,8 +224,15 @@ panic.
   dropping the old value; Rust drops it only on paths that assigned it.
 - A reference field of a struct bound by a pattern (`if let Some(x) =
   o` with `x.part: &str`) is drawn as owning a resource.
-- `Rc`: clones are shown as independent owners that each drop the value;
-  reference counting isn't modelled.
+- `Rc` / `Arc` / `Weak`: reference counts aren't modelled. Each clone is
+  drawn as its own owner; its scope end says that its resource is dropped
+  and adds that, for an `Rc`, this lowers the reference count and the
+  shared value is freed only when its last `Rc` is dropped, without saying
+  which one that is (a `Weak` doesn't keep the value alive). This applies
+  to a variable or struct field whose own type is `Rc` / `Arc` / `Weak`,
+  and to a struct whose only droppable fields are of one such type. An
+  `Rc` inside another type (`Option<Rc<T>>`, `Vec<Rc<T>>`) keeps the plain
+  wording.
 - `if let` with a tuple pattern (`if let (Some(a), Some(b)) = (x, y)`)
   shows no bindings, and `x` / `y` as still owning their values.
 - A closure that uses one field or element (`move || p.name.len()`,

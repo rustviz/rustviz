@@ -1055,18 +1055,27 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c15_05_rc_strong_count",
-        status: Wrong,
-        note: "Rc: b's drop only decrements the count; the value is freed when a drops (#373)",
-        must_contain: &["Rc::clone reads from a", "Move from Rc::new to a"],
-        known_wrong: &["b goes out of scope. Its resource is dropped."],
+        must_contain: &[
+            "Rc::clone reads from a",
+            "Move from Rc::new to a",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "Rc::clone makes another Rc to the same value (nothing is copied), now owned by b",
+            "b is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+        ],
+        must_not_contain: &["b goes out of scope. Its resource is dropped.", "Move from Rc::clone to b"],
         ..E
     },
     Snippet {
         id: "c15_06_rc_method_clone",
-        status: Wrong,
-        note: "Rc: same as c15_05 (#373)",
-        must_contain: &["clone reads from a (implicitly borrowed)", "Move from Rc::new to a"],
-        known_wrong: &["b goes out of scope. Its resource is dropped."],
+        must_contain: &[
+            "clone reads from a (implicitly borrowed)",
+            "Move from Rc::new to a",
+            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "clone makes another Rc to the same value (nothing is copied), now owned by b",
+            "b is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
+        ],
+        must_not_contain: &["b goes out of scope. Its resource is dropped.", "Move from clone to b"],
         ..E
     },
     Snippet {
@@ -1083,18 +1092,24 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c15_08_rc_refcell",
-        status: Wrong,
-        note: "was a crash at c2037dd. a drops first and only decrements the Rc count; value's drop frees the RefCell (#373). The `+= 10` write through the borrow_mut guard has no event of its own (README Limitations)",
+        status: Missing,
+        note: "was a crash at c2037dd. The `+= 10` write through the borrow_mut guard has no event of its own (README Limitations)",
         must_contain: &[
             "Move from Rc::new to value",
             "Rc::clone borrows value immutably (a shared borrow); value has interior mutability, so its contents can change even through a shared borrow",
             "borrow_mut borrows value immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
-            "Move from Rc::clone to a",
+            "Rc::clone makes another Rc to the same value (nothing is copied), now owned by a",
             "println! reads from a through an implicit reference, so a isn't moved",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "value goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+        ],
+        must_not_contain: &[
+            "borrow_mut reads from value",
+            "Rc::clone reads from value",
+            "Move from Rc::clone to a",
+            "a goes out of scope. Its resource is dropped.",
             "value goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["borrow_mut reads from value", "Rc::clone reads from value"],
-        known_wrong: &["a goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {

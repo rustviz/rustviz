@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{rc_call_of, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1095,6 +1095,7 @@ fn render_dot(
                         hover_messages::event_dot_branch_merge_moved_with_drop(
                             &is.real_name(),
                             is.extract_rap().map_or(false, |r| r.holds_value()),
+                            is.extract_rap().and_then(|r| r.rc_drop()),
                         )
                     };
                     let m_data = EventDotData {
@@ -1215,7 +1216,7 @@ fn render_dot(
                             hash: *hash as u64,
                             dot_x: cx,
                             dot_y: cy,
-                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name),
+                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, ro.rc_drop()),
                             p1x: cx - 3, p1y: cy - 1,
                             p2x: cx + 3, p2y: cy - 1,
                             p3x: cx,     p3y: cy + 3,
@@ -1282,7 +1283,9 @@ fn render_dot(
                             if ro.holds_borrow() && !holder_never_borrows(visualization_data, ro) {
                                 title.push_str(&hover_messages::event_dot_holder_drop_suffix());
                             } else {
-                                title.push_str(". Its resource is dropped.");
+                                title.push_str(". Its resource is dropped");
+                                title.push_str(&hover_messages::rc_drop_note(ro.rc_drop()));
+                                title.push('.');
                             }
                             title
                         };
@@ -1322,7 +1325,15 @@ fn render_dot(
                 Event::OwnerDropAtReassign { .. } | Event::TemporaryDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
-                    let title = event.print_message_with_name(&mut name);
+                    // A reassignment that drops an Rc/Arc/Weak says it only lowers a count (#373).
+                    let rc = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false }) {
+                        visualization_data.timelines[hash].resource_access_point.rc_drop()
+                    } else { None };
+                    let title = if rc.is_some() {
+                        hover_messages::event_dot_owner_drop_at_reassign(&name, rc)
+                    } else {
+                        event.print_message_with_name(&mut name)
+                    };
                     let drop_data = DropDotData {
                         hash: *hash as u64,
                         dot_x: cx,
@@ -2503,6 +2514,14 @@ fn render_arrow (
             } else {
                 format!("{} to {}", title, styled_to_string)
             };
+            // `Rc::clone(&a)` / `a.clone()` / `Rc::downgrade(&a)` make
+            // another owner of the same value; the value isn't moved
+            // or copied (#373).
+            if matches!(external_event, ExternalEvent::Move { .. }) {
+                if let Some(call) = rc_call_of(from) {
+                    title = hover_messages::arrow_rc_call(&from.name(), &to.name(), call);
+                }
+            }
             // A borrow "returned" from `s` to `*s`: the lender has no
             // column, so don't describe it as returned to itself.
             // When the visitor knows it borrowed 'static data (a string

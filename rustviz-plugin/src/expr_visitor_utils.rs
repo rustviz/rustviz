@@ -2,7 +2,7 @@
 use std::{cmp::max, collections::{HashMap, HashSet, VecDeque}};
 use log::warn;
 use rustc_hir::Mutability;
-use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
+use crate::svg_generator::data::{ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
 use rustc_middle::ty::{Ty, TyCtxt, TypeckResults};
 use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability};
 use rustc_span::Span;
@@ -1046,6 +1046,58 @@ pub fn local_callee_result_key(call: &Expr, tcx: &TyCtxt) -> LocalCallee {
   LocalCallee::Call(fn_key(tcx.hir_name(path.segments[0].hir_id).as_str()))
 }
 
+/// Which `Rc` / `Arc` / `Weak` kind `ty` is, by std diagnostic item.
+fn rc_kind_of_ty(tcx: &TyCtxt, ty: rustc_middle::ty::Ty) -> Option<RcKind> {
+  use rustc_span::sym;
+  let did = ty.ty_adt_def()?.did();
+  if tcx.is_diagnostic_item(sym::Rc, did) { Some(RcKind::Rc) }
+  else if tcx.is_diagnostic_item(sym::Arc, did) { Some(RcKind::Arc) }
+  else if tcx.is_diagnostic_item(sym::RcWeak, did) { Some(RcKind::RcWeak) }
+  else if tcx.is_diagnostic_item(sym::ArcWeak, did) { Some(RcKind::ArcWeak) }
+  else { None }
+}
+
+/// Is the call `call` (a `Call` or `MethodCall`) to `<Rc<T> as
+/// Clone>::clone` / `<Arc<T> as Clone>::clone`, or to `Rc::downgrade` /
+/// `Arc::downgrade`? Decided from the resolved callee and its `Self`
+/// type, not from the name written (#373): a user's own `clone` method,
+/// or `String::clone`, is not one.
+pub fn rc_call_of_expr(call: &Expr, tcx: &TyCtxt) -> Option<RcCall> {
+  let typeck = tcx.typeck(call.hir_id.owner);
+  let (callee_id, def_id) = match call.kind {
+    ExprKind::MethodCall(..) => (call.hir_id, typeck.type_dependent_def_id(call.hir_id)?),
+    ExprKind::Call(fn_expr, _) => {
+      let ExprKind::Path(ref qpath) = fn_expr.kind else { return None };
+      match typeck.qpath_res(qpath, fn_expr.hir_id) {
+        rustc_hir::def::Res::Def(_, def_id) => (fn_expr.hir_id, def_id),
+        _ => return None,
+      }
+    }
+    _ => return None,
+  };
+  if tcx.lang_items().clone_fn() == Some(def_id) {
+    // The trait method `Clone::clone`; its `Self` is the first generic arg.
+    let self_ty = typeck.node_args(callee_id).types().next()?;
+    return rc_kind_of_ty(tcx, self_ty).map(RcCall::Clone);
+  }
+  // An inherent method of `Rc` / `Arc`: the impl's self type says which.
+  if tcx.item_name(def_id).as_str() == "downgrade" {
+    let impl_id = tcx.opt_parent(def_id)?;
+    if !matches!(tcx.def_kind(impl_id), rustc_hir::def::DefKind::Impl { .. }) { return None; }
+    return rc_kind_of_ty(tcx, tcx.type_of(impl_id).skip_binder()).map(RcCall::Downgrade);
+  }
+  None
+}
+
+/// The function RAP for `call`'s result, with `Rc` clone / downgrade
+/// calls marked as such.
+pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> ResourceAccessPoint {
+  match rc_call_of_expr(call, tcx) {
+    Some(rc_call) => rap.with_rc_call(rc_call),
+    None => rap,
+  }
+}
+
 pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> ResourceTy {
   match expr.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
@@ -1091,12 +1143,12 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
         LocalCallee::Consumed => hirid_to_var_name(fn_expr.hir_id, tcx),
         LocalCallee::NotLocal => hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
       };
-      key.and_then(|n| raps.get(&n).map(|rd| rd.rap.to_owned()))
+      key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::MethodCall(name_and_generic_args, ..) => {
       hirid_to_var_name(name_and_generic_args.hir_id, &tcx)
-        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned()))
+        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::Block(b, _) => {

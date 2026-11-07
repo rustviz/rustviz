@@ -195,7 +195,36 @@ pub struct Owner {
     /// gives it back at the borrow's end, like a reference, while
     /// still owning its own value (#336).
     pub holds_borrow: bool,
+    /// `Some` iff this owner's own type is `Rc<T>`, `Arc<T>` or one of
+    /// their `Weak<T>`s: dropping it lowers a count and frees the shared
+    /// value only if it was the last owner (#373).
+    pub rc: Option<RcKind>,
 }
+
+/// Which reference-counted pointer an `Owner` is (found by the std
+/// diagnostic items, not by name).
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+pub enum RcKind { Rc, Arc, RcWeak, ArcWeak }
+
+impl RcKind {
+    pub fn is_weak(self) -> bool { matches!(self, RcKind::RcWeak | RcKind::ArcWeak) }
+    /// The strong pointer's name: `Rc` or `Arc` (also for their Weaks'
+    /// `upgrade` / `downgrade` counterparts).
+    pub fn strong_name(self) -> &'static str {
+        match self { RcKind::Rc | RcKind::RcWeak => "Rc", RcKind::Arc | RcKind::ArcWeak => "Arc" }
+    }
+}
+
+/// What a drop claims about counts: the dropped place is itself an
+/// `Rc` / `Arc` / `Weak`, or a struct all of whose droppable fields are.
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+pub enum RcDrop { Own(RcKind), Fields(RcKind) }
+
+/// A call that makes another owner of the same shared value, recognised
+/// from the resolved callee (not its name): `<Rc<T> as Clone>::clone`
+/// (also `Arc`), and `Rc::downgrade` / `Arc::downgrade` (#373).
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+pub enum RcCall { Clone(RcKind), Downgrade(RcKind) }
 
 // when something is a struct member
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
@@ -214,6 +243,13 @@ pub struct Struct {
     pub interior_mut: bool,
     /// Same as Owner::is_manually_drop, for a `ManuallyDrop<T>` field.
     pub is_manually_drop: bool,
+    /// `Some` iff this member's own type is `Rc<T>`, `Arc<T>` or one of
+    /// their `Weak<T>`s (same role as `Owner::rc`).
+    pub rc: Option<RcKind>,
+    /// `Some(k)` iff this is a struct whose every field that needs drop
+    /// is a `k`, and the struct has no `Drop` impl of its own: dropping
+    /// it only lowers counts (#373).
+    pub rc_fields: Option<RcKind>,
 }
 
 // a reference of type &mut T
@@ -257,6 +293,9 @@ pub struct Function {
     /// `std::mem::drop` and the argument's type needs drop (see
     /// `DropsOld`): the call is where the value is dropped.
     pub drops_arg: DropsOld,
+    /// Set only on the copy a call's result event carries, when the
+    /// resolved callee clones an `Rc` / `Arc` or downgrades one.
+    pub rc_call: Option<RcCall>,
 }
 
 // ResourceTy is a wrapper for ResourceAccessPoints
@@ -422,6 +461,36 @@ pub fn temporary_label(n: usize) -> String {
 }
 
 impl ResourceAccessPoint {
+    /// `Some` iff this RAP is an owner whose own type is `Rc` / `Arc` /
+    /// `Weak`.
+    pub fn rc_kind(&self) -> Option<RcKind> {
+        match self {
+            ResourceAccessPoint::Owner(Owner { rc, .. })
+            | ResourceAccessPoint::Struct(Struct { rc, .. }) => *rc,
+            _ => None,
+        }
+    }
+
+    /// What a drop of this RAP should say about reference counts, if
+    /// anything (#373): its own type is `Rc` / `Arc` / `Weak`, or it is a
+    /// struct whose drop only drops such fields.
+    pub fn rc_drop(&self) -> Option<RcDrop> {
+        match self {
+            ResourceAccessPoint::Struct(Struct { rc_fields: Some(k), .. }) => Some(RcDrop::Fields(*k)),
+            _ => self.rc_kind().map(RcDrop::Own),
+        }
+    }
+
+    /// A copy of this function RAP marked as a call that clones or
+    /// downgrades an `Rc` / `Arc`.
+    pub fn with_rc_call(&self, call: RcCall) -> ResourceAccessPoint {
+        let mut rap = self.clone();
+        if let ResourceAccessPoint::Function(f) = &mut rap {
+            f.rc_call = Some(call);
+        }
+        rap
+    }
+
     /// A copy of this function RAP marked as `std::mem::drop` called on
     /// a value that needs drop.
     pub fn with_drops_arg(&self) -> ResourceAccessPoint {
@@ -1681,7 +1750,7 @@ impl Event {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
             }
             Event::OwnerDropAtReassign { maybe_moved: false } => {
-                hover_messages::event_dot_owner_drop_at_reassign(my_name)
+                hover_messages::event_dot_owner_drop_at_reassign(my_name, None)
             }
             Event::OwnerDropAtReassign { maybe_moved: true } => {
                 hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name)
@@ -1780,7 +1849,8 @@ impl Event {
                     ResourceTy::Caller => safe_message(if v { hover_messages::event_dot_move_to_caller_value } else { hover_messages::event_dot_move_to_caller }, &self.deref_name(my_name), to),
                     ResourceTy::Temporary { extended } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
-                        hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v),
+                        hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
+                            is.extract_rap().and_then(|r| r.rc_drop())),
                     _ if to.is_closure() => safe_message(if v { hover_messages::event_dot_capture_move_to_closure_value } else { hover_messages::event_dot_capture_move_to_closure }, &self.deref_name(my_name), to),
                     _ => safe_message(if v { hover_messages::event_dot_move_to_value } else { hover_messages::event_dot_move_to }, &self.deref_name(my_name), to),
                 }
@@ -1841,7 +1911,7 @@ impl Event {
                     // the element in place.
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
-                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place),
+                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place, None),
                         // The old element has nothing to drop (that's what makes
                         // it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
@@ -1864,12 +1934,17 @@ impl Event {
                     };
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
-                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name)),
+                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name), None),
                         // The old value has nothing to drop (that's what
                         // makes it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy()),
                     }
+                } else if let Some(call) = rc_call_of(from) {
+                    // `let b = Rc::clone(&a);`, `a.clone()`,
+                    // `Rc::downgrade(&a)`: another owner of the same
+                    // value; nothing is copied (#373).
+                    hover_messages::event_dot_rc_call_acquire(&self.deref_name(my_name), call)
                 } else if let Some(rap) = is.extract_rap().filter(|rap| rap.is_ref()) {
                     // `let s: &str = "hi";`, `let r2 = r;` — the
                     // variable is bound to a reference, which never
@@ -2045,6 +2120,15 @@ pub fn ResourceAccessPoint_extract (external_event : &ExternalEvent) -> (&Resour
         _ => (&ResourceTy::Anonymous, &ResourceTy::Anonymous)
     };
     (from, to)
+}
+
+/// `Some` iff `from` is the result of an `Rc` / `Arc` clone or
+/// downgrade call: the new owner shares the value, it doesn't copy it.
+pub fn rc_call_of(from: &ResourceTy) -> Option<RcCall> {
+    match from.extract_rap() {
+        Some(ResourceAccessPoint::Function(f)) => f.rc_call,
+        _ => None,
+    }
 }
 
 pub fn string_of_external_event(e: &ExternalEvent) -> String {

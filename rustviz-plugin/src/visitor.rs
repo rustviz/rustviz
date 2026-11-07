@@ -961,7 +961,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               let field_is_copy = self.ty_is_copy(field_ty, param.hir_id.owner);
               let field_name = format!("{}.{}", name, field);
               self.add_struct(field_name.clone(), owner_hash, true, muta, field_is_copy, self.ty_is_plain(field_ty, param.hir_id.owner), self.ty_has_interior_mut(field_ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
-              self.mark_if_manually_drop(&field_name, field_ty);
+              self.mark_owner_type(&field_name, field_ty);
             }
           }
           else if ty.is_adt() && !is_special{ // kind of weird given we don't have a InitStructParam
@@ -976,6 +976,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let owner_hash = self.rap_hashes as u64;
                 let parent_is_copy = self.ty_is_copy(ty, param.hir_id.owner);
                 self.add_struct(name.clone(), owner_hash, false, bool_of_mut(binding_annotation.1), parent_is_copy, self.ty_is_plain(ty, param.hir_id.owner), self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
+                self.mark_owner_type(&name, ty);
                 // Nested struct fields get columns too (`r.tl.x`, #239).
                 // A reference field borrows from something in the
                 // caller's frame, like a reference parameter.
@@ -1001,7 +1002,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           else {
             let is_copy = self.ty_is_copy(ty, param.hir_id.owner);
             self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
-            self.mark_if_manually_drop(&name, ty);
+            self.mark_owner_type(&name, ty);
           }
           self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id, own_param, in_pattern: None });
           *self.unique_id += 1;
@@ -2702,7 +2703,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       rustc_middle::ty::TypingEnv::post_analysis(self.tcx, user_pat.hir_id.owner),
                       pat_ty);
                     self.add_owner(pat_name.clone(), false, is_copy, self.ty_is_plain(pat_ty, user_pat.hir_id.owner), self.ty_has_interior_mut(pat_ty, user_pat.hir_id.owner), self.current_scope, false);
-                    self.mark_if_manually_drop(&pat_name, pat_ty);
+                    self.mark_owner_type(&pat_name, pat_ty);
                   }
                   self.annotate_src(pat_name.clone(), pat_ident.span, false,
                     *self.raps.get(&pat_name).unwrap().rap.hash());
@@ -3715,7 +3716,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             pat_ty,
           );
           self.add_owner(name.clone(), false, is_copy, self.ty_is_plain(pat_ty, hirid.owner), self.ty_has_interior_mut(pat_ty, hirid.owner), self.current_scope, false);
-          self.mark_if_manually_drop(&name, pat_ty);
+          self.mark_owner_type(&name, pat_ty);
         }
         self.annotate_src(name.clone(), ident.span, false,
           *self.raps.get(&name).unwrap().rap.hash());
