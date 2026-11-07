@@ -1012,6 +1012,8 @@ const EXPECTED_OK: &[&str] = &[
     "loop_break_value_several_tuple",
     // A Result's or enum's drop says what it may hold (#684).
     "enum_drop_holds",
+    // Borrows that rustc's checker keeps live past the holder's last use (#644).
+    "borrow_end_nll",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11363,6 +11365,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h goes out of scope. Its resource is dropped (including",
         ],
     },
+    TooltipExpect {
+        name: "borrow_end_nll",
+        // #644: the loan moved on to `hold.r` / `h` / `h2` (or was
+        // swapped into `m1`, or is in `m` with `rb` tying lifetimes) is
+        // given back by that holder, but on the row where rustc's borrow
+        // checker ends it: the old holder's (or the tied reference's)
+        // last use. The text didn't change; the bug was the row it was
+        // drawn on (pinned by `borrow_ends_where_rustc_ends_the_loan`),
+        // so the end of each holder's borrow is now a dot of its own.
+        // These guard that the right reference returns each lender.
+        must_contain: &[
+            "Return immutably borrowed resource from hold.r to p",
+            "Return immutably borrowed resource from other.r to q",
+            "Return immutably borrowed resource from h to a",
+            "Return immutably borrowed resource from o to b",
+            "Return mutably borrowed resource from h2 to c",
+            "Return mutably borrowed resource from o2 to d",
+            "Return mutably borrowed resource from m to x",
+            "Return mutably borrowed resource from n to z",
+            "Return mutably borrowed resource from m1 to w",
+            "Return mutably borrowed resource from m2 to u",
+            "hold.r's immutable borrow ends",
+            "h's immutable borrow ends",
+            "h2's mutable borrow ends",
+            "m's mutable borrow ends",
+            "m1's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            // The variable that got a new value doesn't hold the old loan.
+            "Return immutably borrowed resource from other.r to p",
+            "Return immutably borrowed resource from o to a",
+            "Return mutably borrowed resource from o2 to c",
+            "Return mutably borrowed resource from m2 to w",
+            "Return mutably borrowed resource from rb to x",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13477,7 +13515,9 @@ fn struct_field_overwrite_by_call_borrows_per_signature() {
 /// #637: a struct moved to another variable takes its field's borrow
 /// along. The lender is given back once, at the new holder's last use:
 /// the loan is live while any value holding the reference is (the line
-/// after it uses the lender again, which rustc accepts). Moved inside an
+/// after it uses the lender again, which rustc accepts). If the source
+/// gets a new value and is used later, the loan, which flowed into its
+/// type's lifetime, lives until then (#644). Moved inside an
 /// arm, the borrow ends at hold's last use in that arm, and as the other
 /// arm starts (other.r isn't used there): once per path.
 #[test]
@@ -13491,7 +13531,9 @@ fn moved_struct_returns_its_borrow_from_the_new_holder() {
         ("u", "mutably", "hold.r.push('1');"),
         ("e", "immutably", "println!(\"{} {}\", o2.inner.r, o2.n);"),
         ("f", "immutably", "println!(\"call {}\", hold.r);"),
-        ("p", "immutably", "println!(\"source {}\", hold.r);"),
+        // p's loan flowed into `other`, which is live until its last
+        // use: rustc keeps p borrowed until then (#644).
+        ("p", "immutably", "println!(\"source {}\", other.r);"),
         ("q", "immutably", "println!(\"source {}\", other.r);"),
     ] {
         let ends = end(v, kind);
@@ -13503,6 +13545,30 @@ fn moved_struct_returns_its_borrow_from_the_new_holder() {
     assert_eq!(w.len(), 2, "w: {:?}", w);
     assert_eq!(w[0], code_row_y(&code, "println!(\"branch {}\", hold.r);"), "w: {:?}", w);
     assert!(w[1] > w[0] && w[1] < code_row_y(&code, "w.push('!');"), "w's other end should be at the if's end: {:?}", w);
+}
+
+/// #644: a loan is live while any variable it flowed into is, though
+/// the value holding it moved to another variable (`let hold = other;
+/// other = H { r: &q };`, `let h = o; o = &b;`), or two references'
+/// lifetimes are tied (`rb = &mut n;` with `rb: &mut &mut String`, a
+/// swap). Polonius ended these loans at the new holder's last use;
+/// rustc's borrow checker (NLL) rejects a use of the lender until the
+/// later line, so the lender is given back there.
+#[test]
+fn borrow_ends_where_rustc_ends_the_loan() {
+    let rv = run_with_local_backend("borrow_end_nll");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (v, kind, line) in [
+        ("p", "immutably", "println!(\"{}\", other.r);"),
+        ("a", "immutably", "println!(\"{}\", o);"),
+        ("c", "mutably", "o2.push('2');"),
+        ("x", "mutably", "println!(\"{}\", rb);"),
+        ("w", "mutably", "m2.push('2');"),
+    ] {
+        let ends = dots_with_tooltip(&svg, &format!("{}'s resource is no longer {} borrowed", v, kind));
+        assert_eq!(ends.len(), 1, "{}: {:?}", v, ends);
+        assert_eq!(ends[0].1, code_row_y(&code, line), "{}'s borrow should end on the row of `{}`: {:?}", v, line, ends);
+    }
 }
 
 /// #624: `p = P { a: &z, b: &z };` over `P { a: &x, b: &y }` has four

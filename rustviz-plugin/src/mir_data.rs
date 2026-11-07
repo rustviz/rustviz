@@ -15,7 +15,8 @@ use rustc_middle::ty::Ty;
 use std::collections::HashMap;
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
 use rustc_utils::SpanExt;
-use rustc_borrowck::consumers::{BodyWithBorrowckFacts, RustcFacts};
+use rustc_borrowck::consumers::{BodyWithBorrowckFacts, BorrowIndex, Borrows, RustcFacts};
+use rustc_mir_dataflow::Analysis;
 use rustc_span::Span;
 use polonius_engine::{Algorithm, Output, FactTypes};
 type Loan = <RustcFacts as FactTypes>::Loan;
@@ -151,6 +152,33 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         res
     }
 
+    /// The last line at which each loan is in scope for rustc's NLL
+    /// borrow checker (#644): the `Borrows` dataflow rustc's borrowck
+    /// runs, whose state before a statement is the set of loans an
+    /// access there conflicts with. Polonius' `loan_live_at` is more
+    /// precise (location-sensitive subset relations) and can end a loan
+    /// earlier than rustc does, which would draw a lender free where
+    /// rustc still rejects using it.
+    fn nll_loan_end_lines(&self, body_with_facts: &BodyWithBorrowckFacts<'tcx>) -> HashMap<BorrowIndex, usize> {
+        let body = &body_with_facts.body;
+        let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        let mut ends: HashMap<BorrowIndex, usize> = HashMap::new();
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for statement_index in 0..=data.statements.len() {
+                let location = Location { block, statement_index };
+                cursor.seek_before_primary_effect(location);
+                if cursor.get().is_empty() { continue; }
+                let line = self.location_to_line(location, body_with_facts);
+                for b in cursor.get().iter() {
+                    let e = ends.entry(b).or_insert(line);
+                    if line > *e { *e = line; }
+                }
+            }
+        }
+        ends
+    }
+
     // To get this to really work we would need to do a dataflow analysis to establish which temporaries 
     // refer to the same piece of data. Since the way the MIR is SSA.
     // For example:
@@ -192,6 +220,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
           });
         });
         
+        let nll_ends = self.nll_loan_end_lines(body_with_facts);
         let mut res: Vec<MIRBorrowData> = Vec::new();
 
         // refine loan regions (when testing they seem to be off sometimes) by looping through loan assignments
@@ -200,6 +229,11 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let assignment_line = self.location_to_line(location, &body_with_facts);
             match body_with_facts.borrow_set.location_map().get(&location) {
               Some(b_data) => {
+                // Where rustc's borrow checker ends the loan (#644);
+                // Polonius' end only for a loan NLL never has in scope
+                // after the statement that makes it.
+                let end_line = nll_ends.get(b_idx).copied()
+                  .unwrap_or_else(|| loan_regions.get(b_idx).map_or(assignment_line, |r| r.1));
                 // println!("borrow_data for location {:#?} : {:#?}", location, b_data);
                 // For a borrow of `r.a.b`, MIR's `borrowed_place`
                 // is `r` with projections [Field(a), Field(b)].
@@ -215,12 +249,11 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 let b_name = self.src_name_of_local(b_place, &loc_to_source_name);
                 let a_name = self.src_name_of_local(a_place, &loc_to_source_name);
 
-                // A loan that is never live (the `&s` MIR takes of a
-                // `ref s` binding for a match guard that doesn't use `s`)
-                // ends where it's issued.
-                let region_end = loan_regions.get(b_idx).map_or(assignment_line, |r| r.1);
+                // (A loan that is never live, like the `&s` MIR takes of a
+                // `ref s` binding for a guard that doesn't use `s`, ends
+                // where it's issued: `assignment_line` above.)
                 res.push(MIRBorrowData {borrow_idx: b_idx.index(), 
-                                        region: (assignment_line, region_end),
+                                        region: (assignment_line, end_line),
                                         borrowed_place: b_name, 
                                         assigned_place: a_name,
                                         span: self.location_to_span(location, &body_with_facts)});
