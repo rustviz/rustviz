@@ -292,9 +292,6 @@ const Description: React.FC = () => (
         is drawn as if its body always ran; spread it over several lines to see
         the move as conditional.
       </li>
-      <li>
-        An <code>if let</code> with a tuple pattern shows no bindings.
-      </li>
     </ul>
     <p>
       <strong>Some valid programs crash the visualizer</strong> (you&apos;ll
@@ -404,7 +401,11 @@ const Description: React.FC = () => (
         so does a literal of only fresh values (
         <code>let (ref a, _) = (make(), make());</code>). Other temporaries (
         <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
-        <code>for</code> head) drop without being drawn or mentioned.
+        <code>for</code> head) drop without being drawn or mentioned, except a
+        tuple of variables matched by <code>if let</code> or{' '}
+        <code>match</code> (<code>(x, y)</code>): where it&apos;s dropped is
+        stated on <code>x</code>&apos;s and <code>y</code>&apos;s columns
+        (not when a <code>?</code> leaves early).
       </li>
     </ul>
     <p>

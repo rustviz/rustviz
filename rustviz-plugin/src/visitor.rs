@@ -996,19 +996,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// exit carries out (`return e`, `break e`); what it may move isn't
   /// dropped. `how`: `return`, `break`, `continue` or `panic`, for the
   /// drop of a temporary.
+  ///
+  /// A tuple-literal scrutinee whose arm or if branch the exit leaves
+  /// (`live_tuples`) is dropped too, before the locals declared before
+  /// its match / `if let` (#327). It has no column, and its drop
+  /// doesn't end one, so it is stated even where the locals' drops
+  /// aren't drawn (the exit is in an `if` without `else`).
   fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, how: &str) {
     let Some(branch_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
     let ExitFrame::Branch { len: branch_len, .. } = self.exit_frames[branch_at] else { return };
-    let from = match loop_id {
-      None => 0,
+    // `frame_floor`: the exit leaves the constructs from this frame on.
+    let (from, frame_floor) = match loop_id {
+      None => (0, 0),
       Some(target) => match self.exit_frames.iter()
         .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target))
       {
         // The branch is inside the loop: drop what the iteration
         // declared before the branch.
         Some(i) if i < branch_at => match &self.exit_frames[i] {
-          ExitFrame::Loop { len, .. } => *len,
+          ExitFrame::Loop { len, .. } => (*len, i + 1),
           ExitFrame::Branch { .. } => return,
         },
         // A labelled block, or a loop inside the branch (no branch
@@ -1018,7 +1025,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let moved = value.map(|e| locals_moved_by(self.tcx, e)).unwrap_or_default();
     let end = branch_len.min(self.in_scope.len());
-    for rap in self.droppable_locals(from, end, &moved, true, line) {
+    // Innermost last, so popped first: Rust drops the tuple of an
+    // inner match before what an outer one holds.
+    let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.iter()
+      .filter(|t| t.frame >= frame_floor).cloned().collect();
+    for (idx, rap) in self.droppable_locals_at(from, end, &moved, true, line) {
+      // A tuple is dropped before the locals declared before its match.
+      while tuples.last().is_some_and(|t| idx < t.len) {
+        let t = tuples.pop().unwrap();
+        self.drop_tuple_on_exit(&t, line);
+      }
       let id = *self.unique_id;
       *self.unique_id += 1;
       self.exit_drops.insert(id);
@@ -1044,6 +1060,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id }),
       }
     }
+    while let Some(t) = tuples.pop() {
+      self.drop_tuple_on_exit(&t, line);
+    }
+  }
+
+  /// The drop of the live tuple scrutinee `t` at an exit on `line`
+  /// (#327), worded as #327's "when this arm leaves the match early" /
+  /// "when the if branch leaves early". Not an `exit_drops` event: it
+  /// ends no column, so it stays wherever the exit is drawn.
+  fn drop_tuple_on_exit(&mut self, t: &LiveTuple<'tcx>, line: usize) {
+    for ev in self.tuple_drop_events(t.scrutinee, &t.tuple, Some(t.pat), t.at) {
+      self.add_external_event(line, ev);
+    }
   }
 
   /// The locals in `in_scope[from..end]` that own a value to drop at
@@ -1053,12 +1082,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// non-`Copy` references (`&mut T`). A temporary whose scope ended
   /// before `line` was dropped already.
   fn droppable_locals(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<ResourceAccessPoint> {
+    self.droppable_locals_at(from, end, moved, refs, line).into_iter().map(|(_, r)| r).collect()
+  }
+
+  /// `droppable_locals`, each with its index in `in_scope`.
+  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<(usize, ResourceAccessPoint)> {
     if from >= end {
       return Vec::new();
     }
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::new();
-    for name in self.in_scope[from..end].iter().rev().filter(|n| seen.insert(n.as_str())) {
+    for (idx, name) in self.in_scope[from..end].iter().enumerate().rev()
+      .map(|(i, n)| (from + i, n)).filter(|(_, n)| seen.insert(n.as_str())) {
       let base = name.split('.').next().unwrap_or(name);
       let Some(rd) = self.raps.get(name) else { continue };
       if rd.rap.is_copy() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
@@ -1074,7 +1109,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if !self.owns_value_here(*rd.rap.hash()) {
         continue;
       }
-      out.push(rd.rap.clone());
+      out.push((idx, rd.rap.clone()));
     }
     out
   }
@@ -2298,10 +2333,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let entry_len = self.in_scope.len();
         let if_lo;
         let if_hash_lo;
+        // `if let … = (x, y)` moves `x` and `y` into the tuple even when
+        // the pattern doesn't match; the else branch shows that (#327).
+        let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
+        let mut iflet_tuple: Option<&'tcx rustc_hir::LetExpr<'tcx>> = None;
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
             if_hash_lo = self.rap_hashes;
+            scrutinee_moves = self.tuple_scrutinee_moves(let_expr.init);
+            iflet_tuple = Some(let_expr);
             let (bound, first_in_branch) = self.register_iflet_let_bindings(let_expr, None);
             // Copies out of the scrutinee stay before the split (#496).
             if_lo = first_in_branch;
@@ -2337,7 +2378,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // nor the binding of the `if`'s value to a `let` (#410).
         let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
         self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide });
+        // An exit in the if branch drops the tuple scrutinee (#327).
+        let live_tuple = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()).map(|let_expr| LiveTuple {
+          frame: self.exit_frames.len() - 1,
+          len: entry_len,
+          scrutinee: let_expr.init,
+          tuple: match self.tuple_scrutinee_target(let_expr.init) {
+            ResourceTy::Temporary { tuple: Some(t), .. } => t,
+            _ => String::new(),
+          },
+          pat: let_expr.pat,
+          at: TupleDropAt::IfExit,
+        });
+        let live = live_tuple.is_some();
+        self.live_tuples.extend(live_tuple);
         self.visit_expr(&if_expr);
+        if live {
+          self.live_tuples.pop();
+        }
         // Everything declared in each branch, also inside an inline
         // construct nested in it (an `else if let`'s bindings, #501):
         // see raps_declared_since.
@@ -2416,7 +2474,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .filter(|(_, e)| if_ids.contains(&e.get_id())
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
-            if !events_move_out_of_outer(&body_ev, &if_scope) {
+            // A tuple scrutinee's variables are moved whether or not the
+            // body runs (#327), so that's a second path as well.
+            if scrutinee_moves.is_empty() && !events_move_out_of_outer(&body_ev, &if_scope) {
                 // The body may be skipped, so a `return` / `break` /
                 // panic in it doesn't end the columns it's drawn on;
                 // its drops aren't drawn (#410).
@@ -2496,6 +2556,44 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut else_decl = else_decl;
         else_decl.extend(else_inner);
         else_decl.extend(else_scoped);
+        // The pattern didn't match, but the tuple literal it was matched
+        // against already took `x` / `y` (the if branch's own moves come
+        // from register_iflet_let_bindings).
+        //
+        // The tuple is dropped (#327) where an edition-2024 `if let`
+        // drops its scrutinee's temporaries: at the end of the if
+        // branch (when it leaves early, then), or, when the pattern
+        // doesn't match, before the else branch runs. It has no column,
+        // so a drop dot on each variable whose value (or part of it)
+        // is still in it says so.
+        if let Some(let_expr) = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()) {
+          let tuple_name = match self.tuple_scrutinee_target(let_expr.init) {
+            ResourceTy::Temporary { tuple: Some(t), .. } => t,
+            _ => String::new(),
+          };
+          let mut front: Vec<(usize, ExternalEvent)> = Vec::new();
+          for r in &scrutinee_moves {
+            front.push((if_end, ExternalEvent::Move {
+              from: ResourceTy::Value(r.clone()),
+              to: self.tuple_scrutinee_target(let_expr.init),
+              id: *self.unique_id,
+              is_partial: false,
+              into_closure: false,
+            }));
+            *self.unique_id += 1;
+            liveness.insert(r.clone());
+          }
+          let at = if else_expr.is_some() { TupleDropAt::Else } else { TupleDropAt::NoElse };
+          front.extend(self.tuple_drop_events(let_expr.init, &tuple_name, None, at).into_iter().map(|e| (if_end, e)));
+          else_ev.splice(0..0, front);
+
+          // A branch that leaves early drops it at its exit instead:
+          // see drop_locals_on_exit.
+          if !if_diverges {
+            let evs = self.tuple_drop_events(let_expr.init, &tuple_name, Some(let_expr.pat), TupleDropAt::IfEnd);
+            if_ev.extend(evs.into_iter().map(|e| (if_end, e)));
+          }
+        }
 
         
         let if_map = create_line_map(&if_ev);
@@ -2555,14 +2653,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // No `else` (and the body moves something, see above): the
           // implicit empty `else` is a second path that leaves every
           // variable as it was (#257).
-          None => (
+          None => {
+            // The scrutinee's moves (#327) are all this path has.
+            let else_map = create_line_map(&else_ev);
+            (
             vec!["If".to_owned(), "Else".to_owned()],
             vec![if_slice, else_slice],
             vec![
               ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits },
-              ExtBranchData { e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
+              ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
             ],
-          ),
+            )
+          }
         };
         // The arm of an `if let` with pattern bindings is named so for
         // the drawing: they bind on the split line, and the arm's column
@@ -2788,12 +2890,25 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let match_lo = *self.unique_id;
             let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
             self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide });
+            // `match (x, y) { … }` moves `x` and `y` into the tuple
+            // whatever arm is taken (#327).
+            let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
+            let into_tuple = self.tuple_scrutinee_target(guard_expr);
+            let tuple_name = match &into_tuple {
+              ResourceTy::Temporary { tuple: Some(t), .. } => t.clone(),
+              _ => String::new(),
+            };
+            // The tuple lives to the end of the statement holding the
+            // match, usually the match's own last line.
+            let past_match = self.temporary_scope_end(guard_expr).is_some_and(|(_, l, _)| l > merge);
             for arm in arms.iter() {
               // An arm's pattern bindings are out of scope in the next.
               self.in_scope.truncate(entry_len);
               let arm_hash_lo = self.rap_hashes;
               let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
               let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
+              // Parents this arm's pattern moves out of.
+              let mut arm_moved: Vec<ResourceTy> = Vec::new();
 
               // get line info
               // An arm body can be a bare macro call
@@ -2860,10 +2975,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     };
                     let mut associated_ro = Vec::new();
                     self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
+                    // A `ref` binding out of `(x, y)` borrows the tuple's
+                    // element, not x (#580).
+                    for (r, e, from, _) in associated_ro.iter_mut() {
+                      *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
+                    }
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
                     for (to_ro, e, from, partial) in associated_ro.iter() {
+                      if matches!(e, Evt::Move) {
+                        arm_moved.push(from.clone());
+                      }
                       // If the type of the pat is not the same as the parent associated with it then it must be a partial move
                       let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
                       let id = *self.unique_id;
@@ -2912,6 +3035,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
                     for (to_ro, e, from, partial) in associated_ro.iter() {
+                      if matches!(e, Evt::Move) {
+                        arm_moved.push(from.clone());
+                      }
                       let id = *self.unique_id;
                       *self.unique_id += 1;
                       let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
@@ -2943,6 +3069,27 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   }
                 }
               }
+
+              // A variable the scrutinee tuple took but this arm's
+              // pattern doesn't move out (`_ => …`, `(Some(_), b)`): it
+              // was still moved into the tuple, and isn't usable after
+              // the match (#327).
+              for r in scrutinee_moves.iter() {
+                if arm_moved.contains(&ResourceTy::Value(r.clone())) {
+                  continue;
+                }
+                let id = *self.unique_id;
+                *self.unique_id += 1;
+                let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r.clone()), id, false);
+                if inline {
+                  self.add_external_event(pat_line, ext_ev);
+                } else {
+                  branch_e_data.push((pat_line, ext_ev));
+                }
+              }
+              // An arm that leaves early (`_ => return 0`) drops the tuple
+              // at its exit instead (#327): see drop_locals_on_exit.
+              let arm_diverges = self.expr_diverges(arm.body);
 
               // A struct bound by the pattern (`Some(y) =>` with `y: P`)
               // gets field columns (`y.name`, `y.n`). They receive their
@@ -2999,7 +3146,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.inside_branch = true;
               self.uninit_locals = uninit_before.clone();
               let body_lo = *self.unique_id;
+              // An exit in the arm drops the tuple scrutinee (#327).
+              let live = !scrutinee_moves.is_empty();
+              if live {
+                self.live_tuples.push(LiveTuple {
+                  frame: self.exit_frames.len() - 1,
+                  len: entry_len,
+                  scrutinee: guard_expr,
+                  tuple: tuple_name.clone(),
+                  pat: arm.pat,
+                  at: TupleDropAt::MatchArmExit,
+                });
+              }
               self.visit_expr(arm.body);
+              if live {
+                self.live_tuples.pop();
+              }
               let body_ids = body_lo..*self.unique_id;
               uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
               self.inside_branch = prev_inside_branch;
@@ -3067,6 +3229,28 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   self.add_external_event(end, gos);
                 } else {
                   branch_e_data.push((end, gos));
+                }
+              }
+
+              // The tuple is dropped after the arm, and with it what of
+              // each variable's value the pattern didn't move out
+              // (#327). It has no column: a drop dot on each such
+              // variable's says so. (An arm that leaves early drops it
+              // at its `return` / `break` / `continue` / panic.)
+              if !arm_diverges {
+                let (at, line) = if past_match {
+                  (TupleDropAt::MatchArmStmt, end)
+                } else if inline {
+                  (TupleDropAt::MatchHere, merge)
+                } else {
+                  (TupleDropAt::MatchArm, end)
+                };
+                for ev in self.tuple_drop_events(guard_expr, &tuple_name, Some(arm.pat), at) {
+                  if inline {
+                    self.add_external_event(line, ev);
+                  } else {
+                    branch_e_data.push((line, ev));
+                  }
                 }
               }
 
@@ -3572,6 +3756,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// One TupleTempDrop per variable of the tuple-literal `scrutinee`
+  /// whose value (or part of it) is still in the tuple after `pat`
+  /// matched (`None`: it didn't), each listing all of them (#327).
+  fn tuple_drop_events(&mut self, scrutinee: &'tcx Expr<'tcx>, tuple: &str, pat: Option<&'tcx rustc_hir::Pat<'tcx>>, at: TupleDropAt) -> Vec<ExternalEvent> {
+    let left = self.tuple_scrutinee_left(scrutinee, pat);
+    let with: Vec<TupleLeft> = left.iter().map(|(_, l)| l.clone()).collect();
+    left.into_iter().map(|(ro, _)| {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      ExternalEvent::TupleTempDrop { ro, tuple: tuple.to_owned(), at, with: with.clone(), id }
+    }).collect()
+  }
+
   /// When the temporary of `expr` is dropped, in words, and the line
   /// that happens on: the end of the enclosing statement, the block's
   /// final expression, the match arm, the `if` / `while` condition, the
@@ -3775,7 +3972,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if moved_name(self, e).is_some() {
         let ty = self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id);
         let needs_drop = ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner));
-        let to = if needs_drop { ResourceTy::Temporary { extended: false } } else { ResourceTy::Anonymous };
+        let to = if needs_drop { ResourceTy::Temporary { extended: false, tuple: None } } else { ResourceTy::Anonymous };
         self.match_rhs(to, e, Evt::Move);
       }
     }

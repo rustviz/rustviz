@@ -845,6 +845,19 @@ const EXPECTED_OK: &[&str] = &[
     // ... and at a `break` / `continue` or a panic (#553 with #410).
     "let_temp_dropped_at_break",
     "let_temp_dropped_at_panic",
+    // `if let` with a tuple pattern binds its names; a tuple-literal
+    // scrutinee moves its variables whatever the pattern does (#327,
+    // #390).
+    "iflet_tuple_pattern",
+    "match_tuple_literal_moves",
+    // Where the tuple a tuple-literal scrutinee builds is dropped, and
+    // what of its variables' values goes with it (#327).
+    "tuple_scrutinee_drops",
+    // A `ref` binding out of `(x, y)` borrows the tuple, not x (#580).
+    "tuple_scrutinee_ref",
+    // An early exit nested in an arm / if branch drops a tuple
+    // scrutinee at the exit (#327 on #410); `process::exit` drops nothing.
+    "tuple_scrutinee_exit_drops",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9158,6 +9171,170 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              lived past its statement. Its resource is dropped.",
         ],
         must_not_contain: &["goes out of scope at the end of the block"],
+    },
+    // ─── Tuple patterns in `if let`; tuple-literal scrutinees (#327) ─
+    TooltipExpect {
+        name: "iflet_tuple_pattern",
+        // `if let (Some(a), Some(b)) = (x, y)` binds `a` / `b` from the
+        // tuple's elements. Building the tuple moves `x` and `y` into
+        // it, so they own nothing afterwards, even when the pattern
+        // doesn't bind from them (`Some(_)`) or doesn't match (the else
+        // branch). `Some((key, n))` on an `Option<(String, i32)>` binds
+        // both names.
+        must_contain: &[
+            "Move from x to a",
+            "Move from y to b",
+            "x goes out of scope. No resource is dropped.",
+            "y goes out of scope. No resource is dropped.",
+            "Move from q to r",
+            "p was moved or dropped in every branch above",
+            "q was moved or dropped in every branch above",
+            "p goes out of scope. No resource is dropped.",
+            "Move from entry to key",
+            "Copy from entry to n",
+            "key goes out of scope. Its resource is dropped.",
+            // The tuple (p, q) is dropped (edition 2024, checked with a
+            // Drop-printing program) at the end of the if branch, with
+            // p's value in it (q's String went to r), or, when the
+            // pattern fails, before the else branch runs, with both.
+            // It has no column, so the drop is stated on p's / q's.
+            "p's resource is moved into the temporary tuple (p, q)",
+            "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
+            "The pattern didn't match, so the temporary tuple (p, q) is dropped here, before the else branch runs, and with it p's and q's resources",
+            // No else: a failed match drops (x, y) and both values; a
+            // match moves both Strings out, so nothing is left in it.
+            "The pattern didn't match, so the temporary tuple (x, y) is dropped here, and with it x's and y's resources",
+        ],
+        must_not_contain: &[
+            "=x goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+            "=q goes out of scope. Its resource is dropped.",
+            "=entry goes out of scope. Its resource is dropped.",
+            // q's value isn't in the tuple on the if path.
+            "=The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's and q's resources",
+            "The temporary tuple (x, y) is dropped here, at the end of the if branch",
+        ],
+    },
+    TooltipExpect {
+        name: "match_tuple_literal_moves",
+        // `match (x, y)` moves both into the tuple, whatever arm runs:
+        // the `_` arm shows them moved too (#390). A nested tuple
+        // pattern (`(first, (n, second))`) on a tuple variable binds
+        // every name from its own element.
+        must_contain: &[
+            "Move from x to a",
+            "x was moved or dropped in every branch above",
+            "y was moved or dropped in every branch above",
+            "Move from t.0 to first",
+            "Copy from t.1.0 to n",
+            "Move from t.1.1 to second",
+            "second goes out of scope. Its resource is dropped.",
+            // The `_` arm takes nothing out of the tuple (x, y): it is
+            // dropped after the arm, with both values in it.
+            "x's resource is moved into the temporary tuple (x, y)",
+            "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it x's and y's resources",
+        ],
+        must_not_contain: &[
+            "x was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            "y was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            "Partial move from t to first",
+            // The first arm moves both Strings out: nothing is left.
+            "and with it x's resource",
+            "and with it y's resource",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_drops",
+        // The tuple a tuple-literal scrutinee builds has no column, so
+        // where it's dropped is stated on the columns of the variables
+        // whose values are in it (#327). Timing is edition 2024's,
+        // checked with a Drop-printing program: a match keeps it to the
+        // end of the match (or until an arm leaves early); an if let
+        // to the end of the if branch (or its early `return`).
+        must_contain: &[
+            // `early`: arm 1 moved x's String out, y's value is left.
+            "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
+            // `_ => return 0` drops the tuple as it returns.
+            "The temporary tuple (x, y) is dropped when this arm leaves the match early, and with it x's and y's resources",
+            "x goes out of scope. No resource is dropped.",
+            // `early_if`: p's value goes when the branch returns.
+            "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it p's resource",
+            "The pattern didn't match, so the temporary tuple (p, q) is dropped here, and with it p's and q's resources",
+            // A one-arm match is drawn inline: the drop is on the
+            // match's closing line.
+            "The temporary tuple (x, y) is dropped here, at the end of the match, and with it x's and y's resources",
+            // `E::Two(c, _)` moves one String out of e's value; the
+            // other is dropped with the tuple.
+            "The temporary tuple (e, f) is dropped here, at the end of the if branch, and with it the rest of e's resource",
+            "The pattern didn't match, so the temporary tuple (e, f) is dropped here, and with it e's and f's resources",
+        ],
+        must_not_contain: &[
+            // x's value went into the tuple; it isn't x's to drop at
+            // the `return`.
+            "=x goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+            "=e goes out of scope. Its resource is dropped.",
+            "=f goes out of scope. Its resource is dropped.",
+            // g took f's String: nothing of f's is left in the tuple.
+            "the rest of e's resource and f's resource",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_ref",
+        // `(Some(ref a), _)` on `(x, y)`: x's value was moved into the
+        // temporary tuple, and `a` borrows the String in that tuple,
+        // not x. The String stays in the tuple and is dropped with it
+        // after the arm, so x never owns a value again (#580). Same
+        // for `ref mut s` in an `if let`: the tuple, holding p's
+        // value, is dropped at the end of the if branch.
+        must_contain: &[
+            "x's resource is moved into the temporary tuple (x, y)",
+            "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it x's and y's resources",
+            "x was moved or dropped in every branch above",
+            "x goes out of scope. No resource is dropped.",
+            "p's resource is moved into the temporary tuple (p, q)",
+            "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
+            "p was moved or dropped in every branch above",
+            "p goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from x to a",
+            "Return immutably borrowed resource from a to x",
+            "x's resource is immutably borrowed by a",
+            "Mutable borrow from p to s",
+            "Return mutably borrowed resource from s to p",
+            "x was moved in at least one branch above",
+            "p was moved in at least one branch above",
+            "x goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "p goes out of scope. Its resource is dropped here only if no branch above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_exit_drops",
+        // A `return` that leaves a match arm or an `if let` branch from
+        // inside a nested `if` drops the tuple scrutinee right there, as
+        // it drops the function's other values (#410), checked with a
+        // Drop-printing program: at `return 0` the arm's own values go
+        // first, then the tuple (holding y's value), then the locals
+        // declared before the match. `std::process::exit` runs no
+        // destructors, so that arm drops nothing.
+        must_contain: &[
+            "The temporary tuple (x, y) is dropped when this arm leaves the match early, and with it y's resource",
+            "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
+            "The temporary tuple (s, t) is dropped when this arm leaves the match early, and with it s's and t's resources",
+            "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it p's resource",
+            "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
+            "m's resource is moved into the temporary tuple (m, n)",
+        ],
+        must_not_contain: &[
+            // `_ => std::process::exit(1)`: the process ends without
+            // dropping anything.
+            "The temporary tuple (m, n) is dropped when this arm leaves the match early",
+            "=y goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+        ],
     },
 ];
 

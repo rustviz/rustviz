@@ -279,6 +279,26 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub literal_temps: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
   // The elements of such a literal already moved into its temporary.
   pub premoved: HashSet<rustc_hir::HirId>,
+
+  // The tuple-literal scrutinees (`match (x, y)`, `if let … = (x, y)`)
+  // whose arm or if branch is being visited, innermost last (#327). A
+  // `return`, `break`, `continue` or panic that leaves the arm drops
+  // the tuple, and what of the variables' values is still in it.
+  pub live_tuples: Vec<LiveTuple<'tcx>>,
+}
+
+/// See `ExprVisitor::live_tuples`.
+#[derive(Clone)]
+pub struct LiveTuple<'tcx> {
+  // The index in `exit_frames` of the if/else or match frame whose
+  // branch holds the tuple, and that frame's `len`.
+  pub frame: usize,
+  pub len: usize,
+  pub scrutinee: &'tcx Expr<'tcx>,
+  pub tuple: String,
+  pub pat: &'tcx Pat<'tcx>,
+  // `MatchArmExit` or `IfExit`.
+  pub at: TupleDropAt,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -829,6 +849,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExternalEvent::GoOutOfScope { ro, .. }
       | ExternalEvent::ManuallyDropByHand { ro, .. }
       | ExternalEvent::LoopExitMove { ro, .. }
+      | ExternalEvent::TupleTempDrop { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. } => {
@@ -3006,7 +3027,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     res: &'t mut Vec<(ResourceAccessPoint, Evt, Ty<'tcx>)>,
 ) {
     match pat.kind {
-        PatKind::TupleStruct(_p, tuple_members, _) => {
+        // `Ok(x)`, and a tuple sub-pattern (`(a, (n, b))` in a match
+        // arm, `if let (Some(a), _) = …`; #327): every binding inside
+        // destructures out of the same parent.
+        PatKind::TupleStruct(_, tuple_members, _) | PatKind::Tuple(tuple_members, _) => {
             for p in tuple_members.iter() {
                 self.get_dec_of_pat2(p, ty_results, parent, parent_ty, scope, res);
             }
@@ -3245,8 +3269,39 @@ pub fn register_iflet_let_bindings(
     // the binding's own RAP since is_global=false).
     let scope = emit_gos_at.unwrap_or(let_line);
 
+    // `if let (Some(a), Some(b)) = (x, y)`: like `match (x, y)`, each
+    // sub-pattern destructures its own element of the tuple literal
+    // (#327). Otherwise the whole pattern matches the scrutinee.
+    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (let_expr.pat.kind, scrutinee.kind) {
+        (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(elems)) if !scrutinee.span.from_expansion() => {
+            let gap = elems.len().saturating_sub(sub_pats.len());
+            sub_pats.iter().enumerate().map(|(k, sp)| {
+                let i = match ddpos.as_opt_usize() {
+                    Some(d) if k >= d => k + gap,
+                    _ => k,
+                };
+                let elem = &elems[i];
+                (sp, crate::expr_visitor_utils::get_rap(elem, &self.tcx, &self.raps), typeck_res.node_type(elem.hir_id))
+            }).collect()
+        }
+        _ => vec![(let_expr.pat, parent.clone(), scrutinee_ty)],
+    };
     let mut decls = Vec::new();
-    self.get_dec_of_pat_parts(let_expr.pat, typeck_res, &parent, scrutinee_ty, scope, &mut decls);
+    for (sp, sp_parent, sp_parent_ty) in pairs {
+        let mut sub = Vec::new();
+        self.get_dec_of_pat_parts(sp, typeck_res, &sp_parent, sp_parent_ty, scope, &mut sub);
+        let sp_ty = typeck_res.node_type(sp.hir_id);
+        for (r, e, from, partial) in sub {
+            let from = self.retarget_tuple_borrow(scrutinee, &r, &e, from);
+            decls.push((r, e, from, partial.unwrap_or(sp_parent_ty != sp_ty)));
+        }
+    }
+
+    let moved_into_scrutinee = self.tuple_scrutinee_moves(scrutinee);
+    let moved_by_pattern: Vec<ResourceTy> = decls.iter()
+        .filter(|(_, e, _, _)| matches!(e, Evt::Move))
+        .map(|(_, _, from, _)| from.clone())
+        .collect();
 
     // Copies first (stable, so each group keeps pattern order).
     let (copies, others): (Vec<_>, Vec<_>) =
@@ -3254,11 +3309,10 @@ pub fn register_iflet_let_bindings(
     let n_copies = copies.len();
     let mut first_other = None;
     let mut registered: HashSet<ResourceAccessPoint> = HashSet::new();
-    for (i, (binding_rap, evt, from, partial)) in copies.into_iter().chain(others).enumerate() {
+    for (i, (binding_rap, evt, from, is_partial)) in copies.into_iter().chain(others).enumerate() {
         if i == n_copies {
             first_other = Some(*self.unique_id);
         }
-        let is_partial = partial.unwrap_or(scrutinee_ty != typeck_res.node_type(let_expr.pat.hir_id));
         let evt_kind = evt.clone();
         let event = self.ext_ev_of_evt(
             evt,
@@ -3292,7 +3346,19 @@ pub fn register_iflet_let_bindings(
             registered.insert(r);
         }
     }
-    (registered, first_other.unwrap_or(*self.unique_id))
+    // A tuple-literal scrutinee moves its variables into the tuple
+    // whether or not the pattern matches: show the ones the pattern
+    // didn't move out itself (`Some(_)`, `_`) as moved too.
+    let end_of_bindings = first_other.unwrap_or(*self.unique_id);
+    let into_tuple = self.tuple_scrutinee_target(scrutinee);
+    for r in moved_into_scrutinee {
+        if !moved_by_pattern.contains(&ResourceTy::Value(r.clone())) {
+            let event = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), *self.unique_id, false);
+            *self.unique_id += 1;
+            self.add_external_event(let_line, event);
+        }
+    }
+    (registered, end_of_bindings)
 }
 
 /// A by-value pattern binding of reference type out of a value that
@@ -3533,6 +3599,216 @@ pub fn mark_branch_results_kept(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
         self.mark_borrow_kept_by_result(tail, &own);
       }
     }
+  }
+}
+
+/// The variables a tuple-literal scrutinee (`if let … = (x, y)`,
+/// `match (x, y) { … }`) moves into the tuple it builds: each element
+/// that names a variable of a non-Copy, non-reference type. They are
+/// moved whether or not the pattern then matches, and whether or not it
+/// binds anything from them, so `x` can't be used afterwards (#327).
+/// Variables whose parts have columns of their own (a struct or tuple
+/// variable) are left out: marking only the whole as moved would leave
+/// their part columns claiming a drop.
+pub fn tuple_scrutinee_moves(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<ResourceAccessPoint> {
+    let ExprKind::Tup(elems) = scrutinee.kind else { return Vec::new() };
+    if scrutinee.span.from_expansion() {
+        return Vec::new();
+    }
+    let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
+    elems.iter().filter_map(|e| {
+        let ExprKind::Path(QPath::Resolved(_, path)) = e.kind else { return None };
+        if !matches!(path.res, Res::Local(_)) {
+            return None;
+        }
+        let ty = typeck.node_type(e.hir_id);
+        if ty.is_ref() || self.ty_is_copy(ty, e.hir_id.owner) {
+            return None;
+        }
+        match crate::expr_visitor_utils::get_rap(e, &self.tcx, &self.raps) {
+            ResourceTy::Value(rap @ ResourceAccessPoint::Owner(_)) => Some(rap),
+            _ => None,
+        }
+    }).collect()
+}
+
+/// A `ref` / `ref mut` binding out of a tuple-literal scrutinee's
+/// element (`(Some(ref a), _)` on `(x, y)`) borrows that element of the
+/// temporary tuple, not `x`, whose value was moved into the tuple
+/// (#580). Its lender is the tuple, which has no column: drawn like a
+/// borrow of any other temporary (`Anonymous`).
+pub fn tuple_elem_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: ResourceTy) -> ResourceTy {
+  if matches!(evt, Evt::SBorrow | Evt::MBorrow) {
+    if let ResourceTy::Value(r) = &from {
+      if self.tuple_scrutinee_moves(scrutinee).contains(r) {
+        return ResourceTy::Anonymous;
+      }
+    }
+  }
+  from
+}
+
+/// `tuple_elem_lender` for the binding `binding`, also pointing the
+/// borrow its `ref` registered (add_ref) at the tuple, so the borrow's
+/// end isn't drawn as giving x its value back (#580).
+pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: ResourceTy) -> ResourceTy {
+  let lender = self.tuple_elem_lender(scrutinee, evt, from.clone());
+  if lender != from {
+    if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
+      if rd.lender == from {
+        rd.lender = lender.clone();
+      }
+    }
+  }
+  lender
+}
+
+/// Where a tuple-literal scrutinee's variables go: the move into the
+/// tuple, labelled with its source text (`(p, q)`; empty when it's
+/// too long to quote).
+pub fn tuple_scrutinee_target(&self, scrutinee: &'tcx Expr<'tcx>) -> ResourceTy {
+  let text = self.tcx.sess.source_map().span_to_snippet(scrutinee.span).ok()
+    .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+    .filter(|t| t.chars().count() <= 32)
+    .unwrap_or_default();
+  ResourceTy::Temporary { extended: false, tuple: Some(text) }
+}
+
+/// The tuple-literal scrutinee's variables (`tuple_scrutinee_moves`)
+/// whose value, or part of it, is still in the tuple after `pat`
+/// matched (`None`: the pattern didn't match, so all of it), and is
+/// dropped with the tuple (#327). Only types that need drop: the
+/// others have nothing to drop.
+pub fn tuple_scrutinee_left(&self, scrutinee: &'tcx Expr<'tcx>, pat: Option<&'tcx Pat<'tcx>>) -> Vec<(ResourceAccessPoint, TupleLeft)> {
+  let ExprKind::Tup(elems) = scrutinee.kind else { return Vec::new() };
+  let moved = self.tuple_scrutinee_moves(scrutinee);
+  let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
+  let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, scrutinee.hir_id.owner);
+  let mut out = Vec::new();
+  for (i, e) in elems.iter().enumerate() {
+    let rap = match crate::expr_visitor_utils::get_rap(e, &self.tcx, &self.raps) {
+      ResourceTy::Value(r) if moved.contains(&r) => r,
+      _ => continue,
+    };
+    if !typeck.node_type(e.hir_id).needs_drop(self.tcx, env) {
+      continue;
+    }
+    let left = match pat {
+      None => Some(false),
+      Some(p) => self.tuple_elem_left(p, i, elems.len(), typeck, env),
+    };
+    if let Some(rest) = left {
+      out.push((rap.clone(), TupleLeft { name: rap.name().clone(), rest, rc: rap.rc_drop() }));
+    }
+  }
+  out
+}
+
+/// What `pat`, matched against a tuple literal of `n` elements, leaves
+/// of element `i` in the tuple: all of it (`Some(false)`), part of it
+/// (`Some(true)`) or nothing (`None`).
+fn tuple_elem_left(&self, pat: &'tcx Pat<'tcx>, i: usize, n: usize,
+  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> Option<bool> {
+  match pat.kind {
+    PatKind::Tuple(subs, dd) => {
+      let gap = n.saturating_sub(subs.len());
+      let k = match dd.as_opt_usize() {
+        Some(d) if i >= d && i < d + gap => return Some(false),
+        Some(d) if i >= d + gap => i - gap,
+        _ => i,
+      };
+      subs.get(k).and_then(|sp| self.pat_leaves(sp, typeck, env))
+    }
+    // `(Some(a), _) | (_, Some(a))`: which alternative matched decides.
+    // When they differ, "the rest of" covers both (all of it, or
+    // what's left after the move).
+    PatKind::Or(alts) => {
+      let each: Vec<Option<bool>> = alts.iter().map(|a| self.tuple_elem_left(a, i, n, typeck, env)).collect();
+      if each.iter().all(|l| *l == each[0]) { each[0] } else { Some(true) }
+    }
+    // `t => …` takes the whole tuple; `_`, `ref t` leave it.
+    _ => self.pat_leaves(pat, typeck, env),
+  }
+}
+
+/// What matching `pat` against an owned value leaves of it: all of it
+/// (`Some(false)`: nothing is moved out), part of it that needs drop
+/// (`Some(true)`), or nothing that needs drop (`None`).
+fn pat_leaves(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> Option<bool> {
+  let mut moves = false;
+  pat.walk_always(|p| {
+    if let PatKind::Binding(..) = p.kind {
+      let by_ref = matches!(typeck.pat_binding_modes().get(p.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
+      if !by_ref && !self.ty_is_copy(typeck.node_type(p.hir_id), p.hir_id.owner) {
+        moves = true;
+      }
+    }
+  });
+  if !moves {
+    Some(false)
+  } else if self.pat_leaves_drop(pat, typeck, env) {
+    Some(true)
+  } else {
+    None
+  }
+}
+
+/// Whether, after `pat` matched an owned value and its by-value
+/// bindings moved out what they bind, a part that needs drop is left
+/// in the value: under a `_`, a `ref` binding, a literal or a field
+/// skipped by `..`.
+fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
+  use rustc_middle::ty::TyKind;
+  let tcx = self.tcx;
+  let ty = typeck.node_type(pat.hir_id);
+  if !ty.needs_drop(tcx, env) {
+    return false;
+  }
+  // Whether a field the pattern skips with `..` needs drop: `tys` are
+  // the fields' types, of which `m` sub-patterns cover all but the
+  // ones from index `d` on.
+  let skipped_drop = |d: usize, m: usize, tys: Vec<Ty<'tcx>>| {
+    let gap = tys.len().saturating_sub(m);
+    tys.into_iter().skip(d).take(gap).any(|t| t.needs_drop(tcx, env))
+  };
+  match pat.kind {
+    PatKind::Binding(..) => {
+      matches!(typeck.pat_binding_modes().get(pat.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)))
+    }
+    PatKind::Tuple(subs, dd) => {
+      if subs.iter().any(|sp| self.pat_leaves_drop(sp, typeck, env)) {
+        return true;
+      }
+      let Some(d) = dd.as_opt_usize() else { return false };
+      let TyKind::Tuple(tys) = ty.kind() else { return true };
+      skipped_drop(d, subs.len(), tys.iter().collect())
+    }
+    PatKind::TupleStruct(ref qpath, subs, dd) => {
+      if subs.iter().any(|sp| self.pat_leaves_drop(sp, typeck, env)) {
+        return true;
+      }
+      let Some(d) = dd.as_opt_usize() else { return false };
+      let TyKind::Adt(adt, args) = ty.kind() else { return true };
+      let variant = adt.variant_of_res(typeck.qpath_res(qpath, pat.hir_id));
+      skipped_drop(d, subs.len(), variant.fields.iter().map(|f| f.ty(tcx, args)).collect())
+    }
+    PatKind::Struct(ref qpath, fields, rest) => {
+      if fields.iter().any(|f| self.pat_leaves_drop(f.pat, typeck, env)) {
+        return true;
+      }
+      if rest.is_none() {
+        return false;
+      }
+      let TyKind::Adt(adt, args) = ty.kind() else { return true };
+      let variant = adt.variant_of_res(typeck.qpath_res(qpath, pat.hir_id));
+      variant.fields.iter()
+        .filter(|f| !fields.iter().any(|fp| fp.ident.name == f.name))
+        .any(|f| f.ty(tcx, args).needs_drop(tcx, env))
+    }
+    PatKind::Or(alts) => alts.iter().any(|a| self.pat_leaves_drop(a, typeck, env)),
+    // `_`, a literal, a unit variant, a `box` / deref pattern: what
+    // they match stays.
+    _ => true,
   }
 }
 
