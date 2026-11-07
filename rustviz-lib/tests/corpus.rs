@@ -827,6 +827,7 @@ const EXPECTED_OK: &[&str] = &[
     // the literal's temporary, which has a `(temporary N)` column (#439).
     "let_pattern_literal_unbound_moves",
     "let_pattern_literal_temp_scopes",
+    "edition2024/if_let_chain_cond_reads_x",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9862,7 +9863,8 @@ fn assert_arm_starts_on_split_line(name: &str, var: &str, line: &str, bind_text:
     let row = code_row_y(&code, line);
     let bind = dots_with_tooltip(&timeline, bind_text);
     let arrow = arrow_points(&timeline, arrow_text);
-    let split = dots_with_tooltip(&timeline, &format!("{} is live in a conditional expression ", var));
+    // (`dots_listing`: a condition's event on the line shares the split dot, #509.)
+    let split = dots_listing(&timeline, &format!("{} is live in a conditional expression ", var));
     assert_eq!((bind.len(), arrow.len(), split.len()), (1, 1, 1), "{} {}: dots / arrow", name, var);
     let (bind, split) = (bind[0], split[0]);
     // The binding is on its own source row, and its arrow runs level
@@ -10009,9 +10011,7 @@ fn outer_borrow_end_is_drawn_in_each_arm() {
 /// #508: the same for a plain `if` or `match` whose first arm is written
 /// on the split line (`if c { take(s); } else {`): the arm's column used to
 /// start at the split row while the diagonal reached it a row lower, so it
-/// ran back up to the move's dot. A condition with an event of its own on
-/// that line (`if s.len() > 1 { take(s); } else {`) keeps its old drawing:
-/// no dot is raised half a row above the `if` row.
+/// ran back up to the move's dot.
 #[test]
 fn an_arm_whose_first_event_is_on_the_split_line_starts_there() {
     assert_arm_starts_on_split_line(
@@ -10020,13 +10020,30 @@ fn an_arm_whose_first_event_is_on_the_split_line_starts_there() {
     assert_arm_starts_on_split_line(
         "match_arm_on_split_line", "s", "match n { 0 => take(s),",
         "s's resource is moved", "Move from s to take");
+}
 
-    // The condition reads `s` on the `if` line: no raised split dot.
-    let rv = run_with_local_backend("if_arm_on_split_line_cond_event");
-    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-    let row = code_row_y(&code, "if s.len() > 1 { take(s); } else {");
-    let raised = format!("cy=\"{}\"", row - 15.0);
-    assert!(!timeline.contains(&raised), "a dot is half a row above the `if` row although the condition has an event there");
+/// #509: when the condition also has an event of the column's own on the
+/// split line (`if s.len() > 1 { take(s); } else {`, or a let-chain whose
+/// first part reads the variable the later `let` binds from: `if
+/// x.is_some() && let Some(a) = &x {`), that event runs before either
+/// arm. It's drawn on the split dot, raised half a row above the `if`
+/// row, and the `if` arm starts on the row as without it. These columns
+/// used to keep the old drawing: the arm ran back up to its first event's
+/// dot (a Z), and that event's arrow hopped over the split dot.
+#[test]
+fn a_condition_event_on_the_split_line_is_on_the_raised_split_dot() {
+    for (name, var, line, bind_text, arrow_text, cond) in [
+        ("if_arm_on_split_line_cond_event", "s", "if s.len() > 1 { take(s); } else {",
+         "s's resource is moved", "Move from s to take", "len reads from s (implicitly borrowed)"),
+        ("edition2024/if_let_chain_cond_reads_x", "x", "if x.is_some() && let Some(a) = &x {",
+         "x's resource is immutably borrowed by a; x is read-only while the borrow is live",
+         "Partial immutable borrow from x to a", "is_some reads from x (implicitly borrowed)"),
+    ] {
+        assert_arm_starts_on_split_line(name, var, line, bind_text, arrow_text);
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        let split = dots_listing(&timeline, &format!("{} is live in a conditional expression ", var));
+        assert_eq!(dots_listing(&timeline, cond), split, "{}: {:?} is not on the split dot", name, cond);
+    }
 }
 
 /// #557: `if let Msg::Pair(n, s) = msg` copies `n` out of `msg` before the

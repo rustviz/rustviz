@@ -3800,19 +3800,15 @@ const PATTERN_SPLIT_RISE: i64 = 15;
 /// to the event's dot, and an arrow from that dot hopped over the split
 /// dot.
 ///
-/// Not when the column has a dot of its own on the split line (an
-/// event of the condition or scrutinee, as in `if s.len() > 1 { take(s); }`):
-/// it would be left between the arms. A copy out of an `if let`
-/// scrutinee is no such event: it is recorded before the split and
-/// drawn on the raised split dot (`event_dot_y`).
+/// An event of the column's own in the condition or scrutinee on that
+/// line (`if s.len() > 1 { take(s); }`, `if x.is_some() && let Some(a)
+/// = &x {`, or a copy out of an `if let` scrutinee, #557) runs before
+/// either arm: it goes on the raised split dot (`event_dot_y`), not
+/// between the arms (#509).
 fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
     let Event::Branch { branch_history, split_point, merge_point, .. } = &history[i].1 else { return false };
     !branch_is_collapsed(*split_point, *merge_point)
         && branch_history.first().is_some_and(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
-        && !history.iter().enumerate().any(|(j, (l, ev))| {
-            j != i && l == split_point && !matches!(ev, Event::RefDie { .. })
-                && !(j < i && matches!(ev, Event::Duplicate { .. }))
-        })
 }
 
 /// Lines where a column stops for, or resumes after, a conditional
@@ -3878,23 +3874,22 @@ impl CollapsedApexes {
 /// line): it runs before any arm, so it goes on the split dot, not in
 /// the middle of the diamond (#492). Likewise an event recorded after
 /// the conditional, on its last line, runs after the arms: it goes on
-/// the join dot.
+/// the join dot. The same holds for a conditional whose split dot is
+/// raised half a row above its line (`binds_at_split`): an event of
+/// the condition on that line goes on the raised split dot (#509).
 fn event_dot_y(history: &[(usize, Event)], i: usize) -> i64 {
     let line = history[i].0;
     let collapsed = |ev: &Event, on: fn(usize, usize) -> usize| matches!(ev,
         Event::Branch { split_point, merge_point, .. }
             if branch_is_collapsed(*split_point, *merge_point) && on(*split_point, *merge_point) == line);
-    let before_split = history[i + 1..].iter()
-        .take_while(|(l, _)| *l == line)
-        .any(|(_, ev)| collapsed(ev, |split, _| split));
+    let mut same_line_after = history[i + 1..].iter().enumerate()
+        .take_while(|(_, (l, _))| *l == line);
+    let before_split = same_line_after.clone().any(|(_, (_, ev))| collapsed(ev, |split, _| split));
+    let before_raised_split = same_line_after
+        .any(|(j, (_, ev))| matches!(ev, Event::Branch { split_point, .. } if *split_point == line)
+            && binds_at_split(history, i + 1 + j));
     let after_join = history[..i].iter().rev()
         .any(|(_, ev)| collapsed(ev, |_, merge| merge));
-    // A copy out of an `if let` scrutinee, on the split line before a
-    // raised split: it goes on the split dot (`binds_at_split`).
-    let before_raised_split = matches!(history[i].1, Event::Duplicate { .. }) && history[i + 1..].iter()
-        .take_while(|(l, _)| *l == line)
-        .any(|(_, ev)| matches!(ev, Event::Branch { split_point, .. } if *split_point == line))
-        && CollapsedApexes::of(history).raised_splits.contains(&line);
     get_y_axis_pos(line) + if before_split {
         -COLLAPSED_APEX
     } else if before_raised_split {
