@@ -795,6 +795,19 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_first_part",
     "edition2024/while_let_chain",
     "anonymous_copy_source",
+    // Exits other than a `return` ending a branch drop what they leave
+    // (#410): panics, `break` / `continue`, `return s.len()`.
+    "exit_panic_drops",
+    "exit_unreachable_else",
+    "exit_break_continue_drops",
+    "exit_continue_in_match",
+    "exit_return_borrowed_value",
+    "exit_return_after_nested_if",
+    "exit_path_dependent_drops",
+    "exit_return_in_let_if",
+    // An exit drops an unbound temporary (#457) only while its
+    // statement is running.
+    "exit_temporary_drops",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4872,22 +4885,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. Its resource is dropped.",
             "s goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &[
-            "This branch stops here: it returns, panics, breaks or continues, so it never \
-             reaches the end of the conditional, and t's column doesn't either",
-        ],
+        must_not_contain: &[],
     },
     TooltipExpect {
         name: "match_diverging_arm",
-        // #317: the `_ => unreachable!()` / `_ => panic!()` arms end in
-        // a bar on `s`'s, `t`'s and `m`'s columns.
+        // #317: the `_ => unreachable!()` arm ends in a bar on `s`'s
+        // column (`s` has no value yet there), and the `_ => panic!()`
+        // arm on `m`'s. `s` and `t` are dropped at that `panic!`
+        // (#410), which ends their columns there instead of a bar;
+        // `return_drops_what_the_branch_owns` counts the drops.
         must_contain: &[
-            "This branch stops here: it returns, panics, breaks or continues, so it never \
-             reaches the end of the conditional, and s's column doesn't either",
-            "This branch stops here: it returns, panics, breaks or continues, so it never \
-             reaches the end of the conditional, and t's column doesn't either",
-            "This branch stops here: it returns, panics, breaks or continues, so it never \
-             reaches the end of the conditional, and m's column doesn't either",
+            "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[],
     },
@@ -5872,10 +5880,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s₂'s resource is moved to the caller",
             "Move from to_string to v₂",
             "v₂ goes out of scope. Its resource is dropped.",
-            // early_return: the first r is dropped at each `return`,
-            // so its column stops in both branches.
-            "This branch stops here: it returns, panics, breaks or continues, so it never \
-             reaches the end of the conditional, and r's column doesn't either",
+            // early_return: the first r is dropped at each `return`
+            // (its drop dot ends its column, #410); r₂ is moved to the
+            // caller. `branches_that_diverge_stop_short` checks that only
+            // r₂'s column ends in a stop bar.
+            "r goes out of scope. Its resource is dropped.",
             // main: its own s / s₂, unrelated to param's
             "Move from param to s₂",
             "s₂ goes out of scope. Its resource is dropped.",
@@ -8581,6 +8590,101 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is initialized with a copy of Anonymous resource",
         ],
     },
+    // #410: a panic drops what the function owns, where it panics.
+    // `return_drops_what_the_branch_owns` counts the drops per arm.
+    TooltipExpect {
+        name: "exit_panic_drops",
+        must_contain: &[
+            "t goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "exit_unreachable_else",
+        must_contain: &["t goes out of scope. Its resource is dropped."],
+        // The `else` ends in the drops, not a bar
+        // (`branches_that_diverge_stop_short`).
+        must_not_contain: &[],
+    },
+    // #410: `break 'outer` drops `c` and `b`, `continue` drops `c`.
+    TooltipExpect {
+        name: "exit_break_continue_drops",
+        must_contain: &[
+            "b goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    // #410: the guessing game's `Err(_) => continue` drops `guess`,
+    // and `parse(&guess)`'s Result, whose statement it leaves.
+    TooltipExpect {
+        name: "exit_continue_in_match",
+        must_contain: &[
+            "guess goes out of scope. Its resource is dropped.",
+            "This temporary Result<u32, String> is dropped here, where `continue` leaves early: \
+             nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        // The Result is an unbound temporary, dropped at the `continue`
+        // or at the end of its statement; no `let` borrowed it, and it
+        // isn't dropped again at the end of the loop body.
+        must_not_contain: &[
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it \
+             was kept alive past the end of its statement. Its resource is dropped.",
+        ],
+    },
+    // #410: `return s.len()` / `return format!("{}!", u)` drop `s` / `u`.
+    TooltipExpect {
+        name: "exit_return_borrowed_value",
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    // #410: a nested if/else before the `return` no longer hides it.
+    TooltipExpect {
+        name: "exit_return_after_nested_if",
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    // #410: a `return`'s drops follow the path to it; see the counts
+    // in `return_drops_what_the_branch_owns`.
+    TooltipExpect {
+        name: "exit_path_dependent_drops",
+        must_contain: &["t goes out of scope. Its resource is dropped."],
+        must_not_contain: &[],
+    },
+    // #410: `s` is dropped at the end only, not at the `return` that
+    // leaves before `let s = if …` binds it; see the counts in
+    // `return_drops_what_the_branch_owns`.
+    TooltipExpect {
+        name: "exit_return_in_let_if",
+        must_contain: &["t goes out of scope. Its resource is dropped."],
+        must_not_contain: &[],
+    },
+    // #410 with #457: `g`'s `return` leaves while `parse(&s)`'s Result
+    // is alive and drops it; `f`'s `return` comes after `make()`'s
+    // String was dropped and doesn't drop it again (it used to, worded
+    // as a `let`-borrowed temporary).
+    TooltipExpect {
+        name: "exit_temporary_drops",
+        must_contain: &[
+            "This temporary Result<u32, String> is dropped here, where `return` leaves early: \
+             nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Result<u32, String> is dropped at the end of this statement: \
+             nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of this statement: nothing bound it \
+             to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it \
+             was kept alive past the end of its statement. Its resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -9236,12 +9340,40 @@ fn svg_lines(svg: &str) -> Vec<(f64, f64, f64, f64)> {
 
 /// #317: a branch of type `!` (`return`, `panic!()`, …) used to be
 /// drawn converging into the merge dot like the others. It now ends in
-/// a short bar, and nothing leaves its column below that bar.
+/// a short bar, and nothing leaves its column below that bar. The bar's
+/// message doesn't name the column it sits on, so this test checks the
+/// columns: each bar's `data-hash` is its column's.
 #[test]
 fn branches_that_diverge_stop_short() {
-    // `diverging_branch_stops` has no bar since #363: its returning
-    // branch's columns end with drops at the `return`.
-    for (name, bars) in [("diverging_branch_stops", 0), ("match_diverging_arm", 3)] {
+    const BAR: &str = "This branch stops here: it returns, panics, breaks or continues, so it \
+                       never reaches the end of the conditional";
+    // A column that ends in a drop at the exit (#363, #410) gets no bar:
+    // the drop dot ends it.
+    for (name, columns) in [
+        // The returning branch's `s` and `t` are dropped at the `return`.
+        ("diverging_branch_stops", &[][..]),
+        // `unreachable!()` on `s` (no value yet) and `panic!()` on `m`;
+        // the `panic!` arm drops `s` and `t`.
+        ("match_diverging_arm", &["s", "m"][..]),
+        // `process::exit` runs no destructors: its arm keeps the bars.
+        ("exit_panic_drops", &["s", "t"][..]),
+        ("exit_unreachable_else", &[][..]),
+        // `b` lives on past the inner `continue`; `c` is dropped there.
+        ("exit_break_continue_drops", &["b"][..]),
+        ("exit_continue_in_match", &["n"][..]),
+        // `s` and `u` are dropped at their `return`s.
+        ("exit_return_borrowed_value", &["v"][..]),
+        ("exit_return_after_nested_if", &[][..]),
+        // `pick`'s `s` has no value on the `_ => return 0` path: a bar,
+        // not a drop. `f`'s `t` is dropped at its `return`; `g`'s `m`
+        // is path-dependent and draws neither.
+        ("exit_path_dependent_drops", &["s"][..]),
+        ("exit_return_in_let_if", &[][..]),
+        // The temporary Result is dropped at the `return`.
+        ("exit_temporary_drops", &["n"][..]),
+        // early_return: r is dropped at each `return`; r₂ moves out.
+        ("shadow_matrix_scopes", &["r₂"][..]),
+    ] {
         let rv = run_with_local_backend(name);
         let timeline = rv.timeline_panel_string();
         let bar_tags: Vec<&str> = timeline
@@ -9249,7 +9381,48 @@ fn branches_that_diverge_stop_short() {
             .map(|(i, _)| &timeline[i..=i + timeline[i..].find('>').unwrap()])
             .filter(|t| t.contains("This branch stops here"))
             .collect();
-        assert_eq!(bar_tags.len(), bars, "{}: stop bars", name);
+        let label_of = |hash: &str| -> String {
+            let key = format!("data-hash=\"{}\"", hash);
+            let t = timeline
+                .split("<text ")
+                .skip(1)
+                .find(|t| t.split_once('>').unwrap().0.contains("class=\"label") && t.split_once('>').unwrap().0.contains(&key))
+                .unwrap_or_else(|| panic!("{}: no header label for hash {}", name, hash));
+            let body = &t[t.find('>').unwrap() + 1..t.find("</text>").unwrap()];
+            let mut text = String::new();
+            let mut in_tag = false;
+            for c in body.chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => text.push(c),
+                    _ => {}
+                }
+            }
+            text.split('|').next().unwrap().to_string()
+        };
+        let mut got: Vec<String> = bar_tags
+            .iter()
+            .map(|tag| {
+                assert!(
+                    tag.contains(&format!("data-tooltip-text=\"{}\"", BAR)),
+                    "{}: stop bar message: {}",
+                    name, tag
+                );
+                let h = &tag[tag.find("data-hash=\"").unwrap() + 11..];
+                label_of(&h[..h.find('"').unwrap()])
+            })
+            .collect();
+        got.sort();
+        let mut want: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
+        want.sort();
+        assert_eq!(got, want, "{}: columns that end in a stop bar", name);
+        // The geometry check only fits conditionals outside loops: in a
+        // loop the column legitimately continues below the bar once the
+        // loop is over (`b` in `exit_break_continue_drops`).
+        if !["diverging_branch_stops", "match_diverging_arm", "exit_panic_drops"].contains(&name) {
+            continue;
+        }
         for tag in bar_tags {
             let (x1, y, x2, _) = svg_lines(tag)[0];
             let x = (x1 + x2) / 2.0;
@@ -10437,16 +10610,55 @@ fn or_pattern_binding_from_different_values_is_refused() {
 /// right there (#363), so those values get a second drop dot, on the
 /// returning branch, besides the one at the end of the function. A
 /// value moved away before the `return` gets none there.
+///
+/// #410: the same for the other ways of leaving early. A panic drops
+/// everything (`panic!`, `todo!`, `unreachable!`); `break` / `continue`
+/// drop what the loop's iteration declared; `return s.len()` drops the
+/// borrowed `s`. What a `return` drops follows the path to it: nothing
+/// that only another arm gives a value, and nothing that a conditional
+/// above moved on some paths only (`m`, whose drop depends on a runtime
+/// drop flag). A var written as `"m:No"` counts "m goes out of scope.
+/// No resource is dropped." instead, and `"m:Flag"` the scope-end
+/// wording for a value moved on some paths only (#179).
 #[test]
 fn return_drops_what_the_branch_owns() {
     for (name, expected) in [
         ("diverging_branch_stops", &[("s", 2), ("t", 1)][..]),
         ("return_in_arm_drops", &[("v", 2), ("w", 1)][..]),
+        // `consume`'s parameter `s` is dropped once more.
+        ("match_diverging_arm", &[("s", 3), ("t", 1)][..]),
+        ("exit_panic_drops", &[("s", 3), ("t", 3)][..]),
+        ("exit_unreachable_else", &[("s", 2), ("t", 2)][..]),
+        // `b`: at the `break 'outer` and at the end of the outer body
+        // (#256); `c`: at the `break 'outer`, the `continue` and the end
+        // of the inner body.
+        ("exit_break_continue_drops", &[("a", 1), ("b", 2), ("c", 3)][..]),
+        // `guess`: at the `continue` and at the end of the loop body (#256).
+        ("exit_continue_in_match", &[("guess", 2), ("secret", 1)][..]),
+        ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 2)][..]),
+        ("exit_return_after_nested_if", &[("s", 2), ("t", 2)][..]),
+        // `m` (moved on one path above): no drop of any kind at the
+        // `return`, and the drop-flag wording once, at the end of `g`.
+        // (Before #179's wording reached this branch, that scope-end
+        // dot said "No resource is dropped.", false on the `else` path.)
+        ("exit_path_dependent_drops", &[("s", 1), ("t", 1), ("m", 0), ("m:No", 0), ("m:Flag", 1)][..]),
+        // `s` has no value yet at the `return`: dropped only at the end.
+        ("exit_return_in_let_if", &[("s", 1), ("s:No", 0), ("t", 2)][..]),
     ] {
         let rv = run_with_local_backend(name);
         let tooltips = timeline_tooltips(&rv.timeline_panel_string());
         for (var, count) in expected {
-            let drop = format!("{} goes out of scope. Its resource is dropped.", var);
+            let drop = if let Some(v) = var.strip_suffix(":No") {
+                format!("{} goes out of scope. No resource is dropped.", v)
+            } else if let Some(v) = var.strip_suffix(":Flag") {
+                format!(
+                    "{} goes out of scope. Its resource is dropped here only if no branch above \
+                     moved it (Rust tracks this with a runtime drop flag).",
+                    v
+                )
+            } else {
+                format!("{} goes out of scope. Its resource is dropped.", var)
+            };
             assert_eq!(
                 tooltips.iter().filter(|t| **t == drop).count(),
                 *count,

@@ -261,6 +261,18 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // so `print_lifetimes` can't see that `o`'s borrow has to last
   // until then; the arm records it here instead.
   pub borrow_floor: HashMap<String, usize>,
+
+  // Names of the variables in scope right now, in declaration order
+  // (#410). `add_rap` pushes; a block, a match arm, an `if let` and a
+  // loop truncate it back when they end, which takes their own
+  // variables (pattern bindings included) out of scope.
+  pub in_scope: Vec<String>,
+
+  // The constructs a `return`, `break`, `continue` or panic leaves,
+  // innermost last, each with `in_scope.len()` where it began: an
+  // if/else or a match (whose branch the exit is in), and loops, by
+  // the HirId a `break` / `continue` names as its target.
+  pub exit_frames: Vec<ExitFrame>,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -272,6 +284,19 @@ pub struct BreakMove {
   pub brk: rustc_hir::HirId,
   pub rap: ResourceAccessPoint,
   pub definite: bool,
+}
+
+/// See `ExprVisitor::exit_frames`.
+#[derive(Clone)]
+pub enum ExitFrame {
+  // `hide`: ranges of event ids (see `take_branch_events`) that can
+  // be among `preprocessed_events` while a branch of the conditional
+  // is visited but aren't on the path through it: the if-body's while
+  // the `else` is visited, and, for `let x = if … / match …`, the
+  // events binding each branch's value to `x` (`rhs_arm_ids`), which
+  // only happen once the conditional has finished.
+  Branch { len: usize, hide: Vec<std::ops::Range<usize>> },
+  Loop { id: rustc_hir::HirId, len: usize },
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -659,6 +684,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // Functions are keyed in their own namespace (see `fn_key`), so a
     // variable and a function with the same name get separate RAPs.
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
+    self.in_scope.push(key.clone());
     self.raps.entry(key).or_insert_with(|| {
       self.rap_hashes += 1;
       RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None, temp_owner: None }
@@ -3011,7 +3037,9 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     let is_block_local = |r: &ResourceAccessPoint| {
       self.raps.get(r.name()).map_or(false, |rd| !rd.is_global && rd.rap.hash() == r.hash())
     };
-    let mut vars: Vec<ResourceAccessPoint> = vars.into_iter().filter(|r| is_block_local(r)).collect();
+    // An unbound temporary (#457) is dropped by its own event, at the
+    // end of its statement, not with the block.
+    let mut vars: Vec<ResourceAccessPoint> = vars.into_iter().filter(|r| is_block_local(r) && needs_scope_end(r)).collect();
     // A struct's field columns (`p.name`) go out of scope with it.
     let owners: HashSet<u64> = vars.iter().filter_map(|r| match r {
       ResourceAccessPoint::Struct(st) if !st.is_member => Some(st.hash),

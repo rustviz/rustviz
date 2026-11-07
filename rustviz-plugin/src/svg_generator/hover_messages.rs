@@ -1822,13 +1822,11 @@ pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
 /// The end of a branch of type `!` (`return`, `panic!()`, `break`,
 /// `continue`, `unreachable!()`) on a variable's column: the path
 /// stops here and never reaches the code after the conditional (#317).
-pub fn branch_never_reaches_merge(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    format!(
-        "This branch stops here: it returns, panics, breaks or continues, so it never \
-         reaches the end of the conditional, and {0}'s column doesn't either",
-        my_name_fmt
-    )
+/// The bar sits on the column, so the message doesn't name it.
+pub fn branch_never_reaches_merge() -> String {
+    "This branch stops here: it returns, panics, breaks or continues, so it never \
+     reaches the end of the conditional"
+        .to_string()
 }
 
 /// Every branch above ended without the resource — either by a

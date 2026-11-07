@@ -279,13 +279,16 @@ rather than listed here.
   loop's variable is drawn bound at the `for` line and going out of
   scope at the body's closing brace, like the body's own `let`s; Rust
   creates it afresh each iteration.
-- Leaving a function early drops every value it still owns, where it
-  leaves. That's drawn for a `return` that ends an `if`/`else` branch
-  or a `match` arm, but not for `panic!()` / `unreachable!()` (the
-  values are dropped while the panic unwinds), `break` / `continue`
-  (locals declared inside the loop are dropped), a `return` in an `if`
-  without `else`, or a variable used in the returned expression
-  (`return s.len()` drops `s`).
+- Leaving early drops what is left behind, right there: a `return` or
+  a panic (`panic!()`, `unreachable!()`, `todo!()`, which unwind) drops
+  every value the function still owns, a `break` / `continue` the
+  values declared inside the loop. That's drawn when the exit is in an
+  `if`/`else` branch or a `match` arm, but not in an `if` without
+  `else` (`if done { return; }`; it is when that body also moves a
+  value, which draws the `if` as a branch), and not for the `?`
+  operator. A value moved on some paths before the exit only gets no
+  drop there: whether it's dropped depends on the path (Rust tracks it
+  with a runtime drop flag).
 - Method chains (`v.iter().map(f).collect()`): only the first call
   has `v` as its receiver and is drawn on `v`'s column. Each later
   call's receiver is the previous call's result, a temporary with no
