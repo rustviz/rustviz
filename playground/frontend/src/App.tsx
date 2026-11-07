@@ -426,22 +426,25 @@ const Description: React.FC = () => (
         A temporary borrowed by a <code>let</code> (
         <code>let r = &amp;String::from(&quot;a&quot;);</code>) gets a{' '}
         <code>(temporary)</code> column that lives to the end of the block. A
-        call&apos;s result that nothing binds or moves on (
+        value that nothing binds or moves on (a call&apos;s result:{' '}
         <code>make();</code>, <code>make().len()</code>,{' '}
-        <code>f(&amp;make())</code>) gets a short{' '}
+        <code>f(&amp;make())</code>; <code>vec![..];</code>; a struct, tuple or
+        array literal; an <code>if let</code> / <code>while let</code> scrutinee;
+        the iterator a <code>for</code> loop makes from its head) gets a short{' '}
         <code>(temporary)</code> column too (numbered together), and so does the
         literal in <code>let (ref a, ..) = (s, t);</code>, which <code>s</code>{' '}
         and <code>t</code> are moved into (only variables are drawn moving in),
         a <code>ref</code> binding of a value (
         <code>let ref t = String::from(&quot;a&quot;);</code>) borrows one, and
         so does a literal of only fresh values (
-        <code>let (ref a, _) = (make(), make());</code>). Other temporaries (
-        <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
-        <code>for</code> head) drop without being drawn or mentioned, except a
-        tuple of variables matched by <code>if let</code> or{' '}
-        <code>match</code> (<code>(x, y)</code>): where it&apos;s dropped is
-        stated on <code>x</code>&apos;s and <code>y</code>&apos;s columns
-        (not when a <code>?</code> leaves early).
+        <code>let (ref a, _) = (make(), make());</code>).
+        Not drawn or mentioned: a field moved out of a temporary
+        (<code>make().name</code>), a scrutinee that a pattern binds by value, and
+        a macro or literal that nothing binds and that moves a variable into the
+        temporary (<code>vec![s];</code>), except a tuple of variables matched by{' '}
+        <code>if let</code> or <code>match</code> (<code>(x, y)</code>):
+        where it&apos;s dropped is stated on <code>x</code>&apos;s and{' '}
+        <code>y</code>&apos;s columns (not when a <code>?</code> leaves early).
       </li>
     </ul>
     <p>
