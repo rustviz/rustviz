@@ -300,14 +300,13 @@ rather than listed here.
   a panic (`panic!()`, `unreachable!()`, `todo!()`, which unwind) drops
   every value the function still owns, a `break` / `continue` the
   values declared inside the loop. That's drawn when the exit is in an
-  `if`/`else` branch or a `match` arm, but not in an `if` without
-  `else` (`if done { return; }`; it is when that body also moves a
-  value, which draws the `if` as a branch). A value moved on some paths
-  before the exit only gets no drop there: whether it's dropped depends
-  on the path (Rust tracks it with a runtime drop flag). The `?`
-  operator returns early on `Err` / `None`, dropping what the function
-  owns: that's drawn as a dot on each owner at the `?`, saying the value
-  is dropped only if the `?` returns early; the owner's column goes on.
+  `if` branch (with or without an `else`) or a `match` arm. A value
+  moved on some paths before the exit only gets no drop there: whether
+  it's dropped depends on the path (Rust tracks it with a runtime drop
+  flag). The `?` operator returns early on `Err` / `None`, dropping
+  what the function owns: that's drawn as a dot on each owner at the
+  `?`, saying the value is dropped only if the `?` returns early; the
+  owner's column goes on.
 - Method chains (`v.iter().map(f).collect()`): only the first call
   has `v` as its receiver and is drawn on `v`'s column. Each later
   call's receiver is the previous call's result, a temporary with no

@@ -2880,9 +2880,20 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .cloned().collect();
             let chain_fail_ev = self.preprocessed_events.iter()
               .any(|(_, e)| else_ids.contains(&e.get_id()));
+            // A body that always exits (`return`, a panic, `break` /
+            // `continue`) and drops something there is drawn as a
+            // branch too: its column ends in those drops, and the
+            // implicit `else` carries on (#429). On one line it's drawn
+            // like any other one-line branch (#360). A body that only
+            // sometimes exits (the exit is in a nested conditional drawn
+            // inline) has no column to end in them, so they aren't drawn
+            // (#410).
+            let exit_branch = self.expr_diverges(if_expr)
+              && body_ev.iter().any(|(_, e)| self.exit_drops.contains(&e.get_id()));
+            let drawn_as_branch = events_move_out_of_outer(&body_ev, &if_scope) || exit_branch;
             // A tuple scrutinee's variables are moved whether or not the
             // body runs (#327), so that's a second path as well.
-            if scrutinee_moves.is_empty() && !events_move_out_of_outer(&body_ev, &if_scope) && !chain_fail_ev {
+            if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {
                 // The body may be skipped, so a `return` / `break` /
                 // panic in it doesn't end the columns it's drawn on;
                 // its drops aren't drawn (#410).
