@@ -2306,6 +2306,44 @@ fn render_hopping_arrow(
     ))
 }
 
+/// How many rows below its line an arrow is stacked: its place among the
+/// arrows its line map lists for `row`. An arrow the map doesn't list (a
+/// borrow's end moved into an arm, see `nest_borrow_ends_in_arms`) is drawn
+/// first on its line, and so is a return from a reference to itself.
+fn arrow_order_of(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> i64 {
+    let line_map = fetch_line_map(vd, ev.get_id());
+    let order = line_map.get(&row)
+        .and_then(|evs| evs.iter().position(|x| x == ev))
+        .unwrap_or(0) as i64;
+    match ev {
+        ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. }
+            if from.is_same_underlying(to) => 0,
+        _ => order,
+    }
+}
+
+/// Is `ev` a return (a borrow's end) whose source column is where another
+/// return, drawn level on the same row, ends: a reborrow's end followed by
+/// its lender's end (`s` to `r`, then `r` to `x`)?
+fn returns_chain_on_row(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> bool {
+    let (ExternalEvent::StaticDie { from, .. } | ExternalEvent::MutableDie { from, .. }) = ev else { return false };
+    let Some(src) = from.extract_rap() else { return false };
+    let mut all = Vec::new();
+    arrows_with_rows(&vd.external_events, &mut all);
+    all.into_iter().any(|(l, other)| {
+        let (ExternalEvent::StaticDie { from: of, to: ot, .. } | ExternalEvent::MutableDie { from: of, to: ot, .. }) = other else { return false };
+        let (Some(of_rap), Some(ot_rap)) = (of.extract_rap(), ot.extract_rap()) else { return false };
+        let id = other.get_id();
+        l == row
+            && id != ev.get_id()
+            && !of.is_same_underlying(ot)
+            && ot_rap.hash() == src.hash()
+            && of_rap.hash() != src.hash()
+            && arrow_order_of(vd, l, other) == 0
+            && column_event_y(vd, of_rap.hash(), id, l) == column_event_y(vd, ot_rap.hash(), id, l)
+    })
+}
+
 // render arrow
 fn render_arrow (
     line_number : &usize,
@@ -2805,21 +2843,7 @@ fn render_arrow (
                     }
                 },
                 (from_variable, to_variable, e) => {
-                    let line_map = fetch_line_map(&visualization_data, e.get_id());
-                    // An arrow its line map doesn't list (a borrow's end
-                    // moved into an arm, see `nest_borrow_ends_in_arms`)
-                    // is drawn first on its line.
-                    let mut arrow_order = line_map.get(line_number)
-                        .and_then(|evs| evs.iter().position(|x| x == external_event))
-                        .unwrap_or(0) as i64;
-                    match e {
-                      ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. } => {
-                        if from.is_same_underlying(to) {
-                          arrow_order = 0;
-                        }
-                      }
-                      _ => {}
-                    }
+                    let arrow_order = arrow_order_of(visualization_data, *line_number, external_event);
 
                     let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, e.get_id());
                     let to_timeline = fetch_timeline(to_variable.hash(), visualization_data, resource_owners_layout, e.get_id());
@@ -2828,22 +2852,30 @@ fn render_arrow (
                     let x2 = from_timeline.x_val;
                     let y1 = column_event_y(visualization_data, to_variable.hash(), e.get_id(), *line_number);
                     let y2 = column_event_y(visualization_data, from_variable.hash(), e.get_id(), *line_number);
-                    if arrow_order > 0 && x2 <= x1{ // trapezoid
+                    // A return whose source is where another return on this
+                    // row ends (`s` gives back to `r`, `r` to `x`) would be
+                    // drawn level with it and read as one long arrow
+                    // through `r`'s dot (#577). It dips half a row instead.
+                    let chained = arrow_order == 0 && y1 == y2
+                        && returns_chain_on_row(visualization_data, *line_number, external_event);
+                    let row_drop = if chained { LINE_SPACE / 2 } else { LINE_SPACE * arrow_order };
+                    let y_row = if chained { y1 + row_drop } else { get_y_axis_pos(*line_number) + row_drop };
+                    if (arrow_order > 0 || chained) && x2 <= x1{ // trapezoid
                         let x3 = from_timeline.x_val + 20;
                         let x4 = to_timeline.x_val - 20;
-                        let y3 = get_y_axis_pos(*line_number)+LINE_SPACE*arrow_order;
-                        let y4 = get_y_axis_pos(*line_number)+LINE_SPACE*arrow_order;
+                        let y3 = y_row;
+                        let y4 = y_row;
     
                         data.coordinates.push((x1 as f64, y1 as f64));
                         data.coordinates.push((x4 as f64, y4 as f64));
                         data.coordinates.push((x3 as f64, y3 as f64));
                         data.coordinates.push((x2 as f64, y2 as f64));
     
-                    } else if arrow_order > 0 && x2 > x1 { // deeper trapezoid
+                    } else if (arrow_order > 0 || chained) && x2 > x1 { // deeper trapezoid
                         let x3 = from_timeline.x_val - 20;
                         let x4 = to_timeline.x_val + 20;
-                        let y3 = get_y_axis_pos(*line_number)+LINE_SPACE*arrow_order;
-                        let y4 = get_y_axis_pos(*line_number)+LINE_SPACE*arrow_order;
+                        let y3 = y_row;
+                        let y4 = y_row;
     
                         data.coordinates.push((x1 as f64, y1 as f64));
                         data.coordinates.push((x4 as f64, y4 as f64));

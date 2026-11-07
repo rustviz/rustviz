@@ -11958,3 +11958,80 @@ fn arrowhead_stops_before_a_call_icon_on_its_dot() {
         "the head's tip is at x={}, {}px from the call icon's centre (the glyph reaches 6px)",
         tip_x, tip_x - icons[0]);
 }
+
+/// Level straight gray arrows as (tail x, head tip x, y). A shaft is written
+/// source first and stops 12.75px short of the head's tip.
+fn level_arrows(svg: &str) -> Vec<(f64, f64, f64)> {
+    let mut out = Vec::new();
+    for t in start_tags(svg, "polyline") {
+        if attr(t, "stroke") != Some("gray") {
+            continue;
+        }
+        let pts: Vec<f64> = attr(t, "points")
+            .unwrap_or("")
+            .split(|c: char| c == ' ' || c == ',')
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        if pts.len() != 4 || pts[1] != pts[3] {
+            continue;
+        }
+        let dir = if pts[2] > pts[0] { 1.0 } else { -1.0 };
+        out.push((pts[0], pts[2] + 12.75 * dir, pts[1]));
+    }
+    out
+}
+
+/// Pairs of level arrows that run into each other: one's head lands within
+/// 15px of where the next starts, in the same direction on the same row. They
+/// read as one long arrow passing through the dot between them (#577).
+fn chained_level_arrows(svg: &str) -> Vec<String> {
+    let arrows = level_arrows(svg);
+    let mut out = Vec::new();
+    for (i, &(tail, tip, y)) in arrows.iter().enumerate() {
+        for (j, &(tail2, tip2, y2)) in arrows.iter().enumerate() {
+            let same_way = (tip - tail) * (tip2 - tail2) > 0.0;
+            if i != j && y == y2 && same_way && (tail2 - tip).abs() < 15.0 {
+                out.push(format!("an arrow ends at x={} where another starts, both on y={}", tip, y));
+            }
+        }
+    }
+    out
+}
+
+/// #577: a reborrow's end and its lender's end on one row (`s` gives back
+/// to `r`, `r` to `x`, both on the `}` of the arm) used to be drawn level,
+/// the second starting where the first ends, so they read as one long arrow
+/// through `r`'s dot. The second dips half a row instead.
+#[test]
+fn chained_return_arrows_are_visibly_separate() {
+    for name in [
+        "match_local_ref_reborrow",
+        "match_ref_param_reborrow",
+        "match_mut_ref_param_reborrow",
+    ] {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        assert_eq!(chained_level_arrows(&tl), Vec::<String>::new(), "{}", name);
+    }
+    let tl = run_with_local_backend("match_local_ref_reborrow").timeline_panel_string();
+    let first = arrow_points(&tl, "Return immutably borrowed resource from s to r");
+    let second = arrow_points(&tl, "Return immutably borrowed resource from r to x");
+    assert_eq!((first.len(), second.len()), (1, 2), "{:?} {:?}", first, second);
+    let y = first[0][0].1;
+    // The arm's return from `r` to `x` (the other one is the `None` arm's, a
+    // row lower) starts on `s`'s row and goes below it, not along it.
+    let arm = second
+        .iter()
+        .find(|p| p[0].1 - y < 20.0 && p[0].1 >= y - 1.0)
+        .expect("r's return in the arm");
+    assert!(arm.len() > 2 && arm.iter().any(|&(_, py)| py > y + 5.0),
+        "r's return should leave the row s's return ends on: {:?}", arm);
+    // The dip is the only change: half a row at most below the line (not a
+    // full row), no row is added to the code panel for it, and the next
+    // line's arrow (the `None` arm's return) is still one row down.
+    let lowest = arm.iter().map(|&(_, py)| py).fold(f64::MIN, f64::max);
+    assert!(lowest <= y + 15.0 + 0.5, "r's return dips to y={}, more than half a row below y={}", lowest, y);
+    let none_arm = second.iter().find(|p| p[0].1 > y + 20.0).expect("r's return in the None arm");
+    assert_eq!(none_arm[0].1, y + 30.0, "the next line moved: {:?}", none_arm);
+    let rv = run_with_local_backend("match_local_ref_reborrow");
+    assert_eq!(unnumbered_code_rows(&rv.code_panel_string()), 0, "a blank row was added for the dip");
+}
