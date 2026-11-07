@@ -1995,6 +1995,10 @@ impl Event {
                     let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
                     hover_messages::event_dot_literal_temporary_acquire(&from_name, ends_with_statement)
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) && matches!(from, ResourceTy::Anonymous) {
+                    // `let (x, _) = (m(), n());`: the literal's own value
+                    // (#483).
+                    hover_messages::event_dot_literal_temporary_start()
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
                     // `make();`, `make().len()`: nothing takes the value.
                     safe_message(hover_messages::event_dot_unbound_temporary_acquire, &self.deref_name(my_name), from)

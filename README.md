@@ -404,7 +404,13 @@ rather than listed here.
   variables are drawn moving in (`let (x, _) = (m, String::new());`
   doesn't show the `String::new()`, though it is dropped with the
   temporary), and a literal inside a one-line `if` / `match` is not
-  drawn (its drop is not stated). Left out
+  drawn (its drop is not stated). A `ref` binding of a value (`let ref
+  t = String::from("a");`, `let P { ref name, .. } = make_p();`)
+  borrows a `(temporary)` column that lives to the end of the block,
+  and a literal of only fresh values (`let (ref a, _) = (make(),
+  make());`) is a temporary column too, with nothing drawn moving in. A
+  pattern that also moves a part of the value out by value (`let (ref
+  a, b) = make_pair();`) gets no temporary column. Left out
   (their drops are not stated): temporaries that aren't a call's result
   (`vec![..];`, `format!(..);`, a struct literal), the scrutinee of
   `if let` / `while let`, a `for` loop's head (`for x in make().iter()`),

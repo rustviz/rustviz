@@ -777,6 +777,10 @@ const EXPECTED_OK: &[&str] = &[
     // the literal's temporary, which has a `(temporary N)` column (#439).
     "let_pattern_literal_unbound_moves",
     "let_pattern_literal_temp_scopes",
+    // The temporary a `ref` binding of a value extends, or a literal with
+    // only fresh elements, is a column and its drop is stated (#483).
+    "let_ref_temporary_value",
+    "let_literal_fresh_elements",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8451,6 +8455,55 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d goes out of scope. Its resource is dropped.",
             "Move from i to (temporary 3)",
             "(temporary 3)",
+        ],
+    },
+    // ─── `ref` bindings of values and literals of fresh values (#483) ─
+    TooltipExpect {
+        name: "let_ref_temporary_value",
+        // `let ref t = String::from("tmp");` borrows a temporary that
+        // lives, and is dropped, at the end of the block; so do `ref
+        // mut m = make()` and the part `ref name` borrows of `make_p()`.
+        // Before, `t` borrowed nothing drawn and no tooltip said the
+        // String was dropped.
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "Move from make to (temporary 2)",
+            "Move from make_p to (temporary 3)",
+            "Immutable borrow from (temporary) to t",
+            "Mutable borrow from (temporary 2) to m",
+            "Immutable borrow from (temporary 3) to name",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "m's mutable borrow ends (what it borrows from isn't shown)",
+            "name's immutable borrow ends (what it borrows from isn't shown)",
+            "(temporary 4)",
+        ],
+    },
+    TooltipExpect {
+        name: "let_literal_fresh_elements",
+        // The tuple `(make(), make())` and the array of fresh values
+        // are temporaries even though no variable is moved into them:
+        // with `ref a` / `ref k` they live to the end of the block, and
+        // `let (x, _) = ..` drops its literal at the end of the
+        // statement with what `_` left in it.
+        must_contain: &[
+            "Immutable borrow from (temporary) to a",
+            "Immutable borrow from (temporary 3) to k",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
+            "(temporary 3) acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "The literal on the right of this let builds a temporary. No `ref` binding borrows from it, so Rust drops it at the end of this statement, with whatever the pattern didn't bind by value",
+        ],
+        must_not_contain: &[
+            "a's immutable borrow ends (what it borrows from isn't shown)",
+            "k's immutable borrow ends (what it borrows from isn't shown)",
+            "(temporary 4)",
         ],
     },
 ];

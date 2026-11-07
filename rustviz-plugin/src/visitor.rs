@@ -4183,9 +4183,94 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.premoved.insert(se.hir_id);
       }
     }
+    // A fresh value (a call's result, a nested literal) that the pattern
+    // leaves is part of the same temporary: with no variable moved in,
+    // the temporary still exists, and is dropped (or, with a `ref`
+    // binding, kept) with everything in it (#483).
+    let leftover = pairs.iter()
+      .filter(|(sp, _)| match sp.kind {
+        PatKind::Wild => true,
+        PatKind::Binding(ann, ..) => matches!(ann.0, rustc_hir::ByRef::Yes(..)),
+        _ => false,
+      })
+      .map(|(_, se)| *se)
+      .chain(ignored.iter().copied())
+      .find(|e| !matches!(
+        e.kind,
+        ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)
+      ));
     for se in ignored {
       self.move_into_literal(se, is_skipped);
     }
+    if let Some(e) = leftover {
+      self.start_literal_temp(e, is_skipped);
+    }
+  }
+
+  /// The temporary of a literal that nothing was moved into (every
+  /// element the pattern leaves is a fresh value): made here, and
+  /// holding the literal's value from this line (#483).
+  fn start_literal_temp(&mut self, e: &'tcx Expr<'tcx>, is_skipped: bool) {
+    use rustc_hir::Node;
+    if is_skipped || e.span.from_expansion() {
+      return;
+    }
+    let Some(let_stmt) = self.tcx.hir_parent_iter(e.hir_id).find_map(|(_, n)| match n {
+      Node::LetStmt(l) => Some(l),
+      _ => None,
+    }) else { return };
+    if self.literal_temps.contains_key(&let_stmt.hir_id) {
+      return;
+    }
+    if let Some(tmp) = self.literal_temp(e) {
+      let line = expr_to_line(e, &self.tcx);
+      self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp), ResourceTy::Anonymous, false);
+    }
+  }
+
+  /// `let ref t = String::from("tmp");`, `let P { ref name, .. } =
+  /// make_p();`: the `let` borrows from the value on its right, which
+  /// rustc keeps as a temporary to the end of the block (temporary
+  /// lifetime extension), and drops there (#483). Draw it like `let r =
+  /// &String::from("tmp");` (#400): a `(temporary N)` column that takes
+  /// the value, is borrowed by the `ref` bindings, and goes out of
+  /// scope with them. None when it has nothing to drop, sits in a
+  /// one-line branch, or the pattern also moves a part of it out by
+  /// value (what is left of it isn't drawn).
+  fn ref_bound_value_temp(&mut self, init: &'tcx Expr<'tcx>, is_skipped: bool) -> Option<ResourceAccessPoint> {
+    let rustc_hir::Node::LetStmt(l) = self.tcx.parent_hir_node(init.hir_id) else { return None };
+    if is_skipped {
+      return None;
+    }
+    if let Some(t) = self.literal_temps.get(&l.hir_id) {
+      return Some(t.clone());
+    }
+    let typeck = self.tcx.typeck(init.hir_id.owner);
+    let ty = typeck.expr_ty(init);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, init.hir_id.owner);
+    if ty.is_ref() || !ty.needs_drop(self.tcx, env) || self.inside_one_line_branch(init) {
+      return None;
+    }
+    let (mut moves_out, mut mutable) = (false, false);
+    l.pat.each_binding(|ann, hid, _, _| match ann.0 {
+      rustc_hir::ByRef::Yes(_, m) => mutable |= m == Mutability::Mut,
+      rustc_hir::ByRef::No => moves_out |= typeck.node_type(hid).needs_drop(self.tcx, env),
+    });
+    if moves_out {
+      return None;
+    }
+    self.temp_count += 1;
+    let tmp_name = temporary_label(self.temp_count);
+    self.add_owner(tmp_name.clone(), mutable, false, false, false, self.current_scope, !self.inside_branch);
+    let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
+    let n_events = self.preprocessed_events.len();
+    self.match_rhs(ResourceTy::Value(tmp.clone()), init, Evt::Move);
+    if self.preprocessed_events.len() == n_events {
+      let line = expr_to_line(init, &self.tcx);
+      self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false);
+    }
+    self.literal_temps.insert(l.hir_id, tmp.clone());
+    Some(tmp)
   }
 
   /// The `(temporary N)` column of the literal that `e` is an element
@@ -4337,7 +4422,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ///   ref name, .. } = p;` borrows `p.name` (or, when that part has
   ///   no column, partially borrows `p`);
   /// - against a value (`let ref r = String::from("hi");`), it borrows
-  ///   a temporary, which has no column;
+  ///   a temporary, which gets a `(temporary N)` column (#483);
   /// - against an element of a literal the pattern is paired with
   ///   (`let (ref a, b) = (s, 1);`), `s` is moved (or copied) into the
   ///   literal's temporary, and `a` borrows that, not `s`.
@@ -4398,7 +4483,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // temporary; the binding borrows the temporary.
       let lender = match self.move_into_literal(init, is_skipped) {
         Some(tmp) => ResourceTy::Value(tmp),
-        None => ResourceTy::Anonymous,
+        // `let ref t = String::from("tmp");`: the whole initializer is
+        // a value, which this `let` keeps alive (#483).
+        None if whole_init => match self.ref_bound_value_temp(init, is_skipped) {
+          Some(tmp) => ResourceTy::Value(tmp),
+          None => ResourceTy::Anonymous,
+        },
+        // `let (ref a, _) = (make(), make());`: `a` borrows the
+        // temporary the literal is, though nothing was moved into it.
+        None => {
+          let tmp = self.tcx.hir_parent_iter(hirid)
+            .find_map(|(_, n)| match n { rustc_hir::Node::LetStmt(l) => Some(l.hir_id), _ => None })
+            .and_then(|l| self.literal_temps.get(&l));
+          match tmp {
+            Some(tmp) if !tmp.is_unbound_temporary() => ResourceTy::Value(tmp.clone()),
+            _ => ResourceTy::Anonymous,
+          }
+        }
       };
       (lender, false)
     };
