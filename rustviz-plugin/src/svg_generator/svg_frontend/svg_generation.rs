@@ -145,6 +145,21 @@ fn side_by_side_bindings(evs: &[ExternalEvent], b_data: &ExtBranchData) -> Optio
         .then_some(pairs)
 }
 
+/// True when the arrows `evs` of one line are two or more of the
+/// let-chain bindings the plugin asked to draw side by side
+/// (`VisualizationData::binding_columns`): `while let Some(b) = y &&
+/// let Some(c) = z {` (#584), or `if let … && let …` without a branch
+/// to put them in (#583). Like `side_by_side_bindings`'s, they go on the
+/// line's own row, each binding's column right after its source's.
+fn chain_bindings_side_by_side(evs: &[ExternalEvent], pairs: &[(u64, u64)]) -> bool {
+    evs.len() >= 2 && evs.iter().all(|e| {
+        matches!(e, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. }
+            | ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
+            && matches!(ResourceAccessPoint_extract(e),
+                (ResourceTy::Value(from), ResourceTy::Value(to)) if pairs.contains(&(*from.hash(), *to.hash())))
+    })
+}
+
 /// Shifts the lines of the arm `b_data` by the rows inserted above it
 /// and below its stacked arrows. `pattern_lines` are the (unshifted)
 /// lines its conditional splits on and the arm starts on, where its
@@ -210,9 +225,11 @@ pub fn mutate_branch_lines(
                     let res = old_line_map.get(&line_num)
                         .filter(|ev| ev.iter().any(|x| x.get_id() == id))
                         .cloned();
-                    let side_by_side = res.as_ref()
-                        .filter(|_| line_num == pattern_lines.0 || line_num == pattern_lines.1)
-                        .and_then(|ev| side_by_side_bindings(ev, b_data));
+                    let side_by_side = res.as_ref().and_then(|ev| {
+                        let on_pattern_line = line_num == pattern_lines.0 || line_num == pattern_lines.1;
+                        on_pattern_line.then(|| side_by_side_bindings(ev, b_data)).flatten()
+                            .or_else(|| chain_bindings_side_by_side(ev, binding_columns).then(Vec::new))
+                    });
                     let ex = match res {
                     Some(ev) if side_by_side.is_some() => {
                         // All on the line's own row, and left out of the
@@ -569,6 +586,9 @@ pub fn render_svg(
     }
     let mut skippable_ev: HashSet<usize> = HashSet::new();
     let mut line_insertion_map: HashMap<usize, usize> = HashMap::new();
+    // The let-chain bindings the plugin found (before the arms' own are
+    // added below).
+    let chain_pairs = visualization_data.binding_columns.clone();
     // Same as in `mutate_branch_lines`: (source line, visual row) for
     // the rest of a line whose borrow ends were moved down a row.
     let mut same_line_row: Option<(usize, usize)> = None;
@@ -699,6 +719,17 @@ pub fn render_svg(
             }
             let res = line_ev.cloned();
             let ex = match res {
+                Some(ev) if chain_bindings_side_by_side(&ev, &chain_pairs) => {
+                    // A let-chain's bindings (#584): all on the line's
+                    // own row, and left out of the line map, so each is
+                    // drawn as the first arrow on its line, straight
+                    // along the row (see `mutate_branch_lines`).
+                    for e in &ev {
+                        visualization_data.append_processed_external_event(e.clone(), final_line_num);
+                        skippable_ev.insert(e.get_id());
+                    }
+                    0
+                }
                 Some(ev) => { // if there are multiple arrow events on this line
                     let (front, back) = split_same_line_borrow_ends(&ev);
                     let back_row = final_line_num + front.len();

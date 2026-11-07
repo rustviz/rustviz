@@ -124,6 +124,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   }
   let mut rap_hash_num: usize = 1;
   let mut ids: usize = 0;
+  // Let-chain bindings drawn beside their sources (#583, #584).
+  let mut binding_columns: Vec<(u64, u64)> = Vec::new();
 
   
   
@@ -228,11 +230,13 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               literal_temps: HashMap::new(),
               premoved: HashSet::new(),
               live_tuples: Vec::new(),
+              binding_columns: Vec::new(),
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
             visitor.print_out_of_scope();
             rap_hash_num = visitor.rap_hashes;
+            binding_columns.append(&mut visitor.binding_columns);
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
             collect_shadow_notes(&tcx, impl_item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
           }
@@ -322,11 +326,13 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           literal_temps: HashMap::new(),
           premoved: HashSet::new(),
           live_tuples: Vec::new(),
+          binding_columns: Vec::new(),
         };
         visitor.visit_body(hir_body);
         visitor.print_lifetimes();
         visitor.print_out_of_scope();
         rap_hash_num = visitor.rap_hashes;
+        binding_columns.append(&mut visitor.binding_columns);
         merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
         collect_shadow_notes(&tcx, item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
       },
@@ -399,7 +405,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, hidden_source_lines, args.write_to_cwd) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, hidden_source_lines, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

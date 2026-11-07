@@ -348,6 +348,52 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     out
   }
 
+  /// The pattern-binding events of a let-chain: those handed out ids
+  /// in `ids` that bind one of the chain's bindings `decls`, with their
+  /// lines.
+  fn chain_binding_events(
+    &self,
+    ids: &std::ops::Range<usize>,
+    decls: &HashSet<ResourceAccessPoint>,
+  ) -> Vec<(usize, ExternalEvent)> {
+    self.preprocessed_events.iter()
+      .filter(|(_, ev)| ids.contains(&ev.get_id()) && matches!(ev,
+        ExternalEvent::Move { to: ResourceTy::Value(to), .. }
+        | ExternalEvent::Copy { to: ResourceTy::Value(to), .. }
+        | ExternalEvent::StaticBorrow { to: ResourceTy::Value(to), .. }
+        | ExternalEvent::MutableBorrow { to: ResourceTy::Value(to), .. } if decls.contains(to)))
+      .cloned()
+      .collect()
+  }
+
+  /// A let-chain that binds two or more variables on one line, such as
+  /// `while let Some(t) = v.pop() && let Some(u) = y {` (#584) or `if
+  /// let Some(a) = &x && let Some(b) = y {` (#583): the (source,
+  /// binding) column pairs of the bindings made from a variable declared
+  /// outside the chain, for the renderer to put each binding's column
+  /// right after its source's (`VisualizationData::binding_columns`).
+  /// Then each arrow runs straight along the line between two adjacent
+  /// columns, instead of hopping over another binding's dot (u after t,
+  /// with `pop`'s value arriving on t). A binding from a function's
+  /// result (`v.pop()`) or from a struct keeps its place; a chain that
+  /// binds twice from one variable is left as it is.
+  fn chain_binding_columns(&self, binds: &[(usize, ExternalEvent)], decls: &HashSet<ResourceAccessPoint>) -> Vec<(u64, u64)> {
+    if binds.len() < 2 || binds.iter().any(|(l, _)| *l != binds[0].0) {
+      return Vec::new();
+    }
+    let plain = |r: &ResourceAccessPoint| !r.is_fn() && !r.is_struct_group() && !r.is_member();
+    let pairs: Vec<(u64, u64)> = binds.iter().filter_map(|(_, ev)| {
+      let (ResourceTy::Value(from), ResourceTy::Value(to)) = ResourceAccessPoint_extract(ev) else { return None };
+      (plain(from) && plain(to) && !decls.contains(from)).then(|| (*from.hash(), *to.hash()))
+    }).collect();
+    let distinct = |hs: Vec<u64>| hs.iter().collect::<HashSet<_>>().len() == hs.len();
+    if distinct(pairs.iter().map(|p| p.0).collect()) && distinct(pairs.iter().map(|p| p.1).collect()) {
+      pairs
+    } else {
+      Vec::new()
+    }
+  }
+
   /// Panic (reported as "can't visualize this yet") if any event from
   /// `preprocessed_events[mark..]` moves out of, or assigns to, a
   /// variable in `outer`. See `visit_match_guard`.
@@ -2520,6 +2566,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
         let mut iflet_tuple: Option<&'tcx rustc_hir::LetExpr<'tcx>> = None;
         let mut chain_fail: Vec<ChainFailMove> = Vec::new();
+        // Events handed out ids in the if-branch's range that stay
+        // before the split (see the let-chain case below).
+        let mut pre_split: HashSet<usize> = HashSet::new();
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
@@ -2544,6 +2593,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
             if_lo = walk.first_lo.unwrap_or(start);
             chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
+            let binds = self.chain_binding_events(&(if_lo..*self.unique_id), &decls);
+            // Copying a value out of a variable declared before the `if`
+            // changes nothing about that variable, so, as for a lone `if
+            // let` (#496), the copy stays before the split and the
+            // variable's column doesn't branch for it (#583).
+            pre_split = binds.iter()
+              .filter(|(_, ev)| matches!(ev, ExternalEvent::Copy { from: ResourceTy::Value(f), .. } if outer.contains(f)))
+              .map(|(_, ev)| ev.get_id())
+              .collect();
+            let cols = self.chain_binding_columns(&binds, &decls);
+            self.binding_columns.extend(cols);
             decls
           } else {
             self.visit_expr(&guard_expr);
@@ -2675,7 +2735,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if else_expr.is_none() {
             let rhs = self.rhs_arm_ids.get(&if_expr.hir_id).copied();
             let body_ev: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter()
-              .filter(|(_, e)| if_ids.contains(&e.get_id())
+              .filter(|(_, e)| (if_ids.contains(&e.get_id()) && !pre_split.contains(&e.get_id()))
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
             let chain_fail_ev = self.preprocessed_events.iter()
@@ -2707,8 +2767,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // (#117). The guard's events were handed out before `if_ids`,
         // so they stay on the global timeline.
         let _ = line_num; // no longer used for guard-live extension
-        let mut if_ev = self.take_branch_events(if_ids, Some(if_expr));
-        let mut else_ev = self.take_branch_events(else_ids, else_expr);
+        let mut if_ev = self.take_branch_events(if_ids, Some(if_expr), &pre_split);
+        let mut else_ev = self.take_branch_events(else_ids, else_expr, &HashSet::new());
         // The arrows now inside the branches are drawn from each
         // branch's own line map. Take them out of the global one, or an
         // arrow that stays on the split line (a copy out of an if-let
@@ -2938,7 +2998,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   // is drawn inline (no Branch), so the chain's events
                   // are shown unconditionally; nothing to refuse. Their
                   // scope ends are emitted after the body, below.
+                  let lo = *self.unique_id;
                   self.visit_if_let_chain(cond, &HashSet::new(), &mut bindings, &mut ChainWalk::default());
+                  let binds = self.chain_binding_events(&(lo..*self.unique_id), &bindings);
+                  let cols = self.chain_binding_columns(&binds, &bindings);
+                  self.binding_columns.extend(cols);
                 } else {
                   self.visit_expr(cond);
                 }
@@ -3405,7 +3469,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // them by source line gave every event on a shared line
               // to the first arm (#117).
               if !inline {
-                let body_ev = self.take_branch_events(body_ids, Some(arm.body));
+                let body_ev = self.take_branch_events(body_ids, Some(arm.body), &HashSet::new());
                 branch_e_data.extend(body_ev);
 
                 // contribute events-touched variables to liveness; the

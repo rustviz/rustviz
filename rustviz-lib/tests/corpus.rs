@@ -892,6 +892,12 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_different_fields",
     "or_pattern_three_places",
     "or_pattern_tuple_scrutinee",
+    // Let-chain copies stay before the split (#583); a chain's bindings
+    // are drawn beside their sources, also in `while let` (#584).
+    "edition2024/if_let_chain_copy_first",
+    "edition2024/if_let_chain_pop_and_copy",
+    "edition2024/while_let_chain_two_bindings",
+    "edition2024/while_let_chain_two_sources",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6740,7 +6746,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope",
             "x goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
-        must_not_contain: &["=x goes out of scope. Its resource is dropped."],
+        // Copying the i32 out of `y` changes nothing about `y`, so `y`
+        // doesn't branch (#583, as #496 for a lone `if let`).
+        must_not_contain: &[
+            "=x goes out of scope. Its resource is dropped.",
+            "y is live in a conditional expression",
+            "y isn't moved in any of the branches above",
+        ],
     },
     TooltipExpect {
         name: "edition2024/if_let_chain_move",
@@ -9729,6 +9741,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "whatever of a's, b's and c's resources",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_pop_and_copy",
+        // #583: the copy out of `y` leaves `y` as it was, so `y` has no
+        // arms and no join.
+        must_contain: &[
+            "Copy from y to u",
+            "u is initialized with a copy of y",
+            "y's value is copied",
+            "Copy from pop to t",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "y is live in a conditional expression",
+            "y isn't moved in any of the branches above",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_copy_first",
+        must_contain: &[
+            "Copy from y to b",
+            "b is initialized with a copy of y",
+            "Partial immutable borrow from x to a",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &["y is live in a conditional expression"],
+    },
+    TooltipExpect {
+        name: "edition2024/while_let_chain_two_bindings",
+        must_contain: &[
+            "Copy from y to u",
+            "u is initialized with a copy of y",
+            "Copy from pop to t",
+            "t goes out of scope",
+            "u goes out of scope",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "edition2024/while_let_chain_two_sources",
+        must_contain: &[
+            "Copy from y to b",
+            "b is initialized with a copy of y",
+            "Copy from z to c",
+            "c is initialized with a copy of z",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -10989,6 +11048,87 @@ fn two_bindings_on_one_let_chain_line_are_drawn_side_by_side() {
             assert_eq!(bind.len(), 1, "{}: {}", name, text);
             assert_eq!(bind[0].1, row, "{}: {:?} isn't on the `if let` row", name, text);
         }
+    }
+}
+
+/// #583: `if let Some(a) = &x && let Some(b) = y {` copies the `i32`
+/// out of `y`. That doesn't change `y`, but `y`'s column used to split
+/// into an `if` arm and an `else` arm that both read "y holds a copyable
+/// value" down to a join ("y isn't moved in any of the branches
+/// above"), for nothing. As for a lone `if let` (#496), the copy is now
+/// drawn on `y`'s one column, and the binding beside its source still
+/// gets a straight arrow.
+#[test]
+fn copying_out_of_a_let_chain_scrutinee_doesnt_branch_it() {
+    // (fixture, the `if let` line, the copy, columns left to right)
+    for (name, line, copy, cols) in [
+        ("edition2024/if_let_chain", "if let Some(a) = &x && let Some(b) = y {",
+         "Copy from y to b", ["x", "a", "y", "b"]),
+        ("edition2024/if_let_chain_pop_and_copy", "if let Some(t) = v.pop() && let Some(u) = y {",
+         "Copy from y to u", ["v", "y", "u", "t"]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        for text in ["y is live in a conditional expression", "y isn't moved in any of the branches above"] {
+            assert!(!timeline.contains(text), "{}: y has a branch: {:?}", name, text);
+        }
+        assert_eq!(dots_with_tooltip(&timeline, "y's value is copied").len(), 1, "{}", name);
+        let xs: Vec<f64> = cols.iter().map(|l| label_x(&timeline, l)).collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "{}: columns {:?} at {:?}", name, cols, xs);
+        let row = code_row_y(&code, line);
+        let arrow = arrow_points(&timeline, copy);
+        assert_eq!(arrow.len(), 1, "{}: {:?}", name, copy);
+        assert!(arrow[0].len() == 2 && arrow[0].iter().all(|p| p.1 == row),
+            "{}: {:?} isn't a straight arrow along the `if let` row y={}: {:?}", name, copy, row, arrow[0]);
+        assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
+        let hops: Vec<&str> = start_tags(&timeline, "path")
+            .into_iter()
+            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+            .collect();
+        assert_eq!(hops, Vec::<&str>::new(), "{}: an arrow hops over a dot", name);
+    }
+}
+
+/// #584: a let-chain whose loop body or `if` body is drawn inline (no
+/// arms), so #510's side-by-side layout for an arm's pattern line didn't
+/// apply. In `while let Some(t) = v.pop() && let Some(u) = y {` the
+/// columns were v, y, t, u and `Copy from y to u` hopped over `t`'s dot;
+/// with two bindings from variables (`while let Some(b) = y && let
+/// Some(c) = z {`, or an `if let` chain without an `else` whose body
+/// only reads) the second arrow was a trapezoid through a blank row
+/// added below the line. Each binding made from a variable now gets its
+/// column right after that variable's, and the arrows run straight along
+/// the line's own row.
+#[test]
+fn a_let_chains_bindings_are_drawn_beside_their_sources_inline() {
+    // (fixture, the line, its arrows between columns, columns left to
+    // right, the next line)
+    for (name, line, arrows, cols, next) in [
+        ("edition2024/while_let_chain_two_bindings", "while let Some(t) = v.pop() && let Some(u) = y {",
+         &["Copy from y to u"][..], ["v", "y", "u", "t"], "take(t);"),
+        ("edition2024/while_let_chain_two_sources", "while let Some(b) = y && let Some(c) = z {",
+         &["Copy from y to b", "Copy from z to c"][..], ["y", "b", "z", "c"], "take(b);"),
+        ("edition2024/if_let_chain_copy_first", "if let Some(b) = y && let Some(a) = &x {",
+         &["Copy from y to b", "Partial immutable borrow from x to a"][..], ["x", "a", "y", "b"], "show(a);"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let xs: Vec<f64> = cols.iter().map(|l| label_x(&timeline, l)).collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "{}: columns {:?} at {:?}", name, cols, xs);
+        let row = code_row_y(&code, line);
+        for text in arrows {
+            let arrow = arrow_points(&timeline, text);
+            assert_eq!(arrow.len(), 1, "{}: {:?}", name, text);
+            assert!(arrow[0].len() == 2 && arrow[0].iter().all(|p| p.1 == row),
+                "{}: {:?} isn't a straight arrow along the row y={}: {:?}", name, text, row, arrow[0]);
+        }
+        assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
+        let hops: Vec<&str> = start_tags(&timeline, "path")
+            .into_iter()
+            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+            .collect();
+        assert_eq!(hops, Vec::<&str>::new(), "{}: an arrow hops over a dot", name);
+        assert_eq!(code_row_y(&code, next), row + 30.0, "{}: a row is added below the line", name);
     }
 }
 
