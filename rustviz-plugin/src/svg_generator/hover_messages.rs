@@ -822,6 +822,10 @@ pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft) -> String 
             "{0}'s former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             fmt_style(my_name)
         ),
+        LoopLeft::Continue => format!(
+            "{0}'s former resource, the `for` loop's iterator, is dropped here: this `continue` leaves the `for` loop and goes on to the next iteration of the outer loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+            fmt_style(my_name)
+        ),
         LoopLeft::End => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
             fmt_style(my_name)

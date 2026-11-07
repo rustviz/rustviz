@@ -1248,6 +1248,8 @@ pub enum LoopLeft {
     Try,
     /// At a `panic!()` inside the loop, as it unwinds (#649).
     Panic,
+    /// At a `continue` to an outer loop, leaving this one.
+    Continue,
 }
 
 /// What a `for` loop does with a head it moves (`for s in v`, `for s

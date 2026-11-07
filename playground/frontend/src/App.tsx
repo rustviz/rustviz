@@ -348,9 +348,9 @@ const Description: React.FC = () => (
       </li>
       <li>
         A <code>for</code> loop drops its iterator where the loop is left. A{' '}
-        <code>break &apos;outer</code> out of an inner loop is drawn only in an{' '}
-        <code>if</code>/<code>else</code> branch, and a{' '}
-        <code>continue &apos;outer</code> isn&apos;t drawn.
+        <code>break &apos;outer</code> or <code>continue &apos;outer</code> out
+        of an inner loop is drawn only in an <code>if</code>/<code>else</code>{' '}
+        branch, not in an <code>if</code> without <code>else</code>.
       </li>
       <li>
         <code>let r = loop {'{'} … break ra; {'}'};</code> where <code>ra</code> is a
