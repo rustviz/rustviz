@@ -632,6 +632,9 @@ const EXPECTED_OK: &[&str] = &[
     "closure_arg_ref_captures",
     // A read through a reference / Box stored in an element (#438).
     "read_through_element_ref",
+    // Thick `let mut` branch columns bend at splits and joins (#487).
+    "mut_branch_kinks",
+    "mut_branch_kinks_plain",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8438,4 +8441,38 @@ fn same_line_borrow_ends_below_its_use() {
         assert!(lent < back && back == ends,
             "{}: opt is lent at y={}, gets it back at y={} (s's end: y={})", name, lent, back, ends);
     }
+}
+
+/// A thick (mutable) branch column is drawn as butt-capped segments, so
+/// every bend would show a wedge-shaped notch at its outer corner. Each
+/// bend gets a zero-length round-capped line that closes it (#487).
+#[test]
+fn mutable_branch_bends_have_round_joints() {
+    let t = run_with_local_backend("mut_branch_kinks").timeline_panel_string();
+    let dots = start_tags(&t, "line")
+        .into_iter()
+        .filter(|l| attr(l, "class").map_or(false, |c| c.starts_with("solid")))
+        .filter(|l| attr(l, "x1") == attr(l, "x2") && attr(l, "y1") == attr(l, "y2"))
+        .count();
+    // if/else: 2 arms x (split + join); match: 2 bent arms x (split +
+    // join) (the middle arm is straight).
+    assert!(dots == 8, "expected a round joint at each bend, found {}", dots);
+    assert!(t.contains("stroke-linecap: round"));
+    // The joints are decorative: a bend point can lie on another arm's
+    // row, so they must not be hoverable arm elements.
+    assert!(start_tags(&t, "line").into_iter()
+        .filter(|l| l.contains("stroke-linecap: round"))
+        .all(|l| !l.contains("tooltip-trigger") && !l.contains("data-tooltip-text")));
+    // The plain fixture has no dot or icon on its solid bends, so the
+    // joints are what closes the notch: 2 arms x (split + join).
+    let plain = run_with_local_backend("mut_branch_kinks_plain").timeline_panel_string();
+    let plain_dots = start_tags(&plain, "line")
+        .into_iter()
+        .filter(|l| attr(l, "class").map_or(false, |c| c.starts_with("solid")))
+        .filter(|l| attr(l, "x1") == attr(l, "x2") && attr(l, "y1") == attr(l, "y2"))
+        .count();
+    assert!(plain_dots == 4, "expected 4 round joints, found {}", plain_dots);
+    // Immutable (double-line) columns are untouched.
+    let imm = run_with_local_backend("if_no_else").timeline_panel_string();
+    assert!(!imm.contains("stroke-linecap"));
 }

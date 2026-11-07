@@ -3488,6 +3488,31 @@ fn render_branch_run(
         }
     }
 
+    // Round joint. A thick solid column is drawn as one butt-capped
+    // `<line>` per segment, so where the direction changes (a split
+    // diagonal meeting the arm's vertical, or the reverse at a join)
+    // the outer corner of the bend is left uncovered: a wedge-shaped
+    // notch. A zero-length line with a round cap at the shared point
+    // is a disc of the stroke's own width, which closes the notch
+    // without lengthening either segment (so run ends and dash
+    // phases are untouched). It is purely decorative: not a tooltip
+    // trigger (each segment already has its own hover area), and it
+    // sits on the bend point, which can lie on another arm's row. Thin hollow columns have their own
+    // bevel pass below.
+    for window in classified.windows(2) {
+        let (prev_style, _, prev_seg) = &window[0];
+        let (curr_style, _, curr_seg) = &window[1];
+        if !matches!(prev_style, OwnerLine::Solid) { continue; }
+        if !matches!(curr_style, OwnerLine::Solid) { continue; }
+        let a = (prev_seg.p2.0 - prev_seg.p1.0, prev_seg.p2.1 - prev_seg.p1.1);
+        let b = (curr_seg.p2.0 - curr_seg.p1.0, curr_seg.p2.1 - curr_seg.p1.1);
+        if (a.0 * b.1 - a.1 * b.0).abs() < 1e-6 { continue; }
+        svg.push_str(&format!(
+            "            <line data-hash=\"{}\" class=\"solid\" data-underline=\"none\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" style=\"stroke-linecap: round; pointer-events: none;\"/>\n",
+            hash, prev_seg.p2.0, prev_seg.p2.1, prev_seg.p2.0, prev_seg.p2.1,
+        ));
+    }
+
     // Bevel pass. Adjacent hollow segments with different
     // perpendicular directions (a diagonal converge meeting a
     // vertical body, or vice versa) leave a small gap on each side
