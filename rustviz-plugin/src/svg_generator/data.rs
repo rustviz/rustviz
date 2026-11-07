@@ -1835,7 +1835,7 @@ impl Event {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal)
             }
             Event::OwnerDropIfTryReturns => {
-                hover_messages::event_dot_owner_drop_if_try_returns(my_name)
+                hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the

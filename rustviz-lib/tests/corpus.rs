@@ -832,6 +832,7 @@ const EXPECTED_OK: &[&str] = &[
     // A collection's drop says it drops what it holds (#542).
     "collection_drop_holds",
     "collection_drop_holds_flag",
+    "collection_drop_holds_exit",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8775,10 +8776,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
+            // `v` is a `Vec<String>`: its drop says what it holds (#542).
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource is dropped. If the `?` succeeds, nothing happens to v here.",
+             resource is dropped (including every String it holds). If the `?` succeeds, nothing \
+             happens to v here.",
         ],
         must_not_contain: &[
+            "the function returns and v's resource is dropped. If",
             // `s` is a reference.
             "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
@@ -8994,6 +8998,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "its resource is dropped when words goes out of scope.",
             "=maybe's resource is moved into drop, which drops it",
             "=_v goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "collection_drop_holds_exit",
+        // The drops at early exits (#410: `return`, panic, `break`;
+        // #430: `?`) carry the same parenthetical as the scope end.
+        must_contain: &[
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+            "o goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "m goes out of scope. Its resource is dropped (including every key it holds).",
+            "w goes out of scope. Its resource is dropped (including every String it holds).",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and names's \
+             resource is dropped (including every String it holds). If the `?` succeeds, nothing happens \
+             to names here.",
+        ],
+        must_not_contain: &[
+            "=v goes out of scope. Its resource is dropped.",
+            "=o goes out of scope. Its resource is dropped.",
+            "=m goes out of scope. Its resource is dropped.",
+            "=w goes out of scope. Its resource is dropped.",
+            "the function returns and names's resource is dropped. If",
         ],
     },
 ];

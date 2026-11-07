@@ -1343,14 +1343,17 @@ fn render_dot(
                 Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::TemporaryDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
-                    // A reassignment that drops something says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false }) {
+                    // A reassignment, or the drop at a `?`'s early return,
+                    // says what else goes with it (#373, #542).
+                    let note = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false } | Event::OwnerDropIfTryReturns) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
-                    let title = if !note.is_empty() {
-                        hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
-                    } else {
+                    let title = if note.is_empty() {
                         event.print_message_with_name(&mut name)
+                    } else if matches!(event, Event::OwnerDropIfTryReturns) {
+                        hover_messages::event_dot_owner_drop_if_try_returns(&name, &note)
+                    } else {
+                        hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
                     };
                     let drop_data = DropDotData {
                         hash: *hash as u64,
