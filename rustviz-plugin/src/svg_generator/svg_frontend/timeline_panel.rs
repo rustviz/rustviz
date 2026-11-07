@@ -1258,6 +1258,22 @@ fn render_dot(
                         };
                         append_drop_dot(drop_data, timeline_data, dots);
                         continue;
+                    } else if !resource_hold && ro.box_contents_moved() {
+                        // `take(*b)`: the contents are gone but the Box's
+                        // allocation is still freed here (#609).
+                        let cx = timeline_data.x_val;
+                        let cy = event_y;
+                        let drop_data = DropDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title: hover_messages::event_dot_box_contents_moved_go_out_of_scope(&name),
+                            p1x: cx - 3, p1y: cy - 1,
+                            p2x: cx + 3, p2y: cy - 1,
+                            p3x: cx,     p3y: cy + 3,
+                        };
+                        append_drop_dot(drop_data, timeline_data, dots);
+                        continue;
                     } else if !resource_hold {
                         // Resource was already moved out — same copy
                         // for both Copy and non-Copy types: just note

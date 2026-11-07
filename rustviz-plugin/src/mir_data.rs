@@ -51,7 +51,34 @@ impl<'tcx> Visitor<'tcx> for BoxFieldMoves {
     }
 }
 
+/// Finds a move of the whole contents of `*local` (`move (*_1)`).
+struct BoxContentsMoves { local: Local, found: bool }
+
+impl<'tcx> Visitor<'tcx> for BoxContentsMoves {
+    fn visit_operand(&mut self, op: &Operand<'tcx>, loc: Location) {
+        if let Operand::Move(place) = op {
+            if place.local == self.local && matches!(place.projection.as_slice(), [ProjectionElem::Deref]) {
+                self.found = true;
+            }
+        }
+        self.super_operand(op, loc);
+    }
+}
+
 impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
+    /// Is `name`, a `Box<T>`, emptied by a move of its whole contents
+    /// somewhere in this body (`take(*b)`)? Its heap allocation is
+    /// still freed at scope end (#609).
+    pub fn box_contents_moved_out(&self, name: &str, ty: Ty<'tcx>) -> bool {
+        if !ty.is_box() { return false; }
+        let names = self.mir_local_names(self.bwf);
+        #[expect(clippy::disallowed_methods, reason = "a name is bound to one local; min() makes order irrelevant")]
+        let Some(local) = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).min() else { return false };
+        let mut v = BoxContentsMoves { local, found: false };
+        v.visit_body(&self.bwf.body);
+        v.found
+    }
+
     /// For a `Box<T>` variable `name` whose `T` has field columns and
     /// from which a field is moved out somewhere in this body
     /// (`take(b.name)`): `T`. Rust allows that move out of a `Box`
