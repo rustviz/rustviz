@@ -1661,6 +1661,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           break_alt: None,
           break_out: false,
           via_try: Some(*kind),
+          closure_value: false,
           id,
         });
         self.try_moves.insert(try_expr.hir_id, Some(id));
@@ -2138,7 +2139,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // drawn like a struct parameter, as in a `let`.
             let owner_hash = self.rap_hashes as u64;
             let muta = bool_of_mut(binding_annotation.1);
-            self.add_struct(name.clone(), owner_hash, false, muta, false, false, false, self.current_scope, !self.inside_branch);
+            self.add_struct(name.clone(), owner_hash, false, muta, false, false, InteriorMut::No, self.current_scope, !self.inside_branch);
             if let Some(ResourceAccessPoint::Struct(s)) = self.raps.get_mut(&name).map(|rd| &mut rd.rap) {
               s.is_box = true;
             }
@@ -2348,7 +2349,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             }
           }
           _ => {
-            let fn_name: String = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
+            // The callee is a name (`f(x)`, `Point::new(..)`, a local
+            // closure `g()`), or an expression whose value is called:
+            // a closure in a struct field (`(w.f)()`, #703), a call's
+            // result (`make(s)(1)`), an element (`fs[0]()`). Such a
+            // callee is evaluated before the arguments; its source text
+            // names the call.
+            let fn_name: String = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+              Some(name) => name,
+              None => {
+                self.visit_expr(fn_expr);
+                self.callee_text(fn_expr)
+              }
+            };
             self.add_fn(fn_name.clone());
             for arg in args.iter(){
               self.visit_expr(&arg);
@@ -3607,6 +3620,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               break_alt: None,
               break_out: false,
               via_try: None,
+              closure_value: false,
             }));
             *self.unique_id += 1;
             liveness.insert(r.clone());
@@ -5006,7 +5020,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (#400): the label doesn't say which kind it is, the tooltips do.
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
-    self.add_owner(tmp_name.clone(), false, false, false, false, end_line, !self.inside_branch);
+    self.add_owner(tmp_name.clone(), false, false, false, InteriorMut::No, end_line, !self.inside_branch);
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
       o.unbound_temp = true;
     }
@@ -5103,6 +5117,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         // `==`, `<`, … take both operands by reference.
         ExprKind::Binary(op, l, r) if is_me(l) || is_me(r) => op.node.is_comparison(),
+        // `adder(t)(1)` calls the closure `adder(t)` returned (#703):
+        // through a reference for `Fn` / `FnMut`, so it is dropped at the
+        // end of the statement; an `FnOnce` call consumes it.
+        ExprKind::Call(callee, _) if is_me(callee) => {
+          !typeck.type_dependent_def_id(p.hir_id)
+            .is_some_and(|m| self.tcx.trait_of_assoc(m) == self.tcx.lang_items().fn_once_trait())
+        }
         ExprKind::Match(scrut, arms, rustc_hir::MatchSource::Normal) if is_me(scrut) => {
           let mut moves_out = false;
           for arm in arms {
@@ -6753,7 +6774,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
-    self.add_owner(tmp_name.clone(), mutable, false, false, false, self.current_scope, !self.inside_branch);
+    self.add_owner(tmp_name.clone(), mutable, false, false, InteriorMut::No, self.current_scope, !self.inside_branch);
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let n_events = self.preprocessed_events.len();
     self.match_rhs(ResourceTy::Value(tmp.clone()), init, Evt::Move);
@@ -6807,13 +6828,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // The variables moved into it read as moving into the literal on
     // the right of the `let`, not into one nothing binds (#570).
     if extended {
-      self.add_owner(tmp_name.clone(), mutable, false, false, false, self.current_scope, !self.inside_branch);
+      self.add_owner(tmp_name.clone(), mutable, false, false, InteriorMut::No, self.current_scope, !self.inside_branch);
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.let_literal_temp = true;
       }
     } else {
       let (when, end_line, owner) = self.temporary_scope_end(e)?;
-      self.add_owner(tmp_name.clone(), false, false, false, false, end_line, !self.inside_branch);
+      self.add_owner(tmp_name.clone(), false, false, false, InteriorMut::No, end_line, !self.inside_branch);
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.unbound_temp = true;
         o.let_literal_temp = true;

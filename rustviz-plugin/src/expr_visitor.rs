@@ -598,35 +598,56 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     ty_has_std_sync_primitive(self.tcx, ty)
   }
 
-  /// True iff a value of type `ty` can be mutated through a shared
-  /// reference: `Cell`, `RefCell`, `Mutex`, atomics, or a type that
-  /// contains one (`Rc<RefCell<T>>`, `Vec<Cell<T>>`, a local struct
-  /// with such a field). Populates `Owner::interior_mut` /
+  /// Whether a value of type `ty` can be mutated through a shared
+  /// reference: it contains an `UnsafeCell` (what `Cell`, `RefCell`,
+  /// `Mutex` and the atomics are built on), inline or behind a pointer
+  /// (`Rc<RefCell<T>>`, `Vec<Cell<T>>`, `&Cell<T>`, a local struct with
+  /// such a field). Populates `Owner::interior_mut` /
   /// `Struct::interior_mut`, which keeps the lend-dot tooltip from
-  /// calling an immutably borrowed `RefCell` "read-only".
+  /// calling an immutably borrowed `RefCell` "read-only" and the call
+  /// dot of a `&self` method from saying it only reads.
   ///
-  /// Conservative in the direction that matters: it descends into
-  /// generic arguments of every ADT and into the fields of local
-  /// ADTs, but not into private fields of foreign types, so `Rc<T>`'s
-  /// own refcount cells don't count. A false `true` only drops the
-  /// "read-only" clause; a false `false` would state something
-  /// untrue, so foreign types that hide a cell behind a pointer are
-  /// the known gap.
-  pub fn ty_has_interior_mut(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
-    fn go<'tcx>(tcx: TyCtxt<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>, ty: Ty<'tcx>,
-                depth: usize, seen: &mut HashSet<Ty<'tcx>>) -> bool {
-      if depth > 8 || !seen.insert(ty) { return false; }
-      if !ty.is_freeze(tcx, env) { return true; }
-      match ty.kind() {
-        rustc_middle::ty::Adt(def, args) => {
-          args.types().any(|t| go(tcx, env, t, depth + 1, seen))
-            || (def.did().is_local()
-                && def.all_fields().any(|f| go(tcx, env, f.ty(tcx, args), depth + 1, seen)))
+  /// Exact where the type is known: a cell is found by looking for
+  /// `UnsafeCell` itself, in the generic arguments of every ADT, in all
+  /// fields of a local ADT, and in the fields of a foreign ADT that
+  /// isn't `Freeze` (so has a cell inline; `Rc<T>`'s own refcount cells,
+  /// behind its pointer, don't count). A `dyn Trait`, type parameter or
+  /// opaque type gives `Unknown` unless a cell was found elsewhere: it
+  /// may or may not hold one (`Vec<Box<dyn Fn()>>` was said to have
+  /// interior mutability because `dyn Fn()` isn't `Freeze`; #706).
+  pub fn ty_has_interior_mut(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> InteriorMut {
+    fn any(parts: impl Iterator<Item = InteriorMut>) -> InteriorMut {
+      let mut out = InteriorMut::No;
+      for p in parts {
+        match p {
+          InteriorMut::Yes => return InteriorMut::Yes,
+          InteriorMut::Unknown => out = InteriorMut::Unknown,
+          InteriorMut::No => {}
         }
-        rustc_middle::ty::Ref(_, t, _) | rustc_middle::ty::Array(t, _)
-        | rustc_middle::ty::Slice(t) => go(tcx, env, *t, depth + 1, seen),
-        rustc_middle::ty::Tuple(ts) => ts.iter().any(|t| go(tcx, env, t, depth + 1, seen)),
-        _ => false,
+      }
+      out
+    }
+    fn go<'tcx>(tcx: TyCtxt<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>, ty: Ty<'tcx>,
+                depth: usize, seen: &mut HashSet<Ty<'tcx>>) -> InteriorMut {
+      if depth > 8 || !seen.insert(ty) { return InteriorMut::No; }
+      match ty.kind() {
+        TyKind::Adt(def, args) => {
+          if def.is_unsafe_cell() { return InteriorMut::Yes; }
+          let mut parts: Vec<Ty<'tcx>> = args.types().collect();
+          if def.did().is_local() || !ty.is_freeze(tcx, env) {
+            parts.extend(def.all_fields().map(|f| f.ty(tcx, args)));
+          }
+          any(parts.into_iter().map(|t| go(tcx, env, t, depth + 1, seen)))
+        }
+        TyKind::Ref(_, t, _) | TyKind::Array(t, _) | TyKind::Slice(t) => go(tcx, env, *t, depth + 1, seen),
+        TyKind::Tuple(ts) => any(ts.iter().map(|t| go(tcx, env, t, depth + 1, seen))),
+        // A closure holds what it captures.
+        TyKind::Closure(_, args) => go(tcx, env, args.as_closure().tupled_upvars_ty(), depth + 1, seen),
+        // Opaque: what's inside isn't known here.
+        TyKind::Dynamic(..) | TyKind::Param(_) | TyKind::Alias(..) | TyKind::Foreign(_)
+        | TyKind::Placeholder(_) | TyKind::Bound(..) | TyKind::Infer(_) | TyKind::Error(_)
+        | TyKind::Coroutine(..) | TyKind::CoroutineClosure(..) | TyKind::CoroutineWitness(..) => InteriorMut::Unknown,
+        _ => InteriorMut::No,
       }
     }
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, owner);
@@ -634,13 +655,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   // Adds an owner RAP
-  pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
+  pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
     self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
-  pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
+  pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
     self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
@@ -885,7 +906,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -989,7 +1010,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // To be honest this struct logic is leftover from RV1 and should eventually be reworked
   // It doesn't make much sense that a struct should be represented any different than an owner
   // the reason for this is that in the frontend structs are visualized differently in the timeline header
-  pub fn add_struct(&mut self, name: String, owner: u64, mem: bool, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
+  pub fn add_struct(&mut self, name: String, owner: u64, mem: bool, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
     self.add_rap(ResourceAccessPoint::Struct(Struct {
       name: name,
       hash: self.rap_hashes as u64,
@@ -1293,9 +1314,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *self.unique_id += 1;
         let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -1340,9 +1361,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       *self.unique_id += 1;
       let (from, to) = (ResourceTy::Value(child), ResourceTy::Value(dest));
       self.add_external_event(line_num, if is_copy {
-        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None }
+        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false }
       } else {
-        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None }
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
       });
     }
   }
@@ -1381,6 +1402,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         break_alt: None,
         break_out: false,
         via_try: None,
+        closure_value: false,
       });
       self.move_struct_fields_away(line_num, &name);
     }
@@ -1506,8 +1528,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id, break_alt: None },
-      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move },
+      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
@@ -1603,6 +1625,61 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// per-field RAP that was never registered.
   pub fn is_union_typed(&self, e: &Expr) -> bool {
     self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_union()
+  }
+
+  /// `let h = g;` (or `h = g;`) with `g` a closure (#704): the closure
+  /// value is copied (when all it captures by reference are shared
+  /// borrows, it is `Copy`) or moved, like any other value; nothing is
+  /// captured. The borrows its by-reference captures made go with it:
+  /// rustc's loan for each one lasts as long as either closure can
+  /// still be used, which is the line `g`'s borrow already ends on (the
+  /// closure literal drew it at the loan's end). A copy holds the
+  /// borrow too, so `h` also gives it back there; after a move `h`
+  /// holds it instead of `g`.
+  fn move_or_copy_closure(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, g: ResourceAccessPoint) {
+    let is_copy = matches!(evt, Evt::Copy);
+    let mut ev = self.ext_ev_of_evt(evt, lhs.clone(), ResourceTy::Value(g.clone()), *self.unique_id, false);
+    if let ExternalEvent::Copy { closure_value, .. } | ExternalEvent::Move { closure_value, .. } = &mut ev {
+      *closure_value = true;
+    }
+    self.add_external_event(line_num, ev);
+    *self.unique_id += 1;
+    let held_by_g = |e: &ExternalEvent| matches!(e,
+      ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+      | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. } if r.hash() == g.hash() && r.name() == g.name());
+    if is_copy {
+      let ends: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter()
+        .filter(|(_, e)| held_by_g(e))
+        .cloned()
+        .collect();
+      for (line, mut e) in ends {
+        let (ExternalEvent::StaticDie { from, id, to, .. } | ExternalEvent::MutableDie { from, id, to, .. }) = &mut e else { continue };
+        // `h = g;` again: h already gives this borrow back there.
+        let lender = to.clone();
+        let already = self.preprocessed_events.iter().any(|(l, x)| *l == line && matches!(x,
+          ExternalEvent::StaticDie { from: f, to: t, .. } | ExternalEvent::MutableDie { from: f, to: t, .. }
+            if *f == lhs && *t == lender));
+        if already {
+          continue;
+        }
+        *from = lhs.clone();
+        *id = *self.unique_id;
+        *self.unique_id += 1;
+        self.add_external_event(line, e);
+      }
+    } else {
+      // Both copies of the event: the renderer draws a line's arrows
+      // from `event_line_map`.
+      let retarget = |e: &mut ExternalEvent| {
+        if held_by_g(e) {
+          if let ExternalEvent::StaticDie { from, .. } | ExternalEvent::MutableDie { from, .. } = e {
+            *from = lhs.clone();
+          }
+        }
+      };
+      self.preprocessed_events.iter_mut().for_each(|(_, e)| retarget(e));
+      self.event_line_map.values_mut().flatten().for_each(retarget);
+    }
   }
 
   /// `add_ev` for an `SBorrow` / `MBorrow` whose reborrow-ness the
@@ -2222,6 +2299,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let rustc_hir::def::Res::Local(id) = path.res else { return false };
     self.hir_body.params.iter().any(|p| p.pat.hir_id == id)
       && self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id).is_ref()
+  }
+
+  /// The name a call whose callee is an expression, not a path, goes
+  /// by (`(w.f)()` → `w.f`; #703): the callee's source text without
+  /// the parentheses around it (the HIR span includes them).
+  pub fn callee_text(&self, callee: &Expr) -> String {
+    fn unwrap_parens(t: &str) -> &str {
+      let t = t.trim();
+      let Some(inner) = t.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else { return t };
+      // Only when the first `(` closes at the end: not `(f)(x)`.
+      let mut depth = 0i32;
+      for c in inner.chars() {
+        match c {
+          '(' => depth += 1,
+          ')' => { depth -= 1; if depth < 0 { return t; } }
+          _ => {}
+        }
+      }
+      if depth == 0 { unwrap_parens(inner) } else { t }
+    }
+    let text = if callee.span.from_expansion() { None } else {
+      self.tcx.sess.source_map().span_to_snippet(callee.span).ok()
+    };
+    text.map(|t| unwrap_parens(&t).split_whitespace().collect::<Vec<_>>().join(" "))
+      .filter(|t| !t.is_empty())
+      .unwrap_or_else(|| "callee".to_owned())
   }
 
   /// A place's source text if it's short and plain enough to put in a
@@ -3019,7 +3122,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // column per field, so the move and what is left to drop show.
     else if let Some(inner) = self.box_with_field_moved_out(&name, ty) {
       let owner_hash = self.rap_hashes as u64;
-      self.add_struct(name.clone(), owner_hash, false, mutability, false, false, false, self.current_scope, !self.inside_branch);
+      self.add_struct(name.clone(), owner_hash, false, mutability, false, false, InteriorMut::No, self.current_scope, !self.inside_branch);
       if let Some(ResourceAccessPoint::Struct(s)) = self.raps.get_mut(&name).map(|rd| &mut rd.rap) {
         s.is_box = true;
       }
@@ -4818,6 +4921,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             self.add_borrow_ev(line_num, Evt::MBorrow, lhs, ResourceTy::Value(rhs_rap), true);
             return;
           }
+          if rhs_rap.is_closure() && lhs.is_closure() && matches!(evt, Evt::Copy | Evt::Move) {
+            self.move_or_copy_closure(line_num, evt, lhs, rhs_rap);
+            return;
+          }
           self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
         }
         None => {
@@ -4902,6 +5009,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           return;
         }
         LocalCallee::NotLocal => {}
+      }
+      // The callee is an expression (`(w.f)()`, `make()(x)`; #703):
+      // the result is a new value the call returned.
+      if !matches!(fn_expr.kind, ExprKind::Path(_)) {
+        self.bind_from_anonymous(line_num, lhs);
+        return;
       }
       let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
         Some(n) => {

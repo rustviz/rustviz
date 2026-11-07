@@ -1025,6 +1025,10 @@ fn render_dot(
             // call that returned it (#686); its dot lists the captures.
             Event::Acquire { from: ResourceTy::Value(f), .. }
             | Event::Copy { from: ResourceTy::Value(f), .. } if f.is_fn() => false,
+            // `let h = g;` moves or copies the closure g; h's dot
+            // says so (#704).
+            Event::Acquire { id, .. } | Event::Copy { id, .. }
+                if closure_value_event(visualization_data, *id).is_some() => false,
             Event::Acquire { is, .. }
             | Event::Copy { is, .. }
             | Event::StaticBorrow { is, .. }
@@ -1577,6 +1581,8 @@ fn render_dot(
                     } {
                         let captures = collect_closure_captures(visualization_data, *hash, *line_number);
                         data.title = hover_messages::event_dot_closure_returned(&name, &func, &captures);
+                    } else if let Some(title) = closure_value_title(event, &name, visualization_data) {
+                        data.title = title;
                     } else if let Event::Acquire { from: ResourceTy::Anonymous, is, .. } = event {
                         if is.is_closure() {
                             let captures = collect_closure_captures(visualization_data, *hash, *line_number);
@@ -1978,6 +1984,8 @@ fn collect_closure_captures(
             continue;
         }
         match ev {
+            // `let h = g;` isn't a capture (#704).
+            ExternalEvent::Move { closure_value: true, .. } | ExternalEvent::Copy { closure_value: true, .. } => {}
             ExternalEvent::Move { from, to, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
                     out.push((name, "moved"));
@@ -2090,26 +2098,92 @@ fn kept_closure_lend_title(event: &Event, name: &String, visualization_data: &Vi
 // distinguishes the scope-end "captured resources are dropped"
 // message and the timeline state line ("owns N resources via
 // capture") from their borrow-only fallbacks.
+//
+// A closure moved into this one as a whole (`let h = g;`, #704) brings
+// what it owns along: h owns what g captured by move.
 fn closure_move_capture_count(
     visualization_data: &VisualizationData,
     closure_hash: u64,
 ) -> usize {
-    let evs = &visualization_data.external_events;
-    evs.iter()
-        .map(|(line, ev)| match ev {
-            // `let h = keep_mut(|| t.push('!'));` (#686): the closure a
-            // call returned is moved out of the call, which captures
-            // nothing. It owns what the closure literal passed to that
-            // call on the same line moved in (none here: `&mut t`).
-            ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } if f.is_fn() && matches_closure(to, closure_hash) =>
-                evs.iter()
-                    .filter(|(l, e)| l == line && matches!(e,
-                        ExternalEvent::Move { to: ResourceTy::Value(g), into_closure: true, .. } if g.hash() == f.hash()))
-                    .count(),
-            ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash) => 1,
-            _ => 0,
-        })
-        .sum()
+    fn count(visualization_data: &VisualizationData, closure_hash: u64, depth: usize) -> usize {
+        if depth > 8 {
+            return 0;
+        }
+        visualization_data
+            .external_events
+            .iter()
+            .map(|(line, ev)| match ev {
+                // `let h = keep_mut(|| t.push('!'));` (#686): the closure a
+                // call returned is moved out of the call, which captures
+                // nothing. It owns what the closure literal passed to that
+                // call on the same line moved in (none here: `&mut t`).
+                ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } if f.is_fn() && matches_closure(to, closure_hash) =>
+                    visualization_data.external_events.iter()
+                        .filter(|(l, e)| l == line && matches!(e,
+                            ExternalEvent::Move { to: ResourceTy::Value(g), into_closure: true, .. } if g.hash() == f.hash()))
+                        .count(),
+                ExternalEvent::Move { to, closure_value: false, .. } if matches_closure(to, closure_hash) => 1,
+                ExternalEvent::Move { from, to, closure_value: true, .. } if matches_closure(to, closure_hash) =>
+                    from.extract_rap().map_or(0, |g| count(visualization_data, *g.hash(), depth + 1)),
+                _ => 0,
+            })
+            .sum()
+    }
+    count(visualization_data, closure_hash, 0)
+}
+
+/// The `let h = g;` event (#704) with id `id`, if that's what it is:
+/// (g, h, whether it's a copy).
+fn closure_value_event(visualization_data: &VisualizationData, id: usize) -> Option<(&ResourceTy, &ResourceTy, bool)> {
+    visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
+        ExternalEvent::Copy { from, to, closure_value: true, id: i, .. } if *i == id => Some((from, to, true)),
+        ExternalEvent::Move { from, to, closure_value: true, id: i, .. } if *i == id => Some((from, to, false)),
+        _ => None,
+    })
+}
+
+/// The number of borrows closure `h` gives back (its captures by
+/// reference, or those of the closure it was copied or moved from).
+fn closure_borrow_count(visualization_data: &VisualizationData, closure_hash: u64) -> usize {
+    let mut lenders: Vec<String> = Vec::new();
+    for (_, ev) in &visualization_data.external_events {
+        if let ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. } = ev {
+            if matches_closure(from, closure_hash) && !lenders.contains(&to.name()) {
+                lenders.push(to.name());
+            }
+        }
+    }
+    lenders.len()
+}
+
+/// The dots of `let h = g;` with g a closure (#704): a plain move or
+/// copy of g's value, not a capture. h holds the borrows g's closure
+/// made, so its dot says so.
+fn closure_value_title(event: &Event, my_name: &String, visualization_data: &VisualizationData) -> Option<String> {
+    let id = match event {
+        Event::Duplicate { id, .. } | Event::Move { id, .. } | Event::Acquire { id, .. } | Event::Copy { id, .. } => *id,
+        _ => return None,
+    };
+    let (g, h, is_copy) = closure_value_event(visualization_data, id)?;
+    let g_rap = g.extract_rap()?;
+    let h_rap = h.extract_rap()?;
+    let owns = closure_move_capture_count(visualization_data, *g_rap.hash()) > 0;
+    Some(match event {
+        Event::Duplicate { .. } => hover_messages::event_dot_copy_to(my_name, &h.name()),
+        Event::Move { .. } if owns => hover_messages::event_dot_move_to(my_name, &h.name()),
+        Event::Move { .. } => hover_messages::event_dot_move_to_value(my_name, &h.name()),
+        _ => {
+            let borrows = closure_borrow_count(visualization_data, *h_rap.hash());
+            // `h = g;` after h had a value (a Copy closure: the old
+            // value has nothing to drop).
+            let assigned = visualization_data.external_events.iter().any(|(_, ev)| match ev {
+                ExternalEvent::Bind { to, id: i, .. } | ExternalEvent::Copy { to, id: i, .. } | ExternalEvent::Move { to, id: i, .. } =>
+                    *i < id && matches_closure(to, *h_rap.hash()),
+                _ => false,
+            });
+            hover_messages::event_dot_closure_value_acquire(my_name, g_rap.name(), is_copy, borrows, assigned)
+        }
+    })
 }
 
 // A holder (#336) whose value was created without a borrow (`let mut

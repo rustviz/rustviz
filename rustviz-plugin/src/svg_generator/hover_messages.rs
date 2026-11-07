@@ -2256,6 +2256,24 @@ pub fn event_dot_holder_acquire(my_name: &String, from_name: &String) -> String 
     )
 }
 
+// `let h = g;` with g a closure (#704): h gets g's closure value, a
+// copy (a closure that captures by reference only shared borrows, and
+// otherwise Copy values, is Copy) or by a move. Nothing is captured.
+// The borrows g's captures made go with the value: a copy holds them
+// too, a moved-to h holds them instead of g.
+// `assigned`: `h = g;` over a value h had (only for a copy).
+pub fn event_dot_closure_value_acquire(my_name: &String, from_name: &String, is_copy: bool, borrows: usize, assigned: bool) -> String {
+    let (h, g) = (fmt_style(my_name), fmt_style(from_name));
+    let s = if borrows == 1 { "" } else { "s" };
+    let copy = if assigned { "is assigned a copy of" } else { "is initialized with a copy of" };
+    match (is_copy, borrows) {
+        (true, 0) => format!("{0} {2} {1}", h, g, copy),
+        (true, _) => format!("{0} {3} {1}, and holds the same borrow{2} as {1}", h, g, s, copy),
+        (false, 0) => format!("{0} takes over {1}'s value", h, g),
+        (false, _) => format!("{0} takes over {1}'s value, and the borrow{2} it holds", h, g, s),
+    }
+}
+
 // Scope end of a holder that still holds its (non-Copy) value.
 pub fn event_dot_holder_drop_suffix() -> String {
     ". Its value is dropped, but not the data it borrowed.".to_owned()
