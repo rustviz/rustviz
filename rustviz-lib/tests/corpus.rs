@@ -548,6 +548,13 @@ const EXPECTED_OK: &[&str] = &[
     "if_let_binding_copy",
     "if_let_binding_move",
     "while_let_binding_kinds",
+    // A reference declared before an if/match whose last use is in an
+    // arm: its borrow ends in each arm (#495);
+    // `outer_borrow_end_is_drawn_in_each_arm` checks where.
+    "outer_ref_end_in_match_arm",
+    "outer_ref_end_in_if_arm",
+    "outer_mut_ref_end_in_if_arm",
+    "outer_ref_end_in_nested_if",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5557,6 +5564,50 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["Move from x to a", "Move from y to b", "Copy from o to s"],
     },
+    // #495: a reference declared before an if/match whose last use is
+    // in one arm. Its borrow used to end on the parent columns, in the
+    // middle of the diamond; that was about *where* the end was drawn,
+    // so `outer_borrow_end_is_drawn_in_each_arm` pins it. These pin the
+    // texts of the per-arm ends and of the reference's join.
+    TooltipExpect {
+        name: "outer_ref_end_in_match_arm",
+        must_contain: &[
+            "Return immutably borrowed resource from r to s",
+            "r's borrow has ended on this path",
+            "r's borrow ended in each branch above",
+        ],
+        // The join used to say only that r isn't moved, and r's column
+        // ran on past it as if r still borrowed s.
+        must_not_contain: &["r isn't moved in any of the branches above"],
+    },
+    TooltipExpect {
+        name: "outer_ref_end_in_if_arm",
+        must_contain: &[
+            "Return immutably borrowed resource from r to s",
+            "r's borrow has ended on this path",
+            "r's borrow ended in each branch above",
+        ],
+        must_not_contain: &["r isn't moved in any of the branches above"],
+    },
+    TooltipExpect {
+        name: "outer_mut_ref_end_in_if_arm",
+        must_contain: &[
+            "Return mutably borrowed resource from r to s",
+            "s's resource is no longer mutably borrowed",
+            "r's borrow has ended on this path",
+            "r's borrow ended in each branch above",
+        ],
+        must_not_contain: &["r isn't moved in any of the branches above"],
+    },
+    TooltipExpect {
+        name: "outer_ref_end_in_nested_if",
+        must_contain: &[
+            "Return immutably borrowed resource from r to s",
+            "r's borrow has ended on this path",
+            "r's borrow ended in each branch above",
+        ],
+        must_not_contain: &["r isn't moved in any of the branches above"],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -6305,6 +6356,40 @@ fn if_let_binding_is_drawn_at_the_start_of_its_arm() {
         assert_eq!((bind.len(), arrow.len()), (1, 1), "{}: dot / arrow", line);
         assert_eq!(bind[0].1, row, "{}: binding not on its row", line);
         assert!(arrow[0].iter().all(|p| p.1 == row), "{}: arrow not along its row: {:?}", line, arrow[0]);
+    }
+}
+
+/// #495: a reference declared before an `if` / `match` whose last use
+/// is in one arm stops borrowing in that arm, and on the paths through
+/// the other arms it already has. The lender gets its value back once
+/// per path, on an arm's column between the split and the join. It used
+/// to get it back once, on its parent column in the middle of the
+/// diamond (or, when the lender wasn't used in the conditional, beside
+/// it), and its arms stayed "shared" to the join, so `s.push('y')` in
+/// the other arm was drawn mutating a shared `s`.
+#[test]
+fn outer_borrow_end_is_drawn_in_each_arm() {
+    for (name, kind, paths) in [
+        ("outer_ref_end_in_match_arm", "immutably", 2),
+        ("outer_ref_end_in_if_arm", "immutably", 2),
+        ("outer_mut_ref_end_in_if_arm", "mutably", 2),
+        ("outer_ref_end_in_nested_if", "immutably", 3),
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        let mut splits = dots_with_tooltip(&timeline, "s is live in a conditional expression ");
+        splits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let mut joins = dots_with_tooltip(&timeline, "s isn't moved in any of the branches above");
+        joins.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert!(!splits.is_empty() && !joins.is_empty(),
+            "{}: s has no column in the conditional (splits {:?}, joins {:?})", name, splits, joins);
+        let (split, join) = (splits[0], joins[joins.len() - 1]);
+        let back = dots_with_tooltip(&timeline, &format!("s's resource is no longer {kind} borrowed"));
+        assert_eq!(back.len(), paths, "{}: s gets its value back {:?}, not once per path", name, back);
+        for (x, y) in &back {
+            assert!(*x != split.0, "{}: s gets its value back on its parent column at ({}, {})", name, x, y);
+            assert!(split.1 < *y && *y < join.1,
+                "{}: s gets its value back at ({}, {}), not between split {:?} and join {:?}", name, x, y, split, join);
+        }
     }
 }
 

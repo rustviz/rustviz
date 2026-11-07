@@ -1587,3 +1587,16 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String) -> String {
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
     format!("{0} isn't moved in any of the branches above", fmt_style(my_name))
 }
+
+// Merge dot for a reference declared before the conditional whose
+// borrow ended in each arm, at its last use there or, in an arm that
+// doesn't use it, as the arm starts.
+pub fn event_dot_branch_merge_borrow_ended(my_name: &String) -> String {
+    format!("{0}'s borrow ended in each branch above", fmt_style(my_name))
+}
+
+// Dashed rest of an `if` / `match` arm after the borrow held by a
+// reference declared before the conditional has ended in that arm.
+pub fn state_ref_borrow_ended(my_name: &String) -> String {
+    format!("{0}'s borrow has ended on this path", fmt_style(my_name))
+}
