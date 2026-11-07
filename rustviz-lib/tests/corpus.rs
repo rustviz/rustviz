@@ -833,6 +833,8 @@ const EXPECTED_OK: &[&str] = &[
     "collection_drop_holds",
     "collection_drop_holds_flag",
     "collection_drop_holds_exit",
+    // An array of Strings drops every String it holds (#544).
+    "array_of_strings_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8948,10 +8950,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Dropping a collection / Option / Box also drops what it holds;
         // the element type is known, the count isn't, so none is given.
         // Elements that need no drop (Vec<i32>, Option<i32>) add nothing.
-        // KNOWN WRONG, not pinned here: `pair` (a `[String; 2]`) says "No
-        // resource is dropped" at scope end, a separate bug.
         must_contain: &[
             "words goes out of scope. Its resource is dropped (including every String it holds).",
+            "pair goes out of scope. Its resource is dropped (including every String it holds).",
             "queue goes out of scope. Its resource is dropped (including every String it holds).",
             "slice goes out of scope. Its resource is dropped (including every String it holds).",
             "maybe goes out of scope. Its resource is dropped (including the String it holds, if any).",
@@ -8966,6 +8967,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "=words goes out of scope. Its resource is dropped.",
+            "=pair goes out of scope. No resource is dropped.",
             "=queue goes out of scope. Its resource is dropped.",
             "=slice goes out of scope. Its resource is dropped.",
             "=maybe goes out of scope. Its resource is dropped.",
@@ -9019,6 +9021,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=m goes out of scope. Its resource is dropped.",
             "=w goes out of scope. Its resource is dropped.",
             "the function returns and names's resource is dropped. If",
+        ],
+    },
+    TooltipExpect {
+        name: "array_of_strings_drop",
+        // `[String; N]` owns its Strings: dropping the array drops each
+        // one (#544). Strings moved into an array literal are owned by
+        // the array, so they don't go out of scope with a drop of their
+        // own. A `[i32; 3]` has nothing to drop.
+        must_contain: &[
+            "names goes out of scope. Its resource is dropped (including every String it holds).",
+            "moved goes out of scope. Its resource is dropped (including every String it holds).",
+            "first goes out of scope. No resource is dropped.",
+            "second goes out of scope. No resource is dropped.",
+            "again acquires ownership of a new resource; its previous resource is dropped (including every String it holds)",
+            "again goes out of scope. Its resource is dropped (including every String it holds).",
+            "gone's resource is moved into drop, which drops it (including every String it holds)",
+            "gone goes out of scope. No resource is dropped.",
+            "maybe goes out of scope. Its resource is dropped (including every String it holds) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=names goes out of scope. No resource is dropped.",
+            "=moved goes out of scope. No resource is dropped.",
+            "first goes out of scope. Its resource is dropped",
+            "second goes out of scope. Its resource is dropped",
+            "nums goes out of scope. Its resource is dropped (including every i32 it holds).",
         ],
     },
 ];
