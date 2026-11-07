@@ -5985,7 +5985,24 @@ fn insert_in_arm(
   if !rest.is_empty() {
     return insert_in_arm(&mut arm.e_data, rest, ev, in_line_map);
   }
-  let at = arm.e_data.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
+  let mut at = arm.e_data.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
+  // An exit on the borrow's last line (`return r.len();`, a panic)
+  // drops the lender there too (`drop_locals_on_exit`), and it was
+  // emitted first. The borrow ends before the lender is dropped: put
+  // its end ahead of that drop, or the lender would be dropped while
+  // still lent, as owning nothing to drop (#645).
+  let lender = match &ev.1 {
+    ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. }
+    | ExternalEvent::RefDie { to, .. } => to.extract_rap(),
+    _ => None,
+  };
+  if let Some(lender) = lender {
+    if let Some(i) = arm.e_data[..at].iter().rposition(|(l, e)| *l == ev.0
+      && matches!(e, ExternalEvent::GoOutOfScope { ro, .. } if ro == lender))
+    {
+      at = i;
+    }
+  }
   if in_line_map && ev.1.is_var_arrow_ev() {
     arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
   }
