@@ -1588,6 +1588,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               rd.lifetime = self.current_scope;
             }
           }
+          else if let Some(inner) = self.box_with_field_moved_out(&name, ty) {
+            // A `Box<Struct>` parameter a field is moved out of (#602):
+            // drawn like a struct parameter, as in a `let`.
+            let owner_hash = self.rap_hashes as u64;
+            let muta = bool_of_mut(binding_annotation.1);
+            self.add_struct(name.clone(), owner_hash, false, muta, false, false, false, self.current_scope, !self.inside_branch);
+            if let Some(ResourceAccessPoint::Struct(s)) = self.raps.get_mut(&name).map(|rd| &mut rd.rap) {
+              s.is_box = true;
+            }
+            self.register_struct_members(&name, inner, owner_hash, muta, MemberSite {
+              owner_id: param.hir_id.owner,
+              assigned_at: line_num,
+              scope: self.current_scope,
+              is_global: !self.inside_branch,
+              ref_lender: Some(ResourceTy::Caller),
+            });
+          }
           else if matches!(ty.kind(), rustc_middle::ty::TyKind::Tuple(_)) && self.has_member_columns(ty) {
             // A by-value tuple parameter gets a column per element, like
             // a struct parameter's fields (#189).

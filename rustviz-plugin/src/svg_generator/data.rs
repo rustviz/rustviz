@@ -269,6 +269,11 @@ pub struct Struct {
     pub rc_inside: Option<RcDrop>,
     /// Same as `Owner::holds`.
     pub holds: Option<String>,
+    /// A `Box<T>` drawn as a group of `T`'s field columns (#602): a
+    /// field was moved out through the box, so the box is partially
+    /// moved. Whatever fields remain, and the box's own heap
+    /// allocation, are still freed when it goes out of scope.
+    pub is_box: bool,
 }
 
 // a reference of type &mut T

@@ -9,7 +9,9 @@
 
 use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_to_line, split_numbered_name}};
 use log::info;
-use rustc_middle::mir::{Location, Local, VarDebugInfoContents};
+use rustc_middle::mir::{Location, Local, Operand, ProjectionElem, VarDebugInfoContents};
+use rustc_middle::mir::visit::Visitor;
+use rustc_middle::ty::Ty;
 use std::collections::HashMap;
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
 use rustc_utils::SpanExt;
@@ -32,7 +34,40 @@ pub struct MIRBorrowData {
 }
 
 
+/// Finds a move of a field out of `*local` (`move ((*_1).0)`).
+struct BoxFieldMoves { local: Local, found: bool }
+
+impl<'tcx> Visitor<'tcx> for BoxFieldMoves {
+    fn visit_operand(&mut self, op: &Operand<'tcx>, loc: Location) {
+        if let Operand::Move(place) = op {
+            if place.local == self.local
+                && matches!(place.projection.first(), Some(ProjectionElem::Deref))
+                && matches!(place.projection.get(1), Some(ProjectionElem::Field(..)))
+            {
+                self.found = true;
+            }
+        }
+        self.super_operand(op, loc);
+    }
+}
+
 impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
+    /// For a `Box<T>` variable `name` whose `T` has field columns and
+    /// from which a field is moved out somewhere in this body
+    /// (`take(b.name)`): `T`. Rust allows that move out of a `Box`
+    /// only, not out of other pointers (#602).
+    pub fn box_with_field_moved_out(&self, name: &str, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
+        if !ty.is_box() { return None; }
+        let inner = ty.boxed_ty()?;
+        if !self.has_member_columns(inner) { return None; }
+        let names = self.mir_local_names(self.bwf);
+        #[expect(clippy::disallowed_methods, reason = "a name is bound to one local; min() makes order irrelevant")]
+        let local = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).min()?;
+        let mut v = BoxFieldMoves { local, found: false };
+        v.visit_body(&self.bwf.body);
+        v.found.then_some(inner)
+    }
+
     // these are just helper functions copied from aquascope permissionctxt
     fn point_to_location(&self, p: Point, body_with_facts: &BodyWithBorrowckFacts) -> Location {
         body_with_facts.location_table.as_ref().unwrap().to_location(p)

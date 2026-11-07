@@ -1185,6 +1185,7 @@ fn render_dot(
                     let is_plain = ro.is_plain_value()
                         || (is_copy && !resource_hold && maybe_moved_at_end(history));
                     let is_closure = ro.is_closure();
+                    let is_box = matches!(ro, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
                     if is_closure {
                         // Closure value going out of scope: only
                         // surface "Its captured resources are
@@ -1238,7 +1239,7 @@ fn render_dot(
                         // nothing, whether or not it was moved earlier.
                         data.title = match struct_partial_move_split(visualization_data, *hash) {
                             Some(split) if resource_hold =>
-                                hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond),
+                                hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, false),
                             _ => event.print_message_with_name(&mut name),
                         };
                     } else if !resource_hold && maybe_moved_at_end(history) {
@@ -1270,8 +1271,9 @@ fn render_dot(
                         // and those moved on some paths only maybe
                         // (#395).
                         let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                            &name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond);
-                        if split.dropped.is_empty() && split.maybe_moved.is_empty() {
+                            &name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, is_box);
+                        // A Box's allocation is freed whatever is left in it.
+                        if split.dropped.is_empty() && split.maybe_moved.is_empty() && !is_box {
                             data.title = title;
                         } else {
                             let cx = timeline_data.x_val;
