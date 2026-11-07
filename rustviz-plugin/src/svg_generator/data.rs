@@ -1653,7 +1653,9 @@ impl Event {
                 // the caller and get the parallel ref message.
                 match param {
                     ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) => {
-                        if param.is_plain_value() {
+                        if param.is_copy_owner() {
+                            hover_messages::event_dot_copy_init_from_caller(my_name)
+                        } else if param.is_plain_value() {
                             hover_messages::event_dot_owner_init_from_caller_value(my_name)
                         } else {
                             hover_messages::event_dot_owner_init_from_caller(my_name)
@@ -1825,11 +1827,12 @@ impl Event {
                     // temporary has a column until the end of the
                     // block (#400).
                     hover_messages::event_dot_temporary_acquire(&self.deref_name(my_name))
-                } else if matches!(from, ResourceTy::Anonymous)
-                    && matches!(is.extract_rap(), Some(rap) if rap.is_copy_owner()) {
+                } else if matches!(is.extract_rap(), Some(rap) if rap.is_copy_owner()) {
                     // i32 / bool / other primitive being assigned a
                     // literal or arithmetic value (`let n = 5;` or
-                    // `n += 1;`). "Acquires ownership" is the wrong
+                    // `n += 1;`), or an element of an owned collection
+                    // (`for x in xs` with `xs: Vec<i32>`, a Move event
+                    // for the iterand, #504). "Acquires ownership" is the wrong
                     // mental model for Copy types — there's no heap
                     // resource to own.
                     safe_message(hover_messages::event_dot_acquire_copyable, &self.deref_name(my_name), from)

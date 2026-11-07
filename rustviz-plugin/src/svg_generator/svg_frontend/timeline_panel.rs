@@ -118,6 +118,11 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         .filter(|t| !t.is_empty())
         .collect();
     texts.dedup();
+    // `s = String::from(..)` says "acquires ownership of a new resource;
+    // its previous resource is dropped": the plain "acquires ownership of
+    // a resource" next to it adds nothing (#506).
+    let all = texts.clone();
+    texts.retain(|t| !all.iter().any(|r| hover_messages::reassign_subsumes_acquire(r, t)));
     if texts.len() <= 1 {
         return texts.first().copied().unwrap_or("").to_owned();
     }
@@ -2285,7 +2290,9 @@ fn render_arrow (
             let bot_v2 = (head_x - 12.75, head_y);
             let bot_v3 = (head_x, head_y - 6.0);
 
-            let title = if param.is_plain_value() {
+            let title = if param.is_copy_owner() {
+                hover_messages::event_dot_copy_init_from_caller(&param.name().to_string())
+            } else if param.is_plain_value() {
                 hover_messages::event_dot_owner_init_from_caller_value(&param.name().to_string())
             } else {
                 hover_messages::event_dot_owner_init_from_caller(&param.name().to_string())
