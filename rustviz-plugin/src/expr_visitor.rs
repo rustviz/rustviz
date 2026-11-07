@@ -1789,7 +1789,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Only non-reference field types are handled: storing a reference
   /// through a reference (`h.r = &x`) would need loan bookkeeping for
   /// a place without a column, so it stays unmodelled.
-  fn field_through_ref(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+  pub fn field_through_ref(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
     let typeck = self.tcx.typeck(expr.hir_id.owner);
     if typeck.node_type(expr.hir_id).is_ref() {
       return None;
@@ -1863,6 +1863,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// `get_rap`, falling back to `field_access_through_ref` for a field
+  /// behind a reference (`match self.kind`, `if let Some(n) =
+  /// &cur.next`).
+  pub fn rap_or_field_through_ref(&self, expr: &'tcx Expr<'tcx>) -> ResourceTy {
+    match get_rap(expr, &self.tcx, &self.raps) {
+      ResourceTy::Anonymous => self.field_access_through_ref(expr).unwrap_or(ResourceTy::Anonymous),
+      rty => rty,
+    }
+  }
+
+  /// The resource read by `expr` (`p.x`, `&p.name`, `self.n`) when it
+  /// is a field reached through a reference: `DerefField(p, "p.x")`,
+  /// drawn on p's column like a read of `*p` (#266). `None` for
+  /// anything else, including `&mut p.f`: a mutable reborrow of a field
+  /// isn't drawn yet (#202).
+  pub fn field_access_through_ref(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    let mut place = expr;
+    loop {
+      match place.kind {
+        ExprKind::AddrOf(_, Mutability::Mut, _) => return None,
+        ExprKind::AddrOf(_, _, inner) | ExprKind::DropTemps(inner) => place = inner,
+        _ => break,
+      }
+    }
+    self.field_through_ref(place)
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     // A tuple built in the argument list (`show((s, 1))`,
@@ -1904,7 +1931,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let tycheck_results = self.tcx.typeck(arg.hir_id.owner);
     let arg_ty = tycheck_results.node_type(arg.hir_id);
     let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner), arg_ty);
-    let from_ro = get_rap(arg, &self.tcx, &self.raps);
+    // `take(p.x)` / `look(&p.name)` with p a reference (#266).
+    let from_ro = self.rap_or_field_through_ref(arg);
     // Extend the lifetime of any reference RAP this arg touches so a
     // ref passed as a fn argument shows its dotted lifetime line out
     // to the call site. Critical for macro args like
@@ -1913,7 +1941,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // call update_rap, so without this nudge the ref's lifetime
     // stays pinned to its declaration line and the renderer draws a
     // degenerate (zero-height) ref-line.
-    if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) = &from_ro {
+    if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::DerefField(rap, _, _) = &from_ro {
       self.update_rap(rap, line_num);
     }
     let mut to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
@@ -2177,13 +2205,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // let a = &b (where b has type &&i32)
     // a's aliases consist of a -> (b -> ... -> ...)
     if is_addr(&expr) {
-      let lender = get_rap(&expr, &self.tcx, &self.raps); // in this case we are borrowing from b
+      // in this case we are borrowing from b; `&p.name` with p a
+      // reference is a reborrow of the field through p (#266).
+      let lender = self.rap_or_field_through_ref(&expr);
       let mut aliasing = get_aliasing_data(&lender, &self.borrow_map);
       // if expr has type &&
       let ty = self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id);
       if ty.builtin_deref(false).unwrap().is_ref() {
         match &lender {
-          // (get_rap never yields DerefField; it's an assignment-LHS place.)
+          // (`get_rap` never yields DerefField, but `&&p.f` through a
+          // reference does: there is no aliasing chain to extend.)
           ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) | ResourceTy::Temporary { .. } => { (lender, aliasing) }
           ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
             aliasing.push_front(x.name().to_owned()); // here the lender is added to the list of aliases 
@@ -2976,7 +3007,8 @@ pub fn register_iflet_let_bindings(
     let scrutinee = let_expr.init;
     let typeck_res = self.tcx.typeck(scrutinee.hir_id.owner);
     let scrutinee_ty = typeck_res.node_type(scrutinee.hir_id);
-    let parent = crate::expr_visitor_utils::get_rap(scrutinee, &self.tcx, &self.raps);
+    // `if let Some(n) = &cur.next` with cur a reference (#266).
+    let parent = self.rap_or_field_through_ref(scrutinee);
 
     let let_line = crate::expr_visitor_utils::span_to_line(&let_expr.span, &self.tcx);
     // Body-end is only needed if we're going to emit a GoOutOfScope.
@@ -3407,13 +3439,23 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       }
       let res = match fetch_rap(rhs, &self.tcx, &self.raps) {
         Some(x) => ResourceTy::Value(x),
-        None => ResourceTy::Anonymous
+        // `&p.name` with p a reference borrows the field through p (#266).
+        None => match self.field_access_through_ref(rhs) {
+          Some(rty) => {
+            if let Some(r) = rty.deref_rap() {
+              self.update_rap(&r.clone(), line_num);
+            }
+            rty
+          }
+          None => ResourceTy::Anonymous,
+        },
       };
       // `&*r` / `&mut *r` with r a reference borrows *through* r (a
       // reborrow); `&r` / `&mut r` borrows the variable r itself.
       // Both resolve to the same source RAP, so decide here from the
-      // syntax rather than from r's kind downstream.
-      let is_reborrow = is_explicit_reborrow(
+      // syntax rather than from r's kind downstream. `&p.f` through a
+      // reference p is a reborrow too.
+      let is_reborrow = matches!(res, ResourceTy::DerefField(..)) || is_explicit_reborrow(
         innermost_addr_of_operand(rhs),
         self.tcx.typeck(rhs.hir_id.owner),
       );
@@ -3729,6 +3771,16 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           return;
         }
         self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
+      } else if let Some(rty) = self.field_access_through_ref(rhs) {
+        // `let a = p.x;` / `self.n` as a tail expression, with p /
+        // self a reference: a copy out of the resource p points to,
+        // drawn on p's column (#266). (Moving out from behind a
+        // reference doesn't compile, so this is always a copy.)
+        let line_num = span_to_line(&inner.span, &self.tcx);
+        if let Some(r) = rty.deref_rap() {
+          self.update_rap(&r.clone(), line_num);
+        }
+        self.add_ev(line_num, evt, lhs, rty, false);
       }
     }
     // explicitly using return keyword

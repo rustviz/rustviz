@@ -741,6 +741,10 @@ const EXPECTED_OK: &[&str] = &[
     "match_arm_binding_if_same_line",
     // A reference field overwritten directly (#531).
     "borrow_field_overwrite_direct",
+    // Reads of fields through a reference (`let a = p.x;`, `&p.name`,
+    // `take(p.x)`, `p.name.len()`, a returned `self.x`) are drawn on
+    // the reference's column (#266).
+    "field_read_through_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7830,6 +7834,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's resource is moved into drop, which drops it",
         ],
         must_not_contain: &["x has no value yet"],
+    },
+    TooltipExpect {
+        name: "field_read_through_ref",
+        // A field read through a reference `p` copies out of the
+        // resource p points to; `&p.name` reborrows the field through
+        // p. Before #266 none of these reads drew anything, `n` was
+        // shown returning its borrow to itself (`*n`), and a match on
+        // `self.n` bound `v` "by copy from Anonymous resource".
+        must_contain: &[
+            "the resource p points to is read through p.x (copied to a)",
+            "Copy from p.x to a",
+            "a is initialized with a copy of p.x",
+            "Immutable reborrow from p.name to n",
+            "p.name's resource is immutably borrowed by n",
+            "Return immutably borrowed resource from n to p.name",
+            "the resource p points to is read through p.inner.v (copied to v)",
+            "the resource p points to is read through (*p).x (copied to w)",
+            "Copy from p.x to take",
+            "look reads from p.name",
+            "len reads from p.name (implicitly borrowed)",
+            "the resource self points to is read through self.x (copied to the caller)",
+            "the resource r points to is read through r.x (copied to b)",
+            "Copy from r.x to b",
+            "the resource h.r points to is read through h.r.x (copied to c)",
+            "Partial copy from self.n to v",
+            "v is initialized with a copy of self.n",
+            "Partial immutable borrow from self.label to s",
+            "Return immutably borrowed resource from s to self.label",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from n to *n",
+            "Return immutably borrowed resource from s to *s",
+            "v is initialized by copy from Anonymous resource",
+            "v is initialized with a copy of Anonymous resource",
+            "self's resource is copied to the caller",
+            "p.x acquires ownership of a resource",
+            "p.x is the owner of the resource",
+        ],
     },
 ];
 

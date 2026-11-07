@@ -44,7 +44,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // value like a literal.
       Some(r) if r.is_fn() => ResourceTy::Anonymous,
       Some(r) => ResourceTy::Value(r), // todo, technically need to check for deref here
-      None => ResourceTy::Anonymous
+      // `self.n` / `p.x` returned from behind a reference: a copy of
+      // the field (#266). Not `&self.name`, which returns a reference
+      // rather than a copy.
+      None => self.field_through_ref(e).unwrap_or(ResourceTy::Anonymous),
     };
 
     let line_num = expr_to_line(e, &self.tcx);
@@ -164,9 +167,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // returns the qualified name we registered the receiver
     // under (e.g. `r.s`).
     let Some(rcvr_name) = expr_to_rap_name(rcvr, &self.tcx) else { return };
-    let rcvr_rap = match self.raps.get(&rcvr_name) {
-      Some(rd) => rd.rap.to_owned(),
-      None => return,
+    // `rcvr_rty` is what the call reads: the receiver's own RAP, or
+    // for `p.name.len()` / `self.n.abs()` with p / self a reference,
+    // the field through it, drawn on p's column (#266).
+    let (rcvr_rap, rcvr_rty) = match self.raps.get(&rcvr_name) {
+      Some(rd) => (rd.rap.to_owned(), ResourceTy::Value(rd.rap.to_owned())),
+      None => match self.field_access_through_ref(rcvr) {
+        Some(rty @ ResourceTy::DerefField(..)) => (rty.deref_rap().unwrap().clone(), rty),
+        _ => return,
+      },
     };
     self.update_rap(&rcvr_rap, line_num);
     let fn_rap = self.raps.get(&fn_key(fn_name)).unwrap().rap.to_owned();
@@ -188,6 +197,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           match a.kind {
             Adjust::Borrow(AutoBorrow::Ref(m)) => {
               match m {
+                // `p.name.push_str(..)` through a reference is a
+                // mutable reborrow of the field, not drawn yet (#202).
+                AutoBorrowMutability::Mut{..} if matches!(rcvr_rty, ResourceTy::DerefField(..)) => {}
                 AutoBorrowMutability::Mut{allow_two_phase_borrow: AllowTwoPhase::Yes} => {
                   // `r.push_str(..)` with r: `&mut String` is
                   // `String::push_str(&mut *r, ..)` — an implicit
@@ -211,7 +223,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 },
                 AutoBorrowMutability::Not => {
                   let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
-                  self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), autoref, refcell_borrow_mut);
+                  self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut);
                 }
                 _ => {}
               }
@@ -242,7 +254,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner), self_ty);
       // A Copy value reached through auto-deref (`r.by_value()`
       // with `r: &T`, `T: Copy`) is a copy of `*r`, not of `r`.
-      let from = if typeck.expr_ty(rcvr).is_ref() {
+      let from = if matches!(rcvr_rty, ResourceTy::DerefField(..)) {
+        rcvr_rty.clone()
+      } else if typeck.expr_ty(rcvr).is_ref() {
         ResourceTy::Deref(rcvr_rap.clone())
       } else {
         ResourceTy::Value(rcvr_rap.clone())
@@ -1547,10 +1561,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // its parts was drawn: in `(r1, r2) = (r2, r1)`, r1's
               // lender has changed by the time r2 is assigned)
               let precomputed = destructure_hid.and_then(|h| self.destructure_ref_data.remove(&h));
-              let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = match precomputed {
+              let (mut new_lender, new_aliasing, new_static_lender, new_co_lenders) = match precomputed {
                 Some(d) => d,
                 None => self.get_ref_data_full(&rhs_expr),
               };
+              // `cur = &cur.next;` (or `cur = n` with n borrowed from
+              // `cur.next`): the new pointee is a field of the *old*
+              // cur's pointee, which no column names. Don't record cur
+              // as its own lender ("returned to cur.next").
+              if new_lender.deref_rap() == Some(&lhs_rap) {
+                new_lender = ResourceTy::Anonymous;
+              }
               let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
               r.assigned_at = line_num;
               r.aliasing = new_aliasing;
@@ -2282,13 +2303,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let mut res = Vec::new();
             let mut res_ty = Vec::new();
             for field in fields.iter() {
-              res.push(get_rap(&field, &self.tcx, &self.raps));
+              res.push(self.rap_or_field_through_ref(&field));
               res_ty.push(typeck_res.node_type(field.hir_id));
             }
             (res, res_ty)
           }
           _ => {
-            (vec![get_rap(&guard_expr, &self.tcx, &self.raps)], vec![typeck_res.node_type(guard_expr.hir_id)])
+            // `match self.kind` with self a reference (#266).
+            (vec![self.rap_or_field_through_ref(&guard_expr)], vec![typeck_res.node_type(guard_expr.hir_id)])
           }
         };
         let typeck_res = self.tcx.typeck(guard_expr.hir_id.owner);
