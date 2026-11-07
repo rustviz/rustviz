@@ -113,6 +113,10 @@ pub struct RapData {
   // An unbound temporary's (#457) declaring scope: the block, or match
   // arm body, whose branch declares it, so a branch's decl set covers it.
   pub temp_owner: Option<rustc_hir::HirId>,
+  // Same-named variables of sibling blocks share one column (#308);
+  // `scope` is the first one's block end, and this holds the block ends
+  // of the later ones, each of which also ends the variable (#589).
+  pub extra_scopes: Vec<usize>,
 }
 
 /// A `let` binding with no initializer (`let x;`), remembered until
@@ -809,10 +813,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // variable and a function with the same name get separate RAPs.
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
     self.in_scope.push(key.clone());
-    self.raps.entry(key).or_insert_with(|| {
-      self.rap_hashes += 1;
-      RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None, temp_owner: None }
-    });
+    match self.raps.entry(key) {
+      std::collections::hash_map::Entry::Vacant(v) => {
+        self.rap_hashes += 1;
+        v.insert(RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None, temp_owner: None, extra_scopes: Vec::new() });
+      }
+      // A later variable of the same name in the same fn shares the
+      // column of the first (sibling blocks, #308) and ends at its own
+      // block end (#589).
+      std::collections::hash_map::Entry::Occupied(mut o) => {
+        let rd = o.get_mut();
+        if rd.is_global && is_global && rd.fn_start_line == fn_start_line && !r.is_fn()
+          && scope != rd.scope && !rd.extra_scopes.contains(&scope) {
+          rd.extra_scopes.push(scope);
+        }
+      }
+    }
   }
 
   pub fn update_rap(&mut self, r: &ResourceAccessPoint, line_num: usize) {
@@ -4645,6 +4661,11 @@ pub fn print_out_of_scope(&mut self){
       }
       if !duplicate {
         self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id });
+        *self.unique_id += 1;
+      }
+      // The later variables that share this column (#589).
+      for &scope in rap.extra_scopes.iter() {
+        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id });
         *self.unique_id += 1;
       }
     }

@@ -2204,6 +2204,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         self.visit_block(block); // visit all the statements in the block
         self.in_scope.truncate(entry_len);
           self.current_scope = prev_scope;
+        // A bare block (`{ let u = …; }`) in a branch: its locals aren't
+        // global, so `print_out_of_scope` skips them and no enclosing
+        // construct ends them. They go out of scope at its `}` (#591).
+        // (An `if` / `else` / loop body, a match arm, a closure body
+        // is not a bare block: its construct ends its own locals.)
+        if self.inside_branch
+          && matches!(self.tcx.parent_hir_node(expr.hir_id), rustc_hir::Node::Stmt(_) | rustc_hir::Node::Block(_))
+        {
+          let decls: HashSet<ResourceAccessPoint> = get_decl_of_block(block, &self.tcx, &self.raps)
+            .into_iter().filter(|v| needs_scope_end(v)).collect();
+          self.emit_scope_end(decls, new_scope);
+        }
         // A labeled block (`'a: { … break 'a; … }`) can also end by
         // running to its end.
         if let Some(before) = before {
