@@ -6438,14 +6438,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `g`), so the borrow of `s` doesn't end at the call and
         // isn't drawn.
         must_contain: &[
-            "k's resource is immutably borrowed by the closure passed to apply; k is read-only while the borrow is live",
+            // k and count are i32: a value, not a resource (#484).
+            "k's value is immutably borrowed by the closure passed to apply; k is read-only while the borrow is live",
             "the closure passed to apply reads from k",
-            "count's resource is mutably borrowed by the closure passed to run; count can't be used while the borrow is live",
+            "count's value is mutably borrowed by the closure passed to run; count can't be used while the borrow is live",
             "the closure passed to run reads from/writes to count",
             "the closure passed to map reads from k",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            "k's resource is immutably borrowed by the closure passed to apply; k is read-only while the borrow is live",
+            "count's resource is mutably borrowed by the closure passed to run; count can't be used while the borrow is live",
             "the closure passed to keep reads from s",
             "s's resource is immutably borrowed by the closure passed to keep; s is read-only while the borrow is live",
             "k's resource is moved",
