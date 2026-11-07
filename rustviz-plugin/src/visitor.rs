@@ -2589,6 +2589,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               for (to, from, e) in callback_events {
                 let name = from.real_name();
                 self.borrow_map.remove(&name);
+                // When the scrutinee is itself a reference (`match o`,
+                // `o: &Option<String>`), the binding reborrows through
+                // it, so `o`'s borrow lasts at least until here (#372).
+                if to.is_ref() {
+                  let floor = self.borrow_floor.entry(to.real_name()).or_insert(end);
+                  *floor = (*floor).max(end);
+                }
                 let id = *self.unique_id;
                 *self.unique_id += 1;
                 let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
