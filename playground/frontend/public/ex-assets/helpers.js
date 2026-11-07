@@ -55,11 +55,13 @@ function helpers(classname) {
     if (!tooltip) {
         tooltip = document.createElement('p');
         tooltip.id = 'svg_tooltip';
+        // Long tooltips wrap in CSS (max-width + overflow-wrap); a JS word-splitter
+        // used to do this and cut inside the <span style=...> name wrappers (#308).
         // top/left/margin/max-width pinned explicitly because the playground's
         // index.css applies `p { max-width: 800px; margin-left: 50px; }` and
         // the UA stylesheet adds vertical margins — without these overrides
         // `transform: translate(...)` would land far from the cursor.
-        tooltip.style.cssText = "position: absolute; top: 0; left: 0; margin: 0; max-width: none;" +
+        tooltip.style.cssText = "position: absolute; top: 0; left: 0; margin: 0; max-width: 360px; overflow-wrap: break-word;" +
                                 "padding: 0.5em; font-size: 0.75em; border-radius: 8px; pointer-events: none;" +
                                 "font-family: 'Trebuchet MS', Helvetica, sans-serif;" +
                                 "background: rgb(70, 70, 70, 0.6); color: white; z-index: 100; display: none;";
@@ -170,9 +172,6 @@ function displayTooltip(tooltip, classname) {
 
         let text = e.currentTarget.getAttributeNS(null, "data-tooltip-text");
         tooltip.innerHTML = text;
-
-        // if out of bounds, break text into two lines
-        if (tooltip.getBoundingClientRect().right >= document.body.clientWidth) breakText(text, tooltip);
     }
 
     function hideTooltip(e) {
@@ -321,50 +320,6 @@ function removeUnderline(e, classname, code_obj) {
     let arr = root.getElementsByClassName('emph');
     for (let i = arr.length-1; i >= 0; --i) {
         arr[i].remove();
-    }
-}
-
-// adjust text box
-function breakText(text, tooltip) {
-    // combine span into one element
-    let split_text = text.split(' ');
-    let words = [];
-    let last = 0, span = false;
-    for(const elt of split_text) {
-        if (elt.startsWith('<')) {
-            span = true;
-            words.push(elt);
-            last = words.length-1;
-        }
-        else if (elt.startsWith('!important')) {
-            span = false;
-            words[last] += elt;
-        }
-        else {
-            if (span) {
-                words[last] = words[last] + ' ' + elt;
-            }
-            else {
-                words.push(elt);
-            }
-        }
-    }
-
-    // adjust size and split text based on page boundary
-    tooltip.innerHTML = '';
-    let left = tooltip.getBoundingClientRect().left;
-    for (const word of words) {
-        tooltip.innerHTML += (word + ' ');
-        if (left + tooltip.clientWidth > document.body.clientWidth - 20) {
-            // reset tooltip text and break into new lines
-            let idx = tooltip.innerHTML.lastIndexOf(' ', tooltip.innerHTML.length-2);
-            let temp = tooltip.innerHTML.substr(0, idx);
-            let other = tooltip.innerHTML.substr(idx + 1);
-
-            tooltip.innerHTML = '';
-            tooltip.innerHTML += temp;
-            tooltip.innerHTML += ('<br />' + other);
-        }
     }
 }
 
