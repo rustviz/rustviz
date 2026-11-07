@@ -3495,7 +3495,9 @@ fn render_branch_run(
     // notch. A zero-length line with a round cap at the shared point
     // is a disc of the stroke's own width, which closes the notch
     // without lengthening either segment (so run ends and dash
-    // phases are untouched). Thin hollow columns have their own
+    // phases are untouched). It is purely decorative: not a tooltip
+    // trigger (each segment already has its own hover area), and it
+    // sits on the bend point, which can lie on another arm's row. Thin hollow columns have their own
     // bevel pass below.
     for window in classified.windows(2) {
         let (prev_style, _, prev_seg) = &window[0];
@@ -3506,8 +3508,8 @@ fn render_branch_run(
         let b = (curr_seg.p2.0 - curr_seg.p1.0, curr_seg.p2.1 - curr_seg.p1.1);
         if (a.0 * b.1 - a.1 * b.0).abs() < 1e-6 { continue; }
         svg.push_str(&format!(
-            "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" style=\"stroke-linecap: round;\"/>\n",
-            hash, prev_seg.p2.0, prev_seg.p2.1, prev_seg.p2.0, prev_seg.p2.1, prev_seg.title,
+            "            <line data-hash=\"{}\" class=\"solid\" data-underline=\"none\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" style=\"stroke-linecap: round; pointer-events: none;\"/>\n",
+            hash, prev_seg.p2.0, prev_seg.p2.1, prev_seg.p2.0, prev_seg.p2.1,
         ));
     }
 

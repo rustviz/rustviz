@@ -8441,6 +8441,8 @@ fn same_line_borrow_ends_below_its_use() {
         assert!(lent < back && back == ends,
             "{}: opt is lent at y={}, gets it back at y={} (s's end: y={})", name, lent, back, ends);
     }
+}
+
 /// A thick (mutable) branch column is drawn as butt-capped segments, so
 /// every bend would show a wedge-shaped notch at its outer corner. Each
 /// bend gets a zero-length round-capped line that closes it (#487).
@@ -8456,6 +8458,11 @@ fn mutable_branch_bends_have_round_joints() {
     // join) (the middle arm is straight).
     assert!(dots == 8, "expected a round joint at each bend, found {}", dots);
     assert!(t.contains("stroke-linecap: round"));
+    // The joints are decorative: a bend point can lie on another arm's
+    // row, so they must not be hoverable arm elements.
+    assert!(start_tags(&t, "line").into_iter()
+        .filter(|l| l.contains("stroke-linecap: round"))
+        .all(|l| !l.contains("tooltip-trigger") && !l.contains("data-tooltip-text")));
     // The plain fixture has no dot or icon on its solid bends, so the
     // joints are what closes the notch: 2 arms x (split + join).
     let plain = run_with_local_backend("mut_branch_kinks_plain").timeline_panel_string();
