@@ -224,20 +224,18 @@ pub fn state_dropped_by_hand(my_name: &String) -> String {
 }
 
 // A union that already holds a value is written to again (#191):
-// `u.a = 5;`, `u.a = y;`, `u = U { .. };`. Nothing is acquired and the
-// old contents aren't dropped. `from` names the variable the new
-// value was copied / moved from, if any.
-pub fn event_dot_union_write(my_name: &String, from: Option<(&String, bool)>) -> String {
-    let source = match from {
-        Some((name, true)) => format!(" (copied from {})", fmt_style(name)),
-        Some((name, false)) => format!(" (moved from {})", fmt_style(name)),
-        None => String::new(),
+// `u.a = 5;`, `u.a = y;`, `u = U { .. };`. It reads like a plain
+// assignment (2026-11-05 decision) plus the clause that states the
+// no-drop fact. `is_copy` is whether the value written is Copy;
+// `source` names the variable it was copied from, if any (a literal
+// or call result has none).
+pub fn event_dot_union_write(my_name: &String, is_copy: bool, source: Option<&String>) -> String {
+    let head = match (is_copy, source) {
+        (true, Some(from)) => event_dot_copyable_assign_copy(my_name, from),
+        (true, None) => event_dot_copyable_assign(my_name),
+        (false, _) => event_dot_acquire(my_name, my_name),
     };
-    format!(
-        "{0} is written to{1}; writing to a union never drops its old contents",
-        fmt_style(my_name),
-        source
-    )
+    format!("{0}; writing to a union never drops its old contents", head)
 }
 
 // An owned (non-ref) function parameter receives its resource from
