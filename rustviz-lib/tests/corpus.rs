@@ -773,6 +773,8 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    // A reference whose lender is unknown ends its borrow without naming one (#463).
+    "ref_unknown_lender_end",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8355,6 +8357,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "ref_unknown_lender_end",
+        // `let r = pick();`, `let r = *rr[0];` (rr: Vec<&&i32>) and
+        // `let s = *b;` (b: Box<&i32>) borrow from something the plugin
+        // can't name, so there is no column to return the borrow to.
+        // The end must not read as r returned to *r, itself. This
+        // already holds on main (the wording from #178 covers these
+        // shapes); the entry pins it.
+        must_contain: &[
+            "Copy from pick to r",
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "Copy from *rr[0] to r",
+            "Copy from *b to s",
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to *r",
+            "Return immutably borrowed resource from s to *s",
+            "Return immutably borrowed value from r to *r",
+            "Return immutably borrowed value from s to *s",
+        ],
     },
 ];
 
