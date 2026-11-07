@@ -390,12 +390,15 @@ const Description: React.FC = () => (
         A temporary borrowed by a <code>let</code> (
         <code>let r = &amp;String::from(&quot;a&quot;);</code>) gets a{' '}
         <code>(temporary)</code> column that lives to the end of the block. A
-        call&apos;s result that nothing binds or moves on (
+        value that nothing binds or moves on (a call&apos;s result:{' '}
         <code>make();</code>, <code>make().len()</code>,{' '}
-        <code>f(&amp;make())</code>) gets a short{' '}
-        <code>(temporary)</code> column too (numbered together). Other temporaries (
-        <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
-        <code>for</code> head) drop without being drawn or mentioned.
+        <code>f(&amp;make())</code>; <code>vec![..];</code>; a struct, tuple or
+        array literal; an <code>if let</code> / <code>while let</code> scrutinee;
+        the iterator a <code>for</code> loop makes from its head) gets a short{' '}
+        <code>(temporary)</code> column too (numbered together). Not drawn or
+        mentioned: a field moved out of a temporary (<code>make().name</code>),
+        a scrutinee that a pattern binds by value, and a macro or literal that
+        moves a variable into the temporary (<code>vec![s];</code>).
       </li>
     </ul>
     <p>
