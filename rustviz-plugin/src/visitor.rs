@@ -2382,8 +2382,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // borrows aren't drawn either.)
         let struct_field_ends = match (&lhs_rty, expr.kind) {
           (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
-            if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) =>
-            self.struct_field_borrow_ends(rap, line_num),
+            if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) => {
+            let rap = rap.clone();
+            let ends = self.struct_field_borrow_ends(&rap, line_num);
+            // The literal's fields hold borrows made here: an earlier
+            // move of the old value (`let h2 = hold;`, #637) doesn't
+            // hand these on.
+            self.restart_struct_field_loans(&rap, line_num);
+            ends
+          }
           (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
             if !lhs_is_union_field && !rap.is_member() => {
             let rap = rap.clone();

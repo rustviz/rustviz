@@ -353,9 +353,13 @@ rather than listed here.
   `hold = make(&t)`, `hold = other`) drops the old value, so the old
   borrow ends at the write, as in rustc (or at the old value's last use,
   if earlier). A struct that holds a borrow and is moved to another
-  variable (`let hold = other;`, `hold = other;`) leaves the borrow
-  drawn on `other`'s field column; `hold`'s field says what it borrows
-  from isn't shown (#637).
+  variable (`let hold = other;`, `hold = other;`) takes the borrow with
+  it: `hold`'s field gives it back at `hold`'s last use.
+- Borrow ends come from Polonius's facts, which in a few programs end a
+  borrow earlier than the borrow checker rustc ships (NLL): after
+  `let hold = other; other = H { r: &q };`, the lender of the value
+  `hold` took is drawn free after `hold`'s last use, but rustc keeps it
+  borrowed until `other`'s last use (#644).
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
   through `r: &mut Vec<_>`) is drawn on the collection's column; an
   assignment reads like a plain assignment with the element as the

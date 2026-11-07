@@ -754,13 +754,16 @@ pub fn event_dot_copy_ref_to_caller(my_name: &String, _target_name: &String) -> 
 // copied; the resource it points to stays where it is, still owned by
 // its lender (#178).
 // `pointee_copy`: the referent doesn't need drop, so it's a "value"
-// (`&i32`, `&str`), not a "resource" (#551).
-pub fn event_dot_ref_moved(my_name: &String, to_caller: bool, pointee_copy: bool) -> String {
+// (`&i32`, `&str`), not a "resource" (#551). A `&T` is moved only as
+// a field of a struct that is moved (`let hold = other;`, #637):
+// `other.r` can't be used after that either.
+pub fn event_dot_ref_moved(my_name: &String, to_caller: bool, pointee_copy: bool, is_mut: bool) -> String {
     format!(
-        "{0}'s mutable reference is moved{1} (not the {2} it points to)",
+        "{0}'s {3} reference is moved{1} (not the {2} it points to)",
         fmt_style(my_name),
         if to_caller { " to the caller" } else { "" },
-        held(pointee_copy)
+        held(pointee_copy),
+        if is_mut { "mutable" } else { "immutable" }
     )
 }
 
@@ -1083,7 +1086,9 @@ pub fn event_dot_copyable_assign_copy(my_name: &String, from_name: &String) -> S
 // - `r = s;`, s: `&T`: the reference in s is copied; what it points
 //   to isn't (the counterpart of "s's reference is copied (not the
 //   resource it points to)" on s's column).
-// - `r = s;`, s: `&mut T`: the reference is moved out of s.
+// - `r = s;`, s: `&mut T`: the reference is moved out of s (the arrow
+//   says "Move from s to r"; like any place assignment, the dot reads
+//   like `r = s`, with no "(moved out of s)", #650).
 // - `r = first(..);`: the call's result. Not "the reference first
 //   returns": while shadowing bindings share a column (#173), the
 //   result can be a new binding's non-reference value
@@ -1098,7 +1103,7 @@ pub fn event_dot_ref_assign(my_name: &String, from: &ResourceAccessPoint, copied
     } else if from.is_ref() && copied {
         Some(format!("{0} is assigned a copy of {1}'s reference", r, f))
     } else if from.is_ref() {
-        Some(format!("{0} is assigned {1}'s {2} reference (moved out of {1})", r, f, kind))
+        Some(format!("{0} is assigned {1}'s {2} reference", r, f, kind))
     } else {
         None
     }

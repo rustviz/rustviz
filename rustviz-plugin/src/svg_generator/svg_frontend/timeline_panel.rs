@@ -2639,7 +2639,7 @@ fn render_arrow (
                     Box::new(hover_messages::event_dot_copy_ref_to_caller),
                 ExternalEvent::Copy { .. } => Box::new(hover_messages::event_dot_copy_to_caller),
                 ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), .. } =>
-                    Box::new(move |name: &String, _: &String| hover_messages::event_dot_ref_moved(name, true, ptc)),
+                    Box::new(move |name: &String, _: &String| hover_messages::event_dot_ref_moved(name, true, ptc, true)),
                 _ if rap.holds_value() => Box::new(hover_messages::event_dot_move_to_caller_value),
                 _ => Box::new(hover_messages::event_dot_move_to_caller),
             };

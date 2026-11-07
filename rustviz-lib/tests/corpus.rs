@@ -918,6 +918,8 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_tuple_different_places",
     "or_pattern_shadowed_name",
     "or_pattern_ref_tuple_scrutinee",
+    // A struct holding a borrow, moved to another variable (#637).
+    "borrow_struct_moved_holder",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8005,11 +8007,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m1's mutable borrow ends",
             "Return mutably borrowed resource from m2 to u",
             "Return mutably borrowed resource from m1 to w",
+            // Reads like `m1 = m2` (#650); the arrow names the source.
+            "m1 is assigned m2's mutable reference",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from r1 to x",
             "Return immutably borrowed resource from t to a",
             "Return mutably borrowed resource from m1 to u",
+            "(moved out of m2)",
         ],
     },
     TooltipExpect {
@@ -10086,6 +10091,55 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "drop flag",
         ],
     },
+    TooltipExpect {
+        name: "borrow_struct_moved_holder",
+        // `let hold = other;` moves other's reference field with it: the
+        // loan stays live while hold.r holds the reference, so hold.r
+        // gives the lender back at its last use. Main drew the borrow
+        // returned from other.r (which no longer holds it) and hold.r's
+        // borrow from something "not shown", although the lender is.
+        // The field's new move dot must not say "other.r's resource is
+        // moved" (the generic move text): a reference owns no resource. See
+        // `moved_struct_returns_its_borrow_from_the_new_holder`.
+        must_contain: &[
+            "Move from other.r to hold.r",
+            "other.r's immutable reference is moved (not the resource it points to)",
+            "hold.r is bound to an immutable reference",
+            "Return immutably borrowed resource from hold.r to t",
+            "Return immutably borrowed resource from hold.r to a",
+            "Return immutably borrowed resource from hold.r to b",
+            // `hold = other;` reads like a plain assignment.
+            "hold.r is assigned other.r's immutable reference",
+            "other.r's mutable reference is moved (not the resource it points to)",
+            "Return mutably borrowed resource from hold.r to u",
+            "Move from o.inner.r to o2.inner.r",
+            "Return immutably borrowed resource from o2.inner.r to e",
+            "Return immutably borrowed resource from hold.r to f",
+            "Copy from c1.r to c2.r",
+            "c2.r is initialized with a copy of c1.r",
+            "Return immutably borrowed resource from c2.r to g",
+            "Return immutably borrowed resource from hold.r to p",
+            "Return immutably borrowed resource from other.r to q",
+            "Return immutably borrowed resource from hold.r to w",
+        ],
+        must_not_contain: &[
+            // The moved-from field returning a borrow it no longer holds.
+            "Return immutably borrowed resource from other.r to t",
+            "Return immutably borrowed resource from other.r to b",
+            "Return mutably borrowed resource from other.r to u",
+            "Return immutably borrowed resource from o.inner.r to e",
+            "Return immutably borrowed resource from other.r to f",
+            "Return immutably borrowed resource from other.r to p",
+            // The new holder's lender, which is shown.
+            "isn't shown",
+            // A reference doesn't own what it points to.
+            "other.r's resource is moved",
+            "o.inner.r's resource is moved",
+            // A place assignment has no "(moved out of …)" parenthetical;
+            // the arrow says where the reference came from.
+            "moved out of other.r",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -12139,6 +12193,37 @@ fn struct_overwrite_by_call_or_variable_ends_old_borrow_at_the_write() {
         assert!(end(v)[0].1 < code_row_y(&code, later), "{}'s borrow should end before `{}`", v, later);
     }
     assert_eq!(end("x").len(), 1, "{:?}", end("x"));
+}
+
+/// #637: a struct moved to another variable takes its field's borrow
+/// along. The lender is given back once, at the new holder's last use:
+/// the loan is live while any value holding the reference is (the line
+/// after it uses the lender again, which rustc accepts). Moved inside an
+/// arm, the borrow ends at hold's last use in that arm, and as the other
+/// arm starts (other.r isn't used there): once per path.
+#[test]
+fn moved_struct_returns_its_borrow_from_the_new_holder() {
+    let rv = run_with_local_backend("borrow_struct_moved_holder");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let end = |v: &str, kind: &str| dots_with_tooltip(&svg, &format!("{}'s resource is no longer {} borrowed", v, kind));
+    for (v, kind, line) in [
+        ("t", "immutably", "println!(\"{}\", hold.r);"),
+        ("b", "immutably", "println!(\"assigned {}\", hold.r);"),
+        ("u", "mutably", "hold.r.push('1');"),
+        ("e", "immutably", "println!(\"{} {}\", o2.inner.r, o2.n);"),
+        ("f", "immutably", "println!(\"call {}\", hold.r);"),
+        ("p", "immutably", "println!(\"source {}\", hold.r);"),
+        ("q", "immutably", "println!(\"source {}\", other.r);"),
+    ] {
+        let ends = end(v, kind);
+        assert_eq!(ends.len(), 1, "{}: {:?}", v, ends);
+        assert_eq!(ends[0].1, code_row_y(&code, line), "{}'s borrow should end on the row of `{}`: {:?}", v, line, ends);
+    }
+    let mut w: Vec<f64> = end("w", "immutably").into_iter().map(|d| d.1).collect();
+    w.sort_by(f64::total_cmp);
+    assert_eq!(w.len(), 2, "w: {:?}", w);
+    assert_eq!(w[0], code_row_y(&code, "println!(\"branch {}\", hold.r);"), "w: {:?}", w);
+    assert!(w[1] > w[0] && w[1] < code_row_y(&code, "w.push('!');"), "w's other end should be at the if's end: {:?}", w);
 }
 
 #[test]

@@ -381,11 +381,12 @@ const Description: React.FC = () => (
         reference&apos;s column.
       </li>
       <li>
-        A struct that holds a borrow and is moved to another variable (
-        <code>hold = other;</code>) keeps the borrow drawn on{' '}
-        <code>other</code>&apos;s field column. Overwriting a struct field of a
-        struct with a call&apos;s result (<code>o.inner = make_inner(&amp;t)</code>)
-        doesn&apos;t draw the new borrow.
+        Overwriting a struct field of a struct with a call&apos;s result (
+        <code>o.inner = make_inner(&amp;t)</code>) doesn&apos;t draw the new
+        borrow. In a few programs a borrow is drawn ending earlier than
+        rustc allows: after <code>let hold = other;</code>, assigning{' '}
+        <code>other</code> again keeps what <code>hold</code> borrows
+        borrowed until <code>other</code>&apos;s last use in rustc.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

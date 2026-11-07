@@ -1043,6 +1043,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if *self.unique_id <= id {
       *self.unique_id = id + 1;
     }
+    if let (Some(from_name), Some(to_name)) = (&from_struct, &to_struct) {
+      self.transfer_ref_fields(line_num, from_name, to_name, is_copy);
+    }
     if let Some(from_name) = from_struct.filter(|_| !from_children.is_empty()) {
       let pass_through = match to {
         ResourceTy::Caller => true,
@@ -1091,6 +1094,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
     } else if let Some(to_name) = to_struct {
       self.bind_struct_fields(line_num, &to_name);
+    }
+  }
+
+  /// `let hold = other;` / `hold = other;` (#637): the reference
+  /// fields go with the struct, and so do the borrows they hold. In
+  /// the borrow checker, the loan `other.r` was made with stays live
+  /// as long as any value holding the reference is, so `t` stays
+  /// borrowed until `hold.r`'s last use, and `hold.r` is what gives it
+  /// back. `hold.r` takes `other.r`'s loan as recorded (lender, line
+  /// and span it was made at), so `print_lifetimes` ends it where MIR
+  /// ends that loan; the field's own Move arrow makes `other.r` hand
+  /// the borrow off (`ref_handed_off`), so it draws no end of its own.
+  /// A Copy struct copies the reference: both hold the loan.
+  fn transfer_ref_fields(&mut self, line_num: usize, from_name: &str, to_name: &str, is_copy: bool) {
+    let prefix = format!("{}.", from_name);
+    #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) below")]
+    let mut refs: Vec<ResourceAccessPoint> = self.raps.iter()
+      .filter(|(n, rd)| n.starts_with(&prefix) && !n[prefix.len()..].contains('.')
+        && rd.rap.is_ref() && rd.rap.is_member())
+      .map(|(_, rd)| rd.rap.clone())
+      .collect();
+    refs.sort_by(|a, b| a.hash().cmp(b.hash()).then_with(|| a.name().cmp(b.name())));
+    for child in refs {
+      let field = &child.name()[prefix.len()..];
+      let Some(dest) = self.raps.get(&format!("{}.{}", to_name, field)).map(|rd| rd.rap.clone()) else { continue };
+      if let Some(loan) = self.borrow_map.get(child.name()).cloned() {
+        self.borrow_map.insert(dest.name().clone(), loan);
+      }
+      let ev_id = *self.unique_id;
+      *self.unique_id += 1;
+      let (from, to) = (ResourceTy::Value(child), ResourceTy::Value(dest));
+      self.add_external_event(line_num, if is_copy {
+        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false }
+      } else {
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false }
+      });
     }
   }
 
@@ -2719,6 +2758,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if !matches!(old.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) || old.assigned_at > line {
         continue;
       }
+      // `let h2 = hold; hold = H { r: &u };`: the old value went to
+      // `h2` with its borrow, which ends with `h2` (#637).
+      if self.ref_handed_off(member.name()) {
+        continue;
+      }
       // The loan is live while the old value is used and dead after:
       // if MIR ends it at a later use, it ends there; otherwise (no
       // use since the borrow was stored) it ends at the overwrite.
@@ -2783,6 +2827,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.lender = lender;
         rd.co_lenders = lenders;
         rd.aliasing = aliasing;
+      }
+    }
+  }
+
+  /// `hold = H { r: &t };`: the reference fields' loans in
+  /// `borrow_map` are made at this write; the literal's initialisers
+  /// set their lenders (`match_rhs`).
+  pub fn restart_struct_field_loans(&mut self, st: &ResourceAccessPoint, line: usize) {
+    for member in self.struct_members_deep(st.name()) {
+      if let Some(rd) = self.borrow_map.get_mut(member.name()) {
+        rd.assigned_at = line;
       }
     }
   }
@@ -5072,6 +5127,11 @@ pub fn print_out_of_scope(&mut self){
     }
     self.nest_borrow_ends_in_arms();
     self.end_outer_borrows_in_arms();
+    // A lender that got a column in a conditional just now (its borrow
+    // through an outer reference ends in an arm) has one for the arm's
+    // own references too: `if c { let h2 = h; .. }` hands h's borrow
+    // to h2 in the arm, and h2's end belongs there (#637).
+    self.nest_borrow_ends_in_arms();
   }
 
   /// For a reference `k` that a pattern copied (or moved) out of a
@@ -5185,6 +5245,14 @@ fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoi
   })
 }
 
+/// Whether `events` (an arm's, not looking into nested conditionals)
+/// move the reference `r` into another reference, which then holds
+/// its borrow (see `ref_handed_off`).
+fn handed_off_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> bool {
+  events.iter().any(|(_, e)| matches!(e,
+    ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } if f == r && t.is_ref()))
+}
+
 /// Whether `e` uses `r`; a conditional `r` is live in does.
 fn touches(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
   match e {
@@ -5240,6 +5308,12 @@ fn end_borrow_in_arms(
   }
   for (b, arm) in branches.iter_mut().enumerate() {
     if b == a {
+      // `let h2 = h;` in this arm moved r's reference on (a `&mut`, or
+      // a struct's field with the struct, #637): what holds it now
+      // ends the borrow on this path, so r doesn't (#209).
+      if handed_off_in(&arm.e_data, r) {
+        continue;
+      }
       if in_line_map && ev.1.is_arrow_ev() && branch_ending_borrow(&arm.e_data, r, ev.0).is_none() {
         arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
       }
