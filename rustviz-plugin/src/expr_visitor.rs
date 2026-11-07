@@ -253,6 +253,14 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
   pub all_paths_exit: bool,
+
+  // Earliest line a reference's borrow may be drawn ending at, keyed
+  // by the reference's name (#372). A `match` arm binding that
+  // reborrows through a reference (`match o { Some(s) => … }`, `o:
+  // &Option<String>`) is taken out of `borrow_map` when its arm ends,
+  // so `print_lifetimes` can't see that `o`'s borrow has to last
+  // until then; the arm records it here instead.
+  pub borrow_floor: HashMap<String, usize>,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -4273,6 +4281,20 @@ pub fn print_out_of_scope(&mut self){
       };
       if let Some(kill) = chosen {
         data.lifetime = kill;
+      }
+    }
+    // A reference that a pattern binding reborrows through stays
+    // borrowed as long as that binding does: `s` in `match o {
+    // Some(s) => … }` (`o: &Option<String>`) points into `*o`, so the
+    // borrow `o` holds can't end before `s`'s does (#372). The arm's
+    // bindings left `borrow_map` at the arm's end (see
+    // `borrow_floor`); `if let` bindings are still in it, with `o` as
+    // their lender. Chains (`r2` borrowing through `r1` borrowing
+    // through `o`) need the fixpoint.
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each entry only raises its own lifetime")]
+    for (name, floor) in self.borrow_floor.iter() {
+      if let Some(rd) = self.borrow_map.get_mut(name) {
+        rd.lifetime = rd.lifetime.max(*floor);
       }
     }
     // A reference that borrows through another one (`let r = &v[0]` with
