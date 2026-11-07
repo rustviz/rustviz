@@ -1182,7 +1182,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // A built-in arithmetic / bitwise operator on primitives
           // (`x + y` on i32) reads its operands the same way: each
           // one that names a column is copied into the operator
-          // (#241). Comparisons read through a reference: see below.
+          // (#241), and so is each operand of a built-in comparison
+          // (#497). A comparison that calls a trait method reads through a
+          // reference: see below.
           let fn_name = op_name.to_owned();
           self.add_fn(fn_name.clone());
           for operand in operands {

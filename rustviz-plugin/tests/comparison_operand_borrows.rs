@@ -1,7 +1,7 @@
 // `a == b` on Strings is `PartialEq::eq(&a, &b)` and `a < b` is
 // `PartialOrd::lt(&a, &b)`: rustc inserts a `&` on each operand, so both
 // are borrowed for the comparison, not moved. A comparison of integers
-// (`i < n`) is built in and draws nothing.
+// (`i < n`) is built in and copies both operands into `<` (#497).
 #[derive(PartialEq)]
 struct P { name: String, age: u32 }
 
