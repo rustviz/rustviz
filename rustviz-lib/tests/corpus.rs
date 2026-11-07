@@ -6032,6 +6032,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a to h.r",
             "a's resource is moved",
             "Return mutably borrowed resource from h.r to t",
+        ],
+    },
     // ─── Reads through a reference stored in an element (#438) ──────
     TooltipExpect {
         name: "read_through_element_ref",
@@ -6039,14 +6041,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // points to; slots is a Vec, not a reference, so "Copy from
         // *slots to n" was false.
         must_contain: &[
-            "Copy from *slots[0] to n",
-            "n is initialized by copy from *slots[0]",
+            "n is initialized with a copy of *slots[0]",
             "the resource slots[0] points to is copied",
-            "Copy from *hs[0].r to m",
+            "m is initialized with a copy of *hs[0].r",
             "the resource hs[0].r points to is copied",
-            "Copy from *boxes[0] to k",
+            "k is initialized with a copy of *boxes[0]",
             "the resource boxes[0] points to is copied",
-            "Copy from *grid[0][0] to total",
+            "total is assigned a copy of *grid[0][0]",
             "the resource grid[0][0] points to is copied",
         ],
         must_not_contain: &[
