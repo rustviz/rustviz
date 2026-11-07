@@ -2796,6 +2796,14 @@ impl Visualizable for VisualizationData {
                         b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                     }
                 }
+                // `x = …` / `*r = …` inside a branch drops the value the
+                // variable (or r's lender) held before. The event names
+                // that variable in `ro`, not in from/to (#267).
+                else if let ExternalEvent::OwnerDropAtReassign { ro, .. } = event {
+                    if ro.hash() == rap.hash() {
+                        b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                    }
+                }
             }
         }
     }
