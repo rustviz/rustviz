@@ -1169,6 +1169,8 @@ const EXPECTED_OK: &[&str] = &[
     "temporary_let_else_update_matched_field",
     // A let chain's scrutinee that its pattern moves parts out of (#605).
     "edition2024/temporary_let_chain_partly_moved",
+    // A destructuring assignment that leaves part of a call's result (#625).
+    "destructure_assign_temporary_leftover",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13230,6 +13232,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "at the end of this `&&` / `||` operand",
             "nothing bound it to a variable or moved it on",
             "(temporary 4)",
+        ],
+    },
+    TooltipExpect {
+        name: "destructure_assign_temporary_leftover",
+        // `(m, _) = pair();` is lowered to `{ let (lhs, _) = pair(); m =
+        // lhs; }`: the `_` String stays in the temporary, which is dropped
+        // at the end of that `let`, before m's old value is dropped by the
+        // assignment (checked with a Drop-printing program). Before,
+        // nothing stated it; for `(n, _) = make_w().pair;` #616 said all
+        // of `pair` was moved out (false: pair.1 stays). `(m, n) =
+        // pair();` takes all of it: no column.
+        must_contain: &[
+            "Move from pair to (temporary)",
+            "A temporary holds the value that pair returns, for the destructuring assignment to take apart. It moves parts of it to the places on the left; nothing takes the rest, so Rust drops the temporary, and what is left in it, before those places get their new values",
+            "This temporary (String, String) is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the assignment didn't move out of it",
+            "Move from make_w to (temporary 2)",
+            "This temporary W is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it everything in it but what the assignment moved out of its field pair",
+        ],
+        must_not_contain: &[
+            "its field pair, which was moved out of it",
+            "'s field pair is moved to n",
+            "(temporary 3)",
         ],
     },
 ];

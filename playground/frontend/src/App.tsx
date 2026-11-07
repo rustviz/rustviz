@@ -450,9 +450,8 @@ const Description: React.FC = () => (
         <code>match make().name</code>) get one too, as does a let chain&apos;s
         scrutinee, and so does a call&apos;s
         result that a <code>let</code> pattern takes apart (
-        <code>let (a, _) = make();</code>). Not drawn or mentioned: what a
-        destructuring assignment leaves in one (<code>(m, _) = make();</code>).
-        A variable moved into a{' '}
+        <code>let (a, _) = make();</code>, <code>(m, _) = make();</code>). A
+        variable moved into a{' '}
         <code>vec![..]</code> or literal that nothing binds (<code>vec![s];</code>,
         or by struct update, <code>P {'{'} n: 1, ..p {'}'};</code>) is drawn
         moving into the temporary.

@@ -441,6 +441,15 @@ pub fn event_dot_unbound_temporary_part_acquire(_my_name: &String, from_name: &S
             "A temporary holds the value that {0}, for the `let` pattern to take its field {1} apart. The pattern moves parts of that field into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
             source, fmt_style(f)
         ),
+        // `(m, _) = pair();` (#625).
+        TempPart::Assign(None) => format!(
+            "A temporary holds the value that {0}, for the destructuring assignment to take apart. It moves parts of it to the places on the left; nothing takes the rest, so Rust drops the temporary, and what is left in it, before those places get their new values",
+            source
+        ),
+        TempPart::Assign(Some(f)) => format!(
+            "A temporary holds the value that {0}, for the destructuring assignment to take its field {1} apart. It moves parts of that field to the places on the left; nothing takes the rest, so Rust drops the temporary, and what is left in it, before those places get their new values",
+            source, fmt_style(f)
+        ),
         TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) | TempPart::LetChain(None) => format!(
             "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
             source, let_kind(part)
@@ -550,6 +559,14 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
         ),
         TempPart::Match(Some(f)) => format!(
             "This temporary {0} is dropped {1}, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field {2}",
+            fmt_style(ty), when, fmt_style(f)
+        ),
+        TempPart::Assign(None) => format!(
+            "This temporary {0} is dropped {1}, and with it whatever the assignment didn't move out of it",
+            fmt_style(ty), when
+        ),
+        TempPart::Assign(Some(f)) => format!(
+            "This temporary {0} is dropped {1}, and with it everything in it but what the assignment moved out of its field {2}",
             fmt_style(ty), when, fmt_style(f)
         ),
         TempPart::Let(None) => format!(

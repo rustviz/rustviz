@@ -5153,6 +5153,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       // `let Ok(s) = res() else { .. };`: dropped once the pattern is
       // matched, before the `else` block runs (any edition, #605).
+      // `(m, _) = pair();`: dropped at the end of the `let` it is
+      // lowered to, before the places on the left are assigned (#625).
+      Some(TempPart::Assign(_)) => {
+        when = "as soon as the assignment has taken it apart (before the places on the left get their new values)";
+      }
       Some(TempPart::LetElse(_)) => {
         when = "as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match)";
         end_line = span_end_line(&scrut.span, &self.tcx);
@@ -5270,10 +5275,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // takes the value (or the field) apart, and can leave parts of it
       // in the temporary, which is dropped at the end of the statement
       // (#623). A `ref` binding extends the temporary instead (#483); a
-      // destructuring assignment's `let` isn't the user's. A literal
-      // (`let (a, _) = (s, t);`) is #445's.
+      // destructuring assignment (`(m, _) = pair();`) is lowered to such
+      // a `let` (#625). A literal (`let (a, _) = (s, t);`) is #445's.
       Node::LetStmt(l) => {
-        if l.span.from_expansion() || !matches!(l.source, rustc_hir::LocalSource::Normal)
+        let assign = matches!(l.source, rustc_hir::LocalSource::AssignDesugar);
+        if (!assign && (l.span.from_expansion() || !matches!(l.source, rustc_hir::LocalSource::Normal)))
           || !l.init.is_some_and(|i| i.hir_id == top.hir_id)
           || matches!(expr.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
           return None;
@@ -5283,7 +5289,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if by_ref || !(left || self.pat_leaves_temp_drop(l.pat, sty, typeck, env)) {
           return None;
         }
-        Some(TempPart::Let(path))
+        Some(if assign { TempPart::Assign(path) } else { TempPart::Let(path) })
       }
       _ => self.field_moved_part(top, path, left, typeck, env),
     }
