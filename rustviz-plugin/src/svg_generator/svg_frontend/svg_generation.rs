@@ -49,11 +49,43 @@ fn sort_branch_external_events(b_data: & mut ExtBranchData) {
     }
 }
 
+/// Splits the arrows that share one source line (and so get stacked
+/// rows: the first straight on the line's row, the others as
+/// trapezoids dipping into extra rows below) into the ones that stay
+/// stacked from the line's first row and the ends of borrows that
+/// *start* on this same line. Those ends move to a row of their own
+/// below the stack, together with the line's events that come after
+/// the borrow (#371). Without that, a match arm `Some(s) =>
+/// println!("{}", s),` on `&opt` drew `s`'s borrow ending on the
+/// first row, above the row where `println!` reads through `s`.
+fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, Vec<ExternalEvent>) {
+    let rap_hash = |r: &ResourceTy| r.extract_rap().map(|r| *r.hash());
+    let ends = |e: &ExternalEvent| -> Option<(u64, u64)> {
+        let (from, to) = ResourceAccessPoint_extract(e);
+        Some((rap_hash(from)?, rap_hash(to)?))
+    };
+    let borrows: Vec<(u64, u64)> = group.iter()
+        .filter(|e| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }))
+        .filter_map(|e| ends(e))
+        .collect();
+    group.iter().cloned().partition(|e| {
+        let is_end = matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
+        let ends_a_borrow_here = is_end && ends(e).map_or(false, |(f, t)| {
+            f != t && borrows.iter().any(|&(bf, bt)| (bf, bt) == (f, t) || (bf, bt) == (t, f))
+        });
+        !ends_a_borrow_here
+    })
+}
+
 pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usize, usize>, mut extra_lines: usize) -> usize {
     let old_extra_lines = extra_lines;
     let old_line_map = b_data.line_map.clone();
     let mut new_line_map: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut skippable_ev: HashSet<usize> = HashSet::new();
+    // (source line, shift) for the rest of a line whose arrows were
+    // split by `split_same_line_borrow_ends`: its later events go on
+    // the row of the moved borrow ends, not the line's last row.
+    let mut same_line_shift: Option<(usize, usize)> = None;
 
     // mutate actual events
     let mut i: usize = 0;
@@ -66,7 +98,10 @@ pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usi
             i = i + 1;
             continue;
         }
-        *l += extra_lines; // update starting line of event
+        match same_line_shift {
+            Some((src, shift)) if src == line_num && !matches!(e, ExternalEvent::Branch { .. }) => *l += shift,
+            _ => *l += extra_lines, // update starting line of event
+        }
         match e {
             ExternalEvent::Branch {branches, split_point, merge_point, branch_type, .. } => {
                 *split_point = *l; // update split point
@@ -93,20 +128,27 @@ pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usi
                         .cloned();
                     let ex = match res {
                     Some(ev) => { // if there are multiple arrow events on this line
-                        for e in ev.clone() {
+                        let (front, back) = split_same_line_borrow_ends(&ev);
+                        let back_line = new_line_num + front.len();
+                        for (e, row) in front.iter().map(|e| (e, new_line_num))
+                            .chain(back.iter().map(|e| (e, back_line))) {
                             skippable_ev.insert(e.get_id()); // they all become skippable
                             let mut j = i;
                             while j < size { // need to mutate all their line numbers
                                 let (l, p_e) = b_data.e_data.get_mut(j).unwrap();
                                 if p_e.get_id() == e.get_id(){
-                                    *l = new_line_num;
+                                    *l = row;
                                     break;
                                 }
                                 j += 1;
                             }
                         }
                         let ev_len = ev.len() - 1;
-                        new_line_map.insert(new_line_num, ev); // insert new line number into new event line map
+                        if !back.is_empty() {
+                            same_line_shift = Some((line_num, back_line - line_num));
+                            new_line_map.insert(back_line, back);
+                        }
+                        new_line_map.insert(new_line_num, front); // insert new line number into new event line map
                         l_map.insert(new_line_num, ev_len);
                         ev_len
                         },
@@ -417,6 +459,9 @@ pub fn render_svg(
     }
     let mut skippable_ev: HashSet<usize> = HashSet::new();
     let mut line_insertion_map: HashMap<usize, usize> = HashMap::new();
+    // Same as in `mutate_branch_lines`: (source line, visual row) for
+    // the rest of a line whose borrow ends were moved down a row.
+    let mut same_line_row: Option<(usize, usize)> = None;
     while i < size {
         let (line_num, event) = visualization_data.preprocess_external_events.get_mut(i).unwrap();
         let mut branch_line = 0;
@@ -447,7 +492,11 @@ pub fn render_svg(
         // copies
         let line_num = *line_num;
         let event = event.clone();
-        let final_line_num = if branch_line != 0 { branch_line } else {line_num + extra_lines};
+        let final_line_num = match same_line_row {
+            _ if branch_line != 0 => branch_line,
+            Some((src, row)) if src == line_num => row,
+            _ => line_num + extra_lines,
+        };
 
         // append event
         // append any events that are on the same line in event line map to avoid double counting
@@ -517,8 +566,12 @@ pub fn render_svg(
             let res = line_ev.cloned();
             let ex = match res {
                 Some(ev) => { // if there are multiple arrow events on this line
-                    for e in ev.clone() { // append all the events in the line map on the same line
-                        visualization_data.append_processed_external_event(e.clone(), final_line_num);
+                    let (front, back) = split_same_line_borrow_ends(&ev);
+                    let back_row = final_line_num + front.len();
+                    for (e, row) in front.iter().map(|e| (e, final_line_num))
+                        .chain(back.iter().map(|e| (e, back_row))) {
+                        // append all the events in the line map on the same line
+                        visualization_data.append_processed_external_event(e.clone(), row);
                         skippable_ev.insert(e.get_id()); // they all become skippable
                     }
                     // Stacked arrows draw at consecutive vertical positions
@@ -535,7 +588,11 @@ pub fn render_svg(
                         .take_while(|l| l.trim().is_empty())
                         .count();
                     let to_insert = needed.saturating_sub(trailing_blanks);
-                    event_line_map_replace.insert(final_line_num, ev); // insert new line number into new event line map
+                    if !back.is_empty() {
+                        same_line_row = Some((line_num, back_row));
+                        event_line_map_replace.insert(back_row, back);
+                    }
+                    event_line_map_replace.insert(final_line_num, front); // insert new line number into new event line map
                     line_insertion_map.insert(final_line_num, to_insert);
                     to_insert
                 },
