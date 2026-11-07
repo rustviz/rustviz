@@ -719,6 +719,18 @@ fn compute_column_layout<'a>(
         let fn_line = visualization_data.fn_start_lines.get(hash).copied().unwrap_or(0);
         by_fn.entry(fn_line).or_default().push(*hash);
     }
+    // A pattern binding drawn side by side with the variable it binds
+    // from (`if let Some(a) = &x && let Some(b) = y {`) gets its column
+    // right after that variable's, so that their arrows don't overlap
+    // (#510): x, a, y, b.
+    for hashes in by_fn.values_mut() {
+        for (from, to) in &visualization_data.binding_columns {
+            let (Some(_), Some(j)) = (hashes.iter().position(|h| h == from), hashes.iter().position(|h| h == to)) else { continue };
+            let to = hashes.remove(j);
+            let i = hashes.iter().position(|h| h == from).unwrap_or(j);
+            hashes.insert(i + 1, to);
+        }
+    }
 
     for (_fn_line, hashes) in by_fn.iter() {
         let mut x: i64 = 0; // reset per fn

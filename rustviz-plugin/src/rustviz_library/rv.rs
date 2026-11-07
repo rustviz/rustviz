@@ -41,6 +41,7 @@ impl Rustviz {
       num_valid_raps: num_raps,
       fn_start_lines,
       shadow_notes,
+      binding_columns: Vec::new(),
     };
     /* ******************************************
             --- Render SVG images ---

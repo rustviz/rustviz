@@ -2171,6 +2171,12 @@ pub struct VisualizationData {
     /// rap.hash() → what to say in the hover text of a numbered column
     /// header (`s₂`); only columns whose name is numbered have one.
     pub shadow_notes: HashMap<u64, ShadowNote>,
+
+    /// (source, binding) column pairs of pattern bindings that are drawn
+    /// side by side on their `if let` line, each binding's column right
+    /// after its source's (see `side_by_side_bindings`, #510). Filled in
+    /// by `render_svg`.
+    pub binding_columns: Vec<(u64, u64)>,
 }
 
 /// About a numbered column (`s₂`): a variable of the same name as an

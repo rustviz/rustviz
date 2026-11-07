@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, ExtBranchData, ExternalEvent, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -77,7 +77,52 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
     })
 }
 
-pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usize, usize>, mut extra_lines: usize) -> usize {
+/// The (source, binding) column pairs of the arrows `evs` of one line of
+/// an arm, when they are all bindings of the arm's pattern (`to` is
+/// declared by the arm) from distinct variables that aren't bound there
+/// themselves: `if let Some(a) = &x && let Some(b) = y {` (#510). Such
+/// arrows are drawn side by side on their row, each binding's column
+/// right after its source's (`binding_columns`), rather than one below
+/// the other with a row added for each extra one: by default the
+/// bindings' columns come after both sources, so `x -> a` ran over `y`'s
+/// dot, and `y -> b` was a trapezoid through a blank row that pushed the
+/// arm's body a row away from its code. A struct (or a field) has
+/// columns of its fields next to it, so a line with one isn't changed.
+fn side_by_side_bindings(evs: &[ExternalEvent], b_data: &ExtBranchData) -> Option<Vec<(u64, u64)>> {
+    if evs.len() < 2 {
+        return None;
+    }
+    let mut pairs = Vec::new();
+    for e in evs {
+        if !matches!(e, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. }
+            | ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) {
+            return None;
+        }
+        let (ResourceTy::Value(from), ResourceTy::Value(to)) = ResourceAccessPoint_extract(e) else { return None };
+        let plain = |r: &ResourceAccessPoint| !r.is_fn() && !r.is_struct_group() && !r.is_member();
+        if !plain(from) || !plain(to) || !b_data.decl_vars.contains(to) || b_data.decl_vars.contains(from) {
+            return None;
+        }
+        pairs.push((*from.hash(), *to.hash()));
+    }
+    let distinct = |hs: Vec<u64>| hs.iter().collect::<HashSet<_>>().len() == hs.len();
+    (distinct(pairs.iter().map(|p| p.0).collect()) && distinct(pairs.iter().map(|p| p.1).collect()))
+        .then_some(pairs)
+}
+
+/// Shifts the lines of the arm `b_data` by the rows inserted above it
+/// and below its stacked arrows. `pattern_lines` are the (unshifted)
+/// lines its conditional splits on and the arm starts on, where its
+/// pattern binds (`} else if let Some(a) = &x && … {`);
+/// `binding_columns` collects the pattern bindings drawn side by side
+/// there (`side_by_side_bindings`).
+pub fn mutate_branch_lines(
+    b_data: & mut ExtBranchData,
+    l_map: & mut HashMap<usize, usize>,
+    mut extra_lines: usize,
+    pattern_lines: (usize, usize),
+    binding_columns: &mut Vec<(u64, u64)>,
+) -> usize {
     let old_extra_lines = extra_lines;
     let old_line_map = b_data.line_map.clone();
     let mut new_line_map: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
@@ -110,8 +155,9 @@ pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usi
                 *split_point = *l; // update split point
                 for (j, branch) in branches.iter_mut().enumerate(){ // mutate branches
                     let (start, end) = branch_type.get_mut_start_end(j);
+                    let pattern_lines = (line_num, *start);
                     *start += extra_lines;
-                    let b = mutate_branch_lines(branch, l_map, extra_lines);
+                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -129,7 +175,23 @@ pub fn mutate_branch_lines(b_data: & mut ExtBranchData, l_map: & mut HashMap<usi
                     let res = old_line_map.get(&line_num)
                         .filter(|ev| ev.iter().any(|x| x.get_id() == id))
                         .cloned();
+                    let side_by_side = res.as_ref()
+                        .filter(|_| line_num == pattern_lines.0 || line_num == pattern_lines.1)
+                        .and_then(|ev| side_by_side_bindings(ev, b_data));
                     let ex = match res {
+                    Some(ev) if side_by_side.is_some() => {
+                        // All on the line's own row, and left out of the
+                        // line map, so each is drawn as the first arrow on
+                        // its line: straight along the row.
+                        for e in &ev {
+                            skippable_ev.insert(e.get_id());
+                            if let Some((l, _)) = b_data.e_data[i..].iter_mut().find(|(_, p_e)| p_e.get_id() == e.get_id()) {
+                                *l = new_line_num;
+                            }
+                        }
+                        binding_columns.extend(side_by_side.into_iter().flatten());
+                        0
+                    }
                     Some(ev) => { // if there are multiple arrow events on this line
                         let (front, back) = split_same_line_borrow_ends(&ev);
                         let back_line = new_line_num + front.len();
@@ -487,9 +549,10 @@ pub fn render_svg(
                 branch_line = *line_num + extra_lines;
                 for (j, branch) in branches.iter_mut().enumerate() {
                     let (start, end) = branch_type.get_mut_start_end(j);
+                    let pattern_lines = (*line_num, *start);
                     *start += extra_lines;
                     // recurse into the branch
-                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines);
+                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns);
                     extra_lines += b;
                     *end += extra_lines;
                 }
