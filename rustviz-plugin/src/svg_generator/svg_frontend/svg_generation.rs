@@ -77,6 +77,41 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
     })
 }
 
+/// Whether `e`, one of a line's stacked arrows (`group`), ends the
+/// borrow of a reference that the line also uses otherwise: in
+/// another of its arrows, or in an event of the line not yet appended
+/// (`rest`). `*x += 1;` as x's last use copies out of `*x`, writes
+/// through it, and returns x's borrow, in that order. Appended first,
+/// the end came before the write in x's history, and the write then
+/// showed x holding a live `&mut` again down to its scope end (#587).
+fn ends_after_line_uses(e: &ExternalEvent, group: &[ExternalEvent], rest: &[ExternalEvent]) -> bool {
+    let Some(r) = ended_ref(e) else { return false };
+    group.iter().chain(rest).filter(|o| o.get_id() != e.get_id()).any(|o| uses_rap(o, r))
+}
+
+/// The hash of the reference whose borrow `e` ends, if it is a
+/// StaticDie / MutableDie.
+fn ended_ref(e: &ExternalEvent) -> Option<u64> {
+    if !matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) {
+        return None;
+    }
+    ResourceAccessPoint_extract(e).0.extract_rap().map(|r| *r.hash())
+}
+
+fn uses_rap(e: &ExternalEvent, r: u64) -> bool {
+    let (from, to) = ResourceAccessPoint_extract(e);
+    from.extract_rap().is_some_and(|f| *f.hash() == r) || to.extract_rap().is_some_and(|t| *t.hash() == r)
+}
+
+/// Whether `e`, an event of a line that draws no arrow (the write in
+/// `*x += 1;`), uses a reference whose borrow one of the line's
+/// stacked arrows (`group`) ends. Its dot belongs on the line's own
+/// row with the end's, not on a row inserted below for the stack
+/// (#587).
+fn uses_ref_ended_on_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
+    group.iter().filter_map(ended_ref).any(|r| uses_rap(e, r))
+}
+
 /// The (source, binding) column pairs of the arrows `evs` of one line of
 /// an arm, when they are all bindings of the arm's pattern (`to` is
 /// declared by the arm) from distinct variables that aren't bound there
@@ -223,10 +258,14 @@ pub fn mutate_branch_lines(
                     };
                     extra_lines += ex;
                     *extras_at_line.entry(line_num).or_insert(0) += ex;
-                } else if matches!(e, ExternalEvent::ClosureCall { .. }) {
-                    // Same as the top-level loop: a closure call's dot
-                    // stays on its line, above rows inserted for
-                    // stacked arrows on that line.
+                } else if matches!(e, ExternalEvent::ClosureCall { .. })
+                    || (!matches!(same_line_shift, Some((src, _)) if src == line_num)
+                        && old_line_map.get(&line_num).is_some_and(|g| uses_ref_ended_on_line(e, g)))
+                {
+                    // Same as the top-level loop: a closure call's dot,
+                    // or an event that draws no arrow (a write through
+                    // `*x`, #587), stays on its line, above rows
+                    // inserted for stacked arrows on that line.
                     *l -= extras_at_line.get(&line_num).copied().unwrap_or(0);
                 }
                 // no need for else since we already updated the line
@@ -533,7 +572,25 @@ pub fn render_svg(
     // Same as in `mutate_branch_lines`: (source line, visual row) for
     // the rest of a line whose borrow ends were moved down a row.
     let mut same_line_row: Option<(usize, usize)> = None;
+    // Borrow ends held back until the rest of their source line has been
+    // appended (see `ends_after_line_uses`): (source line, event, row).
+    let mut deferred_ends: Vec<(usize, ExternalEvent, usize)> = Vec::new();
     while i < size {
+        // Append each held-back borrow end once its line has no event
+        // left that uses the reference (so before the reference's own
+        // scope end on that line, which doesn't use it).
+        if !deferred_ends.is_empty() {
+            let pending = &visualization_data.preprocess_external_events[i..];
+            let (still, ready): (Vec<_>, Vec<_>) = std::mem::take(&mut deferred_ends).into_iter().partition(|(src, e, _)| {
+                ended_ref(e).is_some_and(|r| pending.iter().any(|(l, o)| {
+                    l == src && !skippable_ev.contains(&o.get_id()) && uses_rap(o, r)
+                }))
+            });
+            deferred_ends = still;
+            for (_, e, row) in ready {
+                visualization_data.append_processed_external_event(e, row);
+            }
+        }
         let (line_num, event) = visualization_data.preprocess_external_events.get_mut(i).unwrap();
         let mut branch_line = 0;
         if skippable_ev.contains(&event.get_id()) {
@@ -645,10 +702,19 @@ pub fn render_svg(
                 Some(ev) => { // if there are multiple arrow events on this line
                     let (front, back) = split_same_line_borrow_ends(&ev);
                     let back_row = final_line_num + front.len();
+                    let rest_of_line: Vec<ExternalEvent> = visualization_data.preprocess_external_events[i + 1..]
+                        .iter()
+                        .filter(|(l, e)| *l == line_num && !ev.iter().any(|g| g.get_id() == e.get_id()))
+                        .map(|(_, e)| e.clone())
+                        .collect();
                     for (e, row) in front.iter().map(|e| (e, final_line_num))
                         .chain(back.iter().map(|e| (e, back_row))) {
                         // append all the events in the line map on the same line
-                        visualization_data.append_processed_external_event(e.clone(), row);
+                        if ends_after_line_uses(e, &ev, &rest_of_line) {
+                            deferred_ends.push((line_num, e.clone(), row));
+                        } else {
+                            visualization_data.append_processed_external_event(e.clone(), row);
+                        }
                         skippable_ev.insert(e.get_id()); // they all become skippable
                     }
                     // Stacked arrows draw at consecutive vertical positions
@@ -695,10 +761,28 @@ pub fn render_svg(
             visualization_data.append_processed_external_event(event.clone(), final_line_num - same_line);
         }
         else {
-            visualization_data.append_processed_external_event(event.clone(), final_line_num);
+            // Like a closure call, an event that draws no arrow and uses
+            // a reference whose borrow ends on this line (the write in
+            // `*x += 1;`) stays on the line's own row, with the end,
+            // above rows inserted for the line's stacked arrows (#587).
+            // It used to land on the first inserted row, below the end.
+            let same_line: usize = match same_line_row {
+                Some((src, _)) if src == line_num => 0,
+                _ if branch_line != 0 => 0,
+                _ if !visualization_data.event_line_map.get(&line_num)
+                    .is_some_and(|g| uses_ref_ended_on_line(&event, g)) => 0,
+                _ => extras_at_source_line.iter()
+                    .filter(|(s, _)| *s == line_num)
+                    .map(|(_, ex)| *ex)
+                    .sum(),
+            };
+            visualization_data.append_processed_external_event(event.clone(), final_line_num - same_line);
         }
 
         i += 1;
+    }
+    for (_, e, row) in deferred_ends {
+        visualization_data.append_processed_external_event(e, row);
     }
 
     info!("insert line map {:#?}", line_insertion_map);
