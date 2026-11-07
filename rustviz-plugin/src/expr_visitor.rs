@@ -1132,6 +1132,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // (Some(variable), Some(function), _)
       },
       (ResourceTy::Anonymous, ResourceTy::Anonymous, _) | (_, ResourceTy::Caller, _) => {},
+      // A borrow kept by the closure a call returned (#686) is drawn
+      // after that closure arrives from the call on the holder's column,
+      // not stacked with the line's other arrows ahead of it.
+      (_, _, ExternalEvent::StaticBorrow { via, .. } | ExternalEvent::MutableBorrow { via, .. }) if returned_closure(via) => {},
       // A borrow stored in an element (`v[0] = &u`, #282) is drawn on
       // the lender's column only: v's column doesn't model it.
       (_, ResourceTy::Index(..), ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => {},
@@ -3382,6 +3386,80 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loan_line: None,
       co_lenders: lenders,
     });
+  }
+
+  /// `let g = keep(|| s.len());`: `g` holds the closure `keep`
+  /// returned, and that closure holds the reference its capture made,
+  /// so `s` stays borrowed while `g` is in use, not just during the
+  /// call (#686). rustc's facts say which loans `g` holds once the
+  /// call has returned (`loans_kept_after_call`). Each is drawn as a
+  /// capture borrow into `g` that returns where the loan ends, as for
+  /// `let f = || s.len();`. Called after `match_rhs` drew `g`'s value
+  /// arriving from the call.
+  pub fn draw_kept_closure_borrows(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
+    let (func, args): (String, Vec<&'tcx Expr<'tcx>>) = match init.kind {
+      ExprKind::Call(f, args) => match hirid_to_var_name(f.hir_id, &self.tcx) {
+        Some(n) => (n, args.iter().collect()),
+        None => return,
+      },
+      ExprKind::MethodCall(seg, rcvr, args, _) =>
+        (seg.ident.as_str().to_owned(), std::iter::once(rcvr).chain(args.iter()).collect()),
+      _ => return,
+    };
+    let Some(to_rap) = self.raps.get(name).map(|rd| rd.rap.to_owned()) else { return };
+    if !to_rap.is_closure() {
+      return;
+    }
+    let to = ResourceTy::Value(to_rap);
+    let line = expr_to_line(init, &self.tcx);
+    for k in self.loans_kept_after_call(init.span) {
+      if k.holder != name {
+        continue;
+      }
+      // A capture made by a closure literal in the arguments is drawn
+      // on the captured place's column (`p.name`), as `let f = || ..`
+      // draws it, when it's the closure's only capture of that variable.
+      let literal_capture = args.iter().find_map(|a| match a.kind {
+        ExprKind::Closure(c) if a.span.contains(k.span) => {
+          let typeck = self.tcx.typeck(c.def_id);
+          let caps: Vec<_> = typeck.closure_min_captures_flattened(c.def_id)
+            .filter(|cap| matches!(cap.info.capture_kind, rustc_middle::ty::UpvarCapture::ByRef(_)))
+            .filter(|cap| matches!(cap.place.base, rustc_middle::hir::place::PlaceBase::Upvar(u)
+              if binding_name(&self.tcx, u.var_path.hir_id) == k.lender))
+            .collect();
+          match caps.as_slice() {
+            [cap] => self.capture_rap(&cap.place, &k.lender),
+            _ => None,
+          }
+        }
+        _ => None,
+      });
+      let Some(lender) = literal_capture.or_else(|| self.raps.get(&k.lender).map(|rd| rd.rap.to_owned())) else { continue };
+      if lender.is_fn() {
+        continue;
+      }
+      let from = ResourceTy::Value(lender.clone());
+      let via = BorrowVia {
+        func: func.clone(),
+        lenders: vec![lender.name().to_owned()],
+        also_unnamed: false,
+        tie: ArgTie::default(),
+        carrier: ViaCarrier::ReturnedClosure { mutable: k.is_mut, through_ref: k.through_ref },
+      };
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      let ev = if k.is_mut {
+        ExternalEvent::MutableBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, via: Some(via), id }
+      } else {
+        ExternalEvent::StaticBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, via: Some(via), id }
+      };
+      self.update_rap(&lender, line);
+      self.add_external_event(line, ev);
+      // add_ev maps (lhs, rhs) to a Die { from: rhs, to: lhs }: the
+      // borrow goes back from g to s, as in the closure literal arm.
+      let die = if k.is_mut { Evt::MDie } else { Evt::SDie };
+      self.add_ev(k.end_line.max(line), die, from, to.clone(), false);
+    }
   }
 
   /// `let mut refs = Vec::new();` (a type that can hold references)

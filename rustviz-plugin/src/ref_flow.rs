@@ -251,7 +251,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// from types alone.
   pub fn call_stores_into_receiver(&self, call: &'tcx Expr<'tcx>) -> bool {
     matches!(call.kind, ExprKind::MethodCall(..))
-      && self.call_arg_flows_into(call, FlowTarget::Receiver).is_some_and(|f| !f.is_empty())
+      && (self.call_arg_flows_into(call, FlowTarget::Receiver).is_some_and(|f| !f.is_empty())
+        || !self.receiver_kept_loans(call).is_empty())
   }
 
   /// The variables whose borrows `call` stores into its receiver
@@ -259,7 +260,50 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub fn receiver_store_lenders(&self, call: &'tcx Expr<'tcx>) -> (Vec<ResourceTy>, bool) {
     let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
     let is_mut = flows.iter().any(|f| f.place_mut || (f.content && self.value_borrow_is_mut(f.arg)));
-    (self.lenders_of_flows(flows).0, is_mut)
+    let lenders = self.lenders_of_flows(flows).0;
+    if !lenders.is_empty() {
+      return (lenders, is_mut);
+    }
+    // The signature ties the stored value to the receiver only through
+    // a trait bound (`extend<I: IntoIterator<Item = T>>(&mut self, iter:
+    // I)`): ask rustc which loans the receiver holds once the call has
+    // returned (#682).
+    let mut out: Vec<ResourceTy> = Vec::new();
+    let mut is_mut = false;
+    for k in self.receiver_kept_loans(call) {
+      let Some(rd) = self.raps.get(&k.lender) else { continue };
+      // A reborrow through a reference variable (`[&*r]`) isn't drawn.
+      if rd.rap.is_fn() || rd.rap.is_ref() || k.through_ref {
+        continue;
+      }
+      let l = ResourceTy::Value(rd.rap.to_owned());
+      if !out.contains(&l) {
+        out.push(l);
+      }
+      is_mut |= k.is_mut;
+    }
+    (out, is_mut)
+  }
+
+  /// The loans a `&mut self` method call leaves in its receiver
+  /// variable (see `loans_kept_after_call`). Only asked when the
+  /// receiver's type can hold a borrow and the method takes `&mut
+  /// self`, so the (costly) Polonius run is rare.
+  fn receiver_kept_loans(&self, call: &'tcx Expr<'tcx>) -> Vec<crate::mir_data::KeptLoan> {
+    let ExprKind::MethodCall(_, rcvr, _, _) = call.kind else { return Vec::new() };
+    if !matches!(rcvr.kind, ExprKind::Path(QPath::Resolved(None, _))) {
+      return Vec::new();
+    }
+    let Some((sig, ..)) = self.callee_sig(call) else { return Vec::new() };
+    if !matches!(sig.inputs().first().map(|t| t.kind()), Some(ty::Ref(_, _, m)) if m.is_mut()) {
+      return Vec::new();
+    }
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    if !typeck.expr_ty(rcvr).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
+      return Vec::new();
+    }
+    let Some(name) = expr_to_rap_name(rcvr, &self.tcx) else { return Vec::new() };
+    self.loans_kept_after_call(call.span).into_iter().filter(|k| k.holder == name).collect()
   }
 
   fn lenders_of_flows(&self, flows: Vec<ArgFlow<'tcx>>) -> (Vec<ResourceTy>, bool) {

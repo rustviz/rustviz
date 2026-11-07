@@ -9,7 +9,7 @@
 
 use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_to_line, written_name}};
 use log::info;
-use rustc_middle::mir::{Location, Local, Operand, ProjectionElem, VarDebugInfoContents};
+use rustc_middle::mir::{BorrowKind, Location, Local, Operand, ProjectionElem, TerminatorKind, VarDebugInfoContents};
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::ty::Ty;
 use std::collections::HashMap;
@@ -21,6 +21,26 @@ use rustc_span::Span;
 use polonius_engine::{Algorithm, Output, FactTypes};
 type Loan = <RustcFacts as FactTypes>::Loan;
 type Point = <RustcFacts as FactTypes>::Point;
+type Origin = <RustcFacts as FactTypes>::Origin;
+
+/// A loan a call left in a variable (see `loans_kept_after_call`).
+#[derive(Clone, Debug)]
+pub struct KeptLoan {
+    /// Index of the loan in rustc's borrow set (`MIRBorrowData::borrow_idx`).
+    pub loan: usize,
+    /// RAP name of the variable that holds the loan once the call returns.
+    pub holder: String,
+    /// RAP name of the variable borrowed; with `through_ref`, the
+    /// reference variable whose referent (`*r`) is reborrowed.
+    pub lender: String,
+    pub through_ref: bool,
+    pub is_mut: bool,
+    /// Last line the loan is live on (`MIRBorrowData::region.1`).
+    pub end_line: usize,
+    /// Source span of the borrow that issued the loan (for a closure's
+    /// capture, the closure literal).
+    pub span: Span,
+}
 
 pub struct MIRBorrowData {
     pub borrow_idx: usize,
@@ -311,6 +331,112 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
           res
     }
 
+
+    /// The loans a call leaves in a variable that keeps them after it
+    /// returns: the closure `keep` hands back into `g` in `let g =
+    /// keep(|| s.len());` holds its capture's loan of `s` (#686), and
+    /// `refs.extend([&s])` stores `&s` in `refs` (#682), which a
+    /// signature only says through a trait bound (`I: IntoIterator<Item
+    /// = T>`).
+    ///
+    /// Read from rustc's own facts, not the callee's signature: right
+    /// after the call returns, a variable keeps loan L if L is in one
+    /// of the regions of its type there (Polonius' `origin_contains_loan_at`,
+    /// which only holds while that variable is live). A loan counts as
+    /// handed over by the call if it was issued inside the call (`&s` in
+    /// its arguments, a closure argument's capture) or if the variable
+    /// didn't hold it before the call. Only loans of a named variable
+    /// (or of what a reference variable points to, `*r`) are returned.
+    pub fn loans_kept_after_call(&self, call: Span) -> Vec<KeptLoan> {
+        let bwf = self.bwf;
+        let (Some(facts), Some(table)) = (bwf.input_facts.as_ref(), bwf.location_table.as_ref()) else { return Vec::new() };
+        let body = &bwf.body;
+        // The call's terminator, and the first point after it returns.
+        let mut sites: Vec<(Location, Location)> = Vec::new();
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            let term = data.terminator();
+            if let TerminatorKind::Call { target: Some(target), fn_span, .. } = &term.kind {
+                if term.source_info.span == call || *fn_span == call {
+                    sites.push((Location { block: bb, statement_index: data.statements.len() },
+                                Location { block: *target, statement_index: 0 }));
+                }
+            }
+        }
+        if sites.is_empty() {
+            return Vec::new();
+        }
+        let names = self.mir_local_names(bwf);
+        // Ordered by local, so the result doesn't depend on hash order.
+        let mut origins: std::collections::BTreeMap<Local, Vec<Origin>> = std::collections::BTreeMap::new();
+        for (local, origin) in facts.use_of_var_derefs_origin.iter().chain(facts.drop_of_var_derefs_origin.iter()) {
+            if names.contains_key(local) {
+                let os = origins.entry(*local).or_default();
+                if !os.contains(origin) {
+                    os.push(*origin);
+                }
+            }
+        }
+        let out = Output::compute(facts, Algorithm::Naive, true);
+        let held_at = |p: Point, os: &[Origin]| -> Vec<Loan> {
+            let mut ls: Vec<Loan> = Vec::new();
+            if let Some(m) = out.origin_contains_loan_at.get(&p) {
+                for o in os {
+                    for l in m.get(o).into_iter().flatten() {
+                        if !ls.contains(l) {
+                            ls.push(*l);
+                        }
+                    }
+                }
+            }
+            ls
+        };
+        let ends: HashMap<usize, usize> = self.gather_borrow_data(bwf).iter().map(|b| (b.borrow_idx, b.region.1)).collect();
+        let mut res: Vec<KeptLoan> = Vec::new();
+        for (term, after) in sites {
+            for (local, os) in origins.iter() {
+                let before = held_at(table.start_index(term), os);
+                for loan in held_at(table.start_index(after), os) {
+                    let Some((issued, data)) = bwf.borrow_set.location_map().get_index(loan.index()) else { continue };
+                    let span = self.location_to_span(*issued, bwf);
+                    if before.contains(&loan) && !call.contains(span) {
+                        continue;
+                    }
+                    let place = data.borrowed_place();
+                    let through_ref = match place.projection.first() {
+                        Some(ProjectionElem::Deref) => {
+                            // `*r` with `r` a reference variable: a reborrow
+                            // of what r points to. Any deeper deref (`**r`, a
+                            // Box) has no column to draw on.
+                            if place.projection.iter().skip(1).any(|p| matches!(p, ProjectionElem::Deref))
+                                || !body.local_decls[place.local].ty.is_ref() {
+                                continue;
+                            }
+                            true
+                        }
+                        _ if place.projection.iter().any(|p| matches!(p, ProjectionElem::Deref)) => continue,
+                        _ => false,
+                    };
+                    let (Some(lender), Some(holder)) = (names.get(&place.local), names.get(local)) else { continue };
+                    if place.local == *local {
+                        continue;
+                    }
+                    if res.iter().any(|k| k.loan == loan.index() && k.holder == *holder) {
+                        continue;
+                    }
+                    res.push(KeptLoan {
+                        loan: loan.index(),
+                        holder: holder.clone(),
+                        lender: lender.clone(),
+                        through_ref,
+                        is_mut: matches!(data.kind(), BorrowKind::Mut { .. }),
+                        end_line: ends.get(&loan.index()).copied().unwrap_or_else(|| self.location_to_line(*issued, bwf)),
+                        span,
+                    });
+                }
+            }
+        }
+        res
+    }
 
     /// The last line in `lines` (first, last) on which the variable
     /// `name` (its RAP name, see `mir_local_names`) is live, from

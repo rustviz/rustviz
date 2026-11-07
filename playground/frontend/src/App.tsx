@@ -268,10 +268,8 @@ const Description: React.FC = () => (
       <li>
         A reference bound by a pattern out of a value that holds borrows of
         several variables (<code>Some(x)</code> on{' '}
-        <code>pick(&amp;a, &amp;b)</code>) isn&apos;t linked to them, and a
-        collection filled by <code>extend</code> isn&apos;t drawn as
-        borrowing what its references point to (<code>vec![&amp;s]</code>,{' '}
-        <code>collect()</code> and <code>push(&amp;s)</code> are). (What a call returns, like{' '}
+        <code>pick(&amp;a, &amp;b)</code>) isn&apos;t linked to them. (What a
+        call returns, like{' '}
         <code>first_word(&amp;s)</code>, <code>longest(&amp;a, &amp;b)</code>{' '}
         or <code>v.iter()</code>, is.)
       </li>
@@ -315,8 +313,10 @@ const Description: React.FC = () => (
         brace, or to the <code>break</code>/<code>continue</code> every path
         leaves by); closures show
         their captures but not their bodies (for a closure passed straight to
-        a function, what it moves or copies in, and what it borrows only if
-        that borrow ends with the call; calling a once-only closure says what
+        a function, what it moves or copies in, and what it borrows, until the
+        call returns or, if the call&apos;s result keeps the closure (
+        <code>let g = keep(|| s.len());</code>), until that result&apos;s last
+        use; calling a once-only closure says what
         happens to what it captured, not the body&apos;s steps); in a method
         chain only
         the first call is drawn on the variable (later calls work on temporary
