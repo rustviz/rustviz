@@ -945,6 +945,8 @@ fn render_dot(
                     dot_x: timeline_data.x_val,
                     dot_y: if collapsed {
                         get_y_axis_pos(*split_point) - COLLAPSED_APEX
+                    } else if CollapsedApexes::of(history).raised_splits.contains(split_point) {
+                        get_y_axis_pos(*split_point) - PATTERN_SPLIT_RISE
                     } else {
                         get_y_axis_pos(*line_number)
                     },
@@ -3057,6 +3059,15 @@ fn render_branches(
                     get_y_axis_pos(merge_point.saturating_sub(1)) as f64,
                 )
             };
+        // An `if let` whose pattern binds from this column (#382): the
+        // arms fork from half a row above the split row and start on
+        // it, the `if` arm with the binding's dot.
+        let raised = CollapsedApexes::of(history).raised_splits.contains(split_point);
+        let (split_y, column_top_y) = if raised {
+            ((get_y_axis_pos(*split_point) - PATTERN_SPLIT_RISE) as f64, get_y_axis_pos(*split_point) as f64)
+        } else {
+            (split_y, column_top_y)
+        };
 
         // Parent's state at the split. The active arm uses this
         // directly; passive arms Gray-convert it so their leading
@@ -3094,8 +3105,20 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, column_top_y),
-                leading_state, visualization_data,
+                leading_state.clone(), visualization_data,
             );
+            // An arm that starts below the raised fork's row (the `else`)
+            // runs down to its first row in the state it forked with.
+            if raised {
+                let first_row = branch.states.iter().find(|(top, bot, _)| top <= bot).map(|s| s.0);
+                if let Some(first_row) = first_row.filter(|r| r > split_point) {
+                    push_seg_if_renderable(
+                        &mut segs, rap,
+                        (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
+                        leading_state, visualization_data,
+                    );
+                }
+            }
             // A branch of type `!` (`return`, `panic!()`, `break`,
             // `continue`) never reaches the merge (#296): its column
             // stops at the branch's last line instead of running on
@@ -3107,6 +3130,11 @@ fn render_branches(
             let apexes = CollapsedApexes::of(&branch.e_data);
             let mut stop_y: Option<f64> = None;
             for (top, bot, state) in &branch.states {
+                // The binding's dot is on the split row, above the row
+                // the arm's column would start on: the state up to it
+                // ran backwards, from that row up to the dot. A raised
+                // fork's arm starts on the split row itself.
+                if raised && top > bot { continue; }
                 let bot = match stop_line {
                     None => *bot,
                     Some(stop) if *top >= stop => continue,
@@ -3460,22 +3488,59 @@ fn render_timeline(
 /// `render_branches`).
 const COLLAPSED_APEX: i64 = 30;
 
+/// How far above its row the split dot of an `if let` is drawn when the
+/// pattern binds from the column on that row (see `binds_at_split`):
+/// half a row (`LINE_SPACE` is 30), into the gap above, so no row is
+/// added.
+const PATTERN_SPLIT_RISE: i64 = 15;
+
+/// Whether the conditional `history[i]` is an `if let` (over several
+/// lines) whose pattern binds from this column: a borrow, copy or move
+/// out of it on the split line, the first thing its `if` arm does. The
+/// match happens as control enters that arm, so the arm's column starts
+/// on the split row with the binding's dot, and the split dot goes
+/// half a row above it (`PATTERN_SPLIT_RISE`) with the arms forking
+/// from there. Drawn from the split dot on the split row, the arm ran
+/// back up from its diagonal to the binding's dot, and the binding's
+/// arrow hopped over the split dot (#382).
+///
+/// Not when the column has a dot of its own on the split line (an
+/// event of the scrutinee): it would be left between the arms.
+fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
+    let Event::Branch { branch_history, ty, split_point, merge_point, .. } = &history[i].1 else { return false };
+    ty.is_if_let()
+        && !branch_is_collapsed(*split_point, *merge_point)
+        && branch_history.first().is_some_and(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
+        && !history.iter().enumerate().any(|(j, (l, ev))| {
+            j != i && l == split_point && !matches!(ev, Event::RefDie { .. })
+        })
+}
+
 /// Lines where a column stops for, or resumes after, a conditional
 /// whose branches share lines. The column has to stop at the diamond's
-/// top corner (half a row above the line), not run on into it.
+/// top corner (half a row above the line), not run on into it. Also
+/// the split lines of `if let`s whose split dot is raised above its row
+/// (`binds_at_split`), where the column stops at that dot.
 struct CollapsedApexes {
     splits: BTreeSet<usize>,
     merges: BTreeSet<usize>,
+    raised_splits: BTreeSet<usize>,
 }
 
 impl CollapsedApexes {
     fn of(history: &[(usize, Event)]) -> Self {
-        let mut apexes = CollapsedApexes { splits: BTreeSet::new(), merges: BTreeSet::new() };
-        for (_, ev) in history {
+        let mut apexes = CollapsedApexes {
+            splits: BTreeSet::new(),
+            merges: BTreeSet::new(),
+            raised_splits: BTreeSet::new(),
+        };
+        for (i, (_, ev)) in history.iter().enumerate() {
             if let Event::Branch { split_point, merge_point, .. } = ev {
                 if branch_is_collapsed(*split_point, *merge_point) {
                     apexes.splits.insert(*split_point);
                     apexes.merges.insert(*merge_point);
+                } else if binds_at_split(history, i) {
+                    apexes.raised_splits.insert(*split_point);
                 }
             }
         }
@@ -3489,9 +3554,16 @@ impl CollapsedApexes {
             return None;
         }
         let (after_join, before_split) = (self.merges.contains(&top), self.splits.contains(&bot));
+        let before_raised_split = self.raised_splits.contains(&bot);
         let y1 = get_y_axis_pos(top) + if after_join { COLLAPSED_APEX } else { 0 };
-        let y2 = get_y_axis_pos(bot) - if before_split { COLLAPSED_APEX } else { 0 };
-        if (after_join || before_split) && y1 >= y2 {
+        let y2 = get_y_axis_pos(bot) - if before_split {
+            COLLAPSED_APEX
+        } else if before_raised_split {
+            PATTERN_SPLIT_RISE
+        } else {
+            0
+        };
+        if (after_join || before_split || before_raised_split) && y1 >= y2 {
             return None;
         }
         Some((y1, y2))

@@ -1822,6 +1822,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             ],
           ),
         };
+        // The arm of an `if let` with pattern bindings is named so for
+        // the drawing: they bind on the split line, and the arm's column
+        // starts there (#382).
+        let mut b_labels = b_labels;
+        if !iflet_bindings.is_empty() {
+          b_labels[0] = IF_LET_ARM.to_owned();
+        }
         let b_ty = BranchType::If(b_labels, b_slices);
         self.add_external_event(line_num,
           ExternalEvent::Branch {
