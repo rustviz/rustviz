@@ -4907,18 +4907,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// The places that building the literal `e` moves a value that needs
-  /// drop out of (`P { name: s, .. }`, `vec![s]`, `(t, 1)`), nested
-  /// literals included. None when the literal takes a place by struct
-  /// update (`P { n: 1, ..p }` moves only some of p's fields, which
-  /// isn't drawn).
-  fn literal_moved_places(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
+  /// The columns that building the literal `e` moves a value that
+  /// needs drop out of (`P { name: s, .. }`, `vec![s]`, `(t, 1)`), with
+  /// the line of each move, nested literals included. A struct update
+  /// (`P { n: 1, ..p }`) moves p's fields that the literal doesn't
+  /// name (#574); None when those have no columns of their own.
+  fn literal_moved_places(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<(ResourceAccessPoint, usize)>> {
     let typeck = self.tcx.typeck(e.hir_id.owner);
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner);
+    let mut places = Vec::new();
     let elems: Vec<&'tcx Expr<'tcx>> = match e.kind {
       ExprKind::Struct(_, fields, tail) => {
         if let rustc_hir::StructTailExpr::Base(b) = tail {
-          if is_place_expr(b) { return None; }
+          if is_place_expr(b) {
+            places.extend(self.struct_update_moves(e, fields, b, typeck, env)?);
+          }
         }
         fields.iter().map(|f| f.expr).collect()
       }
@@ -4930,15 +4933,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         None => return Some(Vec::new()),
       },
     };
-    let mut places = Vec::new();
     for x in elems {
       if is_place_expr(x) {
-        if typeck.expr_ty(x).needs_drop(self.tcx, env) { places.push(x); }
+        if typeck.expr_ty(x).needs_drop(self.tcx, env) {
+          if let Some(src) = fetch_rap(x, &self.tcx, &self.raps) {
+            places.push((src, expr_to_line(x, &self.tcx)));
+          }
+        }
       } else if matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
         places.extend(self.literal_moved_places(x)?);
       }
     }
     Some(places)
+  }
+
+  /// `P { n: 1, ..p }`: the columns of p's fields that need drop and
+  /// that the literal doesn't name, which it moves out of p (#574).
+  /// None when one of them has no column.
+  fn struct_update_moves(
+    &self,
+    lit: &'tcx Expr<'tcx>,
+    fields: &'tcx [rustc_hir::ExprField<'tcx>],
+    base: &'tcx Expr<'tcx>,
+    typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+    env: rustc_middle::ty::TypingEnv<'tcx>,
+  ) -> Option<Vec<(ResourceAccessPoint, usize)>> {
+    let rustc_middle::ty::TyKind::Adt(def, args) = typeck.expr_ty(lit).kind() else { return None };
+    if !def.is_struct() {
+      return None;
+    }
+    let base_name = expr_to_rap_name(base, &self.tcx)?;
+    let line = expr_to_line(base, &self.tcx);
+    let mut moves = Vec::new();
+    for f in def.non_enum_variant().fields.iter() {
+      if fields.iter().any(|ef| ef.ident.name == f.name) || !f.ty(self.tcx, args).needs_drop(self.tcx, env) {
+        continue;
+      }
+      let col = self.raps.get(&format!("{}.{}", base_name, f.name))?;
+      moves.push((col.rap.to_owned(), line));
+    }
+    Some(moves)
   }
 
   /// `vec![String::new()];`, `format!(..).len()`: a std macro's result
@@ -4992,7 +5026,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// needs drop, and only for the shapes where the value certainly isn't
   /// moved on: anything else (a field moved out of it, a `match` that
   /// binds part of it by value, a borrow a `let` extends) says nothing.
-  fn note_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, fn_name: String, into: Vec<&'tcx Expr<'tcx>>) -> Option<ResourceAccessPoint> {
+  fn note_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, fn_name: String, into: Vec<(ResourceAccessPoint, usize)>) -> Option<ResourceAccessPoint> {
     if self.temp_drops_noted.contains(&expr.hir_id) {
       return None;
     }
@@ -5017,7 +5051,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     when: &str,
     end_line: usize,
     owner: Option<HirId>,
-    into: Vec<&'tcx Expr<'tcx>>,
+    into: Vec<(ResourceAccessPoint, usize)>,
   ) -> Option<ResourceAccessPoint> {
     // Branch events are sliced out by line, so a one-line `match` / `if`
     // can't hold a column of its own (the same limit as #354 / #459).
@@ -5042,11 +5076,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let line = expr_to_line(expr, &self.tcx);
     self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
-    // Variables moved into the temporary (`vec![s];`, #570).
-    for x in into {
-      let Some(src) = fetch_rap(x, &self.tcx, &self.raps) else { continue };
+    // Variables moved into the temporary (`vec![s];`, #570; the fields
+    // `P { n: 1, ..p }` takes from p, #574).
+    for (src, src_line) in into {
       self.update_rap(&src, line);
-      self.add_ev(expr_to_line(x, &self.tcx), Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
+      self.add_ev(src_line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
     }
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
     let id = *self.unique_id;
