@@ -1027,18 +1027,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // built it, #439); the exit drops it before its scope's end.
       let temp_ty = rap.is_unbound_temporary().then(|| self.preprocessed_events.iter()
         .find_map(|(_, e)| match e {
-          ExternalEvent::TemporaryDrop { ro, ty, literal, .. } if ro == &rap => Some((ty.clone(), *literal)),
+          ExternalEvent::TemporaryDrop { ro, ty, literal, .. } if ro == &rap => ty.clone().map(|ty| (ty, *literal)),
           _ => None,
         })).flatten();
+      // A `let`-extended temporary (#400) is dropped here too, not at
+      // the end of the block its `let` is in (#553).
+      let extended_temp = rap.is_temporary() && !rap.is_unbound_temporary();
+      let when = if how == "panic" {
+        "here, as the panic unwinds".to_owned()
+      } else {
+        format!("here, where `{}` leaves early", how)
+      };
       match temp_ty {
-        Some((ty, literal)) => {
-          let when = if how == "panic" {
-            "here, as the panic unwinds".to_owned()
-          } else {
-            format!("here, where `{}` leaves early", how)
-          };
-          self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty, when, literal, id });
-        }
+        Some((ty, literal)) => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, id }),
+        None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, id }),
         None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id }),
       }
     }
@@ -3467,7 +3469,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
     let ty = strip_module_paths(&ty.to_string());
     let id = *self.unique_id;
-    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), literal: false, id });
+    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), literal: false, id });
     *self.unique_id += 1;
   }
 
@@ -4814,7 +4816,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
       let ty = strip_module_paths(&ty.to_string());
       let id = *self.unique_id;
-      self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), literal: true, id });
+      self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), literal: true, id });
       *self.unique_id += 1;
     }
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
