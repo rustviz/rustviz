@@ -1,6 +1,6 @@
 // #382: `if let Some(b) = y` with `y: Option<i32>`. The i32 is copied
-// into `b` only when the pattern matches, at the start of the if
-// branch's column.
+// into `b` only when the pattern matches, at the start of `b`'s column.
+// The copy changes nothing about `y`, so `y` stays one column (#496).
 fn take(_k: i32) {}
 
 fn main() {
