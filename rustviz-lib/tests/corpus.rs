@@ -883,6 +883,8 @@ const EXPECTED_OK: &[&str] = &[
     "match_ref_mut_guard_last_use",
     "match_ref_guard_unused",
     "match_shared_ref_binding_last_use",
+    // A write through a `&mut` on the line its borrow ends (#587).
+    "deref_write_ends_borrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9571,6 +9573,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "deref_write_ends_borrow",
+        // #587: `*x += 1;` is x's last use, so x's borrow of `v` ends
+        // there, after the write (pinned in order by
+        // `write_through_ref_comes_before_its_borrow_end`). The write
+        // used to get a dot of its own on a blank row below the return,
+        // and x's column came back as a live `&mut` from there to its
+        // scope end. Same for `y`, out of `it.next()` (#575's return).
+        must_contain: &[
+            "the value x points to is modified through *x",
+            "x's mutable borrow ends",
+            "Return mutably borrowed resource from x to v",
+            "the value y points to is modified through *y",
+            "Return mutably borrowed resource from y to v",
+            "v's resource is no longer borrowed by y, but is still mutably borrowed by it",
+        ],
+        // What was false on main is the order and the extra segment, not
+        // a tooltip's text (bullets are matched one by one here); the
+        // test named above fails on main.
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -10462,6 +10485,31 @@ fn reference_copied_out_of_a_holder_returns_at_its_last_use() {
         .collect();
     assert_eq!(back.len(), 1, "v is unborrowed at {:?} after the loop starts", back);
     assert!(back[0].1 > row, "v is unborrowed at {:?}, not below n's last use (y={}); it still borrows v", back[0], row);
+}
+
+/// #587: `*x += 1;` as x's last use reads `*x`, writes through it, and
+/// then x's borrow ends. All three are on x's dot on that line, in that
+/// order, and x's column isn't drawn again below it: `x` holds a live
+/// `&mut` only from its `let` to that line (one segment).
+#[test]
+fn write_through_ref_comes_before_its_borrow_end() {
+    let rv = run_with_local_backend("deref_write_ends_borrow");
+    let timeline = rv.timeline_panel_string();
+    let tips = tooltip_lines(&timeline);
+    for r in ["x", "y"] {
+        let end = format!("{r}'s mutable borrow ends");
+        let dots: Vec<&Vec<String>> = tips.iter().filter(|t| t.contains(&end)).collect();
+        assert_eq!(dots.len(), 1, "{r}: dots ending its borrow: {:?}", dots);
+        let want = [
+            format!("*{r}'s value is copied"),
+            format!("the value {r} points to is modified through *{r}"),
+            end.clone(),
+        ];
+        assert!(dots[0].ends_with(&want), "{r}: the dot ending its borrow reads {:?}, not ending with {:?}", dots[0], want);
+        let live = format!("{r} holds a mutable reference; it can read and write the borrowed value");
+        let segments = tips.iter().filter(|t| **t == [live.clone()]).count();
+        assert_eq!(segments, 1, "{r}: {segments} segments read {live:?}; its column comes back after its borrow ends");
+    }
 }
 
 /// The timeline y of the code-panel row showing source line `src`
