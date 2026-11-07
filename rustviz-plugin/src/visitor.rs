@@ -1109,6 +1109,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           | ExprKind::DropTemps(_))
       {
         self.descend_through_expansion(expr);
+        if let Some(name) = self.std_value_macro(expr) {
+          self.note_macro_temporary_drop(expr, name);
+        }
         return;
       }
       // Fall through to the normal Match / DropTemps arm below.
@@ -1124,7 +1127,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
         if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-          self.note_temporary_drop(expr, name);
+          self.note_temporary_drop(expr, name, Vec::new());
         }
 
         // need to specifically handle println! macro because it's common
@@ -1195,7 +1198,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let line_num = expr_to_line(&rcvr, &self.tcx);
         let fn_name = name_and_generic_args.ident.as_str().to_owned();
         self.add_fn(fn_name.clone());
-        self.note_temporary_drop(expr, fn_name.clone());
+        self.note_temporary_drop(expr, fn_name.clone(), Vec::new());
         // Recurse into the receiver first: in a chain like
         // `v.iter().map(f).collect()` that visits `v.iter()` (and
         // `.map(f)`) before this call, so events come out in
@@ -2706,6 +2709,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   _ => None,
                 })
               {
+                self.note_for_head_temporary(head_arg, guard_expr, expr);
                 // Iterand event: shape of head_arg dictates the arrow.
                 //   &v       ⇒ SBorrow from v
                 //   &mut v   ⇒ MBorrow from v
@@ -2878,6 +2882,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           _ => {}
         }
       }
+      // `P { .. }`, `(a, b)`, `[a, b]` written by the user: a value
+      // that nothing may take is a temporary too (#469).
+      ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_) => {
+        intravisit::walk_expr(self, expr);
+        if let Some(name) = literal_temporary_name(expr) {
+          self.note_literal_temporary_drop(expr, name);
+        }
+      }
       _ => {
         intravisit::walk_expr(self, expr);
       }
@@ -2932,7 +2944,107 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
   }
 }
 
+/// How a literal is named on the column of the value it builds:
+/// `P { .. }`, `(..)`, `[..]`.
+fn literal_temporary_name(expr: &Expr) -> Option<String> {
+  match expr.kind {
+    ExprKind::Struct(qpath, ..) => {
+      let name = match qpath {
+        QPath::Resolved(_, p) => p.segments.iter().map(|s| s.ident.as_str()).collect::<Vec<_>>().join("::"),
+        QPath::TypeRelative(_, seg) => seg.ident.as_str().to_owned(),
+        _ => return None,
+      };
+      Some(format!("{} {{ .. }}", name))
+    }
+    ExprKind::Tup(_) => Some("(..)".to_owned()),
+    ExprKind::Array(_) => Some("[..]".to_owned()),
+    _ => None,
+  }
+}
+
+/// `x`, `p.f`, `v[i]`, `*r`: an expression that names a place.
+fn is_place_expr(e: &Expr) -> bool {
+  match e.kind {
+    ExprKind::Path(QPath::Resolved(_, p)) => matches!(p.res, Res::Local(_)),
+    ExprKind::Field(base, _) | ExprKind::Index(base, _, _) | ExprKind::Unary(UnOp::Deref, base) => is_place_expr(base),
+    _ => false,
+  }
+}
+
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// The std macro whose result `expr` is, when the user wrote the macro
+  /// call (not a macro inside another macro's expansion): `vec![..]`,
+  /// `format!(..)`. Their expansion isn't a `Call` the visitor reaches,
+  /// so `note_macro_temporary_drop` handles them. (`visit_expr` only
+  /// sees the root of an expansion; `descend_through_expansion` walks
+  /// the rest.)
+  fn std_value_macro(&self, expr: &'tcx Expr<'tcx>) -> Option<&'static str> {
+    let data = expr.span.ctxt().outer_expn_data();
+    if data.call_site.from_expansion() || !data.macro_def_id.is_some_and(|d| !d.is_local()) {
+      return None;
+    }
+    match bang_macro_name(&data.kind).as_deref() {
+      Some("vec") => Some("vec!"),
+      Some("format") => Some("format!"),
+      _ => None,
+    }
+  }
+
+  /// The places that building the literal `e` moves a value that needs
+  /// drop out of (`P { name: s, .. }`, `vec![s]`, `(t, 1)`), nested
+  /// literals included. None when the literal takes a place by struct
+  /// update (`P { n: 1, ..p }` moves only some of p's fields, which
+  /// isn't drawn).
+  fn literal_moved_places(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner);
+    let elems: Vec<&'tcx Expr<'tcx>> = match e.kind {
+      ExprKind::Struct(_, fields, tail) => {
+        if let rustc_hir::StructTailExpr::Base(b) = tail {
+          if is_place_expr(b) { return None; }
+        }
+        fields.iter().map(|f| f.expr).collect()
+      }
+      ExprKind::Tup(items) | ExprKind::Array(items) => items.iter().collect(),
+      ExprKind::Repeat(x, _) => vec![x],
+      _ => match vec_macro_elems(e) {
+        Some(items) => items.iter().collect(),
+        // `vec![]`, a `format!`: nothing is moved in.
+        None => return Some(Vec::new()),
+      },
+    };
+    let mut places = Vec::new();
+    for x in elems {
+      if is_place_expr(x) {
+        if typeck.expr_ty(x).needs_drop(self.tcx, env) { places.push(x); }
+      } else if matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
+        places.extend(self.literal_moved_places(x)?);
+      }
+    }
+    Some(places)
+  }
+
+  /// `vec![String::new()];`, `format!(..).len()`: a std macro's result
+  /// is a temporary like a call's (#469). `name` is the column of the
+  /// macro, like a fn's.
+  fn note_macro_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, name: &str) {
+    self.note_container_temporary_drop(expr, name.to_owned());
+  }
+
+  /// `P { .. };`, `let _ = (make(), 1);`, `[a(), b()].len()`: a literal
+  /// that nothing takes is a temporary like a call's result (#469).
+  fn note_literal_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, name: String) {
+    self.note_container_temporary_drop(expr, name);
+  }
+
+  /// A macro's or literal's temporary. A variable moved into it
+  /// (`vec![s];`, `let _ = P { name: t, n: 1 };`) is drawn moving into
+  /// its column, so it stops owning the value (#570).
+  fn note_container_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, name: String) {
+    let Some(places) = self.literal_moved_places(expr) else { return };
+    self.note_temporary_drop(expr, name, places);
+  }
+
   /// A call whose result is a temporary that Rust drops at the end of
   /// its statement (#457): `make();`, `let _ = make();`, `make().len()`,
   /// `f(&make())`. The temporary has no column, so say so on the
@@ -2940,21 +3052,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// needs drop, and only for the shapes where the value certainly isn't
   /// moved on: anything else (a field moved out of it, a `match` that
   /// binds part of it by value, a borrow a `let` extends) says nothing.
-  fn note_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, fn_name: String) {
+  fn note_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, fn_name: String, into: Vec<&'tcx Expr<'tcx>>) -> Option<ResourceAccessPoint> {
     if self.temp_drops_noted.contains(&expr.hir_id) {
-      return;
+      return None;
     }
     let typeck = self.tcx.typeck(expr.hir_id.owner);
     let ty = typeck.expr_ty(expr);
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
     if !ty.needs_drop(self.tcx, env) || !self.is_unmoved_temporary(expr, typeck, env) {
-      return;
+      return None;
     }
-    let Some((when, end_line, owner)) = self.temporary_scope_end(expr) else { return };
+    let (when, end_line, owner) = self.temporary_scope_end(expr)?;
+    self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into)
+  }
+
+  /// The `(temporary N)` column of a value nothing takes: it acquires
+  /// `ty`'s value from `fn_name` where `expr` is, and is dropped by a
+  /// `TemporaryDrop` at `end_line`.
+  fn record_temporary_drop(
+    &mut self,
+    expr: &'tcx Expr<'tcx>,
+    ty: String,
+    fn_name: String,
+    when: &str,
+    end_line: usize,
+    owner: Option<HirId>,
+    into: Vec<&'tcx Expr<'tcx>>,
+  ) -> Option<ResourceAccessPoint> {
     // Branch events are sliced out by line, so a one-line `match` / `if`
     // can't hold a column of its own (the same limit as #354 / #459).
     if self.inside_one_line_branch(expr) {
-      return;
+      return None;
     }
     self.temp_drops_noted.insert(expr.hir_id);
 
@@ -2974,22 +3102,57 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let line = expr_to_line(expr, &self.tcx);
     self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
+    // Variables moved into the temporary (`vec![s];`, #570).
+    for x in into {
+      let Some(src) = fetch_rap(x, &self.tcx, &self.raps) else { continue };
+      self.update_rap(&src, line);
+      self.add_ev(expr_to_line(x, &self.tcx), Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
+    }
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
-    let ty = strip_module_paths(&ty.to_string());
     let id = *self.unique_id;
-    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), id });
+    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp.clone(), ty, when: when.to_owned(), id });
     *self.unique_id += 1;
+    Some(tmp)
+  }
+
+  /// `for x in make_vec()`, `for x in v`, `for x in vec![..]`: the head
+  /// is moved into the iterator `IntoIterator::into_iter` makes, which
+  /// the loop owns and drops when it ends; what the loop didn't take out
+  /// of it is dropped with it (#469). That iterator has no column, so
+  /// say so on one like a call's result. Nothing is stated for a head
+  /// that is a reference or whose iterator owns nothing (`&v`, `0..n`,
+  /// `v.iter()`, `s.chars()`).
+  fn note_for_head_temporary(&mut self, head: &'tcx Expr<'tcx>, iter_call: &'tcx Expr<'tcx>, for_expr: &'tcx Expr<'tcx>) {
+    let typeck = self.tcx.typeck(iter_call.hir_id.owner);
+    let ty = typeck.expr_ty(iter_call);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, iter_call.hir_id.owner);
+    if ty.is_ref() || !ty.needs_drop(self.tcx, env) || self.temp_drops_noted.contains(&head.hir_id) {
+      return;
+    }
+    let end_line = span_end_line(&for_expr.span, &self.tcx);
+    // An adapter chain's type (`Map<IntoIter<String>, {closure@..}>`)
+    // isn't something a student wrote.
+    let shown = strip_module_paths(&ty.to_string());
+    let shown = if shown.contains('{') { "iterator".to_owned() } else { shown };
+    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, Vec::new());
   }
 
   /// True iff `expr` sits inside an `if` / `match` that starts and ends
   /// on one line.
   fn inside_one_line_branch(&self, expr: &'tcx Expr<'tcx>) -> bool {
     let sm = self.tcx.sess.source_map();
-    self.tcx.hir_parent_iter(expr.hir_id).any(|(_, node)| match node {
-      rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::If(..) | ExprKind::Match(..)) && !e.span.from_expansion() => {
-        sm.lookup_char_pos(e.span.lo()).line == sm.lookup_char_pos(e.span.hi()).line
+    let mut child = expr.hir_id;
+    self.tcx.hir_parent_iter(expr.hir_id).any(|(id, node)| {
+      let from = std::mem::replace(&mut child, id);
+      match node {
+        // The scrutinee / condition is evaluated before the branches
+        // split, so it isn't inside them (#469).
+        rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::Match(s, ..) | ExprKind::If(s, ..) if s.hir_id == from) => false,
+        rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::If(..) | ExprKind::Match(..)) && !e.span.from_expansion() => {
+          sm.lookup_char_pos(e.span.lo()).line == sm.lookup_char_pos(e.span.hi()).line
+        }
+        _ => false,
       }
-      _ => false,
     })
   }
 
@@ -3029,6 +3192,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             });
           }
+          !moves_out
+        }
+        // `if let` / `while let`: the same, for the one pattern (#469).
+        ExprKind::Let(l) if is_me(l.init) => {
+          let mut moves_out = false;
+          l.pat.each_binding(|ann, hid, _, _| {
+            if ann.0 == rustc_hir::ByRef::No && typeck.node_type(hid).needs_drop(self.tcx, env) {
+              moves_out = true;
+            }
+          });
           !moves_out
         }
         _ => false,
@@ -3109,6 +3282,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let is_cond = matches!(self.tcx.parent_hir_node(e.hir_id),
               Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == e.hir_id));
             return is_cond.then(|| ("at the end of the condition", end(inner.span), None));
+          }
+          // The scrutinee of an `if let` / `while let` (#469). Its
+          // temporaries outlive the pattern match.
+          ExprKind::If(c, then, _) if c.hir_id == cur && matches!(c.kind, ExprKind::Let(_)) => {
+            if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) {
+              return Some(("at the end of each iteration of this `while let` loop", end(e.span), None));
+            }
+            if expr.span.edition() >= rustc_span::edition::Edition::Edition2024 {
+              // Edition 2024: dropped before the `else` block runs, or
+              // when the matching block ends.
+              return Some(("before the `else` block of this `if let` runs, or when the block it matched ends", end(then.span), None));
+            }
+            // Before edition 2024 they live to the end of the enclosing
+            // statement, unless this is an `else if let`, whose whole
+            // `else` is a scope of its own.
+            if let Node::Expr(outer) = self.tcx.parent_hir_node(e.hir_id) {
+              if matches!(outer.kind, ExprKind::If(_, _, Some(els)) if els.hir_id == e.hir_id) {
+                return Some(("at the end of this `else if let`", end(e.span), None));
+              }
+            }
           }
           // `if` / `while` conditions, and the operands of `&&` / `||`,
           // are scopes of their own.

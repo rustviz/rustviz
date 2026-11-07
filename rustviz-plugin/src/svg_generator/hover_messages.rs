@@ -328,9 +328,37 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String) -> String 
 // drops it when its statement (or other temporary scope) ends (#457).
 // The two dots of its column: where it comes into being, and the drop.
 pub fn event_dot_unbound_temporary_acquire(_my_name: &String, from_name: &String) -> String {
+    // The column the value comes from is a fn's, a std macro's (`vec!`)
+    // or a literal's (`P { .. }`, `(..)`, `[..]`) (#469).
+    let source = if from_name.ends_with('!') {
+        format!("the {0} macro produces", fmt_style(from_name))
+    } else if from_name.ends_with(" { .. }") || from_name == "(..)" || from_name == "[..]" {
+        format!("the literal {0} builds", fmt_style(from_name))
+    } else {
+        format!("{0} returns", fmt_style(from_name))
+    };
     format!(
-        "A temporary holds the value that {0} returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+        "A temporary holds the value that {0}. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+        source
+    )
+}
+
+// A variable moved into an unbound temporary (`vec![s];`, `let _ = P {
+// name: t, n: 1 };`): the variable's value is now the temporary's, and
+// is dropped with it (#570).
+pub fn event_dot_unbound_temporary_takes(from_name: &String) -> String {
+    format!(
+        "This temporary takes the value of {0}, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
         fmt_style(from_name)
+    )
+}
+
+// An unbound temporary that is still alive where the function returns
+// (or a loop is left) early: Rust drops it on that path too (#469).
+pub fn event_dot_unbound_temporary_exit_drop(my_name: &String) -> String {
+    format!(
+        "{0} is dropped here: the function (or loop) is left early, while this temporary is still alive. Its resource is dropped.",
+        fmt_style(my_name)
     )
 }
 

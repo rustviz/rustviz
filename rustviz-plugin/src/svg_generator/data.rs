@@ -1883,6 +1883,10 @@ impl Event {
                 match to {
                     ResourceTy::Caller => safe_message(if v { hover_messages::event_dot_move_to_caller_value } else { hover_messages::event_dot_move_to_caller }, &self.deref_name(my_name), to),
                     ResourceTy::Temporary { extended } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
+                    // `vec![s];`: s is moved into the temporary the macro or
+                    // literal builds, which nothing takes (#570).
+                    ResourceTy::Value(rap) if rap.is_unbound_temporary() =>
+                        hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), false),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
                             is.extract_rap().and_then(|r| r.rc_drop())),
@@ -1985,6 +1989,11 @@ impl Event {
                     // variable is bound to a reference, which never
                     // owns its referent.
                     hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref())
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary())
+                    && matches!(from, ResourceTy::Value(f) if !f.is_fn()) {
+                    // `vec![s];`: s is moved into the temporary (#570).
+                    let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
+                    hover_messages::event_dot_unbound_temporary_takes(&from_name)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
                     // `make();`, `make().len()`: nothing takes the value.
                     safe_message(hover_messages::event_dot_unbound_temporary_acquire, &self.deref_name(my_name), from)

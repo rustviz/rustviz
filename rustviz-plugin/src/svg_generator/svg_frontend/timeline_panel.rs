@@ -1280,7 +1280,12 @@ fn render_dot(
                         // apex 3px below center.
                         let cx = timeline_data.x_val;
                         let cy = event_y;
-                        let title = if ro.is_temporary() {
+                        let title = if ro.is_unbound_temporary() {
+                            // An unbound temporary still alive where a
+                            // `return` / `break` / `?` leaves its scope
+                            // (#469): it is dropped on that path.
+                            hover_messages::event_dot_unbound_temporary_exit_drop(&name)
+                        } else if ro.is_temporary() {
                             // A `let`-extended temporary (#400): say why
                             // it lives, and so drops, only here.
                             hover_messages::event_dot_temporary_go_out_of_scope(&name)

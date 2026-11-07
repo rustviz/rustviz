@@ -391,17 +391,21 @@ rather than listed here.
   gives its names no columns.
 - Temporaries: a temporary that a `let` borrows (`let r =
   &String::from("a");`) lives until the end of the block, so it gets
-  a column labelled `(temporary)` that is dropped there. A call's
-  result that nothing binds or moves on (`make();`, `let _ = make();`,
-  `make().len()`, `f(&make())`, a `match` scrutinee) gets a short
-  `(temporary)` column too (numbered in one sequence with the others:
-  `(temporary 2)`, ...), dropped where Rust drops it. Left out
-  (their drops are not stated): temporaries that aren't a call's result
-  (`vec![..];`, `format!(..);`, a struct literal), the scrutinee of
-  `if let` / `while let`, a `for` loop's head (`for x in make().iter()`),
-  a field moved out of a temporary (`make().name`), a `match`
-  scrutinee some arm binds by value, and a temporary nested inside a
-  borrowed value (`let p = Wrapper { r: &String::new() };`).
+  a column labelled `(temporary)` that is dropped there. A value that
+  nothing binds or moves on (a call's result: `make();`, `let _ =
+  make();`, `make().len()`, `f(&make())`; a `vec![..]` / `format!(..)`;
+  a struct, tuple or array literal; the scrutinee of a `match`, `if
+  let` or `while let` whose pattern binds nothing by value; the
+  iterator a `for` loop makes from its head, `for x in make_vec()`)
+  gets a short `(temporary)` column too (numbered in one sequence with
+  the others: `(temporary 2)`, ...), dropped where Rust drops it. Left
+  out (their drops are not stated): a field moved out of a temporary
+  (`make().name`), a scrutinee some pattern binds by value (`match
+  make() { Some(s) => .. }`), a macro or literal that takes a place by
+  struct update (`P { n: 1, ..p };`), and a temporary nested inside a
+  borrowed value (`let p = Wrapper { r: &String::new() };`). A variable
+  moved into such a macro or literal (`vec![s];`, `P { name: s, .. };`)
+  is drawn moving into the temporary's column.
   Temporaries with nothing to drop (`&Point { x: 4 }`) get no column.
 
 The plugin has its own per-feature TODO checklist in
