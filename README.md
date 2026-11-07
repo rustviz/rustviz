@@ -244,7 +244,12 @@ rather than listed here.
 - Closures: captures are shown; events inside the closure body aren't.
   For a closure passed straight to a function (`thread::spawn(move ||
   …)`), what it captures by value is drawn as moved / copied into the
-  call; what it captures by reference (`apply(|x| x + k)`) isn't drawn.
+  call. What it captures by reference (`apply(|x| x + k)`) is drawn as
+  borrowed by "the closure passed to apply" for the call, when the
+  closure is gone by the end of the call. When the callee keeps the
+  closure (`let g = keep(|| s.len());`, an iterator adapter stored for
+  later), or the capture is through a reference (`|| r.len()` with
+  `r: &String`), that borrow isn't drawn.
 - Loops (`for`, `while`, `loop`) show a single iteration. A `for`
   loop's variable is drawn bound at the `for` line and going out of
   scope at the body's closing brace, like the body's own `let`s; Rust

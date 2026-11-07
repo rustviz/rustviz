@@ -628,6 +628,8 @@ const EXPECTED_OK: &[&str] = &[
     "branch_call_ref_match",
     "branch_call_ref_method",
     "branch_ref_if_addr",
+    // By-reference captures of a closure passed straight to a call (#298).
+    "closure_arg_ref_captures",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6424,6 +6426,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from r to *r",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_arg_ref_captures",
+        // A closure literal passed to a call borrows what it captures
+        // by reference for as long as the closure lives (#298). For
+        // `apply`, `run` and `Option::map` the closure is gone when
+        // the call returns, so the borrow is drawn like a `&k`
+        // argument. `keep` hands the closure back (it lives on in
+        // `g`), so the borrow of `s` doesn't end at the call and
+        // isn't drawn.
+        must_contain: &[
+            // k and count are i32: a value, not a resource (#484).
+            "k's value is immutably borrowed by the closure passed to apply; k is read-only while the borrow is live",
+            "the closure passed to apply reads from k",
+            "count's value is mutably borrowed by the closure passed to run; count can't be used while the borrow is live",
+            "the closure passed to run reads from/writes to count",
+            "the closure passed to map reads from k",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "k's resource is immutably borrowed by the closure passed to apply; k is read-only while the borrow is live",
+            "count's resource is mutably borrowed by the closure passed to run; count can't be used while the borrow is live",
+            "the closure passed to keep reads from s",
+            "s's resource is immutably borrowed by the closure passed to keep; s is read-only while the borrow is live",
+            "k's resource is moved",
+            "count's resource is moved",
         ],
     },
 ];
