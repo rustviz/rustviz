@@ -773,6 +773,9 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    "match_ref_param_reborrow",
+    "match_mut_ref_param_reborrow",
+    "match_local_ref_reborrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3421,10 +3424,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "match_unchanged_merge",
         // No branch moves `opt` / `self`: the merge dot says so
-        // instead of carrying an empty tooltip.
+        // instead of carrying an empty tooltip. `self` is a reference
+        // that the arm binding `s` reborrows through (#372), so its
+        // borrow ends in each arm (#498), and its merge dot says that
+        // rather than "isn't moved".
         must_contain: &[
             "opt isn't moved in any of the branches above",
-            "self isn't moved in any of the branches above",
+            "self's borrow ended in each branch above",
             "opt goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["="],
@@ -8356,6 +8362,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
     },
+    // #372: a pattern binding reborrows through a reference; the
+    // reference's own borrow ends no earlier than the binding's.
+    // `ref_borrow_outlasts_pattern_reborrow` checks where.
+    TooltipExpect {
+        name: "match_ref_param_reborrow",
+        must_contain: &[
+            "o is an immutable borrow from the caller",
+            "Partial immutable borrow from o to s",
+            "Return immutably borrowed resource from s to o",
+            "o's immutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_mut_ref_param_reborrow",
+        must_contain: &[
+            "o is a mutable borrow from the caller",
+            "Return mutably borrowed resource from s to o",
+            "o's mutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_local_ref_reborrow",
+        must_contain: &[
+            "Return immutably borrowed resource from s to r",
+            "Return immutably borrowed resource from r to x",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -10599,4 +10635,56 @@ fn tuple_reassignment_dots_have_one_line() {
         "t.0 acquires ownership of a new resource; its previous resource is dropped".to_owned(),
         "t.0 acquires ownership of a new resource; its previous resource is dropped".to_owned(),
     ]);
+}
+
+/// (cx, cy) of the topmost timeline dot whose tooltip starts with `prefix`.
+fn first_dot(timeline: &str, prefix: &str) -> (f64, f64) {
+    timeline
+        .split("<circle ")
+        .skip(1)
+        .map(|c| &c[..c.find("/>").unwrap_or(c.len())])
+        .filter(|c| timeline_tooltips(c).iter().any(|t| t.starts_with(prefix)))
+        .map(|c| (num_attr(c, "cx"), num_attr(c, "cy")))
+        .fold(None, |m: Option<(f64, f64)>, d| match m {
+            Some(m) if m.1 <= d.1 => Some(m),
+            _ => Some(d),
+        })
+        .unwrap_or_else(|| panic!("no dot {:?}", prefix))
+}
+
+/// cy of the topmost timeline dot whose tooltip starts with `prefix`.
+fn first_dot_y(timeline: &str, prefix: &str) -> f64 {
+    first_dot(timeline, prefix).1
+}
+
+/// A match arm binding that reborrows through a reference (`Some(s)`
+/// on `o: &Option<String>`) keeps the reference's borrow alive (#372).
+/// The reference's "borrow ends" dot must not be above the row where
+/// `s` gives its borrow back to it; it used to be on the `match` line.
+#[test]
+fn ref_borrow_outlasts_pattern_reborrow() {
+    for (name, outer, kind) in [
+        ("match_ref_param_reborrow", "o", "immutabl"),
+        ("match_mut_ref_param_reborrow", "o", "mutabl"),
+        ("match_local_ref_reborrow", "r", "immutabl"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let tl = rv.timeline_panel_string();
+        let lent = first_dot_y(&tl, &format!("the resource {} points to is {}y borrowed by s", outer, kind));
+        let back = first_dot_y(&tl, &format!("s no longer borrows the resource {} points to", outer));
+        let ends = first_dot_y(&tl, &format!("{}'s {}e borrow ends", outer, kind));
+        assert!(lent < back && back <= ends,
+            "{}: {} lends to s at y={}, gets it back at y={}, its own borrow ends at y={}",
+            name, outer, lent, back, ends);
+        // And it is drawn on the arm where it happens (the column `s`
+        // gives its borrow back in), not on the reference's own column
+        // in the middle of the match diamond, where the return arrow
+        // from `s` would cross it.
+        let (ends_x, _) = first_dot(&tl, &format!("{}'s {}e borrow ends", outer, kind));
+        let (back_x, _) = first_dot(&tl, &format!("s no longer borrows the resource {} points to", outer));
+        let (split_x, _) = first_dot(&tl, &format!("{} is live in a conditional expression", outer));
+        assert!(ends_x == back_x && ends_x != split_x,
+            "{}: {}'s borrow-end dot is at x={}; the arm's column is x={}, the match diamond's x={}",
+            name, outer, ends_x, back_x, split_x);
+    }
 }
