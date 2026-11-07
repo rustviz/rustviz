@@ -259,13 +259,21 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // value, in that loop, pairs the value with `r` the way `let r = k;`
   // would.
   pub break_binds: Vec<(rustc_hir::HirId, ResourceTy, Evt)>,
-  // `break` values seen in a loop whose receiver isn't known yet (the
-  // loop is the right-hand side of an assignment, a tuple pattern, an
-  // argument…): `match_rhs` pairs them once it is.
   // A tuple/struct pattern bound to a loop's value: bound against each
   // `break` value (#452).
   pub break_pats: Vec<(rustc_hir::HirId, &'tcx Pat<'tcx>, usize, bool)>,
+  // `break` values seen in a loop whose receiver isn't known yet (the
+  // loop is the right-hand side of an assignment, a tuple pattern, an
+  // argument…): `match_rhs` pairs them once it is.
   pub loop_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>)>,
+  // A `break value` in a branch of a loop (`if c { break s; }`) leaves
+  // the loop, so its value reaches the receiver where the loop ends,
+  // not in the branch (#350's approach to loop exits): the loop's id
+  // and the value, paired at the loop's end.
+  pub deferred_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>)>,
+  // While set, events are placed on this line (the end of the loop
+  // whose `break` values are being paired).
+  pub line_override: Option<usize>,
 
   // Names of the variables in scope right now, in declaration order
   // (#410). `add_rap` pushes; a block, a match arm, an `if let` and a
@@ -750,6 +758,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   pub fn add_external_event(&mut self, line_num: usize, event: ExternalEvent) {
+    let line_num = self.line_override.unwrap_or(line_num);
     // Drop events whose source or destination is a `// rustviz: skip`-
     // marked variable. The marked RAP still exists (so non-skipped
     // code that references it doesn't crash on lookup), but every

@@ -330,6 +330,12 @@ const Description: React.FC = () => (
         macro that only forwards a variable to <code>println!</code> and
         friends is shown as that read.
       </li>
+      <li>
+        <code>let r = loop {'{'} … break a; {'}'};</code> gives <code>r</code> the
+        value of its <code>break</code>. With several <code>break</code>s that carry
+        a value (<code>if c {'{'} break a; {'}'} else {'{'} break b; {'}'}</code>),
+        <code>r</code> is shown without a value after the loop, which is wrong.
+      </li>
      <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}
         <code>break</code>/<code>continue</code> are drawn when it&apos;s in an{' '}
