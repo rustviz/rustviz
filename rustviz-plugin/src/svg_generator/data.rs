@@ -352,7 +352,13 @@ pub enum ResourceTy {
     // dropped: at the end of the statement, or with a `ref` binding
     // (`extended`) at the end of the block. Only used for a value
     // whose type needs drop.
-    Temporary { extended: bool },
+    //
+    // `tuple`: instead, the tuple an `if let` / `match` scrutinee
+    // `(x, y)` builds (#327), named by its source text (empty when too
+    // long to quote). The move into it doesn't say when it's dropped:
+    // a TupleTempDrop dot on the variable's column does, where the
+    // tuple is dropped.
+    Temporary { extended: bool, tuple: Option<String> },
 }
 
 impl ResourceTy {
@@ -992,6 +998,42 @@ pub enum ViaCarrier {
     PatternBinding { from_call: bool, moved: bool },
 }
 
+/// Where the tuple an `if let` / `match` scrutinee `(x, y)` builds is
+/// dropped (#327), as its drop dot says. In edition 2024 an `if let`'s
+/// scrutinee temporaries are dropped at the end of the if branch, or,
+/// when the pattern doesn't match, before the else branch runs; a
+/// `match`'s at the end of the statement holding the match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TupleDropAt {
+    /// At the end of the if branch (the dot is on its last line).
+    IfEnd,
+    /// The if branch leaves early (`return`, `break`, a panic), and
+    /// the tuple is dropped then.
+    IfExit,
+    /// The pattern didn't match: before the else branch runs.
+    Else,
+    /// The pattern didn't match, and there is no else.
+    NoElse,
+    /// After this match arm, when the match ends.
+    MatchArm,
+    /// After this match arm, at the end of the statement the match is
+    /// in (a later line than the match's end).
+    MatchArmStmt,
+    /// This match arm leaves the match early.
+    MatchArmExit,
+    /// Here, at the end of the match (a one-arm match, drawn inline).
+    MatchHere,
+}
+
+/// A variable whose value, or part of it (`rest`: the pattern moved
+/// some of it out), is still in a scrutinee tuple when it's dropped.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TupleLeft {
+    pub name: String,
+    pub rest: bool,
+    pub rc: Option<RcDrop>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -1165,6 +1207,18 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    // The tuple an `if let` / `match` scrutinee `(x, y)` builds is
+    // dropped (#327), and with it what's left in it of `ro`'s value
+    // (and of the other variables in `with`). The tuple has no column,
+    // so a drop dot on `ro`'s (already moved) column says so; `ro`'s
+    // state doesn't change.
+    TupleTempDrop {
+        ro: ResourceAccessPoint,
+        tuple: String,
+        at: TupleDropAt,
+        with: Vec<TupleLeft>,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -1255,6 +1309,7 @@ impl ExternalEvent {
             &ExternalEvent::TemporaryDrop { id, .. } |
             &ExternalEvent::LoopExitMove { id, .. } |
             &ExternalEvent::OwnerDropIfTryReturns { id, .. } |
+            &ExternalEvent::TupleTempDrop { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -1422,6 +1477,8 @@ pub enum Event {
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
     OwnerDropIfTryReturns,
+    // See ExternalEvent::TupleTempDrop.
+    TupleTempDrop { tuple: String, at: TupleDropAt, with: Vec<TupleLeft> },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1741,6 +1798,9 @@ impl Display for Event {
             Event::OwnerDropIfTryReturns => {
                 write!(f, "Resource is dropped if the `?` returns early")
             },
+            Event::TupleTempDrop { tuple, .. } => {
+                write!(f, "Temporary tuple {} is dropped", tuple)
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -1844,6 +1904,9 @@ impl Event {
             Event::TemporaryDrop { ty: None, when, .. } => {
                 hover_messages::event_dot_extended_temporary_drop(my_name, when)
             }
+            Event::TupleTempDrop { tuple, at, with } => {
+                hover_messages::event_dot_tuple_temp_drop(tuple, *at, with)
+            }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
                 // caller — call that out so the dot hover matches
@@ -1935,7 +1998,8 @@ impl Event {
                 let v = is_plain(is);
                 match to {
                     ResourceTy::Caller => safe_message(if v { hover_messages::event_dot_move_to_caller_value } else { hover_messages::event_dot_move_to_caller }, &self.deref_name(my_name), to),
-                    ResourceTy::Temporary { extended } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
+                    ResourceTy::Temporary { tuple: Some(t), .. } => hover_messages::event_dot_move_to_tuple_temporary(&self.deref_name(my_name), t, v),
+                    ResourceTy::Temporary { extended, tuple: None } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
                             &is.extract_rap().map_or(String::new(), |r| r.drop_note())),
@@ -2626,6 +2690,9 @@ impl Visualizable for VisualizationData {
             // Dropped only on the path that returns; the code after the
             // `?` runs on the other one.
             (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
+            // A dot on a column whose value already went into the tuple:
+            // no change.
+            (_, Event::TupleTempDrop { .. }) => (*previous_state).clone(),
 
             // `ManuallyDrop::drop(&mut md)`: no resource left, and md
             // must not be used again.
@@ -3028,6 +3095,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::OwnerDropIfTryReturns{..} => {
           vec![(line_num, Event::OwnerDropIfTryReturns)]
         },
+        ExternalEvent::TupleTempDrop{ tuple, at, with, .. } => {
+          vec![(line_num, Event::TupleTempDrop { tuple: tuple.clone(), at: *at, with: with.clone() })]
+        },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
       }
@@ -3069,7 +3139,7 @@ impl Visualizable for VisualizationData {
                                         id: *id}));
                 }
             }
-            ExternalEvent::LoopExitMove { ro, .. } => {
+            ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
@@ -3344,6 +3414,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
+            },
+            ExternalEvent::TupleTempDrop{ro, tuple, at, with, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TupleTempDrop { tuple, at, with }, line_number);
             },
         }
     }

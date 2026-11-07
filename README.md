@@ -440,6 +440,11 @@ rather than listed here.
   a field moved out of a temporary (`make().name`), a `match`
   scrutinee some arm binds by value, and a temporary nested inside a
   borrowed value (`let p = Wrapper { r: &String::new() };`).
+  The exception is a tuple of variables matched by `if let` or `match`
+  (`if let (Some(a), _) = (x, y)`): it gets no column, but a drop dot
+  on `x`'s and `y`'s columns says where it's dropped and what of their
+  values goes with it. Anything else in such a tuple (`(x, make())`)
+  is still left out.
   Temporaries with nothing to drop (`&Point { x: 4 }`) get no column.
 
 The plugin has its own per-feature TODO checklist in

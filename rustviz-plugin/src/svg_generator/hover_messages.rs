@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, ResourceAccessPoint};
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, RcCall, RcDrop, StaticLender, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, RcCall, RcDrop, StaticLender, TupleDropAt, TupleLeft, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -584,6 +584,64 @@ pub fn event_dot_move_to_temporary(my_name: &String, extended: bool) -> String {
         fmt_style(my_name),
         if extended { "the block (a `ref` binding borrows from it)" } else { "this statement" }
     )
+}
+
+// "the temporary tuple (p, q)", or just "the temporary tuple" when the
+// scrutinee is too long to quote.
+fn temporary_tuple(tuple: &String) -> String {
+    if tuple.is_empty() {
+        "the temporary tuple".to_owned()
+    } else {
+        format!("the temporary tuple {}", fmt_style(tuple))
+    }
+}
+
+// `if let (Some(_), Some(r)) = (p, q)` / `match (x, y)`: building the
+// tuple moves p into it (#327). Where the tuple is dropped, a
+// TupleTempDrop dot says so (event_dot_tuple_temp_drop).
+pub fn event_dot_move_to_tuple_temporary(my_name: &String, tuple: &String, value: bool) -> String {
+    format!("{0}'s {1} is moved into {2}", fmt_style(my_name), held(value), temporary_tuple(tuple))
+}
+
+// The scrutinee tuple is dropped, and with it whatever of each
+// variable's value the pattern didn't move out (#327). Timing is for
+// edition 2024 (what RustViz compiles with): an `if let` drops its
+// scrutinee's temporaries at the end of the if branch, or before the
+// else branch when the pattern doesn't match; a `match` keeps them to
+// the end of its statement.
+pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleLeft]) -> String {
+    let tuple = temporary_tuple(tuple);
+    let (lead, when) = match at {
+        TupleDropAt::IfEnd => ("", "here, at the end of the if branch"),
+        TupleDropAt::IfExit => ("", "when the if branch leaves early"),
+        TupleDropAt::Else => ("The pattern didn't match, so ", "here, before the else branch runs"),
+        TupleDropAt::NoElse => ("The pattern didn't match, so ", "here"),
+        TupleDropAt::MatchArm => ("", "after this arm, when the match ends"),
+        TupleDropAt::MatchArmStmt => ("", "after this arm, at the end of the statement the match is in"),
+        TupleDropAt::MatchArmExit => ("", "when this arm leaves the match early"),
+        TupleDropAt::MatchHere => ("", "here, at the end of the match"),
+    };
+    let tuple = if lead.is_empty() {
+        let mut c = tuple.chars();
+        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    } else {
+        tuple
+    };
+    // "p's resource", "p's and q's resources", "the rest of x's
+    // resource and y's resource".
+    let items = if with.len() > 1 && with.iter().all(|w| !w.rest && w.rc.is_none()) {
+        let names: Vec<String> = with.iter().map(|w| format!("{}'s", fmt_style(&w.name))).collect();
+        format!("{} resources", join_and(&names))
+    } else {
+        let items: Vec<String> = with.iter().map(|w| format!(
+            "{}{}'s resource{}",
+            if w.rest { "the rest of " } else { "" },
+            fmt_style(&w.name),
+            rc_drop_note(w.rc),
+        )).collect();
+        join_and(&items)
+    };
+    format!("{lead}{tuple} is dropped {when}, and with it {items}")
 }
 
 // def fn(p):

@@ -401,7 +401,10 @@ const Description: React.FC = () => (
         so does a literal of only fresh values (
         <code>let (ref a, _) = (make(), make());</code>). Other temporaries (
         <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
-        <code>for</code> head) drop without being drawn or mentioned.
+        <code>for</code> head) drop without being drawn or mentioned, except a
+        tuple of variables matched by <code>if let</code> or{' '}
+        <code>match</code> (<code>(x, y)</code>): where it&apos;s dropped is
+        stated on <code>x</code>&apos;s and <code>y</code>&apos;s columns.
       </li>
     </ul>
     <p>
