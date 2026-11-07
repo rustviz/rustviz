@@ -43,6 +43,17 @@ on:
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
+# One deploy at a time, newest wins. Two runs pushing to the same
+# destination branch race and the loser fails with "rejected (fetch
+# first)". A cancelled run can't leave the site stale: every run checks
+# out its own triggering commit (github.sha), which on main contains
+# all earlier commits, so the newest run always deploys main's HEAD.
+# A run cancelled mid-push is harmless too (a git push is atomic).
+# Pushes that match no `paths:` filter start no run and cancel nothing.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
