@@ -176,13 +176,12 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c4_09_first_word_str",
-        status: Wrong,
-        note: "returned &str: word isn't linked to my_string, so my_string's borrow ends at L13 though word borrows it until L14, `return &s[0..i]` has no event (#171)",
         must_contain: &[
             "s is an immutable borrow from the caller",
             "a reference from s is returned to the caller; the data it points to is not copied",
-            "word holds an immutable reference; it can read the borrowed resource",
-            "L14 word's immutable borrow ends (what it borrows from isn't shown)",
+            "L13 word holds an immutable reference",
+            "L13 Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "L14 Return immutably borrowed resource from word to my_string",
             "my_string goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -190,8 +189,7 @@ const BOOK: &[Snippet] = &[
             "word is the owner of the resource",
             "s's resource is moved to the caller",
             "Return immutably borrowed resource from word to *word",
-        ],
-        known_wrong: &[
+            "Copy from first_word to word",
             "L13 my_string's resource is no longer immutably borrowed",
         ],
         ..E
@@ -676,7 +674,7 @@ const BOOK: &[Snippet] = &[
             "text is bound to an immutable reference",
             "split_whitespace reads from text",
             "L6 text's borrow of the string literal ends (string literals live for the whole program)",
-            "Mutable borrow from map to count",
+            "L7 Mutable borrow from map to count: or_insert's signature gives the reference it returns the same lifetime as the value it was called on",
             "the value count points to is modified through *count",
             "Return mutably borrowed resource from count to map",
             "map goes out of scope. Its resource is dropped.",
@@ -700,10 +698,10 @@ const BOOK: &[Snippet] = &[
         id: "c8_16_as_str",
         must_contain: &[
             "as_str reads from s (implicitly borrowed)",
-            "Immutable borrow from s to t",
+            "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
             "Return immutably borrowed resource from t to s",
         ],
-        must_not_contain: &["t is the owner of the resource"],
+        must_not_contain: &["t is the owner of the resource", "L3 s's resource is no longer immutably borrowed"],
         ..E
     },
     // ─── Chapter 9: errors ────────────────────────────────────────────
@@ -797,8 +795,6 @@ const BOOK: &[Snippet] = &[
     // ─── Chapter 10: generics, traits, lifetimes ──────────────────────
     Snippet {
         id: "c10_01_largest_generic",
-        status: Wrong,
-        note: "result isn't linked to number_list, so number_list's borrow ends at L13 though result borrows it until L14 (#171)",
         must_contain: &[
             "list is an immutable borrow from the caller",
             "Immutable reborrow from list to largest",
@@ -806,8 +802,9 @@ const BOOK: &[Snippet] = &[
             "largest reads from number_list",
             "item's reference is copied (not the resource it points to)",
             "L5 largest is assigned a copy of item's reference",
-            "result holds an immutable reference; it can read the borrowed value",
-            "L14 result's immutable borrow ends (what it borrows from isn't shown)",
+            "L13 result holds an immutable reference",
+            "L13 Immutable borrow from number_list to result: largest's signature gives the reference it returns the same lifetime as its argument",
+            "L14 Return immutably borrowed resource from result to number_list",
             "number_list goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -816,8 +813,7 @@ const BOOK: &[Snippet] = &[
             "Immutable borrow from list to largest",
             "Return immutably borrowed resource from result to *result",
             "L5 largest is initialized with a copy of item",
-        ],
-        known_wrong: &[
+            "Copy from largest to result",
             "L13 number_list's resource is no longer immutably borrowed",
         ],
         ..E
@@ -849,38 +845,39 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c10_06_longest",
-        status: Wrong,
-        note: "result isn't linked to string1/string2, so string1's borrow ends at L8 (#171)",
         must_contain: &[
             "x is an immutable borrow from the caller",
             "string2 is bound to an immutable reference",
             "as_str reads from string1 (implicitly borrowed)",
             "L8 string2's borrow of the string literal ends (string literals live for the whole program)",
-            "L9 result's immutable borrow ends (what it borrows from isn't shown)",
+            "L8 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments (the other is a value with no column here), so string1 stays borrowed while result is in use",
+            "L9 Return immutably borrowed resource from result to string1",
         ],
         must_not_contain: &[
             "string2 is the owner of the resource",
             "string2 acquires ownership of a resource",
             "Return immutably borrowed resource from string2 to *string2",
             "Return immutably borrowed resource from result to *result",
+            "L8 string1's resource is no longer immutably borrowed",
             "string2's immutable borrow ends (what it borrows from isn't shown)",
         ],
-        known_wrong: &["L8 string1's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
         id: "c10_07_longest_inner_scope",
-        status: Wrong,
-        note: "Listing 10-23's point: result borrows string1/string2 until L10, but both borrows end at L9 (#171)",
         must_contain: &[
             "longest reads from string1",
             "longest reads from string2",
-            "result holds an immutable reference; it can read the borrowed resource",
-            "L10 result's immutable borrow ends (what it borrows from isn't shown)",
+            "L9 result holds an immutable reference",
+            "L9 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
+            "L9 Immutable borrow from string2 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
+            "L10 Return immutably borrowed resource from result to string1",
+            "L10 Return immutably borrowed resource from result to string2",
             "L11 string2 goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["result is the owner of the resource", "Return immutably borrowed resource from result to *result"],
-        known_wrong: &[
+        must_not_contain: &[
+            "result is the owner of the resource",
+            "Return immutably borrowed resource from result to *result",
             "L9 string1's resource is no longer immutably borrowed",
             "L9 string2's resource is no longer immutably borrowed",
         ],
@@ -1213,22 +1210,21 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_13_return_ref_from_vec",
-        status: Wrong,
-        note: "f isn't linked to v, so v's borrow ends at L7 though f borrows it until L8 (#171)",
         must_contain: &[
             "v is an immutable borrow from the caller",
             "a reference from v is returned to the caller; the data it points to is not copied",
             "first reads from v",
-            "f holds an immutable reference; it can read the borrowed resource",
-            "L8 f's immutable borrow ends (what it borrows from isn't shown)",
+            "L7 f holds an immutable reference",
+            "L7 Immutable borrow from v to f: first's signature gives the reference it returns the same lifetime as its argument",
+            "L8 Return immutably borrowed resource from f to v",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "v's resource is moved to the caller",
             "f is the owner of the resource",
             "Return immutably borrowed resource from f to *f",
+            "L7 v's resource is no longer immutably borrowed",
         ],
-        known_wrong: &["L7 v's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {

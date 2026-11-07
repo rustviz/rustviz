@@ -816,13 +816,17 @@ pub fn get_non_anon_lenders(b_map: &HashMap<String, RefData>) -> HashMap<String,
   let mut res: HashMap<String, HashSet<String>> = HashMap::new();
   #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "builds a map of sets; order is lost")]
   for (k, v) in b_map.iter() {
-    match v.lender {
-      ResourceTy::Anonymous => {},
-      _ => {
-        let lender = v.lender.real_name();
-        res.entry(lender.clone())
-          .and_modify(|lendees| { lendees.insert(k.to_owned()); })
-          .or_insert(HashSet::from([k.to_owned()]));
+    // co_lenders: a reference returned by `longest(&a, &b)` is an
+    // active borrower of both `a` and `b` (#171).
+    for l in v.all_lenders() {
+      match l {
+        ResourceTy::Anonymous => {},
+        _ => {
+          let lender = l.real_name();
+          res.entry(lender.clone())
+            .and_modify(|lendees| { lendees.insert(k.to_owned()); })
+            .or_insert(HashSet::from([k.to_owned()]));
+        }
       }
     }
   }
