@@ -6292,7 +6292,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from u to *b",
             "*b acquires ownership of a new resource; its previous resource is dropped",
             "Move from q2 to *rq",
-            "*rq acquires ownership of a resource",
+            // Q is a struct of integers: nothing to drop, so a plain
+            // assignment, not a resource (#484).
+            "*rq is assigned a new value",
             // r: &mut i32 points to a value (#312).
             "the value r points to is modified through *r",
         ],
@@ -6304,6 +6306,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource b points to is modified through *b",
             "the resource rq points to is modified through *rq",
             "*r acquires ownership",
+            "*rq acquires ownership of a resource",
         ],
     },
     TooltipExpect {
@@ -6314,10 +6317,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // to add "(copied from k)" (#260). Nothing is assigned or
         // dropped.
         must_contain: &[
-            "Copy from k to p.x",
+            // The operator is called with k, as for `*r += k` on main.
+            "Copy from k to +=",
             "the resource p points to is modified through p.x",
             "the resource p points to is modified through p.name",
-            "Copy from k to r.x",
             "the resource r points to is modified through r.x",
         ],
         // (Tooltips are matched whole, so these are the full old texts.)

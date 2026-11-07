@@ -1161,7 +1161,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             Some(ResourceTy::Value(rap)) => {
               self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), false, false, ImplicitRef::Autoref);
             }
-            Some(lhs_rty @ (ResourceTy::Deref(_) | ResourceTy::Index(..))) => {
+            Some(lhs_rty @ (ResourceTy::Deref(_) | ResourceTy::Index(..) | ResourceTy::DerefField(..))) => {
               let lhs_rty = match lhs_rty {
                 ResourceTy::Index(r, place, w) => ResourceTy::Index(r, place, w.into_update()),
                 other => other,
@@ -1197,7 +1197,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // An element (`v[i] += 1`) has no column of its own: the write
         // goes on the receiver's, as an in-place update.
         match self.resource_of_lhs(lhs_expr) {
-          Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_))) => {
+          Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) => {
             self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
           }
           Some(ResourceTy::Index(r, place, w)) => {
