@@ -1204,6 +1204,22 @@ pub enum TupleDropAt {
     TryReturns,
 }
 
+/// What a reassignment of a struct or tuple whose parts were moved out
+/// earlier drops of its previous value (#628), by part name: like the
+/// scope end of such a struct (`event_dot_struct_partial_go_out_of_scope`).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ReassignParts {
+    /// Moved out on every path.
+    pub moved: Vec<String>,
+    /// Moved out on some paths only: dropped by a drop flag.
+    pub maybe_moved: Vec<String>,
+    /// Leaf parts that still hold a value that needs drop.
+    pub dropped: Vec<String>,
+    /// Some of `maybe_moved` were moved by a `let` or-pattern (#597) or
+    /// a let-chain's condition (#281), not a branch: "nothing above".
+    pub by_cond: bool,
+}
+
 /// A variable whose value, or part of it (`rest`: the pattern moved
 /// some of it out), is still in a scrutinee tuple when it's dropped.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1500,6 +1516,9 @@ pub enum ExternalEvent {
         // With `maybe_moved`: a let-chain's condition may have been
         // what moved it (#281), not only a branch.
         by_cond: bool,
+        // `ro` is a struct or tuple some of whose parts were moved out
+        // before (#628): what of its previous value is dropped.
+        parts: Option<ReassignParts>,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -1945,7 +1964,7 @@ pub enum Event {
     // unchanged across this event because the matching Acquire from
     // rhs lands on the same line and immediately re-establishes
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool },
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts> },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -2550,10 +2569,13 @@ impl Event {
             Event::RefGoOutOfScope => {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
             }
+            Event::OwnerDropAtReassign { parts: Some(p), .. } => {
+                hover_messages::event_dot_struct_drop_at_reassign_partial(my_name, p)
+            }
             Event::OwnerDropAtReassign { maybe_moved: false, .. } => {
                 hover_messages::event_dot_owner_drop_at_reassign(my_name, "")
             }
-            Event::OwnerDropAtReassign { maybe_moved: true, by_cond } => {
+            Event::OwnerDropAtReassign { maybe_moved: true, by_cond, .. } => {
                 hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name, "", *by_cond)
             }
             Event::ManuallyDropByHand => {
@@ -4006,8 +4028,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, parts, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, parts: parts.clone() })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -4359,8 +4381,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, parts, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, parts }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);

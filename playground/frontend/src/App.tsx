@@ -329,14 +329,9 @@ const Description: React.FC = () => (
         struct name is refused rather than drawn. A few other shapes are
         refused, such as matching on two reference variables. Nested inside
         another pattern (<code>(a, (x, _) | (_, x))</code>) it is drawn the
-        same way, except on the parts of a tuple variable that a tuple being
-        matched moves into a temporary (<code>match (s, u)</code>), which is
-        refused.
-      </li>
-      <li>
-        A tuple nested in a tuple being matched (
-        <code>match (a, (b, c))</code>) isn&apos;t modelled: <code>b</code>{' '}
-        and <code>c</code> are drawn as never moved.
+        same way, except on the parts of a tuple variable that a{' '}
+        <code>let</code>&apos;s tuple moves into a temporary (
+        <code>let (p, (x, _) | (_, x)) = (s, u)</code>), which is refused.
       </li>
       <li>
         A <code>for</code> loop drops its iterator where the loop is left. A{' '}
