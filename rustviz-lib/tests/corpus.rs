@@ -1008,8 +1008,6 @@ const EXPECTED_OK: &[&str] = &[
     "loop_break_value_in_branch",
     "loop_break_value_local",
     "loop_break_value_cond_receivers",
-    // Renders without crashing; its values aren't paired yet (#561).
-    "loop_break_value_several_tuple",
     // A Result's or enum's drop says what it may hold (#684).
     "enum_drop_holds",
     // Borrows that rustc's checker keeps live past the holder's last use (#644).
@@ -1068,6 +1066,13 @@ const EXPECTED_OK: &[&str] = &[
     "exit_outer_borrow_return",
     "exit_outer_borrow_unused",
     "exit_outer_borrow_loop",
+    // Several `break`s that carry a value (#561): `r` gets whichever
+    // value ran, where the loop ends.
+    "loop_break_several_values",
+    "loop_break_several_receivers",
+    "loop_break_several_locals",
+    "loop_break_several_tuple",
+    "loop_break_several_fallthrough",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11978,6 +11983,137 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q's immutable borrow ends",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "loop_break_several_values",
+        // `if c { break a; } else { break b; }` (#561): only the `break`
+        // that ended the loop ran, so `r` owns one String after the loop
+        // and drops it; `a` and `b` are each maybe-moved, and the drop
+        // flag decides which one is dropped at the end of `main`. The
+        // old plugin moved each into `r` in its branch and left `r`
+        // with no value after the loop.
+        must_contain: &[
+            "Move from a to r, if the loop ended with break a",
+            "Move from b to r, if the loop ended with break b",
+            "r acquires ownership of a resource (from whichever break ended the loop)",
+            "r goes out of scope. Its resource is dropped.",
+            "a may have been moved: the loop can end with break a, which moves a's resource to r, so a can't be used after the loop",
+            "b may have been moved: the loop can end with break b, which moves b's resource to r, so b can't be used after the loop",
+            "a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=r goes out of scope. No resource is dropped.",
+            "=Move from a to r",
+            "=Move from b to r",
+            "=a's resource is moved",
+            "=b's resource is moved",
+            "=a goes out of scope. No resource is dropped.",
+            "=b goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_several_receivers",
+        // Several value `break`s into an assignment, a call argument and
+        // a `Copy` receiver (#561): each source is maybe-moved (the old
+        // plugin said a, b, p and q all had nothing to drop), and `m`
+        // isn't "a copy of k" when `break 0` ran.
+        must_contain: &[
+            "Move from a to r, if the loop ended with break a",
+            "r acquires ownership of a resource (from whichever break ended the loop)",
+            "r goes out of scope. Its resource is dropped.",
+            "a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Move from p to take, if the loop ended with break p",
+            "p may have been moved: the loop can end with break p, which moves p's resource to take, so p can't be used after the loop",
+            "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "q goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Copy from k to m, if the loop ended with break k",
+            "k's value is copied, if the loop ended with break k",
+            "m is bound to a copyable value (from whichever break ended the loop)",
+            "m goes out of scope",
+        ],
+        must_not_contain: &[
+            "=a goes out of scope. No resource is dropped.",
+            "=b goes out of scope. No resource is dropped.",
+            "=p goes out of scope. No resource is dropped.",
+            "=q goes out of scope. No resource is dropped.",
+            "=Move from p to take",
+            "=m is initialized with a copy of k",
+            "=m goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_several_locals",
+        // Values declared inside the loop (#561): `break j` drops `k`
+        // (#410) and `break k` moves it, so nothing is left to drop at
+        // the loop's end. A `match` with three value `break`s; and
+        // `break b` in both branches is one plain move.
+        must_contain: &[
+            "k's resource is moved to r if the loop ended with break k",
+            "j's resource is moved to r if the loop ended with break j",
+            // k is dropped only on the `break j` path (drawn in that
+            // branch's lane); on the `break k` path it is moved, and
+            // after #680 that lane no longer gets its own scope-end dot.
+            "k goes out of scope. Its resource is dropped.",
+            "r acquires ownership of a resource (from whichever break ended the loop)",
+            "r goes out of scope. Its resource is dropped.",
+            "Move from String::from to w, if the loop ended with break String::from(\"one\")",
+            "a may have been moved: the loop can end with break a, which moves a's resource to w, so a can't be used after the loop",
+            "w goes out of scope. Its resource is dropped.",
+            "Move from b to v",
+            "b goes out of scope. No resource is dropped.",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=r goes out of scope. No resource is dropped.",
+            "=w goes out of scope. No resource is dropped.",
+            "=v goes out of scope. No resource is dropped.",
+            "=k's resource is moved",
+            "=j's resource is moved",
+            "=k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_several_tuple",
+        // A tuple pattern bound by several value `break`s (#561). The
+        // old plugin (#460's tip) crashed here ("no layout column for
+        // the timeline of event 10").
+        must_contain: &[
+            "Move from x to s, if the loop ended with break (x, 1)",
+            "Move from y to s, if the loop ended with break (y, 2)",
+            "x may have been moved: the loop can end with break (x, 1), which moves x's resource to s, so x can't be used after the loop",
+            "x goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "y goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s acquires ownership of a resource (from whichever break ended the loop)",
+            "s goes out of scope. Its resource is dropped.",
+            "n is bound to a copyable value (from whichever break ended the loop)",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. No resource is dropped.",
+            "n is assigned a new value",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_several_fallthrough",
+        // Several value `break`s of values declared in the loop, whose
+        // body can also reach its end (#561, #431): `k` and `j` are
+        // dropped there on the iterations that don't break. Without the
+        // `break_out` mark their scope end said "No resource is dropped."
+        must_contain: &[
+            "Move from k to r, if the loop ended with break k",
+            "Move from j to r, if the loop ended with break j",
+            "k's resource is moved to r if the loop ended with break k",
+            "k goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "j goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "r acquires ownership of a resource (from whichever break ended the loop)",
+            "r goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=k goes out of scope. No resource is dropped.",
+            "=j goes out of scope. No resource is dropped.",
+            "=r goes out of scope. No resource is dropped.",
+        ],
     },
 ];
 

@@ -342,12 +342,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `break` values seen in a loop whose receiver isn't known yet (the
   // loop is the right-hand side of an assignment, a tuple pattern, an
   // argument…): `match_rhs` pairs them once it is.
-  pub loop_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>)>,
+  // With each `break` as written when the loop has several (#561).
+  pub loop_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>, Option<String>)>,
   // A `break value` in a branch of a loop (`if c { break s; }`) leaves
   // the loop, so its value reaches the receiver where the loop ends,
   // not in the branch (#350's approach to loop exits): the loop's id
-  // and the value, paired at the loop's end.
-  pub deferred_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>)>,
+  // and the value, paired at the loop's end. So are all of them when
+  // the loop has several (#561); the text is the `break` as written,
+  // for tooltips (see BreakAlt).
+  pub deferred_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>, Option<String>)>,
   // While set, events are placed on this line (the end of the loop
   // whose `break` values are being paired).
   pub line_override: Option<usize>,
@@ -360,6 +363,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // that are declared inside the loop, on a loop whose body can reach
   // its end. Their Move is marked `break_out` (see ExternalEvent::Move).
   pub break_out: Vec<String>,
+  // While set, the loop whose `break` values are being paired has
+  // several of them, so each Move / Copy / Bind into its receiver
+  // happened only if its `break` ran (#561).
+  pub break_alt: Option<BreakAlt>,
 
   // Names of the variables in scope right now, in declaration order
   // (#410). `add_rap` pushes; a block, a match arm, an `if let` and a
@@ -1088,6 +1095,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *break_out = true;
       }
     }
+    if let Some(alt) = &self.break_alt {
+      if let ExternalEvent::Move { break_alt, .. } | ExternalEvent::Copy { break_alt, .. }
+        | ExternalEvent::Bind { break_alt, .. } = &mut event {
+        *break_alt = Some(alt.clone());
+      }
+    }
     // Drop events whose source or destination is a `// rustviz: skip`-
     // marked variable. The marked RAP still exists (so non-skipped
     // code that references it doesn't crash on lookup), but every
@@ -1274,9 +1287,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *self.unique_id += 1;
         let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false, via_try: None }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -1321,9 +1334,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       *self.unique_id += 1;
       let (from, to) = (ResourceTy::Value(child), ResourceTy::Value(dest));
       self.add_external_event(line_num, if is_copy {
-        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false }
+        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None }
       } else {
-        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false, via_try: None }
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None }
       });
     }
   }
@@ -1359,6 +1372,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         is_partial: false,
         into_closure: false,
         loop_head: LoopHead::No,
+        break_alt: None,
         break_out: false,
         via_try: None,
       });
@@ -1392,6 +1406,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         from: ResourceTy::Anonymous,
         to: ResourceTy::Value(child),
         id: ev_id,
+        break_alt: None,
       });
       self.bind_struct_fields(line_num, &name);
     }
@@ -1484,9 +1499,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
-      Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
-      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_out: false, via_try: self.try_move },
+      Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id, break_alt: None },
+      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
@@ -2450,17 +2465,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.break_out = saved.1;
   }
 
+  /// The `break` values recorded for `loop_expr` while its receiver
+  /// wasn't known (#452), with each `break` as written.
+  fn take_loop_breaks(&mut self, loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<String>)> {
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.loop_breaks)
+      .into_iter().partition(|(id, ..)| *id == loop_expr.hir_id);
+    self.loop_breaks = rest;
+    mine.into_iter().map(|(_, v, t)| (v, t)).collect()
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     // `f(loop { … break k; })`: what `break` carries is the argument
     // (#452).
     if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = arg.kind {
-      let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
-        .filter(|(id, _)| *id == arg.hir_id).map(|(_, v)| *v).collect();
-      self.loop_breaks.retain(|(id, _)| *id != arg.hir_id);
+      let seen = self.take_loop_breaks(arg);
       let saved = self.enter_deferred(arg.hir_id);
-      for value in seen {
-        self.match_arg(value, fn_name.clone());
+      if seen.len() > 1 {
+        // Several: only the `break` that ended the loop ran (#561).
+        self.pair_break_alternatives(arg, seen, |this, v| this.match_arg(v, fn_name.clone()));
+      } else {
+        for (value, _) in seen {
+          self.match_arg(value, fn_name.clone());
+        }
       }
       self.leave_deferred(saved);
       return;
@@ -5103,12 +5130,15 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // `process_let_binding` does after this, so it only registers where
     // the values go; `visit_expr`'s `Break` arm pairs them.
     ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => {
-      let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
-        .filter(|(id, _)| *id == rhs.hir_id).map(|(_, v)| *v).collect();
-      self.loop_breaks.retain(|(id, _)| *id != rhs.hir_id);
+      let seen = self.take_loop_breaks(rhs);
       let saved = self.enter_deferred(rhs.hir_id);
-      for value in seen {
-        self.match_rhs(lhs.clone(), value, evt.clone());
+      if seen.len() > 1 {
+        // Several: only the `break` that ended the loop ran (#561).
+        self.pair_break_alternatives(rhs, seen, |this, v| this.match_rhs(lhs.clone(), v, evt.clone()));
+      } else {
+        for (value, _) in seen {
+          self.match_rhs(lhs.clone(), value, evt.clone());
+        }
       }
       self.leave_deferred(saved);
       self.break_binds.push((rhs.hir_id, lhs, evt));

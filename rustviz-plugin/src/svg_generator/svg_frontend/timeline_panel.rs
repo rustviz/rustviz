@@ -981,14 +981,24 @@ fn render_dot(
     // (and nothing was put back): a conditional after that finds it
     // empty, so no line runs into or out of its split (#694).
     let mut moved_out = false;
+    // Several `break` values reaching a loop's receiver on one line
+    // (#561): only one of them did, so a later one isn't an assignment
+    // over an earlier one. (line, whether it held a value before them)
+    let mut before_breaks: Option<(usize, bool)> = None;
     for (i, (line_number, event)) in history.iter().enumerate() {
         let resource_hold = if scope_ends > 1 && matches!(event, Event::OwnerGoOutOfScope) {
             held
         } else {
             resource_hold_of_column
         };
-        let held_at_event = held;
         let moved_at_event = moved_out;
+        let mut held_at_event = held;
+        if let Event::Acquire { break_alt: Some(_), .. } | Event::Copy { break_alt: Some(_), .. } = event {
+            match before_breaks {
+                Some((line, before)) if line == *line_number => held_at_event = before,
+                _ => before_breaks = Some((*line_number, held)),
+            }
+        }
         let event_y = event_dot_y(history, i);
         held = holds_value_after(held, event);
         moved_out = match event {
@@ -1561,6 +1571,34 @@ fn render_dot(
                     } else {
                         data.title = event.print_message_with_name(& mut name);
                     }
+                    // One of several `break` values reaching the loop's
+                    // receiver: it happened only if that `break` ended
+                    // the loop (#561).
+                    match event {
+                        Event::Move { to, is, break_alt: Some(alt), .. } => {
+                            let what = match is.extract_rap() {
+                                Some(r) if r.is_ref() => "reference",
+                                Some(r) if r.holds_value() => "value",
+                                _ => "resource",
+                            };
+                            data.title = hover_messages::event_dot_break_alt_move(&name, &to.name(), alt, what);
+                        }
+                        Event::Duplicate { break_alt: Some(alt), .. } => {
+                            data.title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));
+                        }
+                        Event::Acquire { is, break_alt: Some(_), .. } | Event::Copy { is, break_alt: Some(_), .. } => {
+                            // Which `break` ran isn't known here, so
+                            // name no source: what a literal would say.
+                            data.title = if copyable_assign {
+                                hover_messages::event_dot_copyable_assign(&name)
+                            } else {
+                                let generic = Event::Acquire { from: ResourceTy::Anonymous, is: is.clone(), via_try: None, id: 0, break_alt: None };
+                                generic.print_message_with_name(&mut name.clone())
+                            };
+                            data.title.push_str(&hover_messages::break_alt_receiver_suffix());
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -1713,6 +1751,9 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             // (Not a variable whose value was already moved into a
             // scrutinee tuple: it owns nothing either way.)
             Event::OrAltMove { tuple: None, .. } => maybe = true,
+            // Moved by one of several `break`s of a loop: only if that
+            // `break` ended the loop (#561).
+            Event::Move { break_alt: Some(alt), .. } => maybe = !alt.in_loop,
             Event::Acquire { is: ResourceTy::Value(_), .. }
             | Event::Copy { is: ResourceTy::Value(_), .. }
             | Event::Move { .. } | Event::ClosureCall { .. } => maybe = false,
@@ -2353,7 +2394,7 @@ fn union_write_title(
     // Acquire either way, so the event's kind can't tell.
     let (from, id, written) = match event {
         Event::Acquire { from, is: ResourceTy::Value(w), id, .. } => (from, *id, w),
-        Event::Copy { from, is: ResourceTy::Value(w), id } => (from, *id, w),
+        Event::Copy { from, is: ResourceTy::Value(w), id, .. } => (from, *id, w),
         _ => return None,
     };
     let is_copy = matches!(written.place_write(), PlaceWrite::AssignCopy);
@@ -2951,6 +2992,10 @@ fn render_arrow (
                         None => hover_messages::arrow_borrow_ends_lender_not_drawn(&from.name(), is_mut),
                     };
                 }
+            }
+            if let ExternalEvent::Move { break_alt: Some(alt), .. }
+                 | ExternalEvent::Copy { break_alt: Some(alt), .. } = external_event {
+                title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));
             }
             if let ExternalEvent::StaticBorrow { via: Some(via), .. }
                  | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
