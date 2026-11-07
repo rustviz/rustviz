@@ -945,7 +945,19 @@ fn render_dot(
     // holds one is an assignment (`n += 1`, `p.x = 5`), not an
     // initialization (#178).
     let mut held = held_before;
+    // Same-named variables of sibling blocks share a column and each
+    // goes out of scope at its own `}` (#589): whether one still holds
+    // its resource there is whether it still holds a value just before
+    // that event (a `drop(s)` in the first block is not undone by the
+    // second block's own `s`), not the column's penultimate state.
+    let scope_ends = history.iter().filter(|(_, e)| matches!(e, Event::OwnerGoOutOfScope)).count();
+    let resource_hold_of_column = resource_hold;
     for (i, (line_number, event)) in history.iter().enumerate() {
+        let resource_hold = if scope_ends > 1 && matches!(event, Event::OwnerGoOutOfScope) {
+            held
+        } else {
+            resource_hold_of_column
+        };
         let held_at_event = held;
         let event_y = event_dot_y(history, i);
         held = holds_value_after(held, event);

@@ -861,6 +861,11 @@ const EXPECTED_OK: &[&str] = &[
     // A reference copied out of a holder gives its borrow back at its
     // last use while the holder still holds it (#575).
     "holder_ref_ends_first",
+    // Same-named variables of sibling blocks share a column; each ends
+    // at its own `}` (#589).
+    "shared_column_scope_ends",
+    // A bare block nested in a branch ends its locals at its `}` (#591).
+    "nested_block_in_branch_scope_end",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9364,6 +9369,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from t to *t",
         ],
     },
+    TooltipExpect {
+        name: "shadow_sibling_blocks",
+        // #589: the first block's `s` was moved by `drop`, so nothing is
+        // dropped at its `}`; on main that `}` said "Its resource is
+        // dropped" (a false claim) and the second block's `}` said nothing.
+        must_contain: &[
+            "s goes out of scope. No resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "nested_block_in_branch_scope_end",
+        // #591: each inner block's String is dropped at that block's `}`.
+        must_contain: &[
+            "u goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped.",
+            "m goes out of scope. Its resource is dropped.",
+            "k goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -11109,6 +11136,33 @@ fn svg_text(svg: &str) -> String {
         }
     }
     out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+}
+
+/// #589: same-named variables of sibling blocks share one column (#308),
+/// and each one goes out of scope at its own closing brace. Only the
+/// first block's `}` had the scope-end dot.
+#[test]
+fn sibling_blocks_sharing_a_column_each_end_it() {
+    // (snippet, tooltip line, scope-end dots expected)
+    for (name, text, count) in [
+        ("shadow_shared_columns", "s₃ goes out of scope", 2),
+        ("shared_column_scope_ends", "t goes out of scope. Its resource is dropped.", 2),
+        ("shared_column_scope_ends", "r goes out of scope", 3),
+        ("shadow_sibling_blocks", "s goes out of scope. No resource is dropped.", 1),
+        ("shadow_sibling_blocks", "s goes out of scope. Its resource is dropped.", 1),
+        // #591: a bare block in an `if` / `else` / match arm / loop.
+        ("nested_block_in_branch_scope_end", "u goes out of scope. Its resource is dropped.", 1),
+        ("nested_block_in_branch_scope_end", "w goes out of scope. Its resource is dropped.", 1),
+        ("nested_block_in_branch_scope_end", "m goes out of scope. Its resource is dropped.", 1),
+        ("nested_block_in_branch_scope_end", "k goes out of scope. Its resource is dropped.", 1),
+    ] {
+        let rv = run_with_local_backend(name);
+        let dots = dots_listing(&rv.timeline_panel_string(), text);
+        assert_eq!(dots.len(), count, "{}: dots saying {:?}: {:?}", name, text, dots);
+        let mut ys: Vec<f64> = dots.iter().map(|d| d.1).collect();
+        ys.dedup();
+        assert_eq!(ys.len(), count, "{}: the dots share a row: {:?}", name, dots);
+    }
 }
 
 /// The code panel must show the user's source verbatim. The annotation
