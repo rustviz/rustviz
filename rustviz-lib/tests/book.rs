@@ -151,16 +151,18 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c4_07_first_word_loop",
-        status: Wrong,
-        note: "bytes = s.as_bytes() is shown as copied from as_bytes (#171)",
         must_contain: &[
             "s is an immutable borrow from the caller",
-            "bytes holds an immutable reference; it can read the borrowed resource",
+            "L2 Immutable borrow from s to bytes: as_bytes's signature gives the reference it returns the same lifetime as the value it was called on",
+            "L3 Return immutably borrowed resource from bytes to s",
             "Copy from first_word to word",
+        ],
+        must_not_contain: &[
+            "bytes is the owner of the resource",
+            "Copy from as_bytes to bytes",
+            "L2 s's resource is no longer immutably borrowed",
             "L2 as_bytes no longer borrows the resource s points to",
         ],
-        must_not_contain: &["bytes is the owner of the resource", "L2 s's resource is no longer immutably borrowed"],
-        known_wrong: &["Copy from as_bytes to bytes"],
         ..E
     },
     Snippet {

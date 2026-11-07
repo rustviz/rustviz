@@ -364,7 +364,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub fn value_lenders(&self, e: &'tcx Expr<'tcx>) -> Vec<ResourceTy> {
     match e.kind {
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
-        match expr_to_rap_name(e, &self.tcx).and_then(|n| self.borrow_map.get(&n)) {
+        let name = expr_to_rap_name(e, &self.tcx);
+        match name.as_ref().and_then(|n| self.borrow_map.get(n)) {
+          // A reference parameter (`v: &Vec<i32>`): what it points to
+          // is the caller's data, which has no column here. v's own
+          // column stands for it, as it already does for `&v[0]`, so
+          // `v.iter()` / `first_word(s)` borrow "from v" (#393).
+          Some(rd) if matches!(rd.lender, ResourceTy::Caller) && rd.co_lenders.is_empty() => {
+            match name.as_ref().and_then(|n| self.raps.get(n)) {
+              Some(r) if r.rap.is_ref() => vec![ResourceTy::Value(r.rap.to_owned())],
+              _ => rd.all_lenders(),
+            }
+          }
           Some(rd) => rd.all_lenders(),
           // A non-reference variable (`opt: Option<&T>`, an iterator)
           // whose borrow we don't track (holders are in borrow_map).
