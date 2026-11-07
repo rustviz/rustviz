@@ -93,7 +93,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.visit_expr(let_expr.init);
         self.refuse_lasting_guard_effects(mark, outer, expr);
         let mark = self.preprocessed_events.len();
-        let bound = self.register_iflet_let_bindings(let_expr, None);
+        let (bound, _) = self.register_iflet_let_bindings(let_expr, None);
         if !whole_guard {
           self.refuse_lasting_guard_effects(mark, outer, expr);
         }
@@ -1933,9 +1933,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
-            if_lo = *self.unique_id;
             if_hash_lo = self.rap_hashes;
-            self.register_iflet_let_bindings(let_expr, None)
+            let (bound, first_in_branch) = self.register_iflet_let_bindings(let_expr, None);
+            // Copies out of the scrutinee stay before the split (#496).
+            if_lo = first_in_branch;
+            bound
           } else {
             self.visit_expr(&guard_expr);
             if_lo = *self.unique_id;
@@ -2039,6 +2041,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let _ = line_num; // no longer used for guard-live extension
         let mut if_ev = self.take_branch_events(if_ids, Some(if_expr));
         let mut else_ev = self.take_branch_events(else_ids, else_expr);
+        // The arrows now inside the branches are drawn from each
+        // branch's own line map. Take them out of the global one, or an
+        // arrow that stays on the split line (a copy out of an if-let
+        // scrutinee, #496) would drag them out of their branches.
+        let in_branches: HashSet<usize> = if_ev.iter().chain(else_ev.iter()).map(|(_, e)| e.get_id()).collect();
+        for evs in self.event_line_map.values_mut() {
+          evs.retain(|e| !in_branches.contains(&e.get_id()));
+        }
 
         // Compute liveness from the events actually inside the
         // branches — only variables touched by a real event get a
@@ -2203,7 +2213,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let mut bindings = HashSet::new();
                 if let ExprKind::Let(let_expr) = cond.kind {
                   self.visit_expr(let_expr.init);
-                  bindings = self.register_iflet_let_bindings(let_expr, None);
+                  bindings = self.register_iflet_let_bindings(let_expr, None).0;
                 } else {
                   self.visit_expr(cond);
                 }
