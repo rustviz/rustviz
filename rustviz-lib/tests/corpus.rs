@@ -1030,6 +1030,10 @@ const EXPECTED_OK: &[&str] = &[
     "iflet_call_borrow_else",
     "match_call_borrow_arms",
     "edition2024/if_let_chain_call_borrow_else",
+    // A let-chain's binding that reuses the name of an earlier, ended
+    // `if let`'s binding (#696), or shadows a variable in scope.
+    "edition2024/if_let_chain_reused_name",
+    "edition2024/if_let_chain_shadowing_binding",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11599,6 +11603,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "x goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #696: refused before, because the chain's `a` was taken for the
+    // first `if let`'s `a`, whose scope has ended. (EXPECTED_OK checks
+    // that it renders.)
+    TooltipExpect {
+        name: "edition2024/if_let_chain_reused_name",
+        must_contain: &[
+            "p may have been moved: when the condition moves p to a and then turns out false, the else branch runs after that move, so p can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
+            "p goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=p goes out of scope. Its resource is dropped.",
+            // The word order before #660 moved the parenthetical.
+            "Its resource is dropped (including the String it holds, if any) here only if",
+            "a may have been assigned",
+        ],
+    },
+    // The chain's binding shadows `a`, so its column is `a₂`: the drop of
+    // `a₂` when `n > 0` is false used to go unstated.
+    TooltipExpect {
+        name: "edition2024/if_let_chain_shadowing_binding",
+        must_contain: &[
+            "p may have been moved: when the condition moves p to a₂ and then turns out false, the else branch runs after that move, so p can't be used here. When the condition fails after that move, a₂ goes out of scope and its resource is dropped.",
+            "a goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=p may have been moved: when the condition moves p to a₂ and then turns out false, the else branch runs after that move, so p can't be used here",
         ],
     },
 ];
