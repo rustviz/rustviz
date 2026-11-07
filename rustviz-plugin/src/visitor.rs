@@ -1506,6 +1506,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
                 *self.unique_id += 1;
               }
+              else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num) {
+                // `hold.r = &t;` where `hold` held `&s`: the field no
+                // longer points to s, but `hold`'s type has one lifetime
+                // for the field's reference, so the borrow checker keeps
+                // s borrowed until the loan's last use (#531). Drawn on
+                // the lender's column only, like #512's stored borrows.
+                let place = ResourceTy::Index(lhs_rap.clone(), lhs_rap.name().to_owned(), PlaceWrite::Update);
+                let die = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
+                self.add_ev(end_line, die, to_ro, place, false);
+              }
               else {
                 self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &ref_data);
                 // ...and to each further lender (#171).

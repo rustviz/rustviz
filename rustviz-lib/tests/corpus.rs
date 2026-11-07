@@ -739,6 +739,8 @@ const EXPECTED_OK: &[&str] = &[
     // holds its value in every inner branch (#502).
     "nested_match_arm_binding",
     "match_arm_binding_if_same_line",
+    // A reference field overwritten directly (#531).
+    "borrow_field_overwrite_direct",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6026,6 +6028,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b's resource is immutably borrowed by (*ri).r; b is read-only while the borrow is live",
         ],
     },
+    // ─── A reference field overwritten directly (#531) ───────────────
+    TooltipExpect {
+        name: "borrow_field_overwrite_direct",
+        // `hold.r = &t` keeps s borrowed until hold's last use (rustc
+        // rejects a `&mut s` in between), so s's borrow ends on the
+        // println!'s row, with t's; see
+        // `direct_field_overwrite_keeps_old_borrow_until_last_use`.
+        // A reference variable (`r = &y`) is dead between the writes:
+        // x's borrow ends there.
+        must_contain: &[
+            "t's resource is immutably borrowed by hold.r; t is read-only while the borrow is live",
+            "s's resource is no longer immutably borrowed",
+            "b's resource is immutably borrowed by o.inner.r; b is read-only while the borrow is live",
+            "a's resource is no longer immutably borrowed",
+            "x's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // The old borrow handed back at the write.
+            "Return immutably borrowed resource from hold.r to s",
+            "Return immutably borrowed resource from o.inner.r to a",
+        ],
+    },
     // ─── A borrow a call may store, per its signature (#513) ─────────
     TooltipExpect {
         name: "borrow_stored_by_call",
@@ -9409,6 +9433,25 @@ fn borrows_stored_in_a_struct_end_at_its_last_use() {
             }
         }
     }
+}
+
+/// #531: after `hold.r = &t`, s's borrow (held in the same struct) ends at
+/// hold's last use, on t's row, not at the write. For a reference
+/// variable the old borrow ends at the reassignment, before t's.
+#[test]
+fn direct_field_overwrite_keeps_old_borrow_until_last_use() {
+    let svg = run_with_local_backend("borrow_field_overwrite_direct").timeline_panel_string();
+    let end = |v: &str| dots_with_tooltip(&svg, &format!("{}'s resource is no longer immutably borrowed", v));
+    for (new, old) in [("t", "s"), ("b", "a")] {
+        let (new_end, old_end) = (end(new), end(old));
+        assert_eq!(new_end.len(), 1, "{}: {:?}", new, new_end);
+        assert_eq!(old_end.len(), 1, "{}: {:?}", old, old_end);
+        assert_eq!(old_end[0].1, new_end[0].1,
+            "{}'s borrow should end where {}'s does (hold's last use), got {:?} vs {:?}", old, new, old_end, new_end);
+    }
+    let (x_end, y_end) = (end("x"), end("y"));
+    assert_eq!((x_end.len(), y_end.len()), (1, 1));
+    assert!(x_end[0].1 < y_end[0].1, "x's borrow ends at the reassignment, before y's: {:?} {:?}", x_end, y_end);
 }
 
 #[test]
