@@ -387,6 +387,9 @@ const Description: React.FC = () => (
         rustc allows: after <code>let hold = other;</code>, assigning{' '}
         <code>other</code> again keeps what <code>hold</code> borrows
         borrowed until <code>other</code>&apos;s last use in rustc.
+        A struct that holds a borrow and is moved to another variable (
+        <code>hold = other;</code>) keeps the borrow drawn on{' '}
+        <code>other</code>&apos;s field column.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

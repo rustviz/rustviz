@@ -3676,14 +3676,13 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
 }
 
 /// `lhs` is a struct bound to `call`'s result whose reference fields
-/// `register_struct_field_lenders` linked to the caller's variables:
-/// draw a borrow from each lender into each such field, and keep the
-/// lenders borrowed past the call (#336).
+/// `register_struct_field_lenders` (or `reassign_struct_field_lenders`)
+/// linked to the caller's variables: draw a borrow from each lender
+/// into each such field, and keep the lenders borrowed past the call
+/// (#336). `lhs` may be a struct field of a struct (`o.inner = mk(&t)`,
+/// `O { inner: mk(&t), .. }`, #638).
 pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'tcx>, func: String, line_num: usize) {
   let ResourceTy::Value(ResourceAccessPoint::Struct(st)) = lhs else { return };
-  if st.is_member {
-    return;
-  }
   let ty = self.tcx.typeck(call.hir_id.owner).expr_ty(call);
   let Some(adt) = ty.ty_adt_def() else { return };
   let mut all: Vec<ResourceTy> = Vec::new();
@@ -4406,6 +4405,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
               rd.static_lender = static_lender;
               rd.co_lenders = co_lenders;
             }
+          }
+          // A struct field initialised by a call (`O { inner: mk(&t), .. }`):
+          // its reference fields borrow what the callee's signature ties
+          // them to, as for `let inner = mk(&t);` (#638).
+          if matches!(field_rap, ResourceAccessPoint::Struct(_)) {
+            self.register_struct_field_lenders(&new_lhs_name, field.expr, field_ty);
           }
           self.match_rhs(ResourceTy::Value(field_rap), field.expr, e);
       }
