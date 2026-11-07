@@ -1024,6 +1024,12 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_elem_write",
     "edition2024/if_let_chain_box_write",
     "edition2024/if_let_chain_field_write",
+    // `if let Some(a) = x.as_mut() { … } else { … }` and the `match` form:
+    // the call only borrows `x`, so `x` still owns its value after the
+    // conditional (#693).
+    "iflet_call_borrow_else",
+    "match_call_borrow_arms",
+    "edition2024/if_let_chain_call_borrow_else",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11533,6 +11539,68 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["r.name may have been moved", "p.name may have been"],
     },
+    // #693: a call in the scrutinee (`x.as_mut()`, `v.get_mut(0)`,
+    // `w.iter_mut().next()`) only borrows the variable; the pattern's
+    // binding holds that borrow until its last use, and an arm that
+    // binds nothing (`else`, `None =>`) had nothing hold it. Each
+    // variable still owns its value after the conditional and drops it
+    // at its scope end. It used to reach the join still borrowed on the
+    // `else` path, so its scope end said it dropped nothing.
+    TooltipExpect {
+        name: "iflet_call_borrow_else",
+        must_contain: &[
+            "x's resource is mutably borrowed by as_mut; x can't be used while the borrow is live",
+            "x's resource is mutably borrowed by a; x can't be used while the borrow is live",
+            "Return mutably borrowed resource from a to x",
+            "x isn't moved in any of the branches above",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "v's resource is mutably borrowed by b; v can't be used while the borrow is live",
+            "Return mutably borrowed resource from b to v",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+            "w's resource is mutably borrowed by c; w can't be used while the borrow is live",
+            "Return mutably borrowed resource from c to w",
+            "w goes out of scope. Its resource is dropped (including every String it holds).",
+            "t goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &[
+            "x goes out of scope. No resource is dropped.",
+            "v goes out of scope. No resource is dropped.",
+            "w goes out of scope. No resource is dropped.",
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "match_call_borrow_arms",
+        must_contain: &[
+            "x's resource is mutably borrowed by a; x can't be used while the borrow is live",
+            "Return mutably borrowed resource from a to x",
+            "x isn't moved in any of the branches above",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "Return mutably borrowed resource from b to v",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+            "Return mutably borrowed resource from c to w",
+            "w goes out of scope. Its resource is dropped (including every String it holds).",
+            "Return immutably borrowed resource from d to t",
+            "t goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &[
+            "x goes out of scope. No resource is dropped.",
+            "v goes out of scope. No resource is dropped.",
+            "w goes out of scope. No resource is dropped.",
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_call_borrow_else",
+        must_contain: &[
+            "x's resource is mutably borrowed by a; x can't be used while the borrow is live",
+            "Return mutably borrowed resource from a to x",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &[
+            "x goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -14853,6 +14921,35 @@ fn match_ref_binding_borrow_ends_at_last_use() {
         assert!(reach <= back,
             "{}: {}'s \"being shared\" segment runs to y={}, past the borrow's end at y={}",
             name, lender, reach, back);
+    }
+}
+
+/// #693: the borrow a scrutinee's call makes (`x.as_mut()`) is held by the
+/// pattern's binding, and ends at its last use, in its arm. In an arm whose
+/// pattern binds nothing of it (the `else`, `None =>`), nothing held it: it
+/// ends as that arm starts, between the binding arm's last use and the
+/// other arm's code. Without that end the variable reached the join still
+/// borrowed, and its scope end said it dropped nothing.
+#[test]
+fn scrutinee_call_borrow_ends_in_an_arm_that_binds_nothing() {
+    for (name, lender, m, used, other) in [
+        ("iflet_call_borrow_else", "x", "mutabl", "a.push('!');", "println!(\"no x\");"),
+        ("iflet_call_borrow_else", "v", "mutabl", "b.push('!');", "println!(\"no v\");"),
+        ("iflet_call_borrow_else", "w", "mutabl", "c.push('!');", "println!(\"no w\");"),
+        ("match_call_borrow_arms", "x", "mutabl", "Some(a) => a.push('!'),", "None => println!(\"no x\"),"),
+        ("match_call_borrow_arms", "v", "mutabl", "Some(b) => b.push('!'),", "None => println!(\"no v\"),"),
+        ("match_call_borrow_arms", "w", "mutabl", "Some(c) => c.push('!'),", "None => println!(\"no w\"),"),
+        ("match_call_borrow_arms", "t", "immutabl", "Some(d) => println!(\"{d}\"),", "None => println!(\"no t\"),"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let (used_y, other_y) = (code_row_y(&code, used), code_row_y(&code, other));
+        let back = format!("{}'s resource is no longer {}y borrowed", lender, m);
+        let ys: Vec<f64> = dots_listing_tooltip(&tl, &back).into_iter().map(|d| d.1).collect();
+        assert!(ys.iter().any(|&y| y == used_y),
+            "{}: {}'s borrow doesn't end at the binding's last use (y={}): {:?}", name, lender, used_y, ys);
+        assert!(ys.iter().any(|&y| y > used_y && y <= other_y),
+            "{}: {}'s borrow doesn't end in the arm that binds nothing (by y={}): {:?}", name, lender, other_y, ys);
     }
 }
 
