@@ -280,17 +280,23 @@ const Description: React.FC = () => (
         as owning a value afterwards; Rust treats it as possibly uninitialized.
       </li>
       <li>
-        A reference field of a struct bound by <code>if let</code>/<code>match</code> is drawn as an owner.
-      </li>
-      <li>
         <code>Rc</code>/<code>Arc</code> reference counts aren&apos;t tracked: each
         clone is drawn as its own owner, and its drop says only that it lowers
         the count (which clone frees the value isn&apos;t shown).
       </li>
       <li>
-        An <code>if</code> written on one line (<code>if c {'{'} take(s); {'}'}</code>)
-        is drawn as if its body always ran; spread it over several lines to see
-        the move as conditional.
+        A closure that uses one element of a tuple (<code>move || t.0.len()</code>)
+        is drawn as capturing the whole tuple.
+      </li>
+      <li>
+        A tuple literal nested in a <code>match</code> tuple scrutinee (
+        <code>match (a, (b, c))</code>) leaves its variables drawn as never
+        moved, and <code>let (b, _) = w().pair;</code> says <code>b</code>{' '}
+        drops nothing.
+      </li>
+      <li>
+        A reference returned by a <code>loop</code> (<code>break ra;</code>)
+        isn&apos;t linked to its lender.
       </li>
     </ul>
     <p>
@@ -343,8 +349,8 @@ const Description: React.FC = () => (
         <code>&amp;mut self</code> method) is drawn on the reference&apos;s
         column. For a local <code>let r = &amp;mut s;</code> outside{' '}
         <code>if</code>/<code>match</code>, the field value it replaces is also
-        shown dropped on <code>s</code>&apos;s own field column. A write to a tuple
-        field (<code>t.0 = x</code>) or a method result&apos;s field is drawn on
+        shown dropped on <code>s</code>&apos;s own field column. A write to a method
+        result&apos;s field (<code>v.last_mut().unwrap().n = x</code>) is drawn on
         the column of the variable it is reached from; the old value&apos;s drop
         is stated in the tooltip only. A write to an
         element (<code>v[i] = x</code>) is drawn on <code>v</code>&apos;s column,
@@ -366,9 +372,6 @@ const Description: React.FC = () => (
         reference&apos;s column.
       </li>
       <li>
-        A reference to a slice or <code>str</code> (<code>&amp;[i32]</code>) still
-        says &quot;resource&quot; where &quot;value&quot; would be exact.
-        column.
         Overwriting a whole struct that holds a reference with something other
         than a struct literal (<code>hold = make(&amp;t)</code>) may draw the old
         borrow ending too late, or not at all (rustc ends it at the write).
@@ -402,7 +405,8 @@ const Description: React.FC = () => (
         so does a literal of only fresh values (
         <code>let (ref a, _) = (make(), make());</code>). Other temporaries (
         <code>vec![..];</code>, a struct literal, an <code>if let</code> or{' '}
-        <code>for</code> head) drop without being drawn or mentioned, except a
+        <code>for</code> head, what a <code>let</code> pattern leaves of a
+        call&apos;s result) drop without being drawn or mentioned, except a
         tuple of variables matched by <code>if let</code> or{' '}
         <code>match</code> (<code>(x, y)</code>): where it&apos;s dropped is
         stated on <code>x</code>&apos;s and <code>y</code>&apos;s columns
