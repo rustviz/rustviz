@@ -1996,6 +1996,38 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, rc: Option<RcDrop
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
     format!("{0} isn't moved in any of the branches above", fmt_style(my_name))
 }
+// Extra text for a column label with a subscript (`s₂`): a variable
+// that shadows an earlier one of the same name (`let s` while the first
+// `s` is in scope, see `binding_name`), or, rarely, one drawn in a column
+// of its own in another branch from the earlier one. Empty for any other
+// name.
+pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::data::ShadowNote>) -> String {
+    let (Some((base, _)), Some(note)) = (crate::expr_visitor_utils::split_numbered_name(name), note) else {
+        return String::new();
+    };
+    let base = String::from(base);
+    let declared = match note.lines.as_slice() {
+        [one] => format!("a new variable named {}, declared on line {}", fmt_style(&base), one),
+        many => {
+            let (last, init) = many.split_last().unwrap();
+            let init: Vec<String> = init.iter().map(|l| l.to_string()).collect();
+            format!(
+                "a new variable named {}, declared on lines {} and {} (in different branches or blocks, so only one exists at a time)",
+                fmt_style(&base), init.join(", "), last
+            )
+        }
+    };
+    match &note.shadows {
+        Some(shadowed) => format!(
+            ". {0} shadows {1}: it is {2}",
+            fmt_style(name), fmt_style(shadowed), declared
+        ),
+        None => format!(
+            ". {0} is a different variable from {1}: it is {2}. {1} and {0} are in different branches, so only one of them exists at a time",
+            fmt_style(name), fmt_style(&base), declared.replacen("a new variable", "another variable", 1)
+        ),
+    }
+}
 
 // Merge dot for a reference declared before the conditional whose
 // borrow ended in each arm, at its last use there or, in an arm that

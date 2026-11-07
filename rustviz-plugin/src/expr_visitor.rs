@@ -1171,7 +1171,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.tcx.typeck_root_def_id(*closure_def_id) != callee.hir_id.owner.to_def_id() {
       return;
     }
-    let name = self.tcx.hir_name(path.segments[0].hir_id).as_str().to_owned();
+    let name = path_name(path, &self.tcx);
     let closure_rap = match self.raps.get(&name) {
       Some(rd) if rd.rap.is_closure() => rd.rap.to_owned(),
       _ => return,
@@ -1196,7 +1196,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
         _ => continue,
       };
-      let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+      let upvar_name = binding_name(&self.tcx, upvar_hir_id);
       let Some(rap) = self.capture_rap(&capture.place, &upvar_name) else { continue };
       fates.push(CapturedFate {
         name: rap.name().to_owned(),
@@ -1402,7 +1402,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
         _ => continue,
       };
-      let root = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+      let root = binding_name(&self.tcx, upvar_hir_id);
       let Some(from_rap) = self.capture_rap(&capture.place, &root) else { continue };
       match capture.info.capture_kind {
         rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse => {
@@ -2850,7 +2850,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             let muta = bool_of_mut(mode.1); // You need to define this function
             let line_num = span_to_line(&ident.span, &self.tcx); // Assuming self.span_to_line exists
             let ty: Ty<'tcx> = ty_results.node_type(id);
-            let name = ident.to_string();
+            let name = binding_name(&self.tcx, id);
             // copied code - should definetly make a function of this
             if ty.is_ref() {
                 let ref_mutability = bool_of_mut(ty.ref_mutability().unwrap()); // You need to define this function
@@ -3345,9 +3345,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           }
           name
         }
-        _ => {
-          self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned()
-        }
+        _ => path_name(p, &self.tcx),
       };
       // Last-resort fallback: a path that doesn't resolve to a
       // registered RAP gets an Anonymous source instead of
@@ -3441,7 +3439,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           return;
         }
         LocalCallee::Consumed => {
-          let from = hirid_to_var_name(fn_expr.hir_id, &self.tcx)
+          let from = expr_to_rap_name(fn_expr, &self.tcx)
             .and_then(|n| self.raps.get(&n))
             .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
             .unwrap_or(ResourceTy::Anonymous);
@@ -3947,7 +3945,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         // The root variable's name (MIR loans below are keyed on it)
         // and the captured place's column: `p.name` for a disjoint
         // field capture, `p` for a whole-variable one.
-        let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+        let upvar_name = binding_name(&self.tcx, upvar_hir_id);
         let by_value = matches!(capture.info.capture_kind,
           rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
         // A by-value capture of a Copy place copies it into the

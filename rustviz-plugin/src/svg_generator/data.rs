@@ -2124,6 +2124,24 @@ pub struct VisualizationData {
     /// labels per-fn instead of in one shared row at the top of
     /// the SVG. Populated from plugin.rs's merged rap_map.
     pub fn_start_lines: HashMap<u64, usize>,
+
+    /// rap.hash() → what to say in the hover text of a numbered column
+    /// header (`s₂`); only columns whose name is numbered have one.
+    pub shadow_notes: HashMap<u64, ShadowNote>,
+}
+
+/// About a numbered column (`s₂`): a variable of the same name as an
+/// earlier one in its fn.
+#[derive(Debug, Clone)]
+pub struct ShadowNote {
+    /// The variable it shadows (its column name, e.g. `s`), if it
+    /// shadows one: `None` for a variable that only has a column of its
+    /// own because it's in another branch from a same-named variable.
+    pub shadows: Option<String>,
+    /// Source lines of the declarations drawn in this column: several
+    /// when same-named variables of different branches or blocks share
+    /// it.
+    pub lines: Vec<usize>,
 }
 
 /// The RAPs of `raps` in declaration order: by RAP hash (assigned from

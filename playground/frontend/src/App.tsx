@@ -283,10 +283,13 @@ const Description: React.FC = () => (
         A reference field of a struct bound by <code>if let</code>/<code>match</code> is drawn as an owner.
       </li>
       <li>
-        Shadowed variables (<code>let x</code> twice) share one column;{' '}
         <code>Rc</code>/<code>Arc</code> reference counts aren&apos;t tracked: each
         clone is drawn as its own owner, and its drop says only that it lowers
         the count (which clone frees the value isn&apos;t shown).
+      </li>
+      <li>
+        An or-pattern <code>match</code> arm (<code>Ok(s) | Err(s)</code>)
+        shows no binding.
       </li>
       <li>
         An <code>if</code> written on one line (<code>if c {'{'} take(s); {'}'}</code>)

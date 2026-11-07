@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use log::info;
 use rustc_middle::ty::TyCtxt;
-use crate::svg_generator::data::ExternalEvent;
+use crate::svg_generator::data::{ExternalEvent, ShadowNote};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::{path::PathBuf, fs};
 use std::env::current_dir;
@@ -224,6 +224,7 @@ impl RV1Helper {
     a_map: & mut BTreeMap<usize, Vec<String>>,
     num_raps: usize,
     fn_start_lines: HashMap<u64, usize>,
+    shadow_notes: HashMap<u64, ShadowNote>,
     hidden_source_lines: HashSet<usize>,
     write_to_cwd: bool) -> Result<()> {
     let mut keys_to_remove: Vec<usize> = Vec::new();
@@ -242,7 +243,7 @@ impl RV1Helper {
 
 
     // send stuff to RV1
-    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, hidden_source_lines)?;
+    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, hidden_source_lines)?;
 
     if write_to_cwd { // write the SVG files
       self.source_path.pop(); // just write to inside cwd

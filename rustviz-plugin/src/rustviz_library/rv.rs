@@ -1,5 +1,5 @@
 use crate::svg_generator::{
-  data::{ExternalEvent, VisualizationData},
+  data::{ExternalEvent, ShadowNote, VisualizationData},
   svg_frontend::svg_generation
 };
 use anyhow::Result;
@@ -27,6 +27,7 @@ impl Rustviz {
     ev_map: BTreeMap<usize, Vec<ExternalEvent>>,
     num_raps: usize,
     fn_start_lines: HashMap<u64, usize>,
+    shadow_notes: HashMap<u64, ShadowNote>,
     hidden_source_lines: HashSet<usize>,
   ) -> Result<Rustviz>{
     /* ******************************************
@@ -39,6 +40,7 @@ impl Rustviz {
       event_line_map: ev_map,
       num_valid_raps: num_raps,
       fn_start_lines,
+      shadow_notes,
     };
     /* ******************************************
             --- Render SVG images ---

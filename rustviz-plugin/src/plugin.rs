@@ -9,7 +9,7 @@ use rustc_utils::mir::borrowck_facts;
 use crate::expr_visitor::{ExprVisitor, RapData};
 use crate::RVPluginArgs;
 use crate::utils::{RV1Helper, annotate_enum_variant, annotate_toplevel_fn, annotate_struct_field};
-use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint};
+use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ShadowNote};
 
 /// Drain a per-fn visitor's `raps` into a global rap_map.
 ///
@@ -35,6 +35,21 @@ fn merge_visitor_raps(
         global.insert(fq_name, data);
       }
     }
+  }
+}
+
+/// Record the header notes of the numbered columns (`s₂`) of the fn
+/// body `owner`, under the same `<fn_start_line>::<name>` keys that
+/// `merge_visitor_raps` gives its RAPs.
+fn collect_shadow_notes(
+  tcx: &TyCtxt,
+  owner: rustc_hir::OwnerId,
+  fn_start_line: usize,
+  out: &mut HashMap<String, ShadowNote>,
+) {
+  #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "inserting into another map; order is irrelevant")]
+  for (name, note) in crate::expr_visitor_utils::binding_names(tcx, owner).notes.iter() {
+    out.insert(format!("{}::{}", fn_start_line, name), note.clone());
   }
 }
 
@@ -97,6 +112,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // preceding blank line if any — keeps the surrounding spacing
   // tidy when fns at the end of the file are removed).
   let mut hidden_source_lines: HashSet<usize> = HashSet::new();
+  let mut shadow_notes_by_fq: HashMap<String, ShadowNote> = HashMap::new();
   let mut a_line_map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
   let mut owner_to_hash: HashMap<String, usize> = HashMap::new();
   let mut pre_events: Vec<(usize, ExternalEvent)> = Vec::new();
@@ -211,6 +227,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             visitor.print_out_of_scope();
             rap_hash_num = visitor.rap_hashes;
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
+            collect_shadow_notes(&tcx, impl_item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
           }
         }
       }
@@ -297,6 +314,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         visitor.print_out_of_scope();
         rap_hash_num = visitor.rap_hashes;
         merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
+        collect_shadow_notes(&tcx, item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
       },
       _ => {}
     }
@@ -356,8 +374,18 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   fn_starts.sort();
   let fn_start_lines: HashMap<u64, usize> = fn_starts.into_iter().collect();
 
+  // Header notes by RAP hash. (Sorted, as above, in case two RAPs ever
+  // shared a hash.)
+  #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
+  let mut note_pairs: Vec<(u64, String, ShadowNote)> = shadow_notes_by_fq
+    .iter()
+    .filter_map(|(k, n)| rap_map.get(k).map(|d| (*d.rap.hash(), k.clone(), n.clone())))
+    .collect();
+  note_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+  let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
+
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, hidden_source_lines, args.write_to_cwd) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, hidden_source_lines, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

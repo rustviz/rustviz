@@ -500,7 +500,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for capture in typeck.closure_min_captures_flattened(def_id) {
       let ty::UpvarCapture::ByRef(kind) = capture.info.capture_kind else { continue };
       let rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) = capture.place.base else { continue };
-      let name = self.tcx.hir_name(upvar_id.var_path.hir_id).as_str().to_owned();
+      let name = binding_name(&self.tcx, upvar_id.var_path.hir_id);
       if let Some(rd) = self.raps.get(&name) {
         let l = ResourceTy::Value(rd.rap.to_owned());
         if !out.iter().any(|(x, _)| *x == l) {

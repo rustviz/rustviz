@@ -2,7 +2,7 @@
 use std::{cmp::max, collections::{HashMap, HashSet, VecDeque}};
 use log::warn;
 use rustc_hir::Mutability;
-use crate::svg_generator::data::{ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
+use crate::svg_generator::data::{ShadowNote, ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
 use rustc_middle::ty::{Ty, TyCtxt, TypeckResults};
 use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability};
 use rustc_span::Span;
@@ -64,6 +64,289 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
   }
 }
 
+// BINDING NAMES
+//
+// Every local binding (`let s`, a parameter, a pattern binding in a
+// `match` arm or `if let`, a `for` loop variable) is its own variable,
+// even when it reuses a name: `let s = …; let s = …;` declares two
+// variables, and the second shadows the first. RAPs (and so timeline
+// columns) are keyed by name, so each binding gets a name of its own
+// here, and every place that registers or looks up a variable goes
+// through `binding_name` / `path_name` instead of the bare identifier.
+//
+// Within a fn body, a binding keeps the plain name (`s`) unless it
+// shadows: if k variables of the same name are still in scope where it's
+// declared, it is `s` with the subscript k+1 (`s₂`, `s₃`, …). Bindings
+// that shadow the same number of variables share a column: they are
+// never in scope together (sibling blocks, different arms of a `match`,
+// the two blocks of an `if`), so at most one of them exists at a time.
+// The exception is a pair in different branches of an `if` that the
+// timeline can't draw as one column (see `isolated` below, e.g. `if let
+// Some(z) = a {} else if let Some(z) = b {}`): the later one gets a
+// subscript although it shadows nothing, and its header says so. A
+// subscript can't be part of a Rust identifier, so these names never
+// clash with a real variable. (#173)
+
+/// Per-fn-body table built by `collect_binding_names`.
+#[derive(Default)]
+pub struct BindingNames {
+  /// Name of each binding, by the binding pattern's `HirId` (what a
+  /// path's `Res::Local` points to).
+  pub by_hir: HashMap<HirId, String>,
+  /// Identifier span of each binding with its name, in source order;
+  /// used to name MIR locals (see `mir_local_names`).
+  pub by_span: Vec<(Span, String)>,
+  /// For each numbered column name (`s₂`, `s₃`, …): what to say about it
+  /// in the column header's hover text (see `ShadowNote`).
+  pub notes: HashMap<String, ShadowNote>,
+}
+
+thread_local! {
+  static BINDING_NAMES: std::cell::RefCell<HashMap<rustc_hir::OwnerId, std::rc::Rc<BindingNames>>> =
+    std::cell::RefCell::new(HashMap::new());
+}
+
+/// The (cached) binding-name table of the fn body that `owner` owns.
+pub fn binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> std::rc::Rc<BindingNames> {
+  if let Some(t) = BINDING_NAMES.with(|c| c.borrow().get(&owner).cloned()) {
+    return t;
+  }
+  let t = std::rc::Rc::new(collect_binding_names(tcx, owner));
+  BINDING_NAMES.with(|c| c.borrow_mut().insert(owner, t.clone()));
+  t
+}
+
+/// `x`, `x₂`, `x₃`, …: the display name of the `n`th (1-based) variable
+/// called `ident` in a fn body.
+pub fn numbered_name(ident: &str, n: usize) -> String {
+  if n <= 1 {
+    return ident.to_owned();
+  }
+  const SUB: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+  let digits: String = n.to_string().chars().map(|d| SUB[d.to_digit(10).unwrap() as usize]).collect();
+  format!("{}{}", ident, digits)
+}
+
+/// If `name` was made by `numbered_name` with `n >= 2`, the plain
+/// identifier and `n`.
+pub fn split_numbered_name(name: &str) -> Option<(&str, usize)> {
+  const SUB: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+  let base = name.trim_end_matches(|c| SUB.contains(&c));
+  if base.len() == name.len() || base.is_empty() {
+    return None;
+  }
+  let n: usize = name[base.len()..].chars()
+    .map(|c| char::from(b'0' + SUB.iter().position(|d| *d == c).unwrap() as u8))
+    .collect::<String>().parse().ok()?;
+  Some((base, n))
+}
+
+/// The source range in which the binding pattern `pat` is in scope
+/// (from just after the point it's declared to the end of the block,
+/// arm, or `if` body it belongs to), as byte offsets; `None` if the
+/// binding isn't of a shape handled here. `body_span` is the fn body,
+/// the scope of a parameter.
+fn binding_scope(tcx: &TyCtxt, pat: HirId, body_span: Span) -> Option<(u32, u32)> {
+  use rustc_hir::Node;
+  let mut let_expr: Option<Span> = None;
+  for (id, node) in tcx.hir_parent_iter(pat) {
+    match (node, let_expr) {
+      (Node::Pat(_) | Node::PatField(_), None) => {}
+      (Node::Param(_), None) => return Some((body_span.lo().0, body_span.hi().0)),
+      // `let s = …;`: in scope after the statement, to the end of its block.
+      (Node::LetStmt(l), None) => {
+        // (The statement wrapping the `let` sits between it and the block.)
+        return tcx.hir_parent_iter(id)
+          .find_map(|(_, n)| match n {
+            Node::Stmt(_) => None,
+            Node::Block(b) => Some(Some((l.span.hi().0, b.span.hi().0))),
+            _ => Some(None),
+          })
+          .flatten();
+      }
+      (Node::Arm(a), None) => return Some((a.pat.span.lo().0, a.body.span.hi().0)),
+      (Node::Expr(e), None) if matches!(e.kind, ExprKind::Let(_)) => let_expr = Some(e.span),
+      // `if let` / `while let` / a `let` guard: in scope after the
+      // `let`, through the `if`'s then-branch (or the arm's body).
+      (Node::Expr(e), Some(l)) => {
+        if let ExprKind::If(_, then, _) = e.kind {
+          return Some((l.hi().0, then.span.hi().0));
+        }
+      }
+      (Node::Arm(a), Some(l)) => return Some((l.hi().0, a.body.span.hi().0)),
+      (_, Some(_)) => {}
+      _ => return None,
+    }
+  }
+  None
+}
+
+/// The `if`s a binding sits in a branch of: `(the if, in its else
+/// branch, declared directly by the branch)`. A branch declares a
+/// variable directly if it's a `let` of the branch's own block (or an
+/// `if let` pattern, for the then-branch): those are the variables the
+/// timeline draws as declared in that branch.
+fn binding_branches(tcx: &TyCtxt, pat: HirId) -> Vec<(HirId, bool, bool)> {
+  use rustc_hir::Node;
+  let mut out = Vec::new();
+  let mut child = pat;
+  let mut first_block: Option<HirId> = None;
+  let mut in_let = false;
+  for (id, node) in tcx.hir_parent_iter(pat) {
+    match node {
+      Node::Block(b) if first_block.is_none() => first_block = Some(b.hir_id),
+      Node::Expr(e) => match e.kind {
+        ExprKind::Let(_) => in_let = true,
+        ExprKind::If(_, then, els) => {
+          let is_own_block = |branch: &Expr| matches!(branch.kind, ExprKind::Block(b, _) if Some(b.hir_id) == first_block);
+          if in_let && child != then.hir_id && els.is_none_or(|e| e.hir_id != child) {
+            out.push((id, false, true));
+          } else if child == then.hir_id {
+            out.push((id, false, is_own_block(then)));
+          } else if els.is_some_and(|e| e.hir_id == child) {
+            out.push((id, true, is_own_block(els.unwrap())));
+          }
+        }
+        _ => {}
+      },
+      _ => {}
+    }
+    child = id;
+  }
+  out
+}
+
+fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingNames {
+  use rustc_hir::intravisit::{self, Visitor};
+
+  struct Binding {
+    span: Span,
+    hir_id: HirId,
+    ident: String,
+    // Where the binding is in scope (`binding_scope`).
+    scope: (u32, u32),
+    // The `if` branches it's in (`binding_branches`).
+    branches: Vec<(HirId, bool, bool)>,
+  }
+  struct Collector<'a, 'tcx> {
+    tcx: &'a TyCtxt<'tcx>,
+    body_span: Span,
+    out: Vec<Binding>,
+  }
+  impl<'v> Visitor<'v> for Collector<'_, '_> {
+    // Closure bodies are nested bodies, which the default visitor
+    // doesn't enter; the plugin doesn't draw their locals either.
+    fn visit_pat(&mut self, p: &'v Pat<'v>) {
+      match p.kind {
+        PatKind::Binding(_, hir_id, ident, sub) => {
+          // Desugaring / macro locals (`iter` of a `for` loop, `val`
+          // of `?`, `args` of `println!`) never get a column.
+          if !ident.span.from_expansion() {
+            // A binding of a shape `binding_scope` doesn't know is
+            // taken to stay in scope to the end of the fn.
+            let scope = binding_scope(self.tcx, hir_id, self.body_span)
+              .unwrap_or((ident.span.lo().0, self.body_span.hi().0));
+            let branches = binding_branches(self.tcx, hir_id);
+            self.out.push(Binding { span: ident.span, hir_id, ident: ident.to_string(), scope, branches });
+          }
+          if let Some(sp) = sub {
+            self.visit_pat(sp);
+          }
+        }
+        // The alternatives of an or-pattern bind the same variables,
+        // and every use resolves to the first alternative's binding.
+        PatKind::Or(alts) => {
+          if let Some(first) = alts.first() {
+            self.visit_pat(first);
+          }
+        }
+        _ => intravisit::walk_pat(self, p),
+      }
+    }
+  }
+
+  let mut names = BindingNames::default();
+  let Some(body) = tcx.hir_maybe_body_owned_by(owner.def_id) else { return names };
+  let mut c = Collector { tcx, body_span: body.value.span, out: Vec::new() };
+  c.visit_body(body);
+  c.out.sort_by_key(|b| (b.span.lo(), b.span.hi()));
+
+  // First pass: how many variables of the same name each binding
+  // shadows (those still in scope where it's declared), which numbers
+  // its column. Bindings that shadow the same number share a column,
+  // except where the timeline can't draw one variable declared in both
+  // branches of an `if` (`isolated`): that happens when the later
+  // binding isn't a plain `let` of the `else` block (an `else if` chain,
+  // a pattern) or the earlier one isn't one of the `then` block. Those
+  // get a column of their own, numbered after all the others.
+  let n = c.out.len();
+  let mut depth = vec![0usize; n];
+  let mut shadowed: Vec<Option<usize>> = vec![None; n];
+  let mut isolated = vec![false; n];
+  for i in 0..n {
+    let at = c.out[i].span.lo().0;
+    let in_scope: Vec<usize> = (0..i)
+      .filter(|&j| c.out[j].ident == c.out[i].ident && { let (lo, hi) = c.out[j].scope; lo <= at && at < hi })
+      .collect();
+    depth[i] = in_scope.len();
+    shadowed[i] = in_scope.last().copied();
+    isolated[i] = (0..i).any(|j| {
+      c.out[j].ident == c.out[i].ident && depth[j] == depth[i]
+        && c.out[i].branches.iter().any(|&(if_i, else_i, direct_i)| {
+          else_i && c.out[j].branches.iter().any(|&(if_j, else_j, direct_j)| if_j == if_i && !else_j && !(direct_i && direct_j))
+        })
+    });
+  }
+  let mut next_free: HashMap<String, usize> = HashMap::new();
+  for i in 0..n {
+    if !isolated[i] {
+      let m = next_free.entry(c.out[i].ident.clone()).or_insert(0);
+      *m = (*m).max(depth[i] + 1);
+    }
+  }
+  let mut col_names: Vec<String> = Vec::with_capacity(n);
+  for i in 0..n {
+    let ident = &c.out[i].ident;
+    col_names.push(if isolated[i] {
+      let m = next_free.get_mut(ident).unwrap();
+      *m += 1;
+      numbered_name(ident, *m)
+    } else {
+      numbered_name(ident, depth[i] + 1)
+    });
+  }
+  // Second pass: names and header notes.
+  for i in 0..n {
+    let name = col_names[i].clone();
+    if split_numbered_name(&name).is_some() {
+      let line = tcx.sess.source_map().lookup_char_pos(c.out[i].span.lo()).line;
+      let note = names.notes.entry(name.clone())
+        .or_insert_with(|| ShadowNote { shadows: shadowed[i].map(|j| col_names[j].clone()), lines: Vec::new() });
+      note.lines.push(line);
+    }
+    names.by_span.push((c.out[i].span, name.clone()));
+    names.by_hir.insert(c.out[i].hir_id, name);
+  }
+  names
+}
+
+/// Name (and `raps` key) of the local variable bound by the binding
+/// pattern `hir_id`. Falls back to the identifier for a binding outside
+/// the table (e.g. one inside a closure body).
+pub fn binding_name(tcx: &TyCtxt, hir_id: HirId) -> String {
+  binding_names(tcx, hir_id.owner).by_hir.get(&hir_id).cloned()
+    .unwrap_or_else(|| tcx.hir_name(hir_id).as_str().to_owned())
+}
+
+/// Name to look up for the path `p`: the variable it refers to if it
+/// names a local, its first segment otherwise.
+pub fn path_name(p: &Path, tcx: &TyCtxt) -> String {
+  match p.res {
+    Res::Local(hir_id) => binding_name(tcx, hir_id),
+    _ => tcx.hir_name(p.segments[0].hir_id).as_str().to_owned(),
+  }
+}
+
 /// For a place reached through an index projection (`v[0]`,
 /// `ps[0].r`, `grid[1][2]`), the collection that is indexed first:
 /// `v`, `ps`, `grid`. None for places without an index (`p.r`, `r`).
@@ -92,9 +375,7 @@ pub fn index_base<'a, 'tcx>(expr: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
 /// than crashing the plugin.
 pub fn expr_to_rap_name(expr: &Expr, tcx: &TyCtxt) -> Option<String> {
   match expr.kind {
-    ExprKind::Path(QPath::Resolved(_, p)) => {
-      Some(tcx.hir_name(p.segments[0].hir_id).as_str().to_owned())
-    }
+    ExprKind::Path(QPath::Resolved(_, p)) => Some(path_name(p, tcx)),
     ExprKind::Field(inner, ident) => {
       let base = expr_to_rap_name(inner, tcx)?;
       Some(format!("{}.{}", base, ident.as_str()))
@@ -120,13 +401,16 @@ pub fn fn_key(name: &str) -> String {
   format!("fn {}", name)
 }
 
-/// The `raps` key for a path expression: the name of its first segment,
-/// looked up among the variables if the path resolves to a local
-/// binding, and among the functions otherwise (fn items, tuple-struct
+/// The `raps` key for a path expression: the variable it names if the
+/// path resolves to a local binding (`path_name`), and the name of its
+/// first segment among the functions otherwise (fn items, tuple-struct
 /// and unit constructors such as `None`).
 pub fn path_key(p: &Path, tcx: &TyCtxt) -> String {
-  let name = tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
-  if matches!(p.res, Res::Local(_)) { name } else { fn_key(&name) }
+  match p.res {
+    // A local's own name, `s₂` for a second `let s` (`binding_name`).
+    Res::Local(_) => path_name(p, tcx),
+    _ => fn_key(&path_name(p, tcx)),
+  }
 }
 
 /// The local a path expression names (`x` resolving to a `let` or
@@ -212,8 +496,7 @@ pub fn string_of_path(p: &Path, tcx: &TyCtxt) -> String {
       name
     }
     _ => { // technically this is incomplete - there are more cases to cover
-    
-      tcx.hir_name(p.segments[0].hir_id).as_str().to_owned()
+      path_name(p, tcx)
     }
   }
 }
@@ -297,12 +580,13 @@ pub fn num_derefs(expr: &Expr) -> usize{
 /// `visit_local`'s from_expansion guard).
 pub fn collect_pat_bindings(
   pat: &Pat,
+  tcx: &TyCtxt,
   raps: &HashMap<String, RapData>,
   out: &mut HashSet<ResourceAccessPoint>,
 ) {
   match pat.kind {
-    PatKind::Binding(_, _, ident, sub_pat) => {
-      if let Some(rd) = raps.get(&ident.to_string()) {
+    PatKind::Binding(_, hir_id, _, sub_pat) => {
+      if let Some(rd) = raps.get(&binding_name(tcx, hir_id)) {
         out.insert(rd.rap.to_owned());
         // The temporary a `let r = &…;` keeps alive is declared with r.
         if let Some(t) = rd.extended_temp.as_ref().and_then(|t| raps.get(t)) {
@@ -310,31 +594,31 @@ pub fn collect_pat_bindings(
         }
       }
       if let Some(sp) = sub_pat {
-        collect_pat_bindings(sp, raps, out);
+        collect_pat_bindings(sp, tcx, raps, out);
       }
     }
     PatKind::Tuple(pats, _) | PatKind::TupleStruct(_, pats, _) => {
-      for p in pats { collect_pat_bindings(p, raps, out); }
+      for p in pats { collect_pat_bindings(p, tcx, raps, out); }
     }
     PatKind::Struct(_, fields, _) => {
-      for f in fields { collect_pat_bindings(f.pat, raps, out); }
+      for f in fields { collect_pat_bindings(f.pat, tcx, raps, out); }
     }
     PatKind::Or(pats) => {
       // Or-pattern alts bind the same names; walking one alt is enough.
       if let Some(first) = pats.first() {
-        collect_pat_bindings(first, raps, out);
+        collect_pat_bindings(first, tcx, raps, out);
       }
     }
     PatKind::Ref(inner, _, _)
     | PatKind::Box(inner)
     | PatKind::Deref(inner)
     | PatKind::Guard(inner, _) => {
-      collect_pat_bindings(inner, raps, out);
+      collect_pat_bindings(inner, tcx, raps, out);
     }
     PatKind::Slice(before, mid, after) => {
-      for p in before { collect_pat_bindings(p, raps, out); }
-      if let Some(p) = mid { collect_pat_bindings(p, raps, out); }
-      for p in after { collect_pat_bindings(p, raps, out); }
+      for p in before { collect_pat_bindings(p, tcx, raps, out); }
+      if let Some(p) = mid { collect_pat_bindings(p, tcx, raps, out); }
+      for p in after { collect_pat_bindings(p, tcx, raps, out); }
     }
     // No bindings inside these.
     PatKind::Wild
@@ -365,13 +649,13 @@ pub fn needs_scope_end(r: &ResourceAccessPoint) -> bool {
 /// (`else if let Some(y) = b { … } else if let … `), by name. A binding
 /// that reuses an existing variable's name gets no RAP of its own, so
 /// `raps_declared_since` can't see it as declared in the `else`.
-pub fn else_if_let_bindings(expr: &Expr, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn else_if_let_bindings(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
   let mut res = HashSet::new();
   let mut cur = Some(expr);
   while let Some(e) = cur {
     let ExprKind::If(cond, _, els) = e.kind else { break };
     if let ExprKind::Let(let_expr) = cond.kind {
-      collect_pat_bindings(let_expr.pat, raps, &mut res);
+      collect_pat_bindings(let_expr.pat, tcx, raps, &mut res);
     }
     cur = els;
   }
@@ -393,7 +677,7 @@ pub fn get_decl_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
   }
 }
 
-pub fn get_decl_of_stmt(stmt: &Stmt, _tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn get_decl_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
   let mut res = HashSet::new();
   // Synthetic stmts from macro/desugar expansion (the `let args = …`
   // emitted by `println!`, the inner Match arms of `?`, etc.) aren't
@@ -402,7 +686,7 @@ pub fn get_decl_of_stmt(stmt: &Stmt, _tcx: &TyCtxt, raps: &HashMap<String, RapDa
   if stmt.span.from_expansion() { return res; }
   match stmt.kind {
     StmtKind::Let(ref local) => {
-      collect_pat_bindings(&local.pat, raps, &mut res);
+      collect_pat_bindings(&local.pat, tcx, raps, &mut res);
     }
     _ => {}
   }
@@ -1157,7 +1441,8 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
       // the call's Function RAP, never the variable (#254, #299).
       let key = match local_callee_result_key(expr, tcx) {
         LocalCallee::Call(key) => Some(key),
-        LocalCallee::Consumed => hirid_to_var_name(fn_expr.hir_id, tcx),
+        // The variable itself (`f₂` for a shadowing `let f`).
+        LocalCallee::Consumed => expr_to_rap_name(fn_expr, tcx),
         LocalCallee::NotLocal => hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
       };
       key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))

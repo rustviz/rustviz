@@ -7,10 +7,10 @@
 //! you figure out when a copy occurs? You can't use the assignment operator - since a single HIR instr can be compiled down into
 //! multiple MIR instructions.
 
-use crate::{expr_visitor::*, expr_visitor_utils::span_to_line};
+use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_to_line, split_numbered_name}};
 use log::info;
-use rustc_middle::mir::{Location, Local};
-use std::collections::{BTreeMap, HashMap};
+use rustc_middle::mir::{Location, Local, VarDebugInfoContents};
+use std::collections::HashMap;
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
 use rustc_utils::SpanExt;
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, RustcFacts};
@@ -18,14 +18,6 @@ use rustc_span::Span;
 use polonius_engine::{Algorithm, Output, FactTypes};
 type Loan = <RustcFacts as FactTypes>::Loan;
 type Point = <RustcFacts as FactTypes>::Point;
-
-/// Local -> source name. `debug_info_name_map` is a HashMap; walk it in
-/// name order so that if two names ever share a Local (closure captures
-/// all live in `_1`), the same name wins on every run (#211).
-fn local_names(body: &rustc_middle::mir::Body<'_>) -> HashMap<Local, String> {
-    let by_name: BTreeMap<String, Local> = body.debug_info_name_map().into_iter().collect();
-    by_name.into_iter().map(|(name, local)| (local, name)).collect()
-}
 
 pub struct MIRBorrowData {
     pub borrow_idx: usize,
@@ -68,6 +60,35 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
 
 
+    /// Name of each user variable's MIR local, as used for its RAP
+    /// (`s₂` for a second `let s`, see `binding_name`). rustc_utils'
+    /// `debug_info_name_map` is keyed by the source name, so it kept
+    /// only one of two shadowing `s`es; here each local is matched to
+    /// its binding through the binding's span.
+    fn mir_local_names(&self, body_with_facts: &BodyWithBorrowckFacts) -> HashMap<Local, String> {
+        let body = &body_with_facts.body;
+        let owner = self.tcx.local_def_id_to_hir_id(body.source.def_id().expect_local()).owner;
+        let names = binding_names(&self.tcx, owner);
+        let mut res: HashMap<Local, String> = HashMap::new();
+        for vdi in body.var_debug_info.iter() {
+            let VarDebugInfoContents::Place(place) = vdi.value else { continue };
+            let span = vdi.source_info.span;
+            let ident = vdi.name.as_str();
+            let name = names.by_span.iter()
+                .find(|(sp, n)| span.contains(*sp)
+                    && split_numbered_name(n).map_or(n.as_str(), |(base, _)| base) == ident)
+                .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
+            // If two names share a Local (closure captures all live in
+            // `_1`), the same one wins on every run (#211): the greatest,
+            // as before.
+            match res.get(&place.local) {
+                Some(prev) if *prev >= name => {}
+                _ => { res.insert(place.local, name); }
+            }
+        }
+        res
+    }
+
     // To get this to really work we would need to do a dataflow analysis to establish which temporaries 
     // refer to the same piece of data. Since the way the MIR is SSA.
     // For example:
@@ -86,7 +107,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let p_output = Output::compute(&body_with_facts.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
 
         // compute local to name map
-        let loc_to_source_name = local_names(&body_with_facts.body);
+        let loc_to_source_name = self.mir_local_names(body_with_facts);
         
         
         // compute the loan regions
@@ -195,7 +216,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // would be nice to use MIR to figure out where drops occur rather than our own internal state logic
     pub fn gather_drop_data(&self, body_with_facts: &BodyWithBorrowckFacts) -> HashMap<String, usize> {
         // compute local to name map
-        let loc_to_source_name = local_names(&body_with_facts.body);
+        let loc_to_source_name = self.mir_local_names(body_with_facts);
 
         let mut res = HashMap::new();
         for (local, loc_idx) in body_with_facts.input_facts.as_ref().unwrap().var_dropped_at.iter() {

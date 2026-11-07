@@ -822,7 +822,7 @@ fn compute_column_layout<'a>(
                 {
                     name: name.clone(),
                     x_val: x,
-                    title: styled_name.clone() + ", " + &title,
+                    title: styled_name.clone() + ", " + &title + &hover_messages::shadowed_name_note(&name, visualization_data.shadow_notes.get(hash)),
                     is_ref: ref_bool,
                     is_struct_group: timeline.resource_access_point.is_struct_group(),
                     is_member: timeline.resource_access_point.is_member(),

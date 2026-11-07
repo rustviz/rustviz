@@ -571,18 +571,21 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_03_vec_get_match",
         status: Wrong,
-        note: "the `Some(third)` binding shares the outer `third`'s column, so L5 draws a self-arrow `Partial copy from third to third` (#304, #253)",
+        note: "the arm's `third` is a second variable, `third₂` (#173): a `&i32` copied out of the outer `third`; its borrow of `v` isn't shown (#171, #336)",
         must_contain: &[
             "get reads from v (implicitly borrowed)",
             "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
-            "L5 Return immutably borrowed resource from third to v",
+            "L5 third₂ is initialized with a copy of third",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from third to third",
             "L3 v's resource is no longer immutably borrowed",
+            "=L5 Partial copy from third to third",
+            "L5 third goes out of scope. No resource is dropped.",
+            "L8 third goes out of scope. No resource is dropped.",
         ],
-        known_wrong: &["L5 Partial copy from third to third"],
+        known_wrong: &["L5 third₂'s immutable borrow ends (what it borrows from isn't shown)"],
         ..E
     },
     Snippet {
@@ -1140,15 +1143,18 @@ const BOOK: &[Snippet] = &[
     // ─── Misc: shadowing, loops, patterns, items ──────────────────────
     Snippet {
         id: "m_01_shadow_type_change",
-        status: Wrong,
-        note: "both `spaces` share one column (#173), so the &str's borrow is shown ending at L4, where `spaces` is the usize, and the second `let` reads as an assignment to the first binding",
-        must_contain: &["spaces is bound to an immutable reference", "len reads from spaces"],
+        note: "the second `spaces` is its own column, `spaces₂` (#173)",
+        must_contain: &[
+            "spaces is bound to an immutable reference",
+            "len reads from spaces",
+            "L3 spaces's borrow of the string literal ends (string literals live for the whole program)",
+            "L3 spaces₂ is initialized with a copy of len",
+            "L5 spaces₂ goes out of scope",
+        ],
         must_not_contain: &[
             "spaces is the owner of the resource",
             "spaces acquires ownership of a resource",
             "Return immutably borrowed resource from spaces to *spaces",
-        ],
-        known_wrong: &[
             "L4 spaces's borrow of the string literal ends (string literals live for the whole program)",
             "L4 spaces's immutable borrow ends",
             "L3 spaces is assigned the result of len",
@@ -1157,9 +1163,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_02_shadow_inner_block",
-        status: Wrong,
-        note: "inner x merges into the outer x's column and is never dropped at L6 (#173); not expressible as a tooltip string",
-        must_contain: &["L2 Move from String::from to x", "L8 x goes out of scope. Its resource is dropped."],
+        note: "the inner x is its own column, `x₂`, dropped at L6 (#173)",
+        must_contain: &[
+            "L2 Move from String::from to x",
+            "L4 Move from String::from to x₂",
+            "L6 x₂ goes out of scope. Its resource is dropped.",
+            "L8 x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=L4 Move from String::from to x"],
         ..E
     },
     Snippet {
@@ -1402,9 +1413,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x11_existing_shadowing_basic",
-        status: Wrong,
-        note: "copy of tests/shadowing_basic.rs: both `s` share one column, so only one drop shows at L9 (#173); not expressible as a tooltip string",
-        must_contain: &["L6 Move from String::from to s", "L9 s goes out of scope. Its resource is dropped."],
+        note: "copy of tests/shadowing_basic.rs: the second `s` is its own column, `s₂`, and both drop at L9 (#173)",
+        must_contain: &[
+            "L6 Move from String::from to s",
+            "L7 Move from String::from to s₂",
+            "L9 s goes out of scope. Its resource is dropped.",
+            "L9 s₂ goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=L7 Move from String::from to s"],
         ..E
     },
     Snippet {
