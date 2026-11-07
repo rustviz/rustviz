@@ -2093,6 +2093,26 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
     }
 }
 
+// An or-pattern arm (`(x, _) | (_, x) =>`) binds `into` from a different
+// place in each alternative, and `my_name` is one of them (#533). Which
+// alternative matches is decided at run time, so this place's resource
+// is moved into `into` only on some runs; the rest of the time it stays
+// here, and the drop flag decides whether it's dropped at scope end.
+pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]) -> String {
+    let names: Vec<String> = sources.iter().map(|n| fmt_style(n)).collect();
+    let list = match names.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} or {}", init.join(", "), last),
+    };
+    format!(
+        "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
+         that binds {1} from {0}, {0}'s resource is moved into {1} here; otherwise {0} still owns it \
+         (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name), fmt_style(into), list
+    )
+}
+
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
 // moved into the call, and each value it captured by value is dropped
 // or moved out of it inside the call. `fates` comes from the closure

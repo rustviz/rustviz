@@ -331,6 +331,13 @@ const Description: React.FC = () => (
         friends is shown as that read.
       </li>
       <li>
+        An or-pattern arm that binds one name from different places (
+        <code>(x, _) | (_, x)</code>) draws the name as a new value with no
+        arrow, and each place it may move from as maybe-moved. If the name is a
+        reference (<code>ref x</code>) or a tuple or struct, the program is
+        refused rather than drawn.
+      </li>
+      <li>
         Values dropped when a function leaves early are drawn for a{' '}
         <code>return</code> that ends an <code>if</code>/<code>else</code>{' '}
         branch or a <code>match</code> arm, but not for <code>panic!()</code>,{' '}

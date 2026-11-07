@@ -1125,6 +1125,20 @@ pub enum ExternalEvent {
         labeled_block: bool,
         id: usize
     },
+    // An or-pattern arm (`(x, _) | (_, x) =>`, `(Some(x), _) | (_, Some(x))
+    // =>`) binds `x` from a different place in each alternative, and
+    // which alternative matched is only known at run time (#533). `ro` is
+    // one of those places; `from` names all of them. If the alternative
+    // that binds `x` from `ro` is the one that matched, `ro`'s resource
+    // moves into `x` here; otherwise it stays in `ro`, so afterwards
+    // `ro` is maybe-moved. Drawn as a dot on `ro`'s column only: `x`
+    // gets a plain `Bind`, with no arrow to say where it came from.
+    OrAltMove {
+        ro: ResourceAccessPoint,
+        into: String,
+        from: Vec<String>,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -1214,6 +1228,7 @@ impl ExternalEvent {
             &ExternalEvent::ManuallyDropByHand { id, .. } |
             &ExternalEvent::TemporaryDrop { id, .. } |
             &ExternalEvent::LoopExitMove { id, .. } |
+            &ExternalEvent::OrAltMove { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -1378,6 +1393,8 @@ pub enum Event {
     TemporaryDrop { ty: String, when: String },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, labeled_block: bool },
+    // See ExternalEvent::OrAltMove.
+    OrAltMove { into: String, sources: Vec<String> },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1694,6 +1711,9 @@ impl Display for Event {
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
+            Event::OrAltMove { into, .. } => {
+                write!(f, "May have been moved into {}", into)
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -1781,6 +1801,9 @@ impl Event {
             }
             Event::LoopExitMove { definite, labeled_block } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, *labeled_block)
+            }
+            Event::OrAltMove { into, sources } => {
+                hover_messages::event_dot_or_alt_move(my_name, into, sources)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -2555,6 +2578,11 @@ impl Visualizable for VisualizationData {
             // drop flag decides the drop).
             (_, Event::LoopExitMove { .. }) =>
                 State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
+            // Moved into a name an or-pattern binds, if its alternative
+            // matched: not usable afterwards, like after a conditional
+            // that moved it on some paths (#533).
+            (_, Event::OrAltMove { .. }) =>
+                State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
 
 
             (_, _) => State::Invalid,
@@ -2942,6 +2970,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, labeled_block, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, labeled_block: *labeled_block })]
         },
+        ExternalEvent::OrAltMove{into, from, ..} => {
+          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone() })]
+        },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
       }
@@ -2983,7 +3014,7 @@ impl Visualizable for VisualizationData {
                                         id: *id}));
                 }
             }
-            ExternalEvent::LoopExitMove { ro, .. } => {
+            ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::OrAltMove { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
@@ -3255,6 +3286,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::LoopExitMove{ro, definite, labeled_block, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, labeled_block }, line_number);
+            },
+            ExternalEvent::OrAltMove{ro, into, from, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from }, line_number);
             },
         }
     }
