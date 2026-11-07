@@ -3202,6 +3202,9 @@ fn render_branches(
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
             let mut stop_bar = String::new();
+            // Where the stop bar sits, if one is drawn: the last
+            // segment's hover polygon ends short of it (below).
+            let mut stop_at: Option<(f64, f64)> = None;
             match stop_line {
                 None => {
                     let n = segs.len();
@@ -3219,11 +3222,22 @@ fn render_branches(
                     // The bar is a marker, not a line of code: hovering it
                     // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
+                        stop_at = Some((branch_x, stop_y));
+                        let title = hover_messages::branch_never_reaches_merge(&rap.name().to_string());
                         stop_bar = format!(
                             "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
-                            hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y,
-                            hover_messages::branch_never_reaches_merge(&rap.name().to_string()),
+                            hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y, title,
                         );
+                        // The bar's own hover polygon (it's a segment of
+                        // the column too): the bar plus its stroke, drawn
+                        // after the column's polygons so it's on top.
+                        stop_bar.push_str(&format!(
+                            "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{},{} {},{} {},{} {},{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+                            hash,
+                            branch_x - 6.0, stop_y - STOP_BAR_HOVER_HALF_H, branch_x + 6.0, stop_y - STOP_BAR_HOVER_HALF_H,
+                            branch_x + 6.0, stop_y + STOP_BAR_HOVER_HALF_H, branch_x - 6.0, stop_y + STOP_BAR_HOVER_HALF_H,
+                            title,
+                        ));
                     }
                 }
             }
@@ -3251,7 +3265,7 @@ fn render_branches(
 
             let mut branch_svg = String::new();
             for run in &runs {
-                branch_svg.push_str(&render_branch_run(rap, *hash, run, own_y));
+                branch_svg.push_str(&render_branch_run(rap, *hash, run, own_y, stop_at));
             }
             branch_svg.push_str(&stop_bar);
 
@@ -3343,6 +3357,7 @@ fn render_branch_run(
     hash: u64,
     run: &[&BranchSeg],
     own_y: Option<(f64, f64)>,
+    stop_at: Option<(f64, f64)>,
 ) -> String {
     let mut svg = String::new();
 
@@ -3433,7 +3448,17 @@ fn render_branch_run(
     for seg in run.iter() {
         let (dx, dy) = (seg.p2.0 - seg.p1.0, seg.p2.1 - seg.p1.1);
         if dx.abs() < 1e-6 && dy.abs() < 1e-6 { continue; }
-        let pts_str = seg_quad(seg).iter()
+        let mut quad = seg_quad(seg);
+        // The segment that ends at the stop bar leaves the bar's rows to
+        // the bar's own polygon, so no polygon shows the other's tooltip.
+        if stop_at == Some(seg.p2) {
+            let up = if seg.p2.1 >= seg.p1.1 { -1.0 } else { 1.0 };
+            if (seg.p2.1 - seg.p1.1).abs() > 2.0 * STOP_BAR_HOVER_HALF_H {
+                quad[1].1 += up * (STOP_BAR_HOVER_HALF_H - 1.0);
+                quad[2].1 += up * (STOP_BAR_HOVER_HALF_H - 1.0);
+            }
+        }
+        let pts_str = quad.iter()
             .map(|p| format!("{},{}", p.0, p.1))
             .collect::<Vec<_>>()
             .join(" ");
@@ -3446,6 +3471,10 @@ fn render_branch_run(
 
     svg
 }
+
+/// Half the height of the hover polygon over a stop bar (the bar's 3px
+/// stroke, with room for its round caps).
+const STOP_BAR_HOVER_HALF_H: f64 = 3.5;
 
 /// The strip of half-width `BRANCH_HALF_W` around one segment's
 /// centreline, as a polygon's four corners.
