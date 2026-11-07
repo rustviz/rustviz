@@ -568,11 +568,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// True iff `ref_ty` is `&T` / `&mut T` with `T: Copy` (`&i32`) or `T`
   /// a struct / enum that's non-Copy with nothing to drop (`ty_is_plain`).
   /// Such a reference points to a "value", not a "resource" (#312, #484).
-  /// Unsized referents (`str`, `[T]`) keep "resource": they are a view of
-  /// someone else's buffer.
+  /// Unsized referents: `str` is a value, `[T]` is a value iff `T` is
+  /// Copy or plain (`&[i32]`, `&str`; #549), but `[String]` stays a
+  /// resource. `dyn Trait` stays a resource (we can't know).
   pub fn ref_pointee_is_copy(&self, ref_ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
     match ref_ty.kind() {
-      TyKind::Ref(_, inner, _) => self.ty_is_copy(*inner, owner) || (inner.is_adt() && self.ty_is_plain(*inner, owner)),
+      TyKind::Ref(_, inner, _) => match inner.kind() {
+        TyKind::Str => true,
+        TyKind::Slice(elem) => self.ty_is_copy(*elem, owner) || self.ty_is_plain(*elem, owner),
+        _ => self.ty_is_copy(*inner, owner) || (inner.is_adt() && self.ty_is_plain(*inner, owner)),
+      },
       _ => false,
     }
   }
