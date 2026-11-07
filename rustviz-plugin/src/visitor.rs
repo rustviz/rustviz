@@ -1473,7 +1473,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
               let taken_over = matches!(ref_data.lender, ResourceTy::Value(_))
                 && destructure_hid.is_some_and(|me| self.destructure_ref_data.iter()
-                  .any(|(h, (lender, _, _))| *h != me && *lender == ref_data.lender));
+                  .any(|(h, (lender, _, _, _))| *h != me && *lender == ref_data.lender));
               if self.ref_handed_off(lhs_rap.name()) {
               }
               else if borrowers.len() > 1 || taken_over { // there is another active reference at this point, the resource cannot be returned
@@ -3129,6 +3129,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
 
+    {
+      let lo = span_to_line(&local.span, &self.tcx);
+      let hi = self.tcx.sess.source_map().lookup_char_pos(local.span.hi()).line;
+      for d in dest_name.iter().flatten() {
+        if moved.contains(d) {
+          self.destructure_swapped.push((d.clone(), lo, hi));
+        }
+      }
+    }
     self.destructure_srcs = src_of;
     self.destructure_moved = moved;
     self.destructure_ref_data = ref_data;
