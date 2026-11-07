@@ -64,16 +64,17 @@ enum ChainEffectKind {
   /// `how`: also a move out of `*rap`, or a call of the closure `rap`
   /// (#579).
   Move { rap: ResourceAccessPoint, to: ResourceTy, binding: bool, how: ChainFailHow },
-  /// `rap` is assigned a new value (#579). `drops_old`: the assignment
-  /// drops its old value. `held`: it held a value before the part.
-  Assign { rap: ResourceAccessPoint, drops_old: bool, held: bool },
+  /// `rap` is assigned a new value (#579), or with `place` the place
+  /// reached through it (`*r`, `v[i]`, `r.f`; #603). `drops_old`: the
+  /// assignment drops the old value. `held`: it held a value before the
+  /// part (a place always does).
+  Assign { rap: ResourceAccessPoint, place: Option<String>, drops_old: bool, held: bool },
   /// Anything else that lasts: not drawn. `what` / `lasts` are for the
   /// refusal's message.
   Other { name: String, what: &'static str, lasts: &'static str },
 }
 
 const CHAIN_ASSIGN_REF: &str = "assign a new reference to a variable declared outside the condition";
-const CHAIN_ASSIGN_PLACE: &str = "assign to a place reached through a variable declared outside the condition";
 const CHAIN_MOVE_THROUGH: &str = "move out of a value behind a variable declared outside the condition";
 
 /// State of a walk down an `if` let-chain (`visit_if_let_chain`).
@@ -107,6 +108,7 @@ struct ChainFailMove {
 /// `ExternalEvent::ChainFailAssign`.
 struct ChainFailAssign {
   rap: ResourceAccessPoint,
+  place: Option<String>,
   drops_old: bool,
 }
 
@@ -300,7 +302,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let mut events = Vec::new();
     flatten(&self.preprocessed_events[mark..], &mut events);
-    for ev in events {
+    // `*r = s` also puts an `OwnerDropAtReassign` on r's lender, not a
+    // variable the part assigns to: the write through `*r` (#603) says
+    // that drop.
+    let assigned: HashSet<&ResourceAccessPoint> = events.iter().filter_map(|ev| match ev {
+      ExternalEvent::Bind { to: ResourceTy::Value(rap), .. }
+      | ExternalEvent::Copy { to: ResourceTy::Value(rap), .. }
+      | ExternalEvent::Move { to: ResourceTy::Value(rap), .. } => Some(rap),
+      _ => None,
+    }).collect();
+    for ev in events.iter().copied() {
       // What the event does to the place it takes from.
       match ev {
         ExternalEvent::Move { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) =>
@@ -324,18 +335,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           ResourceTy::Value(rap) if rap.is_ref() =>
             push(ChainEffectKind::Other { name: rap.name().to_owned(), what: CHAIN_ASSIGN_REF, lasts: "the assignment lasts" }),
           ResourceTy::Value(rap) =>
-            push(ChainEffectKind::Assign { rap: rap.clone(), drops_old: false, held: held(rap) }),
+            push(ChainEffectKind::Assign { rap: rap.clone(), place: None, drops_old: false, held: held(rap) }),
+          // A write through `*r` / into `v[i]` / `r.f`: drawn on the
+          // column of the variable it's reached through (#603).
           ResourceTy::Deref(rap) =>
-            push(ChainEffectKind::Other { name: format!("*{}", rap.name()), what: CHAIN_ASSIGN_PLACE, lasts: "the assignment lasts" }),
-          ResourceTy::Index(_, place, _) | ResourceTy::DerefField(_, place, _) =>
-            push(ChainEffectKind::Other { name: place.clone(), what: CHAIN_ASSIGN_PLACE, lasts: "the assignment lasts" }),
+            push(ChainEffectKind::Assign { rap: rap.clone(), place: Some(format!("*{}", rap.name())),
+              drops_old: matches!(rap.place_write(), PlaceWrite::AssignDropsOld), held: true }),
+          ResourceTy::Index(rap, place, pw) | ResourceTy::DerefField(rap, place, pw) =>
+            push(ChainEffectKind::Assign { rap: rap.clone(), place: Some(place.clone()),
+              drops_old: matches!(pw, PlaceWrite::AssignDropsOld), held: true }),
           _ => {}
         },
         ExternalEvent::StaticBorrow { to, .. }
         | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) =>
           push(ChainEffectKind::Other { name: to.real_name(), what: CHAIN_ASSIGN_REF, lasts: "the assignment lasts" }),
-        ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) =>
-          push(ChainEffectKind::Assign { rap: ro.clone(), drops_old: true, held: held(ro) }),
+        ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) && assigned.contains(ro) =>
+          push(ChainEffectKind::Assign { rap: ro.clone(), place: None, drops_old: true, held: held(ro) }),
         _ => {}
       }
     }
@@ -356,11 +371,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// it holding its old value or the new one (#579). Other lasting
   /// effects that come before a part that can fail are refused, as for
   /// match guards: a new reference assigned to an outer variable (which
-  /// borrow is live in the else branch isn't known), a write through
-  /// an outer reference or into part of an outer value, an assignment
-  /// to a variable that held no value before (the else branch would
-  /// start with it maybe initialized), or a variable both moved and
-  /// assigned.
+  /// borrow is live in the else branch isn't known), an assignment to a
+  /// variable that held no value before (the else branch would start
+  /// with it maybe initialized), or a variable both moved and assigned.
+  /// A write through an outer reference, into an element or a field
+  /// reached through one (`*r = a`, `v[i] = a`, `r.f = a`) is an
+  /// assignment to that place, drawn on that variable's column (#603).
   fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, has_else: bool) -> (Vec<ChainFailMove>, Vec<ChainFailAssign>) {
     let mut out: Vec<ChainFailMove> = Vec::new();
     let mut assigns: Vec<ChainFailAssign> = Vec::new();
@@ -372,15 +388,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           panic!("`if let` chains that {} (`{}`, line {}) aren't supported yet: {} even when {}",
             what, name, eff.line, lasts, later);
         }
-        ChainEffectKind::Assign { rap, drops_old, held } => {
+        ChainEffectKind::Assign { rap, place, drops_old, held } => {
           if !held {
             panic!("`if let` chains that assign to a variable declared outside the condition that \
                     may hold no value before (`{}`, line {}) aren't supported yet: after the \
                     assignment it holds one even when {}", rap.name(), eff.line, later);
           }
-          match assigns.iter_mut().find(|a| a.rap == *rap) {
+          match assigns.iter_mut().find(|a| a.rap == *rap && a.place == *place) {
             Some(a) => a.drops_old |= drops_old,
-            None => assigns.push(ChainFailAssign { rap: rap.clone(), drops_old: *drops_old }),
+            None => assigns.push(ChainFailAssign { rap: rap.clone(), place: place.clone(), drops_old: *drops_old }),
           }
         }
         ChainEffectKind::Move { rap, to, binding, how } => {
@@ -417,7 +433,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     // The else branch would start with it moved or holding a value
-    // depending on the order, which one dot can't say.
+    // depending on the order, which one dot can't say. A write through a
+    // place (`*b = a`, `v[0] = a`) counts too when the variable it goes
+    // through is moved: the new value went with it.
     if let Some(a) = assigns.iter().find(|a| out.iter().any(|m| m.rap == a.rap)) {
       panic!("`if let` chains that both move and assign a variable declared outside the condition \
               (`{}`) aren't supported yet: both last even when {}", a.rap.name(), later);
@@ -3041,6 +3059,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         for a in std::mem::take(&mut chain_fail_assign) {
           self.add_external_event(fail_line, ExternalEvent::ChainFailAssign {
             ro: a.rap,
+            place: a.place,
             drops_old: a.drops_old,
             no_else: else_expr.is_none(),
             id: *self.unique_id,
