@@ -81,13 +81,33 @@ pub struct RefData {
   /// references borrowing the same variable on one line (`let a = &x;
   /// let b = &x;`) are otherwise indistinguishable (#233).
   pub borrow_span: Option<rustc_span::Span>,
+  /// For a reference that got its value from a call (`id(&p)`,
+  /// `v.first()`), or took over such a reference's loan (see
+  /// `ExprVisitor::ref_carriers`): the line that issued the loan it
+  /// holds. `print_lifetimes` matches it on (this line, lender), as it
+  /// does a reference's own assignment line (#664).
+  pub loan_line: Option<usize>,
   // Further lenders, for a reference returned by a call whose result
   // is tied to several arguments (`longest(&a, &b)` borrows from both
   // `a` and `b`; #171). Empty for every other reference.
   pub co_lenders: Vec<ResourceTy>,
 }
 
+/// The loan a reference holds, as `print_lifetimes` finds it in MIR's
+/// borrow data (see `RefData::borrow_span` and `RefData::loan_line`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoanId {
+  /// Made by the `&x` / `&mut x` expression at this span.
+  Span(rustc_span::Span),
+  /// Issued for the reference's lender on this line.
+  Line(usize),
+}
+
 impl RefData {
+  pub fn loan(&self) -> Option<LoanId> {
+    self.borrow_span.map(LoanId::Span).or(self.loan_line.map(LoanId::Line))
+  }
+
   /// `lender` followed by `co_lenders`.
   pub fn all_lenders(&self) -> Vec<ResourceTy> {
     let mut v = vec![self.lender.clone()];
@@ -274,14 +294,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// A reference destination's source reference and the loan it
   /// holds (see `ref_carriers`), with whether the same statement
   /// reassigns that source (`m2` in `(m1, m2) = (m2, m1)`).
-  pub destructure_ref_src: HashMap<rustc_hir::HirId, (String, rustc_span::Span, bool)>,
-  /// (carrier, source, loan span): `let h = o;` / `h = o;` with `o` a
-  /// reference made by `&p` at that span. `h` holds the same loan. When
-  /// `o` is then given another value, the borrow checker still keeps
+  pub destructure_ref_src: HashMap<rustc_hir::HirId, (String, LoanId, bool)>,
+  /// (carrier, source, loan): `let h = o;` / `h = o;` with `o` a
+  /// reference made by `&p` (or by a call, `id(&p)`, #664). `h` holds
+  /// the same loan. When `o` is then given another value (`o = …`, or
+  /// `*w = …` through a `w = &mut o`), the borrow checker still keeps
   /// that loan live while `o` is live (`o`'s type has one lifetime),
   /// so `h` takes the loan over: `print_lifetimes` ends `h`'s borrow
   /// where rustc ends the loan, not at `h`'s last use (#644).
-  pub ref_carriers: Vec<(String, String, rustc_span::Span)>,
+  pub ref_carriers: Vec<(String, String, LoanId)>,
   /// References holding a loan they took over (see `ref_carriers`).
   /// Copying or moving one on (`q = t;` after `let t = p; p = q;`)
   /// hands the loan to the new holder right away: it's the one that
@@ -854,7 +875,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.holder_shadowed(&name) {
       return;
     }
-    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, co_lenders: Vec::new() });
+    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new() });
   }
   /// `name`'s column is a borrow holder (#336) whose borrow is
   /// recorded; a reference binding of the same name shadows it.
@@ -1076,6 +1097,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // the lender's column only: v's column doesn't model it.
       (_, ResourceTy::Index(..), ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => {},
       (_, ResourceTy::Temporary { .. }, _) => {},
+      // A borrow end drawn on the lender's column only (a borrow
+      // stored in a place, #512/#531, or the old value of a reference
+      // written through `*w`, #664) is no arrow: it mustn't add a row
+      // to its line, which pushed the line's other events onto a row
+      // below the place's borrow end.
+      (ResourceTy::Index(..), _, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) => {},
       (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..),
        ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..), _) // maybe change later
       // `v[i] = s` / `v[i] = y`: an arrow into v's column.
@@ -2768,9 +2795,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// The reference `expr` names and the span of the `&`-expression
-  /// that made the loan it holds, for `ref_carriers`.
-  pub fn source_ref_loan(&self, expr: &Expr) -> Option<(String, rustc_span::Span)> {
+  /// The reference `expr` names and the loan it holds, for
+  /// `ref_carriers`.
+  pub fn source_ref_loan(&self, expr: &Expr) -> Option<(String, LoanId)> {
     let expr = match expr.kind {
       ExprKind::DropTemps(inner) => inner,
       _ => expr,
@@ -2779,13 +2806,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return None;
     }
     let name = expr_to_rap_name(expr, &self.tcx)?;
-    let span = self.borrow_map.get(&name)?.borrow_span?;
-    Some((name, span))
+    let loan = self.borrow_map.get(&name)?.loan()?;
+    Some((name, loan))
   }
 
   /// `carrier` was just given a new value: `src`'s loan, if it took a
   /// reference's (see `ref_carriers`).
-  pub fn note_ref_carrier(&mut self, carrier: &str, src: Option<(String, rustc_span::Span)>) {
+  pub fn note_ref_carrier(&mut self, carrier: &str, src: Option<(String, LoanId)>) {
     self.ref_carriers.retain(|(c, _, _)| c != carrier);
     self.taken_over_loans.remove(carrier);
     let Some((s, sp)) = src else { return };
@@ -2795,6 +2822,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.taken_over_loans.remove(&s) {
       if let Some(rd) = self.borrow_map.get_mut(&s) {
         rd.borrow_span = None;
+        rd.loan_line = None;
       }
       self.take_over_loan(carrier, sp);
     } else {
@@ -2802,11 +2830,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// `r` now holds the loan made at `sp` (see `ref_carriers`).
-  pub fn take_over_loan(&mut self, r: &str, sp: rustc_span::Span) {
+  /// `r` now holds `loan` (see `ref_carriers`).
+  pub fn take_over_loan(&mut self, r: &str, loan: LoanId) {
     if let Some(rd) = self.borrow_map.get_mut(r) {
-      rd.borrow_span = Some(sp);
+      match loan {
+        LoanId::Span(sp) => rd.borrow_span = Some(sp),
+        LoanId::Line(l) => rd.loan_line = Some(l),
+      }
       self.taken_over_loans.insert(r.to_owned());
+    }
+  }
+
+  /// The line rustc's borrow checker ends the loan `rd` holds on.
+  pub fn loan_end(&self, rd: &RefData) -> Option<usize> {
+    match rd.loan()? {
+      LoanId::Span(sp) => self.gather_borrow_data(self.bwf).iter()
+        .find(|b| b.span == sp).map(|b| b.region.1),
+      LoanId::Line(l) => match &rd.lender {
+        ResourceTy::Value(lender) if !lender.is_fn() => self.loan_end_line(l, lender.name()),
+        _ => None,
+      },
     }
   }
 
@@ -2814,13 +2857,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// references that took its loan keep it, and the borrow checker
   /// ends it where it ends the loan (see `ref_carriers`).
   pub fn hand_loan_to_carriers(&mut self, src: &str, old: &RefData) {
-    let carriers: Vec<(String, rustc_span::Span)> = self.ref_carriers.iter()
-      .filter(|(_, s, sp)| s == src && old.borrow_span == Some(*sp))
-      .map(|(c, _, sp)| (c.clone(), *sp))
+    let carriers: Vec<(String, LoanId)> = self.ref_carriers.iter()
+      .filter(|(_, s, loan)| s == src && old.loan() == Some(*loan))
+      .map(|(c, _, loan)| (c.clone(), *loan))
       .collect();
-    for (c, sp) in carriers {
-      if self.borrow_map.get(&c).is_some_and(|rd| rd.borrow_span.is_none() && rd.lender == old.lender) {
-        self.take_over_loan(&c, sp);
+    for (c, loan) in carriers {
+      if self.borrow_map.get(&c).is_some_and(|rd| rd.loan().is_none() && rd.lender == old.lender) {
+        self.take_over_loan(&c, loan);
       }
     }
     self.ref_carriers.retain(|(_, s, _)| s != src);
@@ -2844,6 +2887,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if let Some(rd) = self.borrow_map.get_mut(&name) {
           rd.static_lender = static_lender;
           rd.borrow_span = borrow_span_of(expr);
+          rd.loan_line = call_loan_line(expr, rd.assigned_at);
           rd.co_lenders = co_lenders;
         }
         self.note_ref_carrier(&name, src_loan);
@@ -3037,6 +3081,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       aliasing,
       static_lender: None,
       borrow_span: None,
+      loan_line: None,
       co_lenders: lenders,
     });
   }
@@ -3115,6 +3160,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.aliasing = VecDeque::new();
         rd.static_lender = None;
         rd.borrow_span = None;
+        rd.loan_line = None;
         rd.assigned_at = line;
       }
     }
@@ -3234,6 +3280,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       aliasing,
       static_lender: None,
       borrow_span: None,
+      loan_line: None,
       co_lenders: lenders,
     });
   }
@@ -3303,6 +3350,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           aliasing,
           static_lender: None,
           borrow_span: None,
+          loan_line: None,
           co_lenders: lenders[1..].to_vec(),
         });
       }
@@ -3384,6 +3432,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           aliasing: VecDeque::new(),
           static_lender: None,
           borrow_span: None,
+          loan_line: None,
           co_lenders: Vec::new(),
         });
       } else {
