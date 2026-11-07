@@ -7413,7 +7413,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
             "w goes out of scope. Its resource is dropped.",
-            "t acquires ownership of a new resource; its previous resource is dropped",
+            // Whole-tooltip match (#518): the correct text continues with the Arc note.
+            "=t acquires ownership of a new resource; its previous resource is dropped",
             "handle",
             "Move from Rc::clone to b",
             "Move from clone to c",
