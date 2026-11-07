@@ -79,13 +79,10 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
 // declared, it is `s` with the subscript k+1 (`s₂`, `s₃`, …). Bindings
 // that shadow the same number of variables share a column: they are
 // never in scope together (sibling blocks, different arms of a `match`,
-// the two blocks of an `if`), so at most one of them exists at a time.
-// The exception is a pair in different branches of an `if` that the
-// timeline can't draw as one column (see `isolated` below, e.g. `if let
-// Some(z) = a {} else if let Some(z) = b {}`): the later one gets a
-// subscript although it shadows nothing, and its header says so. A
-// subscript can't be part of a Rust identifier, so these names never
-// clash with a real variable. (#173)
+// the two blocks of an `if`, the two `if let`s of an `else if let`
+// chain), so at most one of them exists at a time. A subscript can't be
+// part of a Rust identifier, so these names never clash with a real
+// variable. (#173)
 
 /// Per-fn-body table built by `collect_binding_names`.
 #[derive(Default)]
@@ -181,41 +178,6 @@ fn binding_scope(tcx: &TyCtxt, pat: HirId, body_span: Span) -> Option<(u32, u32)
   None
 }
 
-/// The `if`s a binding sits in a branch of: `(the if, in its else
-/// branch, declared directly by the branch)`. A branch declares a
-/// variable directly if it's a `let` of the branch's own block (or an
-/// `if let` pattern, for the then-branch): those are the variables the
-/// timeline draws as declared in that branch.
-fn binding_branches(tcx: &TyCtxt, pat: HirId) -> Vec<(HirId, bool, bool)> {
-  use rustc_hir::Node;
-  let mut out = Vec::new();
-  let mut child = pat;
-  let mut first_block: Option<HirId> = None;
-  let mut in_let = false;
-  for (id, node) in tcx.hir_parent_iter(pat) {
-    match node {
-      Node::Block(b) if first_block.is_none() => first_block = Some(b.hir_id),
-      Node::Expr(e) => match e.kind {
-        ExprKind::Let(_) => in_let = true,
-        ExprKind::If(_, then, els) => {
-          let is_own_block = |branch: &Expr| matches!(branch.kind, ExprKind::Block(b, _) if Some(b.hir_id) == first_block);
-          if in_let && child != then.hir_id && els.is_none_or(|e| e.hir_id != child) {
-            out.push((id, false, true));
-          } else if child == then.hir_id {
-            out.push((id, false, is_own_block(then)));
-          } else if els.is_some_and(|e| e.hir_id == child) {
-            out.push((id, true, is_own_block(els.unwrap())));
-          }
-        }
-        _ => {}
-      },
-      _ => {}
-    }
-    child = id;
-  }
-  out
-}
-
 fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingNames {
   use rustc_hir::intravisit::{self, Visitor};
 
@@ -225,8 +187,6 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
     ident: String,
     // Where the binding is in scope (`binding_scope`).
     scope: (u32, u32),
-    // The `if` branches it's in (`binding_branches`).
-    branches: Vec<(HirId, bool, bool)>,
   }
   struct Collector<'a, 'tcx> {
     tcx: &'a TyCtxt<'tcx>,
@@ -246,8 +206,7 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
             // taken to stay in scope to the end of the fn.
             let scope = binding_scope(self.tcx, hir_id, self.body_span)
               .unwrap_or((ident.span.lo().0, self.body_span.hi().0));
-            let branches = binding_branches(self.tcx, hir_id);
-            self.out.push(Binding { span: ident.span, hir_id, ident: ident.to_string(), scope, branches });
+            self.out.push(Binding { span: ident.span, hir_id, ident: ident.to_string(), scope });
           }
           if let Some(sp) = sub {
             self.visit_pat(sp);
@@ -273,47 +232,17 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
 
   // First pass: how many variables of the same name each binding
   // shadows (those still in scope where it's declared), which numbers
-  // its column. Bindings that shadow the same number share a column,
-  // except where the timeline can't draw one variable declared in both
-  // branches of an `if` (`isolated`): that happens when the later
-  // binding isn't a plain `let` of the `else` block (an `else if` chain,
-  // a pattern) or the earlier one isn't one of the `then` block. Those
-  // get a column of their own, numbered after all the others.
+  // its column. Bindings that shadow the same number share a column.
   let n = c.out.len();
-  let mut depth = vec![0usize; n];
   let mut shadowed: Vec<Option<usize>> = vec![None; n];
-  let mut isolated = vec![false; n];
+  let mut col_names: Vec<String> = Vec::with_capacity(n);
   for i in 0..n {
     let at = c.out[i].span.lo().0;
     let in_scope: Vec<usize> = (0..i)
       .filter(|&j| c.out[j].ident == c.out[i].ident && { let (lo, hi) = c.out[j].scope; lo <= at && at < hi })
       .collect();
-    depth[i] = in_scope.len();
     shadowed[i] = in_scope.last().copied();
-    isolated[i] = (0..i).any(|j| {
-      c.out[j].ident == c.out[i].ident && depth[j] == depth[i]
-        && c.out[i].branches.iter().any(|&(if_i, else_i, direct_i)| {
-          else_i && c.out[j].branches.iter().any(|&(if_j, else_j, direct_j)| if_j == if_i && !else_j && !(direct_i && direct_j))
-        })
-    });
-  }
-  let mut next_free: HashMap<String, usize> = HashMap::new();
-  for i in 0..n {
-    if !isolated[i] {
-      let m = next_free.entry(c.out[i].ident.clone()).or_insert(0);
-      *m = (*m).max(depth[i] + 1);
-    }
-  }
-  let mut col_names: Vec<String> = Vec::with_capacity(n);
-  for i in 0..n {
-    let ident = &c.out[i].ident;
-    col_names.push(if isolated[i] {
-      let m = next_free.get_mut(ident).unwrap();
-      *m += 1;
-      numbered_name(ident, *m)
-    } else {
-      numbered_name(ident, depth[i] + 1)
-    });
+    col_names.push(numbered_name(&c.out[i].ident, in_scope.len() + 1));
   }
   // Second pass: names and header notes.
   for i in 0..n {
