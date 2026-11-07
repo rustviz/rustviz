@@ -121,6 +121,12 @@ pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String 
 // dropped here depends on the path, which Rust tracks with a runtime
 // drop flag (same wording as `event_dot_go_out_of_scope_maybe_moved`).
 // At least one of `moved` / `maybe_moved` is non-empty.
+//
+// `by_cond`: at least one of `maybe_moved` was moved out by a let-chain's
+// condition (#281) or by a `let` whose or-pattern binds a name from
+// different places (`let ((x, _) | (_, x)) = t;`, #597), which is no
+// branch: "nothing above", not "no branch above" (true of the
+// branch-moved ones too).
 pub fn event_dot_struct_partial_go_out_of_scope(
     my_name: &String,
     moved: &[String],
@@ -154,7 +160,11 @@ pub fn event_dot_struct_partial_go_out_of_scope(
         }
         if !maybe_moved.is_empty() {
             let (maybe_s, maybe_plural) = join(maybe_moved);
-            out.push_str(&format!(" {} {} moved out in at least one branch above.", maybe_s, if maybe_plural { "were" } else { "was" }));
+            if by_cond {
+                out.push_str(&format!(" {} may have been moved out above.", maybe_s));
+            } else {
+                out.push_str(&format!(" {} {} moved out in at least one branch above.", maybe_s, if maybe_plural { "were" } else { "was" }));
+            }
         }
         return out;
     }

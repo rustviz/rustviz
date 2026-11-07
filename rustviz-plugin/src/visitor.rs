@@ -1016,9 +1016,17 @@ enum ManuallyDropFn { Drop, Take }
 
 /// A name an or-pattern arm binds from a different place in each
 /// alternative (#533): the places, in the order of the alternatives.
-struct OrConflict {
+pub(crate) struct OrConflict {
   name: String,
   places: Vec<ResourceAccessPoint>,
+}
+
+impl OrConflict {
+  /// Whether this is the conflict of the binding `name`, which is
+  /// numbered (`x₂`) when an earlier `x` is in the same function.
+  fn binds(&self, name: &str) -> bool {
+    split_numbered_name(name).map_or(name, |(base, _)| base) == self.name
+  }
 }
 
 /// What `or_conflict_events` draws for an or-pattern arm's names bound
@@ -4978,7 +4986,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       {
         let place = self.member_place_name(init).unwrap();
         let ty = self.tcx.typeck(init.hir_id.owner).node_type(init.hir_id);
-        self.bind_pat_from_member(pat, &place, ty, init, is_skipped);
+        self.bind_pat_from_member(pat, &place, ty, init, is_skipped, &[]);
+      }
+      // `let ((x, _) | (_, x)) = t;`: `x` comes from `t.0` or `t.1`,
+      // whichever alternative matches, like in such a match arm
+      // (#533, #597). Bind the first alternative from `t`'s parts, with
+      // `x` a new value and each place moved into it only if its
+      // alternative matched. An or-pattern whose alternatives bind
+      // every name from the same place falls through to bind_walk.
+      (PatKind::Or(_), ExprKind::Path(_) | ExprKind::Field(..))
+        if self.member_place_name(init).is_some() && !is_skipped =>
+      {
+        let place = self.member_place_name(init).unwrap();
+        let typeck = self.tcx.typeck(init.hir_id.owner);
+        let ty = typeck.node_type(init.hir_id);
+        let parent = ResourceTy::Value(self.raps.get(&place).unwrap().rap.to_owned());
+        let line = span_to_line(&pat.span, &self.tcx);
+        let (first, conflicts) = self.or_arm_stand_in(pat, std::slice::from_ref(&parent), &[ty], line, typeck, &[]);
+        if conflicts.is_empty() {
+          self.bind_walk(pat, init, is_skipped);
+        } else {
+          self.bind_pat_from_member(first, &place, ty, init, is_skipped, &conflicts);
+        }
       }
       // `let &x = &y;` — recurse through the borrow on both sides.
       (PatKind::Ref(inner_pat, _, _), ExprKind::AddrOf(_, _, inner_init)) => {
@@ -5067,6 +5096,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     member_ty: rustc_middle::ty::Ty<'tcx>,
     init: &'tcx Expr<'tcx>,
     is_skipped: bool,
+    // The names an or-pattern binds from different places, with those
+    // places (see the `PatKind::Or` arm of `bind_pat`).
+    or_conflicts: &[OrConflict],
   ) {
     match pat.kind {
       PatKind::Wild => {}
@@ -5084,9 +5116,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           return;
         }
         let line_num = span_to_line(&init.span, &self.tcx);
+        let to = self.raps.get(&name).unwrap().rap.to_owned();
+        if let Some(c) = or_conflicts.iter().find(|c| c.binds(&name)) {
+          self.bind_or_conflict(c, to, evt, line_num);
+          return;
+        }
         let from = self.raps.get(member).unwrap().rap.to_owned();
         self.update_rap(&from, line_num);
-        let to = self.raps.get(&name).unwrap().rap.to_owned();
         self.add_ev(line_num, evt, ResourceTy::Value(to), ResourceTy::Value(from), false);
       }
       _ => {
@@ -5098,16 +5134,65 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for (sp, part) in subs {
               match part {
                 Some((ResourceTy::Value(r), part_ty)) => {
-                  self.bind_pat_from_member(sp, r.name(), part_ty, init, is_skipped);
+                  self.bind_pat_from_member(sp, r.name(), part_ty, init, is_skipped, or_conflicts);
                 }
                 _ => self.bind_walk(sp, init, is_skipped),
               }
             }
           }
-          None => self.bind_walk(pat, init, is_skipped),
+          None if or_conflicts.is_empty() || is_skipped => self.bind_walk(pat, init, is_skipped),
+          // `Some(x)` on `t.0` in `let ((Some(x), _) | (_, Some(x))) =
+          // t;`: `x` is still bound from `t.0` or `t.1`.
+          None => {
+            let mut bs = Vec::new();
+            binding_pats(pat, &mut bs);
+            for b in bs {
+              let PatKind::Binding(annotation, hirid, _, _) = b.kind else { continue };
+              let name = binding_name(&self.tcx, hirid);
+              let Some(c) = or_conflicts.iter().find(|c| c.binds(&name)) else {
+                self.bind_one(name, annotation, hirid, init, is_skipped);
+                continue;
+              };
+              // `let ((ref x, _) | (_, ref x)) = t;` borrows one of the
+              // places; only a match arm draws that (#565).
+              if matches!(annotation.0, rustc_hir::ByRef::Yes(..)) {
+                panic!("or-patterns that bind the reference `{}` from different places in the value being matched \
+                        (line {}) aren't supported yet in an `if let` or `let`", name, span_to_line(&pat.span, &self.tcx));
+              }
+              let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
+              let evt = if self.ty_is_copy(lhs_ty, hirid.owner) { Evt::Copy } else { Evt::Move };
+              self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+              let to = self.raps.get(&name).unwrap().rap.to_owned();
+              self.bind_or_conflict(c, to, evt, span_to_line(&init.span, &self.tcx));
+            }
+          }
         }
       }
     }
+  }
+
+  /// `let ((x, _) | (_, x)) = t;` (#597): `to` is `x`, bound from one
+  /// of `c.places`, whichever alternative matches. Drawn as in such a
+  /// match arm (`or_conflict_events`): `x` gets a new value, with no
+  /// arrow, and when it moves (rather than is copied) each place gets
+  /// an `OrAltMove`, so it's maybe-moved afterwards.
+  fn bind_or_conflict(&mut self, c: &OrConflict, to: ResourceAccessPoint, evt: Evt, line: usize) {
+    if matches!(to, ResourceAccessPoint::Struct(_)) {
+      panic!("or-patterns that bind the struct or tuple `{}` from different places in the value being matched \
+              (line {}) aren't supported yet in an `if let` or `let`", c.name, line);
+    }
+    if matches!(evt, Evt::Move) {
+      let names: Vec<String> = c.places.iter().map(|r| r.name().to_string()).collect();
+      for place in &c.places {
+        self.update_rap(place, line);
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        self.add_external_event(line, ExternalEvent::OrAltMove {
+          ro: place.clone(), into: to.name().clone(), from: names.clone(), tuple: None, part_of: None, in_let: true, id,
+        });
+      }
+    }
+    self.add_ev(line, Evt::Bind, ResourceTy::Value(to), ResourceTy::Anonymous, false);
   }
 
   /// Walk every `PatKind::Binding` reachable inside `pat` and register
@@ -5345,7 +5430,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a place that is itself a reference, and a `&mut` moved out of one
   /// of the places. A reference into the moved values only borrows the
   /// tuple, whichever alternative matched: no conflict.
-  fn or_arm_stand_in(
+  pub(crate) fn or_arm_stand_in(
     &self,
     pat: &'tcx Pat<'tcx>,
     parents: &[ResourceTy],
@@ -5440,6 +5525,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (inner, conflicts)
   }
 
+  /// `or_conflict_events` for an `if let` / `while let` pattern
+  /// (#597): only a name moved or copied from different places is drawn
+  /// there. A reference or a struct or tuple name (drawn in a match arm
+  /// since #565) panics, reported as "can't visualize this yet". The
+  /// events all go at the pattern's line.
+  pub(crate) fn if_let_or_conflict_events(
+    &mut self,
+    conflicts: &[OrConflict],
+    bound: &mut Vec<(ResourceAccessPoint, Evt, ResourceTy, Option<bool>)>,
+    line: usize,
+    tuple_vars: &[ResourceAccessPoint],
+    tuple: &str,
+  ) -> Vec<ExternalEvent> {
+    for entry in bound.iter() {
+      let written = split_numbered_name(entry.0.name()).map_or(entry.0.name().as_str(), |(base, _)| base);
+      let Some(c) = conflicts.iter().find(|c| c.name == written) else { continue };
+      if matches!(entry.0, ResourceAccessPoint::Struct(_)) {
+        panic!("or-patterns that bind the struct or tuple `{}` from different places in the value being matched \
+                (line {}) aren't supported yet in an `if let` or `let`", c.name, line);
+      }
+      if !matches!(entry.1, Evt::Move | Evt::Copy) {
+        panic!("or-patterns that bind the reference `{}` from different places in the value being matched \
+                (line {}) aren't supported yet in an `if let` or `let`", c.name, line);
+      }
+    }
+    let out = self.or_conflict_events(conflicts, bound, line, tuple_vars, tuple, line);
+    debug_assert!(out.end.is_empty() && out.decls.is_empty());
+    out.start
+  }
+
   /// The events for the names an or-pattern binds from different
   /// places (#533), replacing what the first alternative alone would
   /// draw in `bound` (a name, how it's bound, from where):
@@ -5509,7 +5624,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               *self.unique_id += 1;
               let in_tuple = tuple_vars.contains(place).then(|| tuple.to_owned());
               out.start.push(ExternalEvent::OrAltMove {
-                ro: place.clone(), into: xname.clone(), from: names.clone(), tuple: in_tuple.clone(), part_of: None, id,
+                ro: place.clone(), into: xname.clone(), from: names.clone(), tuple: in_tuple.clone(), part_of: None, in_let: false, id,
               });
               // A struct or tuple moves its fields with it.
               let prefix = format!("{}.", place.name());
@@ -5529,7 +5644,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 *self.unique_id += 1;
                 out.start.push(ExternalEvent::OrAltMove {
                   ro: member.clone(), into, from: names.clone(), tuple: in_tuple.clone(),
-                  part_of: Some((xname.clone(), place.name().to_string())), id,
+                  part_of: Some((xname.clone(), place.name().to_string())), in_let: false, id,
                 });
               }
             }

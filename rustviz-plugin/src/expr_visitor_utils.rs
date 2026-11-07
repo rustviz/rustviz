@@ -875,6 +875,9 @@ pub fn events_move_out_of_outer(
         // An `FnOnce` call moves the closure (#271).
         | ExternalEvent::ClosureCall { closure: ResourceTy::Value(rap), .. } =>
             !rap.is_fn() && !decls.contains(rap),
+        // Moved into a name an or-pattern binds if its alternative
+        // matched (#533): `if let (x, _) | (_, x) = t` (#597).
+        ExternalEvent::OrAltMove { ro, .. } => !decls.contains(ro),
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| {
             let inner: HashSet<ResourceAccessPoint> = decls | &b.decl_vars;
             events_move_out_of_outer(&b.e_data, &inner)

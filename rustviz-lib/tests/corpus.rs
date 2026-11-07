@@ -951,6 +951,15 @@ const EXPECTED_OK: &[&str] = &[
     // A `(temporary)` column still alive at an early exit is dropped
     // there, with the exit's wording (#469 with #410).
     "temporary_drop_early_exit",
+    // The same in `if let` / `while let` / `let` (#597).
+    "or_pattern_if_let_different_places",
+    "or_pattern_if_let_different_values_else",
+    "or_pattern_while_let_different_places",
+    "or_pattern_let_different_places",
+    "or_pattern_let_different_fields_reassign",
+    "or_pattern_let_different_places_copy",
+    "or_pattern_if_let_tuple_scrutinee",
+    "or_pattern_let_shadowed_name",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -10513,6 +10522,164 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
         ],
     },
+    // ─── The same in `if let` / `while let` / `let` (#597) ───────────
+    TooltipExpect {
+        name: "or_pattern_if_let_different_places",
+        // `if let (x, _) | (_, x) = u`: drawn like such a match arm. The
+        // old plugin drew no `x` at all, and `u.0` / `u.1` as both
+        // still owning and dropping their String, though one of them
+        // was moved into `x`.
+        must_contain: &[
+            "x acquires ownership of a resource",
+            "x goes out of scope. Its resource is dropped.",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved into x here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved into x here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "u.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. u.0 and u.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "Move from u.0 to x",
+            "Move from u.1 to x",
+            "Move from u to x",
+            "=u.0 goes out of scope. Its resource is dropped.",
+            "=u.1 goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_if_let_different_values_else",
+        // `if let (Some(x), _) | (_, Some(x)) = t { … } else { … }`.
+        must_contain: &[
+            "x acquires ownership of a resource",
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "t.0 goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1 goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Move from t.0 to x",
+            "Move from t to x",
+            "=t.0 goes out of scope. Its resource is dropped.",
+            "=t.1 goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_while_let_different_places",
+        // `while let (x, _) | (_, x) = u { …; break; }`.
+        must_contain: &[
+            "x acquires ownership of a resource",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved into x here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Move from u.0 to x",
+            "=u.0 goes out of scope. Its resource is dropped.",
+            "=u.1 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_let_different_places",
+        // `let ((x, _) | (_, x)) = u;` is no branch: the drop-flag
+        // wording says "nothing above". The old plugin drew `Move from
+        // u to x` and still dropped both `u.0` and `u.1`.
+        must_contain: &[
+            "x acquires ownership of a resource",
+            "x goes out of scope. Its resource is dropped.",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved into x here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved into x here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "u.0 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "u.1 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. u.0 and u.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "Move from u to x",
+            "Move from u.0 to x",
+            "no branch above",
+            "branches above",
+            "=u.0 goes out of scope. Its resource is dropped.",
+            "=u.1 goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_let_different_fields_reassign",
+        // `let (P { a: x, .. } | P { b: x, .. }) = p;` then `p.a = …`:
+        // the old `p.a`, if it's still there, is dropped at the
+        // assignment; `p.b` at scope end, only if nothing moved it.
+        must_contain: &[
+            "x is bound from p.a or p.b, whichever alternative of the pattern matches. If it's the alternative that binds x from p.b, p.b's resource is moved into x here; otherwise p.b still owns it (Rust tracks this with a runtime drop flag).",
+            "p.a acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "p.b goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. p.b may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag). p.a is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from p to x",
+            "branch above",
+            "p.a acquires ownership of a new resource; its previous resource is dropped",
+            "=p.b goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_let_different_places_copy",
+        // A copied `x` / `y` moves nothing; `x` is a copy of `t.0` or
+        // `t.1`, not of the tuple `t` (the old plugin drew `Copy from t
+        // to x`, and no `y`).
+        must_contain: &[
+            "x is bound to a copyable value",
+            "y is bound to a copyable value",
+            "t.0 goes out of scope",
+        ],
+        must_not_contain: &["Copy from t to x", "x is initialized with a copy of t", "moved into", "drop flag"],
+    },
+    TooltipExpect {
+        name: "or_pattern_if_let_tuple_scrutinee",
+        // `if let (Some(x), _) | (_, Some(x)) = (a, b)`: as in `match (a,
+        // b)`, a and b are moved into the temporary tuple whether or not
+        // the pattern matches, x may take a's or b's value out of it, and
+        // the tuple's drop takes the rest. a and b own nothing afterwards,
+        // so no drop flag on them.
+        must_contain: &[
+            "a's resource is moved into the temporary tuple (a, b)",
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "The temporary tuple (a, b) is dropped here, at the end of the if branch, and with it whatever of a's and b's resources x didn't take",
+            "The pattern didn't match, so the temporary tuple (a, b) is dropped here, before the else branch runs, and with it a's and b's resources",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "x acquires ownership of a resource",
+        ],
+        must_not_contain: &[
+            "Move from a to x",
+            "Move from b to x",
+            "a still owns it",
+            "drop flag",
+            "=a goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // A shadowing name (`x₂`) bound from different places by an `if let` or
+    // a `let` or-pattern: the conflict is the written name `x`, which the
+    // `let` path didn't match, so it drew `Move from t.0 to x₂` and dropped
+    // t.1 unconditionally.
+    TooltipExpect {
+        name: "or_pattern_let_shadowed_name",
+        must_contain: &[
+            "x₂ is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x₂ from u.0, u.0's resource is moved into x₂ here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x₂ is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x₂ from t.1, t.1's resource is moved into x₂ here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "t.0 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Move from u.0 to x₂",
+            "Move from t.0 to x₂",
+            "=t.0 goes out of scope. No resource is dropped.",
+            "=t.1 goes out of scope. Its resource is dropped.",
+            "=u.1 goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -12755,6 +12922,28 @@ fn or_pattern_binding_from_different_places_refusals() {
         let err = Rustviz::new(src).expect_err("an or-pattern binding of this kind must not render");
         let msg = err.to_string();
         assert!(msg.contains(what), "expected the or-pattern refusal {:?}, got:\n{}", what, msg);
+    }
+}
+
+/// The same refusal for an `if let` / `let` or-pattern (#597): a
+/// reference or a tuple / struct name bound from different places.
+#[test]
+fn or_pattern_let_binding_a_reference_or_struct_from_different_places_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    for (src, what) in [
+        ("fn main() {\n    let t = (String::from(\"a\"), String::from(\"b\"));\n    if let (ref x, _) | (_, ref x) = t {\n        println!(\"{}\", x);\n    }\n}\n",
+         "the reference `x`"),
+        ("fn main() {\n    let t = (String::from(\"a\"), String::from(\"b\"));\n    let ((ref x, _) | (_, ref x)) = t;\n    println!(\"{}\", x);\n}\n",
+         "the reference `x`"),
+        ("struct P { n: String }\nfn main() {\n    let t = (P { n: String::from(\"a\") }, P { n: String::from(\"b\") });\n    if let (x, _) | (_, x) = t {\n        println!(\"{}\", x.n);\n    }\n}\n",
+         "the struct or tuple `x`"),
+        ("struct P { n: String }\nfn main() {\n    let t = (P { n: String::from(\"a\") }, P { n: String::from(\"b\") });\n    let ((x, _) | (_, x)) = t;\n    println!(\"{}\", x.n);\n}\n",
+         "the struct or tuple `x`"),
+    ] {
+        let err = Rustviz::new(src).expect_err("an or-pattern binding of this kind must not render");
+        let msg = err.to_string();
+        assert!(msg.contains(&format!("or-patterns that bind {} from different places in the value being matched", what)),
+            "expected the or-pattern refusal, got:\n{}", msg);
     }
 }
 
