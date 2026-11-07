@@ -236,6 +236,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   //     computed before any part of the statement is drawn.
   pub destructure_srcs: HashMap<rustc_hir::HirId, &'tcx Expr<'tcx>>,
   pub destructure_moved: HashSet<String>,
+  /// Persistent: (name, first line, last line) of each destination
+  /// of a destructuring assignment whose old value the same statement
+  /// moves out (`m1` in `(m1, m2) = (m2, m1)`). That move hands the
+  /// old borrow on to another reference; it isn't a move of the
+  /// value assigned in the statement, so `ref_handed_off` ignores it.
+  pub destructure_swapped: Vec<(String, usize, usize)>,
   pub destructure_ref_data: HashMap<rustc_hir::HirId, (ResourceTy, VecDeque<String>, Option<StaticLender>, Vec<ResourceTy>)>,
 
 
@@ -906,9 +912,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return false;
     };
     let hash = *rap_data.rap.hash();
+    let swapped_here = |line: usize| self.destructure_swapped.iter()
+      .any(|(n, lo, hi)| n == name && (*lo..=*hi).contains(&line) && (*lo..=*hi).contains(&rd.assigned_at));
     self.preprocessed_events.iter().any(|(line, ev)| match ev {
       ExternalEvent::Move { from: ResourceTy::Value(f), to, .. }
-        if *f.hash() == hash && *line >= rd.assigned_at =>
+        if *f.hash() == hash && *line >= rd.assigned_at && !swapped_here(*line) =>
       {
         match to {
           ResourceTy::Caller => true,

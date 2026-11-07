@@ -699,6 +699,8 @@ const EXPECTED_OK: &[&str] = &[
     "push_mut_refs",
     "generic_by_value_ref",
     "push_owned_not_holder",
+    // Swapping references keeps both lenders borrowed (#291).
+    "ref_swap_keeps_borrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7271,6 +7273,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "names owns a value that can hold references (names isn't a reference itself)",
             "nums owns a value that can hold references (nums isn't a reference itself)",
             "Immutable borrow from k to nums",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_swap_keeps_borrow",
+        // `(r1, r2) = (r2, r1)`, the same swap through a temporary
+        // (`let t = p; p = q; q = t;`), and a swap of `&mut`s: each
+        // lender stays borrowed by the other reference, so its borrow
+        // is returned only at that reference's last use (#291).
+        must_contain: &[
+            "r1's immutable borrow ends",
+            "Return immutably borrowed resource from r2 to x",
+            "Return immutably borrowed resource from r1 to y",
+            "t's immutable borrow ends",
+            "Return immutably borrowed resource from q to a",
+            "Return immutably borrowed resource from p to b",
+            "m1's mutable borrow ends",
+            "Return mutably borrowed resource from m2 to u",
+            "Return mutably borrowed resource from m1 to w",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r1 to x",
+            "Return immutably borrowed resource from t to a",
+            "Return mutably borrowed resource from m1 to u",
         ],
     },
 ];

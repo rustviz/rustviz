@@ -1465,9 +1465,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // (None if the old reference was moved on, `let r2 = r;`
               // before `r = &mut t;`: r had no borrow left to end, #209.)
               let borrowers = get_borrowers(&lhs_rty.real_name(), &self.borrow_map);
+              // In a destructuring assignment, another destination may
+              // take this borrow over in the same statement: in
+              // `(r1, r2) = (r2, r1)` r1 stops borrowing x but r2 now
+              // does, so x is still borrowed (#291). The parts not yet
+              // drawn still have their new lender precomputed.
+              #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+              let taken_over = matches!(ref_data.lender, ResourceTy::Value(_))
+                && destructure_hid.is_some_and(|me| self.destructure_ref_data.iter()
+                  .any(|(h, (lender, _, _, _))| *h != me && *lender == ref_data.lender));
               if self.ref_handed_off(lhs_rap.name()) {
               }
-              else if borrowers.len() > 1 { // there is another active reference at this point, the resource cannot be returned
+              else if borrowers.len() > 1 || taken_over { // there is another active reference at this point, the resource cannot be returned
                 self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
                 *self.unique_id += 1;
               }
@@ -3120,6 +3129,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
 
+    {
+      let lo = span_to_line(&local.span, &self.tcx);
+      let hi = self.tcx.sess.source_map().lookup_char_pos(local.span.hi()).line;
+      for d in dest_name.iter().flatten() {
+        if moved.contains(d) {
+          self.destructure_swapped.push((d.clone(), lo, hi));
+        }
+      }
+    }
     self.destructure_srcs = src_of;
     self.destructure_moved = moved;
     self.destructure_ref_data = ref_data;

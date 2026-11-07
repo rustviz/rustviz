@@ -231,9 +231,6 @@ panic.
 - A closure that uses one field or element (`move || p.name.len()`,
   `move || t.0.len()`) is drawn as capturing the whole variable, so its
   other fields are shown as moved.
-- Swapping references with a destructuring assignment (`(r1, r2) =
-  (r2, r1);`) shows `r1`'s borrow of its old target ending there, even
-  though `r2` borrows that value from then on.
 
 **Crashes the plugin:** some valid programs do. The playground then shows
 "RustViz can't visualize this program yet" with a link to report it.

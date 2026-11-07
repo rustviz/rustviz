@@ -201,6 +201,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               temp_drops_noted: HashSet::new(),
               destructure_srcs: HashMap::new(),
               destructure_moved: HashSet::new(),
+              destructure_swapped: Vec::new(),
               destructure_ref_data: HashMap::new(),
               break_moves: Vec::new(),
             };
@@ -285,6 +286,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               temp_drops_noted: HashSet::new(),
           destructure_srcs: HashMap::new(),
           destructure_moved: HashSet::new(),
+          destructure_swapped: Vec::new(),
           destructure_ref_data: HashMap::new(),
           break_moves: Vec::new(),
         };
