@@ -1731,8 +1731,10 @@ pub struct Timeline {
 // a vector of structs information
 #[derive(Debug)]
 pub struct StructsInfo {
-    //struct owner hash, x val of struct owner, x val of the rightmost member
-    pub structs: Vec<(i64, i64, i64)>,
+    // struct owner hash, x val of struct owner, x val of the rightmost
+    // member, half header-label width of the owner and of the rightmost
+    // member
+    pub structs: Vec<(i64, i64, i64, i64, i64)>,
 }
 
 // VisualizationData supplies all the information we need in the frontend,

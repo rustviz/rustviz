@@ -576,6 +576,10 @@ const EXPECTED_OK: &[&str] = &[
     // annotated `let` / struct field is reborrowed, not moved (#289).
     "mutref_moved_on",
     "mutref_coerced_reborrow",
+    // Struct boxes widen to contain their end columns' header labels
+    // (#477); pinned by `struct_box_contains_long_member_labels`.
+    "struct_box_long_last_label",
+    "struct_box_long_owner_label",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7492,6 +7496,38 @@ fn long_header_labels_do_not_overlap() {
         };
         let last = labels.iter().map(|l| l.0 + l.2.chars().count() as f64 * GLYPH / 2.0).fold(0.0, f64::max);
         assert!(last <= width, "{}: rightmost label ends at {} past the panel width {}", name, last, width);
+    }
+}
+
+/// A struct box contains every header label of its own columns, and no
+/// label outside the struct touches it (#477). The box used to span a
+/// fixed 20px / 40px around the first / last column, so a long last
+/// member (`self.samples`) stuck out on the right.
+#[test]
+fn struct_box_contains_long_member_labels() {
+    const GLYPH: f64 = 8.4;
+    for name in ["struct_box_long_last_label", "struct_box_long_owner_label"] {
+        let t = run_with_local_backend(name).timeline_panel_string();
+        let labels = header_labels(&t);
+        let mut checked = 0;
+        for r in t.split("<rect ").skip(1).map(|r| &r[..r.find('>').unwrap()]).filter(|r| r.contains("rx=\"20\"")) {
+            let (left, y) = (num_attr(r, "x"), num_attr(r, "y"));
+            let right = left + num_attr(r, "width");
+            for (x, ly, text) in labels.iter().filter(|l| l.1 == y + 20.0) {
+                let half = text.chars().count() as f64 * GLYPH / 2.0;
+                if left < *x && *x < right {
+                    // inside the box: the whole label must be
+                    assert!(left <= x - half && x + half <= right,
+                        "{}: label {:?} (x={}, y={}) sticks out of box {}..{}", name, text, x, ly, left, right);
+                    checked += 1;
+                } else {
+                    // outside the box: must not overlap it
+                    assert!(x + half <= left || right <= x - half,
+                        "{}: label {:?} (x={}) collides with box {}..{}", name, text, x, left, right);
+                }
+            }
+        }
+        assert!(checked >= 2, "{}: expected labels inside a struct box", name);
     }
 }
 
