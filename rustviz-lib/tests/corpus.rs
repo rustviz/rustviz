@@ -502,6 +502,23 @@ const EXPECTED_OK: &[&str] = &[
     // a move into a call survives a borrow ending on the same line.
     "mutref_moved_into_generic",
     "move_into_call_same_line_borrow_end",
+    // — Shadowing (#173, #253): each binding gets its own column.
+    "shadow_after_move",
+    "shadow_after_move_into_fn",
+    "shadow_with_live_borrow",
+    "shadow_in_block",
+    "shadow_sibling_blocks",
+    "shadow_shared_columns",
+    "shadow_match_arm",
+    "shadow_rebind_chain",
+    // Shadowing matrix (#308 deep dive): re-lets, scopes, patterns,
+    // closures.
+    "shadow_matrix_let",
+    "shadow_matrix_scopes",
+    "shadow_header_names",
+    "shadow_matrix_patterns",
+    "shadow_matrix_closures",
+    "shadow_closure_fate",
     // A call's result nothing takes is a temporary, dropped at the end of its statement (#457).
     "unbound_temporary",
     // A reference parameter's borrow end on a line shared with another
@@ -1441,13 +1458,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── Shadowing ──────────────────────────────────────────────────
     TooltipExpect {
         name: "shadowing_basic",
-        // Both `let s = ...` lines should bind a String to `s`. The
-        // first `s` is dropped at the shadow site.
+        // The second `let s` declares a new variable, drawn as its own
+        // column `s₂` (#173). Both Strings live, and are dropped, until
+        // the end of `main`.
         must_contain: &[
             "Move from String::from to s",
+            "Move from String::from to s₂",
             "s goes out of scope. Its resource is dropped.",
+            "s₂ goes out of scope. Its resource is dropped.",
+            "s₂, immutable. s₂ shadows s: it is a new variable named s, declared on line 8",
         ],
-        must_not_contain: &[],
+        must_not_contain: &[
+            // Not "a different variable": the earlier one is still in scope.
+            "s₂, immutable. s₂ is a different variable from s: the 2nd variable named s in this function",
+        ],
     },
 
     // ─── Marker comments (skip / hide) ──────────────────────────────
@@ -5267,6 +5291,130 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "shadow_after_move",
+        // `let t = s; let s = …;` used to panic ("Immutable variable s
+        // cannot reacquire resources!", #253): both `s`es shared a RAP.
+        must_contain: &[
+            "Move from s to t",
+            "s goes out of scope. No resource is dropped.",
+            "Move from String::from to s₂",
+            "s₂ goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "shadow_after_move_into_fn",
+        // `take(s); let s = …;`: same panic as above (#253).
+        must_contain: &[
+            "Move from s to take",
+            "s goes out of scope. No resource is dropped.",
+            "s₂ goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "shadow_with_live_borrow",
+        // The first `s` is still borrowed by `r` after it's shadowed,
+        // and is dropped at the end of `main` (#173). The merged column
+        // said the first String was never dropped.
+        must_contain: &[
+            "Immutable borrow from s to r",
+            "Return immutably borrowed resource from r to s",
+            "s goes out of scope. Its resource is dropped.",
+            "s₂ goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_in_block",
+        // `let spaces = spaces.len();` binds a new `usize`, and the
+        // inner block's `x` ends at the block's `}` (#173).
+        must_contain: &[
+            "len reads from spaces",
+            "spaces₂ is initialized with a copy of len",
+            "Copy from len to spaces₂",
+            "x₂ is bound to a copyable value",
+            "x₂ goes out of scope",
+            "x₂, immutable. x₂ shadows x: it is a new variable named x, declared on line 10",
+        ],
+        must_not_contain: &[
+            // Not "a different variable": the earlier one is still in scope.
+            "x₂, immutable. x₂ is a different variable from x: the 2nd variable named x in this function",
+            "spaces is initialized with a copy of len",
+            "=Copy from len to spaces",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_sibling_blocks",
+        // Two `let s` in sibling blocks: neither shadows the other (the
+        // first is out of scope when the second is declared), so they
+        // share one column `s`, with no subscript. The first block's `s`
+        // is moved by `drop`; the second block's `s` drops its String
+        // at the end of its block.
+        must_contain: &[
+            "Move from s to drop",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from String::from to s₂",
+            "s₂ goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_shared_columns",
+        // A subscript means "shadows an earlier variable still in
+        // scope". `s₂` shadows `s`; the two inner blocks each shadow `s₂`
+        // and share the column `s₃`, whose header lists both lines. The
+        // arms of an `if` shadow nothing: one column `x`, no `x₂`.
+        must_contain: &[
+            "s₂, immutable. s₂ shadows s: it is a new variable named s, declared on line 9",
+            "s₃, immutable. s₃ shadows s₂: it is a new variable named s, declared on lines 11 and 15 (in different branches or blocks, so only one exists at a time)",
+            "x, immutable",
+        ],
+        must_not_contain: &[
+            "s₂, immutable. s₂ is a different variable from s: the 2nd variable named s in this function",
+            "s₄, immutable",
+            "x₂, immutable",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_match_arm",
+        // The arms' `n` shadows the outer `n` (#173); the two
+        // `Some(n)` arms share the column `n₂`.
+        must_contain: &[
+            "n is bound to a copyable value",
+            "n₂ is initialized with a copy of opt",
+            "Partial copy from opt to n₂",
+        ],
+        must_not_contain: &[
+            "n is initialized with a copy of opt",
+            "=Partial copy from opt to n",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_rebind_chain",
+        // `let s = s; let s = &s;` moves into `s₂`, then `s₃` borrows
+        // `s₂` (#173). The merged column drew both as arrows from `s`
+        // to itself.
+        must_contain: &[
+            "Move from s to s₂",
+            "Immutable borrow from s₂ to s₃",
+            "Return immutably borrowed resource from s₃ to s₂",
+            "s₂ goes out of scope. Its resource is dropped.",
+            "s₃, immutable. s₃ shadows s₂: it is a new variable named s, declared on line 9",
+        ],
+        must_not_contain: &[
+            // Not "a different variable": the earlier one is still in scope.
+            "s₃, immutable. s₃ is a different variable from s: the 3rd variable named s in this function",
+            "=Move from s to s",
+            "Immutable borrow from s to s",
+            "Return immutably borrowed resource from s to s",
+        ],
+    },
     // ─── Destructuring a struct variable (#326) ─────────────────────
     TooltipExpect {
         name: "struct_destructure_let",
@@ -5588,6 +5736,205 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             // `=`: whole tooltip. `takes`'s parameter `_s` drops its String, and "_s goes out of scope. Its resource is dropped." is correct.
             "=s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_matrix_let",
+        // Re-binding a name with `let` declares a new variable; the
+        // shadowed one keeps (and later drops) its value. Main crashes
+        // on this file (#253); the false texts below are what main drew
+        // for each fn on its own, where the two variables shared a
+        // column.
+        must_contain: &[
+            // owned_twice: shadowing drops nothing; both drop at `}`.
+            "a goes out of scope. Its resource is dropped.",
+            "a₂ goes out of scope. Its resource is dropped.",
+            // copies
+            "Copy from x₂ to y",
+            "y is initialized with a copy of x₂",
+            // type_change
+            "w₂ is initialized with a copy of len",
+            // move_into_new
+            "Move from m to m₂",
+            "m goes out of scope. No resource is dropped.",
+            "m₂ goes out of scope. Its resource is dropped.",
+            // borrow_shadowed: r still owns its String, r₂ borrows it.
+            "Immutable borrow from r to r₂",
+            "Return immutably borrowed resource from r₂ to r",
+            "r goes out of scope. Its resource is dropped.",
+            // trim_shadowed
+            "Immutable borrow from t to t₂: trim's signature gives the reference it returns the same lifetime as the value it was called on",
+            "t goes out of scope. Its resource is dropped.",
+            // mut_rebind
+            "u₂, mutable. u₂ shadows u: it is a new variable named u, declared on line 52",
+            "Move from u to u₂",
+            "u₂ goes out of scope. Its resource is dropped.",
+            // borrow_outlives_shadowing
+            "Return immutably borrowed resource from p to q",
+            "q goes out of scope. Its resource is dropped.",
+            "q₂ is bound to a copyable value",
+            // ref_shadowed
+            "Immutable borrow from h to k₂",
+            "Return immutably borrowed resource from k₂ to h",
+            // three
+            "Move from c₂ to +",
+            "c₂ goes out of scope. No resource is dropped.",
+            "c₃ goes out of scope. Its resource is dropped.",
+            "c₃, immutable. c₃ shadows c₂: it is a new variable named c, declared on line 78",
+            // deferred_init: `d = …` initializes d₂, not the first d.
+            "Move from String::from to d₂",
+            "d goes out of scope. Its resource is dropped.",
+            "d₂ goes out of scope. Its resource is dropped.",
+            // shorthand_field
+            "Move from e₂ to w.e",
+        ],
+        must_not_contain: &[
+            // Not "a different variable": the earlier one is still in scope.
+            "c₃, immutable. c₃ is a different variable from c: the 3rd variable named c in this function",
+            // Not "a different variable": the earlier one is still in scope.
+            "u₂, mutable. u₂ is a different variable from u: the 2nd variable named u in this function",
+            "=Move from m to m",
+            "=Immutable borrow from r to r",
+            "r's resource is immutably borrowed by r; r is read-only while the borrow is live",
+            "r goes out of scope. No resource is dropped.",
+            "Copy from trim to t",
+            "t is initialized with a copy of trim",
+            "=Move from u to u",
+            "q goes out of scope. No resource is dropped.",
+            "=Immutable borrow from h to k",
+            "=Copy from len to w",
+            "w is assigned the result of len",
+            "Move from c to c",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_matrix_scopes",
+        // An inner `let` ends with its block, and later uses go to the
+        // outer column. Main crashes on this file (#253); the false
+        // texts are main's for each fn on its own. Known gaps, not
+        // asserted: `loop_body`'s l₂ never goes out of scope (#256);
+        // `early_return` still drops r / r₂ at its unreachable `}`
+        // (#515). Before `return`'s drops (#411) looked names up per
+        // binding, `return r;` dropped r₂ there and not r.
+        must_contain: &[
+            // block_then_outer
+            "a₂ is initialized with a copy of len",
+            "a₂ goes out of scope",
+            "Move from a to t",
+            "a goes out of scope. No resource is dropped.",
+            // if_arm
+            "b₂ goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            // loop_body
+            "Move from String::from to l₂",
+            "l goes out of scope. Its resource is dropped.",
+            // param / ref_param
+            "s₂'s resource is moved to the caller",
+            "Move from to_string to v₂",
+            "v₂ goes out of scope. Its resource is dropped.",
+            // early_return: the first r is dropped at each `return`,
+            // so its column stops in both branches.
+            "This branch stops here: it returns, panics, breaks or continues, so it never \
+             reaches the end of the conditional, and r's column doesn't either",
+            // main: its own s / s₂, unrelated to param's
+            "Move from param to s₂",
+            "s₂ goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=Copy from len to a",
+            "a is initialized with a copy of len",
+            "b goes out of scope. No resource is dropped.",
+            "Move from s to s",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_matrix_patterns",
+        // Pattern bindings that reuse a name are new variables. Main
+        // crashes on this file (#253). Known wrong, not asserted (same
+        // as main with the bindings renamed): `for y in ys` says y₂
+        // "acquires ownership of a resource" (#504), the `else if let`
+        // binding z₂ gets a column across the whole `if` (#501), the
+        // outer arm's w "has no value yet" in the inner match (#502),
+        // and `let P { n, .. } = p` moves "from p" with p.n still
+        // dropping (#326).
+        must_contain: &[
+            // if_let_same_name
+            "Move from s to s₂",
+            "s₂ goes out of scope. Its resource is dropped.",
+            // match_same_name
+            "Partial move from o to o₂",
+            // while_let_outer
+            "x₂ is initialized with a copy of next",
+            "x is bound to a copyable value",
+            // for_outer
+            "Move from ys to y₂",
+            "y goes out of scope. Its resource is dropped.",
+            // else_if_let
+            "z is initialized with a copy of a",
+            "z₂ is initialized with a copy of b",
+            // tuple_swap
+            "Move from g to f₂",
+            "Move from f to g₂",
+            "f goes out of scope. No resource is dropped.",
+            "g₂ goes out of scope. Its resource is dropped.",
+            // struct_pattern
+            "n₂, immutable. n₂ shadows n: it is a new variable named n, declared on line 66",
+            "n₂ goes out of scope. Its resource is dropped.",
+            // else_if_let: `z` of `else if let` isn't in scope with the first `z`
+            // (they're in different branches), so it doesn't shadow it; it has
+            // a column of its own because the timeline can't draw one variable
+            // declared in both branches of an `else if` chain.
+            "z₂, immutable. z₂ is a different variable from z: it is another variable named z, declared on line 45. z and z₂ are in different branches, so only one of them exists at a time",
+            // nested_match
+            "w₂ is initialized with a copy of b",
+        ],
+        must_not_contain: &[
+            "z₂, immutable. z₂ shadows z: it is a new variable named z, declared on line 45",
+            // Not "a different variable": the earlier one is still in scope.
+            "n₂, immutable. n₂ is a different variable from n: the 2nd variable named n in this function",
+            "=Move from s to s",
+            "=s goes out of scope. No resource is dropped.",
+            "=Copy from next to x",
+            "x goes out of scope. No resource is dropped.",
+            "=Move from ys to y",
+            "Move from p to n",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_matrix_closures",
+        // Closures capture the variable their name refers to at the
+        // closure, not an earlier or later one with the same name. Main
+        // crashes on this file (#253). The FnOnce call and the closure
+        // argument (`fnonce_shadowed`, `closure_arg`) went to the first
+        // `g` / `h` before the names were looked up per binding there.
+        must_contain: &[
+            // closure_param: `|s: &str|` leaves the outer s alone.
+            "s goes out of scope. Its resource is dropped.",
+            // captures_shadowing
+            "Closure capture (immutable borrow) from c₂ to f",
+            "c goes out of scope. Its resource is dropped.",
+            // move_after_shadow
+            "Closure capture (move) from m₂ to f",
+            "Return immutably borrowed resource from t to m",
+            "m goes out of scope. Its resource is dropped.",
+            // captures_first
+            "Closure capture (immutable borrow) from b to f",
+            "Return immutably borrowed resource from f to b",
+            "b₂ goes out of scope. Its resource is dropped.",
+            // fnonce_shadowed
+            "Move from g₂ to t",
+            "g₂'s resource is moved",
+            // closure_arg
+            "Move from h₂ into the closure passed to apply",
+            "h₂ goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=Copy from len to c",
+            "Closure capture (immutable borrow) from c to f",
+            "m goes out of scope. No resource is dropped.",
+            "Move from g to t",
+            "g's resource is moved",
+            "Move from h into the closure passed to apply",
         ],
     },
     // ─── Unbound temporaries (#457) ──────────────────────────────────
@@ -7822,14 +8169,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "else_if_let_same_name",
-        // #525: both `z`s share one column (shadowing isn't split into
-        // columns yet, see README), so the second one's copy reads "z is
-        // assigned a copy of b" there; that wording is the known
-        // one-column limitation and isn't pinned here.
+        // #525: the `z` of the `else if let` is declared in a different
+        // branch from the first `z` and doesn't shadow it, but the
+        // timeline can't yet draw one variable declared in both branches
+        // of an `else if` chain, so it gets its own column `z₂` (#308).
         must_contain: &[
             "z is initialized with a copy of a",
-            "Copy from b to z",
+            "Copy from b to z₂",
+            "z₂ is initialized with a copy of b",
             "z goes out of scope",
+            "z₂ goes out of scope",
         ],
         must_not_contain: &[
             "z is live in a conditional expression ",
@@ -7935,6 +8284,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q acquires ownership of a new resource; its previous resource is dropped",
             "w acquires ownership of a new resource; its previous resource is dropped",
             "r.a acquires ownership of a resource",
+        ],
+    },
+    // A shadowed variable captured by an FnOnce closure is named by its
+    // own column in the call's tooltip (#173).
+    TooltipExpect {
+        name: "shadow_closure_fate",
+        must_contain: &[
+            "g2 is moved into the call (an FnOnce closure can only be called once). u₂, which g2 captured, is dropped during the call",
+        ],
+        must_not_contain: &[
+            "g2 is moved into the call (an FnOnce closure can only be called once). u, which g2 captured, is dropped during the call",
         ],
     },
 ];
@@ -9293,6 +9653,13 @@ fn corpus_expected_tooltips_present() {
             let rv = run_with_local_backend(expect.name);
             assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
             let actual = timeline_tooltips(&rv.timeline_panel_string());
+            // #308: a numbered header stops at "declared on line N"; the
+            // long "While s₂ is in scope the name s refers to s₂ ..."
+            // sentence was dropped as noise.
+            assert!(
+                !actual.iter().any(|t| t.contains(" is in scope the name ") || t.contains("still exists until its own scope ends")),
+                "{}: numbered header still has the trailing scope sentence: {:#?}", expect.name, actual
+            );
 
             let missing: Vec<&str> = expect
                 .must_contain
@@ -9923,6 +10290,51 @@ fn tooltip_attributes_are_escaped() {
                     "{}: bare '&' in tooltip attribute {:?}", name, raw
                 );
             }
+        }
+    }
+}
+
+/// #308: a numbered column header names the variable several times
+/// (`b₂ shadows b: it is a new variable named b ...`). The playground's
+/// helpers.js used to re-split the tooltip HTML on spaces to wrap it and
+/// cut inside the `<span style="...monospace !important;">` wrappers, so
+/// the second occurrence leaked markup. The plugin's text is pinned here
+/// (every header reads as the expected plain string, and the raw
+/// attribute is nothing but well-formed name spans); the JS is pinned by
+/// `tooltip_wrapping_is_css_not_word_splitting`.
+#[test]
+fn numbered_headers_are_clean_markup() {
+    let rv = run_with_local_backend("shadow_header_names");
+    let timeline = rv.timeline_panel_string();
+    let tooltips = timeline_tooltips(&timeline);
+    for v in ["s", "n", "e", "a", "i", "b"] {
+        let want = format!(
+            "{v}₂, immutable. {v}₂ shadows {v}: it is a new variable named {v}, declared on line {line}",
+            line = match v { "s" => 7, "n" => 9, "e" => 11, "a" => 13, "i" => 15, _ => 17 },
+        );
+        assert!(tooltips.contains(&want), "missing header {:?} in {:#?}", want, tooltips);
+        let old = format!("{want}. While {v}₂ is in scope the name {v} refers to {v}₂, but {v} still exists until its own scope ends");
+        assert!(!tooltips.contains(&old), "old long header still present: {:?}", old);
+        assert!(!tooltips.iter().any(|t| t.contains(&format!("While {v}₂ is in scope"))), "trailing sentence in {:#?}", tooltips);
+    }
+    // Raw attributes: remove each well-formed name span (as the plugin
+    // writes it, entity-escaped) and nothing of the markup may remain.
+    let span_open = "&lt;span style=&quot;font-family: 'Source Code Pro',";
+    for chunk in timeline.split("data-tooltip-text=\"").skip(1) {
+        let raw = &chunk[..chunk.find('"').unwrap()];
+        let mut rest = raw.to_string();
+        while let Some(i) = rest.find(span_open) {
+            let close = rest[i..].find("&lt;/span&gt;").expect("unclosed span") + i + "&lt;/span&gt;".len();
+            let open_end = rest[i..].find("&gt;").unwrap() + i + 4;
+            let name = &rest[open_end..close - "&lt;/span&gt;".len()];
+            assert!(!name.contains("&lt;") && !name.contains("&quot;") && !name.contains("span"),
+                "name span holds markup: {:?}", raw);
+            rest.replace_range(i..close, "");
+        }
+        // (a dot shared by several events joins them with `<br>`)
+        let rest = rest.replace("&lt;br&gt;", "");
+        for leak in ["monospace", "!important", "&quot;", "&lt;", "&gt;", "style="] {
+            assert!(!rest.contains(leak), "{:?} leaks outside a name span in {:?}", leak, raw);
         }
     }
 }

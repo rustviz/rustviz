@@ -218,7 +218,6 @@ panic.
 - A reference returned by a call in one branch of an `if` / `match`
   that initializes a variable (`let w = if c { first_word(&s) } else {
   "none" };`) isn't linked to `s`.
-- Shadowing (`let x = …; let x = …;`) puts both bindings in one column.
 - A variable assigned in only some branches (`let mut s; if c { s = …
   }`) is drawn as owning a value after the `if`, and a later `s = …` as
   dropping the old value; Rust drops it only on paths that assigned it.
@@ -243,6 +242,8 @@ panic.
 - A closure that uses one field or element (`move || p.name.len()`,
   `move || t.0.len()`) is drawn as capturing the whole variable, so its
   other fields are shown as moved.
+- An or-pattern arm (`Ok(s) | Err(s) => …`) binds nothing, so the
+  matched value is shown as still dropping what the arm moved out.
 
 **Crashes the plugin:** some valid programs do. The playground then shows
 "RustViz can't visualize this program yet" with a link to report it.

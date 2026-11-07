@@ -788,7 +788,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
         if let ExprKind::Path(QPath::Resolved(_, p)) = e.kind {
           if let Res::Local(id) = p.res {
-            self.names.insert(self.tcx.hir_name(id).to_string());
+            // The variable's own name (`s₂` for a second `let s`).
+            self.names.insert(binding_name(&self.tcx, id));
           }
         }
         intravisit::walk_expr(self, e);
@@ -953,8 +954,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       let ty = self.tcx.typeck(param.hir_id.owner).pat_ty(pat);
       let is_special = ty_is_special_owner(&ty);
       match pat.kind {
-        PatKind::Binding(binding_annotation, _ann_hirid, ident, _op_pat) =>{
-          let name: String = ident.to_string();
+        PatKind::Binding(binding_annotation, binding_hirid, ident, _op_pat) =>{
+          let name: String = binding_name(&self.tcx, binding_hirid);
           if ty.is_ref() {
             // (A `ref` binding of a by-value parameter, `own_param`,
             // takes the same path: its borrow also lasts the whole
@@ -1859,7 +1860,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if !matches!(p.res, Res::Local(_)) {
           return;
         }
-        let name = self.tcx.hir_name(p.segments[0].hir_id).as_str().to_owned();
+        let name = path_name(p, &self.tcx);
         // Skip path-expression references whose span is from a macro
         // expansion. Modern `println!`, `format_args!`, etc. expand
         // to a chain of synthetic references to internal locals (a
@@ -1965,7 +1966,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         };
         let mut else_inner = self.raps_declared_since(else_hash_lo, &uninit_before);
         if let Some(e) = else_expr {
-          else_inner = &else_inner | &else_if_let_bindings(e, &self.raps);
+          else_inner = &else_inner | &else_if_let_bindings(e, &self.tcx, &self.raps);
         }
         let uninit_after_else = std::mem::take(&mut self.uninit_locals);
         self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if), (else_expr, uninit_after_else)]);
@@ -2771,8 +2772,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 //                             columns aren't empty.
                 let prev_inside_branch = self.inside_branch;
                 self.inside_branch = true;
-                if let PatKind::Binding(_, _, pat_ident, None) = user_pat.kind {
-                  let pat_name = pat_ident.to_string();
+                if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
+                  let pat_name = binding_name(&self.tcx, pat_hirid);
                   let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
                     .pat_ty(user_pat);
                     let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
@@ -2862,7 +2863,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let body_end = self.tcx.sess.source_map()
                   .lookup_char_pos(body_expr.span.hi()).line;
                 let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
-                collect_pat_bindings(user_pat, &self.raps, &mut loop_decls);
+                collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut loop_decls);
                 self.emit_scope_end(loop_decls, body_end);
                 // `break`s in the body target the desugared `loop`
                 // (the outer arm's body), which also ends when the
@@ -3464,8 +3465,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.visit_expr(init);
       // A reference returned by a call in a branch keeps that call's
       // borrow (#337).
-      if let PatKind::Binding(_, _, ident, None) = pat.kind {
-        self.mark_branch_results_kept(ident.as_str(), init);
+      if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
+        self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), init);
       }
     } else {
       if !is_skipped {
@@ -3491,7 +3492,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// at the end of their statement (`f(&String::from("a"))`) aren't
   /// drawn. Returns false when `let pat = init` isn't this shape.
   fn bind_extended_temporary(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) -> bool {
-    let PatKind::Binding(annotation, hirid, ident, None) = pat.kind else { return false };
+    let PatKind::Binding(annotation, hirid, _, None) = pat.kind else { return false };
     if annotation.0 != rustc_hir::ByRef::No || init.span.from_expansion() {
       return false;
     }
@@ -3526,7 +3527,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.add_ev(line_num, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false);
     }
 
-    let name = ident.to_string();
+    let name = binding_name(&self.tcx, hirid);
     self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
       line_num, ResourceTy::Value(tmp.clone()), VecDeque::new(), self.current_scope, !self.inside_branch,
       self.ref_pointee_is_copy(lhs_ty, hirid.owner));
@@ -3629,8 +3630,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // side effects were captured by the entry visit_expr.
       }
       // Canonical leaf: a single named binding consuming the init.
-      (PatKind::Binding(annotation, hirid, ident, sub_pat), _) => {
-        self.bind_one(ident.to_string(), annotation, hirid, init, is_skipped);
+      (PatKind::Binding(annotation, hirid, _, sub_pat), _) => {
+        self.bind_one(binding_name(&self.tcx, hirid), annotation, hirid, init, is_skipped);
         // `name @ inner_pat` — register any nested bindings too.
         if let Some(sp) = sub_pat {
           self.bind_walk(sp, init, is_skipped);
@@ -3689,11 +3690,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     match pat.kind {
       PatKind::Wild => {}
       // A by-value binding of a non-reference part.
-      PatKind::Binding(annotation, hirid, ident, None)
+      PatKind::Binding(annotation, hirid, _, None)
         if matches!(annotation.0, rustc_hir::ByRef::No) && !member_ty.is_ref()
           && self.raps.contains_key(member) =>
       {
-        let name = ident.to_string();
+        let name = binding_name(&self.tcx, hirid);
         let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
         let evt = if self.ty_is_copy(lhs_ty, hirid.owner) { Evt::Copy } else { Evt::Move };
         self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
@@ -3741,8 +3742,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     is_skipped: bool,
   ) {
     match pat.kind {
-      PatKind::Binding(annotation, hirid, ident, sub_pat) => {
-        self.bind_one(ident.to_string(), annotation, hirid, init, is_skipped);
+      PatKind::Binding(annotation, hirid, _, sub_pat) => {
+        self.bind_one(binding_name(&self.tcx, hirid), annotation, hirid, init, is_skipped);
         if let Some(sp) = sub_pat {
           self.bind_walk(sp, init, is_skipped);
         }
@@ -3801,7 +3802,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub fn register_pattern_bindings_anon(&mut self, pat: &'tcx Pat<'tcx>, line: usize) {
     match pat.kind {
       PatKind::Binding(_, hirid, ident, sub_pat) => {
-        let name = ident.to_string();
+        let name = binding_name(&self.tcx, hirid);
         let pat_ty = self.tcx.typeck(hirid.owner).pat_ty(pat);
         if pat_ty.is_ref() {
           let pointee_copy = self.ref_pointee_is_copy(pat_ty, hirid.owner);
@@ -3971,7 +3972,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// since x held nothing before. In a later sibling branch the RAP
   /// already exists and only the event is emitted.
   fn init_deferred_local(&mut self, hirid: HirId, decl: DeferredLet, rhs: &'tcx Expr<'tcx>) {
-    let name = self.tcx.hir_name(hirid).to_string();
+    let name = binding_name(&self.tcx, hirid);
     let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
     let evt = self.bind_evt(lhs_ty, hirid);
     let saved = (self.current_scope, self.inside_branch);

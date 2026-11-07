@@ -144,11 +144,12 @@ fn plugin_panic_prints_one_clean_unsupported_line() {
 /// so in words). As with `KNOWN_PANICKING`, a snippet that starts working
 /// is skipped, but at least one must still trip a guard.
 const GUARD_REASONS: &[(&str, &str, &str)] = &[
-    // Shadowing a moved variable (#253): `s` is "re-acquired" after a move.
+    // A match guard that moves an outer variable (#247). (Shadowing a
+    // moved variable (#253) used to be the example here; it renders now.)
     (
-        "shadow_moved",
-        "fn main() {\n    let s = String::from(\"a\");\n    let t = s;\n    let s = String::from(\"b\");\n    println!(\"{} {}\", s, t);\n}\n",
-        "immutable variable `s` re-acquires a resource after a move",
+        "guard_moves_outer",
+        "fn consume(s: String) -> bool { s.len() > 3 }\nfn main() {\n    let s = String::from(\"hello\");\n    let opt = Some(5);\n    match opt {\n        Some(_) if consume(s) => println!(\"yes\"),\n        _ => println!(\"no\"),\n    }\n}\n",
+        "match guards that move or assign a variable declared outside the guard",
     ),
     // A write through `*r` in both arms of an if/else (#264): the layout
     // has no column for the event's timeline.
