@@ -873,6 +873,8 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_call_move",
     "edition2024/if_let_chain_irrefutable_move",
     "edition2024/if_let_chain_else_reassign",
+    "edition2024/if_let_chain_field_move",
+    "edition2024/if_let_chain_closure_move",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9410,11 +9412,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from x to a",
             "Move from a to consume",
             "x may have been moved: when the condition moves x to a and then turns out false, the else branch runs after that move, so x can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
             // main before #198: no move, unconditional drop.
             "=x goes out of scope. Its resource is dropped.",
+            "=x goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "=x goes out of scope. No resource is dropped.",
             "x isn't moved in any of the branches above",
         ],
@@ -9424,10 +9429,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from x to a",
             "x may have been moved: when the condition moves x to a and then turns out false, the body is skipped but the move has happened, so x can't be used after the if. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
             "=x goes out of scope. Its resource is dropped.",
+            "=x goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "=x goes out of scope. No resource is dropped.",
         ],
     },
@@ -9438,9 +9446,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from s to take",
             "s may have been moved: when the condition moves s to take and then turns out false, the else branch runs after that move, so s can't be used here",
-            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
             "=s goes out of scope. Its resource is dropped.",
             "=s goes out of scope. No resource is dropped.",
             "take goes out of scope",
@@ -9466,11 +9476,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The old value is still in `x` only if the condition didn't move
         // it, so its drop at the reassignment is decided by a drop flag.
         must_contain: &[
-            "x acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
             "x acquires ownership of a new resource; its previous resource is dropped",
         ],
+    },
+    // The drop-flag wording where the condition may have moved a field /
+    // a closure (#581 review): "nothing above", not "no branch above".
+    TooltipExpect {
+        name: "edition2024/if_let_chain_field_move",
+        must_contain: &[
+            "p.name may have been moved: when the condition moves p.name to a and then turns out false, the else branch runs after that move, so p.name can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
+            "p goes out of scope. p.name may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag). p.id is dropped.",
+            "p.name goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &["only if no branch above moved it", "moved out in at least one branch above"],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_closure_move",
+        must_contain: &[
+            "f may have been moved: when the condition moves f to run and then turns out false, the else branch runs after that move, so f can't be used here",
+            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &["only if no branch above called it"],
     },
 ];
 

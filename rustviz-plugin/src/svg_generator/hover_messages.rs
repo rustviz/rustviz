@@ -118,6 +118,9 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     dropped: &[String],
     // The struct has nothing to drop at all (#484): no "resource" talk.
     plain: bool,
+    // A let-chain's condition, not only a branch, may have moved one of
+    // `maybe_moved` (#281): "nothing above" instead of "no branch above".
+    by_cond: bool,
 ) -> String {
     fn join(names: &[String]) -> (String, bool) {
         let fmt: Vec<String> = names.iter().map(fmt_style).collect();
@@ -148,7 +151,15 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             out.push_str(&format!(" {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
         }
         let (maybe_s, maybe_plural) = join(maybe_moved);
-        if maybe_plural {
+        if by_cond {
+            out.push_str(&format!(
+                " {} may have been moved out above, so {} dropped here only if nothing above moved \
+                 it (Rust tracks this with {}).",
+                maybe_s,
+                if maybe_plural { "each is" } else { "it's" },
+                if maybe_plural { "runtime drop flags" } else { "a runtime drop flag" }
+            ));
+        } else if maybe_plural {
             out.push_str(&format!(
                 " {} were moved out in some of the branches above; each is dropped here only if no \
                  branch above moved it (Rust tracks this with runtime drop flags).",
@@ -316,12 +327,21 @@ pub fn event_dot_owner_drop_at_reassign(my_name: &String, note: &str) -> String 
 // paths only (#335): like the scope end of such a variable
 // (`event_dot_go_out_of_scope_maybe_moved`), the old value is dropped
 // only if it's still there, which Rust decides at runtime.
-pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String) -> String {
+// `by_cond`: a let-chain's condition, not only a branch, may have moved
+// it (#281): see `moved_above`.
+pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, by_cond: bool) -> String {
     format!(
         "{0} acquires ownership of a new resource. Its previous resource is dropped here only if \
-         no branch above moved it (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name)
+         {1} moved it (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name), moved_above(by_cond)
     )
+}
+
+/// Who may have moved a maybe-moved variable, for the drop-flag
+/// wording: "no branch above", or, when a let-chain's condition may have
+/// moved it before failing (#281), "nothing above".
+pub fn moved_above(by_cond: bool) -> &'static str {
+    if by_cond { "nothing above" } else { "no branch above" }
 }
 
 // A call's result that nothing takes ownership of is a temporary; Rust
@@ -2124,11 +2144,11 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String 
 // Scope end of a variable that was moved on some paths of a conditional
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).
-pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str) -> String {
+pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool) -> String {
     format!(
-        "{0} goes out of scope. Its resource is dropped{1} here only if no branch above moved it \
+        "{0} goes out of scope. Its resource is dropped{1} here only if {2} moved it \
          (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), note
+        fmt_style(my_name), note, moved_above(by_cond)
     )
 }
 
@@ -2320,10 +2340,13 @@ pub fn event_dot_closure_call_once(
 // Scope end of a closure that was called (and so moved) on some paths
 // of a conditional and not on others: whether its captured resources
 // are dropped here is decided at runtime by a drop flag (#179, #271).
-pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String) -> String {
+// `by_cond`: a let-chain's condition may have moved it (into a call,
+// #281); that's not a call of the closure.
+pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: bool) -> String {
     format!(
-        "{0} goes out of scope. Its captured resources are dropped here only if no branch above \
-         called it (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name)
+        "{0} goes out of scope. Its captured resources are dropped here only if {1} \
+         (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name),
+        if by_cond { "nothing above moved or called it" } else { "no branch above called it" }
     )
 }

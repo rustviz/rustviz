@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{rc_call_of, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{rc_call_of, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1122,7 +1122,7 @@ fn render_dot(
                     let reassigned_next = full.iter()
                         .filter(|(l, _)| *l > *merge_point)
                         .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
-                        .map_or(false, |(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_moved: true }));
+                        .map_or(false, |(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_moved: true, .. }));
                     let title = if reassigned_next {
                         hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name())
                     } else {
@@ -1207,7 +1207,7 @@ fn render_dot(
                             // Called (so moved) on some paths only: the drop
                             // flag decides whether its captures are dropped.
                             let title = if maybe_moved {
-                                hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name)
+                                hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history))
                             } else {
                                 hover_messages::event_dot_closure_go_out_of_scope(&name, move_count)
                             };
@@ -1238,7 +1238,7 @@ fn render_dot(
                         // nothing, whether or not it was moved earlier.
                         data.title = match struct_partial_move_split(visualization_data, *hash) {
                             Some(split) if resource_hold =>
-                                hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true),
+                                hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond),
                             _ => event.print_message_with_name(&mut name),
                         };
                     } else if !resource_hold && maybe_moved_at_end(history) {
@@ -1250,7 +1250,7 @@ fn render_dot(
                             hash: *hash as u64,
                             dot_x: cx,
                             dot_y: cy,
-                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note()),
+                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), moved_by_chain_condition(history)),
                             p1x: cx - 3, p1y: cy - 1,
                             p2x: cx + 3, p2y: cy - 1,
                             p3x: cx,     p3y: cy + 3,
@@ -1270,7 +1270,7 @@ fn render_dot(
                         // and those moved on some paths only maybe
                         // (#395).
                         let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                            &name, &split.moved, &split.maybe_moved, &split.dropped, false);
+                            &name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond);
                         if split.dropped.is_empty() && split.maybe_moved.is_empty() {
                             data.title = title;
                         } else {
@@ -1361,7 +1361,7 @@ fn render_dot(
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false } | Event::OwnerDropIfTryReturns) {
+                    let note = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false, .. } | Event::OwnerDropIfTryReturns) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
                     let title = if note.is_empty() {
@@ -1578,6 +1578,17 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
         }
     }
     maybe
+}
+
+// True when a let-chain's condition may have moved this column's value
+// before failing (#281), so a drop-flag message says "nothing above"
+// moved it rather than "no branch above".
+fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
+    history.iter().any(|(_, e)| match e {
+        Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. }, .. } => true,
+        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
+        _ => false,
+    })
 }
 
 fn all_paths_present(ty: &BranchType, n_branches: usize) -> bool {
@@ -1988,6 +1999,8 @@ struct PartialMoveSplit {
     maybe_moved: Vec<String>,
     // Non-Copy leaf fields that still hold a value on every path.
     dropped: Vec<String>,
+    // A let-chain's condition may have moved one of `maybe_moved` (#281).
+    by_cond: bool,
 }
 
 // For a struct column (or a struct-typed field column such as
@@ -2015,6 +2028,7 @@ fn struct_partial_move_split(
     let mut moved: Vec<String> = Vec::new();
     let mut maybe_moved: Vec<String> = Vec::new();
     let mut dropped = Vec::new();
+    let mut by_cond = false;
     for (timeline, name, is_copy) in &fields {
         // Fields of an already-listed moved-out field went with it.
         if moved.iter().chain(maybe_moved.iter()).any(|m| name.starts_with(&format!("{}.", m))) {
@@ -2026,6 +2040,7 @@ fn struct_partial_move_split(
             // Moved in one arm of a `match` on the struct, or one
             // branch of an `if`, and not in the others (#395).
             if maybe_moved_at_end(&timeline.history) {
+                by_cond |= moved_by_chain_condition(&timeline.history);
                 maybe_moved.push((*name).clone());
             } else {
                 moved.push((*name).clone());
@@ -2037,7 +2052,7 @@ fn struct_partial_move_split(
     if moved.is_empty() && maybe_moved.is_empty() {
         None
     } else {
-        Some(PartialMoveSplit { moved, maybe_moved, dropped })
+        Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond })
     }
 }
 

@@ -2316,10 +2316,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         }
 
         for (rap, maybe_moved) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved) {
+          let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
           self.add_external_event(line_num, ExternalEvent::OwnerDropAtReassign {
             ro: rap,
             id: *self.unique_id,
             maybe_moved,
+            by_cond,
           });
           *self.unique_id += 1;
         }

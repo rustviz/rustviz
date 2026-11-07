@@ -1186,6 +1186,9 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize,
         maybe_moved: bool,
+        // With `maybe_moved`: a let-chain's condition may have been
+        // what moved it (#281), not only a branch.
+        by_cond: bool,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -1496,7 +1499,7 @@ pub enum Event {
     // unchanged across this event because the matching Acquire from
     // rhs lands on the same line and immediately re-establishes
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool },
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -1907,11 +1910,11 @@ impl Event {
             Event::RefGoOutOfScope => {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
             }
-            Event::OwnerDropAtReassign { maybe_moved: false } => {
+            Event::OwnerDropAtReassign { maybe_moved: false, .. } => {
                 hover_messages::event_dot_owner_drop_at_reassign(my_name, "")
             }
-            Event::OwnerDropAtReassign { maybe_moved: true } => {
-                hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name)
+            Event::OwnerDropAtReassign { maybe_moved: true, by_cond } => {
+                hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name, *by_cond)
             }
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
@@ -3131,8 +3134,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -3451,8 +3454,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);

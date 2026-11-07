@@ -1169,6 +1169,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     ownership_after(self.preprocessed_events, rap_name, None).unwrap_or(Ownership::None)
   }
 
+  /// True when a let-chain's condition may have moved `name` before it
+  /// failed (#281): a `MaybeMovedAt::ChainFail` event for it, also
+  /// inside a finished conditional. A drop-flag message then says
+  /// "nothing above" moved it rather than "no branch above".
+  pub fn moved_by_chain_condition(&self, name: &str) -> bool {
+    fn any(events: &[(usize, ExternalEvent)], name: &str) -> bool {
+      events.iter().any(|(_, ev)| match ev {
+        ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } => ro.name() == name,
+        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, name)),
+        _ => false,
+      })
+    }
+    any(self.preprocessed_events, name)
+  }
+
   /// True iff `name` is a reference whose value was moved, since it was
   /// last assigned, into something that carries the borrow on and ends
   /// it itself: another reference (`let r2 = r;`, `Holder { r }`) or the
