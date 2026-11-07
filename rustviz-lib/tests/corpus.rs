@@ -4895,7 +4895,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "the resource slots points to is modified through *slots",
             "the resource names points to is modified through *names",
-            "Move from s to *names",
+            // `=`: whole tooltip. "Move from s to *names[0]" is correct (#396).
+            "=Move from s to *names",
             "the resource boxes points to is modified through *boxes",
             // An i32 is a value, not a resource (#484).
             "the resource slots[0] points to is modified through *slots[0]",
@@ -5523,7 +5524,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from r to t",
         ],
         must_not_contain: &[
-            "s goes out of scope. Its resource is dropped.",
+            // `=`: whole tooltip. `takes`'s parameter `_s` drops its String, and "_s goes out of scope. Its resource is dropped." is correct.
+            "=s goes out of scope. Its resource is dropped.",
         ],
     },
     // ─── Unbound temporaries (#457) ──────────────────────────────────
@@ -5708,7 +5710,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Before #151, the `_` part read as never moved.
             "t goes out of scope. Its resource is dropped.",
             // The drop is real and must be stated.
-            "t's resource is moved",
+            // `=`: whole tooltip. The correct tooltip continues "... into a temporary that is dropped at the end of this statement".
+            "=t's resource is moved",
             "b acquires ownership of a new resource; its previous resource is dropped",
             "c acquires ownership of a new resource; its previous resource is dropped",
             "p acquires ownership of a new resource; its previous resource is dropped",
@@ -5996,9 +5999,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             // Main's call dots, which also ended the borrow there.
-            "point reads from t",
-            "set reads from s",
-            "put reads from/writes to b",
+            // `=`: whole tooltip. The correct tooltips continue "; point's signature lets it store this reference in ...".
+            "=point reads from t",
+            "=set reads from s",
+            "=put reads from/writes to b",
         ],
     },
     // #371: the borrow and its end are on one line. The texts were
@@ -6343,7 +6347,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped.",
-            "name goes out of scope. Its resource is dropped.",
+            // `=`: whole tooltip. "u.name goes out of scope. Its resource is dropped." in main is correct.
+            "=name goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -6415,7 +6420,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t isn't moved in any of the branches above",
             "u isn't moved in any of the branches above",
             "w isn't moved in any of the branches above",
-            "s goes out of scope. Its resource is dropped.",
+            // `=`: whole tooltip. `take(_s)` drops its parameter: "_s goes out of scope. Its resource is dropped." is correct.
+            "=s goes out of scope. Its resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
