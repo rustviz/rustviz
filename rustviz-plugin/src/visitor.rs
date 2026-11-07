@@ -1437,7 +1437,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // Plain reassign — only emit the drop if y currently
                 // holds a resource (rules out `let y; y = x;` first
                 // assignment, and `let y = a; let z = y; y = x;` where
-                // y was moved out before reassignment).
+                // y was moved out before reassignment). A value moved
+                // on only some paths above counts; the event says so
+                // (`maybe_moved` below).
                 if self.rap_holds_resource_now(rap.name()) {
                   Some(rap.clone())
                 } else {
@@ -1468,6 +1470,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           _ => Vec::new(),
         };
 
+        // Whether each old value is there on every path, decided
+        // before match_rhs too (see above). `*p = x` writes through a
+        // live `&mut`, so its lender holds a value.
+        let maybe_moved: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
+          .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
+            && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
+          .collect();
+
         if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
           // `v[i] += k`: k is an operand, not the element's new
           // value, so don't draw it as copied into v[i].
@@ -1487,10 +1497,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
 
-        for rap in drop_target.into_iter().chain(field_drop_targets) {
+        for (rap, maybe_moved) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved) {
           self.add_external_event(line_num, ExternalEvent::OwnerDropAtReassign {
             ro: rap,
             id: *self.unique_id,
+            maybe_moved,
           });
           *self.unique_id += 1;
         }

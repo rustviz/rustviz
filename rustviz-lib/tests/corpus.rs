@@ -564,6 +564,12 @@ const EXPECTED_OK: &[&str] = &[
     // run on every case above.
     "branch_hover_per_segment",
     "match_arm_hover_per_segment",
+    // A reassignment after a conditional move drops the old value only
+    // if it is still there (#335).
+    "reassign_after_maybe_move",
+    "reassign_after_maybe_move_no_else",
+    "reassign_after_maybe_move_match",
+    "reassign_after_nested_maybe_move",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5629,6 +5635,83 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "match_arm_on_split_line",
         must_contain: &["Move from s to take", "s's resource is moved"],
         must_not_contain: &["Copy from s to take", "s's value is copied"],
+    },
+    // #335: a reassignment after a conditional that moved the value on
+    // some paths only drops the old value only on the others (drop
+    // flag), and the merge says the drop happens at that reassignment.
+    TooltipExpect {
+        name: "reassign_after_maybe_move",
+        must_contain: &[
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s was moved in at least one branch above, so it can't be used after the branches until \
+             it's assigned again. If the branch that ran didn't move it, its resource is dropped \
+             when s is assigned again.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "reassign_after_maybe_move_no_else",
+        must_contain: &[
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s was moved in at least one branch above, so it can't be used after the branches until \
+             it's assigned again. If the branch that ran didn't move it, its resource is dropped \
+             when s is assigned again.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "reassign_after_maybe_move_match",
+        must_contain: &[
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s was moved in at least one branch above, so it can't be used after the branches until \
+             it's assigned again. If the branch that ran didn't move it, its resource is dropped \
+             when s is assigned again.",
+            "s goes out of scope. Its resource is dropped.",
+            // u is moved in no arm: its old value is dropped.
+            "u acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            // t is moved in every arm: there's nothing to drop.
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "t acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "reassign_after_nested_maybe_move",
+        must_contain: &[
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s was moved in at least one branch above, so it can't be used after the branches until \
+             it's assigned again. If the branch that ran didn't move it, its resource is dropped \
+             when s is assigned again.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+        ],
     },
 ];
 

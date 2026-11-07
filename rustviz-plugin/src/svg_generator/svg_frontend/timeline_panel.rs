@@ -1055,14 +1055,29 @@ fn render_dot(
                     // scope end whether it still owns its resource
                     // (#179), so this is a plain dot and the drop is
                     // shown, conditionally, on the scope-end dot.
+                    // If the variable is assigned again before that,
+                    // the drop flag is checked there instead (#335).
+                    // Looked up in the column's whole history: a merge
+                    // nested in an outer branch only has that branch's
+                    // events in `history`.
+                    let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
+                    let reassigned_next = full.iter()
+                        .filter(|(l, _)| *l > *merge_point)
+                        .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
+                        .map_or(false, |(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_moved: true }));
+                    let title = if reassigned_next {
+                        hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name())
+                    } else {
+                        hover_messages::event_dot_branch_merge_moved_with_drop(
+                            &is.real_name(),
+                            is.extract_rap().map_or(false, |r| r.holds_value()),
+                        )
+                    };
                     let m_data = EventDotData {
                         hash: *hash as u64,
                         dot_x: cx,
                         dot_y: cy,
-                        title: hover_messages::event_dot_branch_merge_moved_with_drop(
-                            &is.real_name(),
-                            is.extract_rap().map_or(false, |r| r.holds_value()),
-                        ),
+                        title,
                     };
                     append_dot(m_data, timeline_data, dots, None);
                 } else if all_moved {
@@ -1262,7 +1277,7 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
-                Event::OwnerDropAtReassign | Event::TemporaryDrop { .. } => {
+                Event::OwnerDropAtReassign { .. } | Event::TemporaryDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     let title = event.print_message_with_name(&mut name);

@@ -819,9 +819,13 @@ pub enum ExternalEvent {
     // or `*p = x` for `p: &mut String`). The owner stays in scope and
     // immediately reacquires from the rhs — this event records the
     // drop of the OLD value at the assignment line.
+    // `maybe_moved`: a conditional above moved the owner on some paths
+    // only, so the old value is dropped here only on the others (a
+    // runtime drop flag decides; #335).
     OwnerDropAtReassign {
         ro: ResourceAccessPoint,
-        id: usize
+        id: usize,
+        maybe_moved: bool,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -1048,8 +1052,8 @@ pub enum Event {
     // (`y = x` or `*p = x`). The owner stays alive — its state is
     // unchanged across this event because the matching Acquire from
     // rhs lands on the same line and immediately re-establishes
-    // FullPrivilege.
-    OwnerDropAtReassign,
+    // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
+    OwnerDropAtReassign { maybe_moved: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -1351,7 +1355,7 @@ impl Display for Event {
             Event::RefGoOutOfScope => {
                 write!(f, "Goes out of Scope as a reference to resource")
             },
-            Event::OwnerDropAtReassign => {
+            Event::OwnerDropAtReassign { .. } => {
                 write!(f, "Previous resource is dropped at reassignment")
             },
             Event::ManuallyDropByHand => {
@@ -1429,8 +1433,11 @@ impl Event {
             Event::RefGoOutOfScope => {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
             }
-            Event::OwnerDropAtReassign => {
+            Event::OwnerDropAtReassign { maybe_moved: false } => {
                 hover_messages::event_dot_owner_drop_at_reassign(my_name)
+            }
+            Event::OwnerDropAtReassign { maybe_moved: true } => {
+                hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name)
             }
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
@@ -2051,7 +2058,7 @@ impl Visualizable for VisualizationData {
             // so the visible state should be the same as before. We
             // preserve the previous state for any input — the dot is
             // a visual annotation, not an ownership transition.
-            (_, Event::OwnerDropAtReassign) => (*previous_state).clone(),
+            (_, Event::OwnerDropAtReassign { .. }) => (*previous_state).clone(),
             // An unbound temporary's column ends where it is dropped.
             (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
 
@@ -2420,8 +2427,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{..} => {
-          vec![(line_num, Event::OwnerDropAtReassign)]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -2703,8 +2710,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);

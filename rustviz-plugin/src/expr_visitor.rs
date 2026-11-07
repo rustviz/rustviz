@@ -811,9 +811,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // reassignment should produce an OwnerDropAtReassign — `let mut y =
   // a; y = x;` drops a, but `let mut y = a; let z = y; y = x;` has
   // nothing to drop: y was moved out at the prior `let z = y`.
-  // See holds_resource_after.
+  // A value moved on only some paths of a conditional above (#335)
+  // counts as held: Rust drops it on the other paths. See
+  // `ownership_after`.
   pub fn rap_holds_resource_now(&self, rap_name: &str) -> bool {
-    holds_resource_after(self.preprocessed_events, rap_name).unwrap_or(false)
+    self.rap_ownership_now(rap_name) != Ownership::None
+  }
+
+  /// `rap_holds_resource_now`, telling apart a value that is held on
+  /// every path from one that a conditional above moved on some paths
+  /// only (`Ownership::Maybe`).
+  pub fn rap_ownership_now(&self, rap_name: &str) -> Ownership {
+    // No prior ownership event: the variable was declared but never
+    // initialized (`let mut y; y = x;`), so there's nothing to drop.
+    ownership_after(self.preprocessed_events, rap_name, None).unwrap_or(Ownership::None)
   }
 
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
@@ -3251,52 +3262,73 @@ fn end_borrow_in_arms(
   }
 }
 
-/// Whether `rap_name` owns a resource after `events`, judged from the
-/// newest ownership-affecting event (borrows and lends don't count);
-/// None if no event decides it. A finished if/else or match sits in
-/// the list as one Branch event, decided by its arms: the variable
-/// holds a resource if it does at the end of some arm, and doesn't if
-/// every arm gave it up; otherwise the state from before the branch
-/// stands. Without looking inside, a reassignment after
-/// `if c { s = a } else { s = b }` (#234) showed no drop, and one
-/// after `if c { take(s) } else { take(s) }` a drop of the
-/// already-moved value.
-fn holds_resource_after(events: &[(usize, ExternalEvent)], rap_name: &str) -> Option<bool> {
+/// Whether a variable owns a resource at some point of the walk.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ownership {
+  /// Owns a resource on every path.
+  Held,
+  /// Owns nothing (moved out, or never initialized).
+  None,
+  /// A conditional above moved it on some paths and not on others.
+  /// Rust drops what's left with a runtime drop flag (#335).
+  Maybe,
+}
+
+/// Ownership of `rap_name` after `events`, judged from the newest
+/// ownership-affecting event (borrows and lends don't count);
+/// `start` (the state before `events`) if no event decides it. A
+/// finished if/else or match sits in the list as one Branch event,
+/// decided by its arms, each starting from the state before the
+/// conditional: if all arms end the same way that's the answer,
+/// otherwise it's `Maybe`. An `if` without `else` that moves (#257)
+/// has an empty `else` arm. Without looking inside, a reassignment
+/// after `if c { take(s) } else { … }` said the old value is dropped
+/// there unconditionally (#335), and one after `if c { take(s) } else
+/// { take(s) }` dropped an already-moved value.
+fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Option<Ownership>) -> Option<Ownership> {
   let is_rap = |r: &ResourceTy| r.extract_rap().map_or(false, |r| r.name() == rap_name);
-  for (_, ev) in events.iter().rev() {
+  for (i, (_, ev)) in events.iter().enumerate().rev() {
     match ev {
       ExternalEvent::ManuallyDropByHand { ro, .. } if ro.name() == rap_name => {
-        return Some(false);
+        return Some(Ownership::None);
       }
       ExternalEvent::Move { from, to, .. } => {
         if is_rap(to) {
-          return Some(true);
+          return Some(Ownership::Held);
         }
         if is_rap(from) {
-          return Some(false);
+          return Some(Ownership::None);
         }
       }
       ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } => {
         if is_rap(to) {
-          return Some(true);
+          return Some(Ownership::Held);
         }
       }
-      ExternalEvent::Branch { branches, .. } => {
-        let arms: Vec<Option<bool>> =
-          branches.iter().map(|b| holds_resource_after(&b.e_data, rap_name)).collect();
-        if arms.contains(&Some(true)) {
-          return Some(true);
-        }
-        if !arms.is_empty() && arms.iter().all(|a| *a == Some(false)) {
-          return Some(false);
-        }
-        // Otherwise (no arm decides, or it was moved out in some arms
-        // and untouched in the others) keep looking before the branch.
+      ExternalEvent::Branch { branches, .. } if !branches.is_empty() => {
+        let before = ownership_after(&events[..i], rap_name, start);
+        let ends: Vec<Option<Ownership>> =
+          branches.iter().map(|b| ownership_after(&b.e_data, rap_name, before)).collect();
+        let holds = |e: &Option<Ownership>| matches!(e, Some(Ownership::Held) | Some(Ownership::Maybe));
+        let moved = |e: &Option<Ownership>| matches!(e, Some(Ownership::None) | Some(Ownership::Maybe));
+        return if ends.iter().all(|e| *e == ends[0]) {
+          ends[0]
+        } else if ends.iter().any(holds) && ends.iter().any(moved) {
+          // Moved on some paths and not on others.
+          Some(Ownership::Maybe)
+        } else if ends.iter().any(holds) {
+          // Initialized on some paths only (`let mut s; if c { s = …
+          // }`, #234): treated as held, as before; README Limitations.
+          Some(Ownership::Held)
+        } else {
+          // Moved, or never initialized, on every path.
+          Some(Ownership::None)
+        };
       }
       _ => {}
     }
   }
-  None
+  start
 }
 
 /// The arm whose own `let`s or pattern declare `r`, if its conditional

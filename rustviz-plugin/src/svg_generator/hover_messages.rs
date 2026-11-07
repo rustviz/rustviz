@@ -308,6 +308,18 @@ pub fn event_dot_owner_drop_at_reassign(my_name: &String) -> String {
     )
 }
 
+// Reassignment after a conditional that moved the variable on some
+// paths only (#335): like the scope end of such a variable
+// (`event_dot_go_out_of_scope_maybe_moved`), the old value is dropped
+// only if it's still there, which Rust decides at runtime.
+pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String) -> String {
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource is dropped here only if \
+         no branch above moved it (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name)
+    )
+}
+
 // A call's result that nothing takes ownership of is a temporary; Rust
 // drops it when its statement (or other temporary scope) ends (#457).
 // The two dots of its column: where it comes into being, and the drop.
@@ -1568,6 +1580,18 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool) -> 
          (until it's assigned again). If the branch that ran didn't move it, its resource is \
          dropped when {0} goes out of scope.",
         my_name_fmt
+    )
+}
+
+// `event_dot_branch_merge_moved_with_drop` when the variable is assigned
+// again before it goes out of scope: the old value, if it's still there,
+// is dropped at that assignment instead (#335).
+pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String {
+    format!(
+        "{0} was moved in at least one branch above, so it can't be used after the branches \
+         until it's assigned again. If the branch that ran didn't move it, its resource is \
+         dropped when {0} is assigned again.",
+        fmt_style(my_name)
     )
 }
 
