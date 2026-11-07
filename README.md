@@ -297,14 +297,17 @@ rather than listed here.
   scope at the body's closing brace, like the body's own `let`s; Rust
   creates it afresh each iteration.
 - A `loop` hands its receiver (`let r = loop { … break k; }`, `r = loop
-  { … }`, a tuple pattern) the value of its `break`. With one `break`
-  that carries a value, in a branch (`if c { break s; }`), the value
-  moves to the receiver where the loop ends. With several (`if c {
-  break a; } else { break b; }`), each is drawn moving into the
-  receiver in its own branch, so after the loop the receiver is shown
-  without a value ("No resource is dropped"), which is false. A loop
-  that is a call argument (`take(loop { … break z; })`) draws the
-  move on the `break`'s line.
+  { … }`, a tuple pattern, a call argument) the value of its `break`.
+  With one `break` that carries a value, in a branch (`if c { break s;
+  }`), the value moves to the receiver where the loop ends. With
+  several (`if c { break a; } else { break b; }`), each is drawn moving
+  into the receiver in its own branch, so after the loop the receiver
+  is shown without a value ("No resource is dropped"), which is false.
+- A reference that a `break` carries out of a loop (`let r = loop {
+  break ra; }`) isn't linked back to what it borrows: its borrow end
+  says "what it borrows from isn't shown", and for a `&mut` the lender
+  is shown with nothing to drop at the end of its scope ("No resource
+  is dropped"), which is false.
 - Leaving early drops what is left behind, right there: a `return` or
   a panic (`panic!()`, `unreachable!()`, `todo!()`, which unwind) drops
   every value the function still owns, a `break` / `continue` the

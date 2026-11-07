@@ -309,6 +309,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // While set, events are placed on this line (the end of the loop
   // whose `break` values are being paired).
   pub line_override: Option<usize>,
+  // A loop whose `break` value was deferred to its end but whose
+  // receiver isn't known yet (`r = loop`, `f(loop { … })`): its id,
+  // the line it ends on and the names `break_out` marks; `match_rhs` /
+  // `match_arg` pair the value there once the receiver is known.
+  pub deferred_lines: Vec<(rustc_hir::HirId, usize, Vec<String>)>,
+  // While pairing a deferred `break` value: the variables it moves
+  // that are declared inside the loop, on a loop whose body can reach
+  // its end. Their Move is marked `break_out` (see ExternalEvent::Move).
+  pub break_out: Vec<String>,
 
   // Names of the variables in scope right now, in declaration order
   // (#410). `add_rap` pushes; a block, a match arm, an `if let` and a
@@ -922,8 +931,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  pub fn add_external_event(&mut self, line_num: usize, event: ExternalEvent) {
+  pub fn add_external_event(&mut self, line_num: usize, mut event: ExternalEvent) {
     let line_num = self.line_override.unwrap_or(line_num);
+    if let ExternalEvent::Move { from: ResourceTy::Value(from), break_out, .. } = &mut event {
+      if self.break_out.contains(from.name()) {
+        *break_out = true;
+      }
+    }
     // Drop events whose source or destination is a `// rustviz: skip`-
     // marked variable. The marked RAP still exists (so non-skipped
     // code that references it doesn't crash on lookup), but every
@@ -1106,7 +1120,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -1153,7 +1167,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_external_event(line_num, if is_copy {
         ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false }
       } else {
-        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No }
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false }
       });
     }
   }
@@ -1189,6 +1203,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         is_partial: false,
         into_closure: false,
         loop_head: LoopHead::No,
+        break_out: false,
       });
       self.move_struct_fields_away(line_num, &name);
     }
@@ -1314,7 +1329,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
       Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_out: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
@@ -2259,6 +2274,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// Before pairing the `break` value of `loop_id` with a receiver
+  /// known only after the loop: if the value was deferred to the
+  /// loop's end (a `break` in a branch, #431), place the events there.
+  /// Returns what `leave_deferred` restores.
+  fn enter_deferred(&mut self, loop_id: rustc_hir::HirId) -> (Option<usize>, Vec<String>) {
+    match self.deferred_lines.iter().position(|(id, ..)| *id == loop_id) {
+      Some(i) => {
+        let (_, line, names) = self.deferred_lines.remove(i);
+        (self.line_override.replace(line), std::mem::replace(&mut self.break_out, names))
+      }
+      None => (self.line_override, self.break_out.clone()),
+    }
+  }
+
+  fn leave_deferred(&mut self, saved: (Option<usize>, Vec<String>)) {
+    self.line_override = saved.0;
+    self.break_out = saved.1;
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     // `f(loop { … break k; })`: what `break` carries is the argument
@@ -2267,9 +2301,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
         .filter(|(id, _)| *id == arg.hir_id).map(|(_, v)| *v).collect();
       self.loop_breaks.retain(|(id, _)| *id != arg.hir_id);
+      let saved = self.enter_deferred(arg.hir_id);
       for value in seen {
         self.match_arg(value, fn_name.clone());
       }
+      self.leave_deferred(saved);
       return;
     }
     // A tuple built in the argument list (`show((s, 1))`,
@@ -4814,9 +4850,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
         .filter(|(id, _)| *id == rhs.hir_id).map(|(_, v)| *v).collect();
       self.loop_breaks.retain(|(id, _)| *id != rhs.hir_id);
+      let saved = self.enter_deferred(rhs.hir_id);
       for value in seen {
         self.match_rhs(lhs.clone(), value, evt.clone());
       }
+      self.leave_deferred(saved);
       self.break_binds.push((rhs.hir_id, lhs, evt));
     }
     ExprKind::DropTemps(exp) => {

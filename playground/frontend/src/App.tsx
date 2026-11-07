@@ -358,6 +358,12 @@ const Description: React.FC = () => (
         <code>continue &apos;outer</code> isn&apos;t drawn.
       </li>
       <li>
+        <code>let r = loop {'{'} … break ra; {'}'};</code> where <code>ra</code> is a
+        reference: <code>r</code>&apos;s borrow isn&apos;t linked back to what it
+        borrows, and for a <code>&amp;mut</code> the lender is wrongly shown with
+        nothing to drop at the end of its scope.
+      </li>
+      <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}
         <code>break</code>/<code>continue</code> are drawn when it&apos;s in an{' '}
         <code>if</code> branch (with or without an <code>else</code>) or a{' '}
