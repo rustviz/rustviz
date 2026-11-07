@@ -1096,6 +1096,13 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_struct_moved_over",
     // A borrow one of several `break`s makes says which (#657, #661).
     "loop_break_borrow_alt",
+    // A reference field taken out of a struct by a pattern (#709).
+    "pattern_ref_field_let",
+    "pattern_ref_field_iflet",
+    "pattern_ref_field_match",
+    "pattern_mutref_field_let",
+    "pattern_mutref_field_iflet",
+    "pattern_mutref_field_match",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4171,13 +4178,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "match_copy_ref_out_of_tuple",
-        // `(x, y)` on a tuple of references copies each reference out;
-        // they borrow `a` and `b`, not `pair`.
+        // `(x, y)` on a tuple of references copies each reference out of
+        // its element `pair.0` / `pair.1` (#709); they borrow `a` and
+        // `b`, not `pair`.
         must_contain: &[
-            "Partial copy from pair to x",
-            "Partial copy from pair to y",
+            "Copy from pair.0 to x",
+            "Copy from pair.1 to y",
         ],
         must_not_contain: &[
+            "Partial copy from pair to x",
+            "Partial copy from pair to y",
             "Return immutably borrowed resource from x to pair",
             "Return immutably borrowed resource from y to pair",
             "pair's resource is no longer immutably borrowed",
@@ -12366,6 +12376,128 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=the resource rq points to is mutably borrowed by r through rq; rq can't be used while the borrow is live",
         ],
     },
+    // #709: `let Part {{ part: r }} = p;`: r copies p.part (a shared reference is Copy), so it borrows what p.part borrows, s; never p.
+    // main drew the copy as taken from the whole of p, and r's borrow as
+    // of p (or, in if let / match, with no lender shown).
+    TooltipExpect {
+        name: "pattern_ref_field_let",
+        must_contain: &[
+            "Copy from p.part to r",
+            "r is initialized with a copy of p.part",
+            "Return immutably borrowed resource from r to s",
+            "Return immutably borrowed resource from p.part to s",
+        ],
+        must_not_contain: &[
+            "=r is initialized with a copy of p",
+            "Copy from p to r",
+            "Return immutably borrowed value from r to p",
+            "Return immutably borrowed value from r to p.part",
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "Immutable borrow from p.part to r",
+        ],
+    },
+    // #709: `if let Part {{ part: r }} = p`: r copies p.part (a shared reference is Copy), so it borrows what p.part borrows, s; never p.
+    // main drew the copy as taken from the whole of p, and r's borrow as
+    // of p (or, in if let / match, with no lender shown).
+    TooltipExpect {
+        name: "pattern_ref_field_iflet",
+        must_contain: &[
+            "Copy from p.part to r",
+            "r is initialized with a copy of p.part",
+            "Return immutably borrowed resource from r to s",
+            "Return immutably borrowed resource from p.part to s",
+        ],
+        must_not_contain: &[
+            "=r is initialized with a copy of p",
+            "Copy from p to r",
+            "Return immutably borrowed value from r to p",
+            "Return immutably borrowed value from r to p.part",
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "Immutable borrow from p.part to r",
+        ],
+    },
+    // #709: `match p {{ Part {{ part: r }} => .. }}`: r copies p.part (a shared reference is Copy), so it borrows what p.part borrows, s; never p.
+    // main drew the copy as taken from the whole of p, and r's borrow as
+    // of p (or, in if let / match, with no lender shown).
+    TooltipExpect {
+        name: "pattern_ref_field_match",
+        must_contain: &[
+            "Copy from p.part to r",
+            "Return immutably borrowed resource from r to s",
+            "Return immutably borrowed resource from p.part to s",
+        ],
+        must_not_contain: &[
+            "=r is initialized with a copy of p",
+            "Copy from p to r",
+            "Return immutably borrowed value from r to p",
+            "Return immutably borrowed value from r to p.part",
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "Immutable borrow from p.part to r",
+        ],
+    },
+    // #709: `let Part {{ part: r }} = p;`: p.part's `&mut` is moved into r (not copied), and r borrows s.
+    // main drew the copy as taken from the whole of p, and r's borrow as
+    // of p (or, in if let / match, with no lender shown).
+    TooltipExpect {
+        name: "pattern_mutref_field_let",
+        must_contain: &[
+            "Move from p.part to r",
+            "Return mutably borrowed resource from r to s",
+        ],
+        must_not_contain: &[
+            "Move from p to r",
+            "Return mutably borrowed value from r to p",
+            "Return mutably borrowed value from r to p.part",
+            "r's mutable borrow ends (what it borrows from isn't shown)",
+            "Mutable borrow from p.part to r",
+            "=p's value is moved",
+        ],
+    },
+    // #709: `if let Part {{ part: r }} = p`: p.part's `&mut` is moved into r (not copied), and r borrows s.
+    // main drew the copy as taken from the whole of p, and r's borrow as
+    // of p (or, in if let / match, with no lender shown).
+    TooltipExpect {
+        name: "pattern_mutref_field_iflet",
+        must_contain: &[
+            "Move from p.part to r",
+            "Return mutably borrowed resource from r to s",
+        ],
+        must_not_contain: &[
+            "Move from p to r",
+            "Return mutably borrowed value from r to p",
+            "Return mutably borrowed value from r to p.part",
+            "r's mutable borrow ends (what it borrows from isn't shown)",
+            "Mutable borrow from p.part to r",
+            "=p's value is moved",
+            // The pattern matches every Part, so the body always runs: no
+            // conditional fork on s, and p.part (moved out at line 5)
+            // holds no borrow to return at the `}`.
+            "s is live in a conditional expression",
+            "p.part is live in a conditional expression",
+            "Return mutably borrowed resource from p.part to s",
+            "p.part's mutable borrow ends",
+            // p's only field is gone and a reference needs no drop.
+            "p goes out of scope. Its",
+        ],
+    },
+    // #709: `match p {{ Part {{ part: r }} => .. }}`: p.part's `&mut` is moved into r (not copied), and r borrows s.
+    // main drew the copy as taken from the whole of p, and r's borrow as
+    // of p (or, in if let / match, with no lender shown).
+    TooltipExpect {
+        name: "pattern_mutref_field_match",
+        must_contain: &[
+            "Move from p.part to r",
+            "Return mutably borrowed resource from r to s",
+        ],
+        must_not_contain: &[
+            "Move from p to r",
+            "Return mutably borrowed value from r to p",
+            "Return mutably borrowed value from r to p.part",
+            "r's mutable borrow ends (what it borrows from isn't shown)",
+            "Mutable borrow from p.part to r",
+            "=p's value is moved",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13291,6 +13423,28 @@ fn write_through_ref_comes_before_its_borrow_end() {
         let segments = tips.iter().filter(|t| **t == [live.clone()]).count();
         assert_eq!(segments, 1, "{r}: {segments} segments read {live:?}; its column comes back after its borrow ends");
     }
+}
+
+/// #709: `if let Part { part: r } = p` moves p.part (a `&mut`) into r;
+/// the pattern matches every Part, so the body always runs. s gets its
+/// borrow back exactly once, from r on the `r.push` row, and its column
+/// doesn't fork.
+#[test]
+fn irrefutable_iflet_moving_a_mutref_field_returns_once() {
+    let rv = run_with_local_backend("pattern_mutref_field_iflet");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = code_row_y(&code, "r.push('x');");
+    let arrows = arrow_points(&timeline, "Return mutably borrowed resource from r to s");
+    assert_eq!(arrows.len(), 1, "returns of s's borrow: {:?}", arrows);
+    let stray = arrow_points(&timeline, "Return mutably borrowed resource from p.part to s");
+    assert!(stray.is_empty(), "p.part was moved out and holds no borrow to return: {:?}", stray);
+    assert!(
+        arrows[0].iter().all(|p| (p.1 - row).abs() < 1.0),
+        "the return {:?} isn't on the r.push row (y={})", arrows[0], row,
+    );
+    let back = dots_with_tooltip(&timeline, "s's resource is no longer mutably borrowed");
+    assert_eq!(back.len(), 1, "s's dots where the borrow ends: {:?}", back);
+    assert!(dots_with_tooltip(&timeline, "s is live in a conditional expression").is_empty());
 }
 
 /// The timeline y of the code-panel row showing source line `src`
