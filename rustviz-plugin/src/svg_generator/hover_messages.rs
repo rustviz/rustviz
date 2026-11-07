@@ -821,6 +821,22 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
     }
 }
 
+// Lender's dot where a reference copied out of a value that holds the
+// borrow ends (`n` in `while let Some(n) = it.next()`, #575): n's part
+// of the borrow is given back, but `holders` (`it`) still hold it, so
+// the lender is still borrowed.
+pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, holders: &[String], mutable: bool, is_copy: bool) -> String {
+    let holders: Vec<String> = holders.iter().map(fmt_style).collect();
+    format!(
+        "{0}'s {1} is no longer borrowed by {2}, but is still {3} borrowed by {4}",
+        fmt_style(my_name),
+        held(is_copy),
+        fmt_style(from_name),
+        if mutable { "mutably" } else { "immutably" },
+        holders.join(" and "),
+    )
+}
+
 // Source-side dot of a borrow stored somewhere RustViz draws no column
 // for and can't name (`v.last_mut().unwrap().r = &x`; #282). The
 // restriction on X is the same as for event_dot_static_lend /

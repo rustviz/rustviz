@@ -858,6 +858,9 @@ const EXPECTED_OK: &[&str] = &[
     // An early exit nested in an arm / if branch drops a tuple
     // scrutinee at the exit (#327 on #410); `process::exit` drops nothing.
     "tuple_scrutinee_exit_drops",
+    // A reference copied out of a holder gives its borrow back at its
+    // last use while the holder still holds it (#575).
+    "holder_ref_ends_first",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8572,6 +8575,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from v to x: x is a reference moved out of the value get_mut returned",
             "Return mutably borrowed resource from x to v",
             "Immutable borrow from v to n: n is a reference copied out of the value next returned",
+            // n's borrow ends at its last use, `println!` (#575); `it`
+            // still borrows v until the loop ends.
+            "Return immutably borrowed resource from n to v",
+            "v's resource is no longer borrowed by n, but is still immutably borrowed by it",
         ],
         must_not_contain: &[
             ", through the reference copied out of",
@@ -9334,6 +9341,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (m, n) is dropped when this arm leaves the match early",
             "=y goes out of scope. Its resource is dropped.",
             "=p goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_ref_ends_first",
+        // #575: `x` (a `&mut i32` moved out of what `it.next()` returns)
+        // and `t` (a `&i32` copied out of `third`) stop borrowing `v` at
+        // their last use, while `it` / `third` go on holding the borrow.
+        // Each gives its borrow back there, and `v` stays borrowed.
+        must_contain: &[
+            "Mutable borrow from v to x: x is a reference moved out of the value next returned",
+            "Return mutably borrowed resource from x to v",
+            "v's resource is no longer borrowed by x, but is still mutably borrowed by it",
+            "Return mutably borrowed resource from it to v",
+            "Immutable borrow from v to t: t is a reference copied out of third",
+            "Return immutably borrowed resource from t to v",
+            "v's resource is no longer borrowed by t, but is still immutably borrowed by third",
+            "Return immutably borrowed resource from third to v",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from x to *x",
+            "Return immutably borrowed resource from t to *t",
         ],
     },
 ];
@@ -10198,6 +10226,35 @@ fn borrow_end_in_arm_is_drawn_in_the_arm() {
         );
         assert_ne!(back[0].0, splits[0].0, "{}: {var} gets its value back on its parent column", name);
     }
+}
+
+/// #575: `n` in `while let Some(n) = it.next()` is a reference copied out
+/// of what `next` returned, so it borrows `v`; that borrow ends at n's
+/// last use, `println!`, while `it` goes on borrowing `v` until the loop
+/// ends. n's return arrow is on the `println!` row, `v` says there that
+/// `it` still borrows it, and `v` is back to unborrowed only once, below.
+#[test]
+fn reference_copied_out_of_a_holder_returns_at_its_last_use() {
+    let rv = run_with_local_backend("holder_iflet_call");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = code_row_y(&code, "println!(\"{}\", n);");
+    let arrows = arrow_points(&timeline, "Return immutably borrowed resource from n to v");
+    assert_eq!(arrows.len(), 1, "n's return arrows: {:?}", arrows);
+    assert!(
+        arrows[0].iter().all(|p| (p.1 - row).abs() < 1.0),
+        "n's return arrow {:?} isn't on the println! row (y={})", arrows[0], row,
+    );
+    let still = dots_with_tooltip(&timeline, "v's resource is no longer borrowed by n, but is still immutably borrowed by it");
+    assert_eq!(still.len(), 1, "v's dots where n's borrow ends: {:?}", still);
+    assert!((still[0].1 - row).abs() < 1.0, "v's dot {:?} isn't on the println! row (y={})", still[0], row);
+    // Below the `while let` row (y's borrow, above it, ends at line 4).
+    let loop_row = code_row_y(&code, "while let Some(n) = it.next() {");
+    let back: Vec<(f64, f64)> = dots_with_tooltip(&timeline, "v's resource is no longer immutably borrowed")
+        .into_iter()
+        .filter(|d| d.1 > loop_row)
+        .collect();
+    assert_eq!(back.len(), 1, "v is unborrowed at {:?} after the loop starts", back);
+    assert!(back[0].1 > row, "v is unborrowed at {:?}, not below n's last use (y={}); it still borrows v", back[0], row);
 }
 
 /// The timeline y of the code-panel row showing source line `src`

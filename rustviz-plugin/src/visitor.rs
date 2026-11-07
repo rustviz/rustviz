@@ -1923,7 +1923,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.add_ev(end_line, die, to_ro, place, false);
               }
               else {
-                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &ref_data);
+                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
                 // ...and to each further lender (#171).
                 for co in ref_data.co_lenders.iter() {
                   let evt = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
@@ -1990,7 +1990,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 *self.unique_id += 1;
               }
               else {
-                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &modified_ref_data);
+                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &modified_ref_data, Vec::new());
               }
 
               // update modified (derefed) reference's lender and aliasing data
