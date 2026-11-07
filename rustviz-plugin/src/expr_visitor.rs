@@ -2940,11 +2940,10 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
 /// `let_expr` line.
 ///
 /// `let_expr` is the `Let(pat, init, …)` HIR node that lives in the
-/// `If`'s guard slot. `emit_gos_at` is `Some(body_end_line)` for the
-/// while-let path (where the binding's lifetime is the body and
-/// nothing else cleans it up) and `None` for the if-let path (where
-/// the surrounding If arm appends GoOutOfScope events from its own
-/// `if_decl` set, so we'd double-emit otherwise).
+/// `If`'s guard slot. With `emit_gos_at = Some(line)` the bindings'
+/// GoOutOfScope is emitted at `line` right away; the callers pass
+/// `None` and end the bindings themselves (the if-let path from its
+/// `if_decl` set, the while-let path after visiting the body).
 ///
 /// Returns the set of bindings registered. The if-let caller unions
 /// these into its `if_decl` set so `append_decl_branch_events` can

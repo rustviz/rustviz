@@ -361,6 +361,23 @@ pub fn needs_scope_end(r: &ResourceAccessPoint) -> bool {
   !r.is_unbound_temporary()
 }
 
+/// The bindings of the `if let` patterns down an `else if let` chain
+/// (`else if let Some(y) = b { … } else if let … `), by name. A binding
+/// that reuses an existing variable's name gets no RAP of its own, so
+/// `raps_declared_since` can't see it as declared in the `else`.
+pub fn else_if_let_bindings(expr: &Expr, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+  let mut res = HashSet::new();
+  let mut cur = Some(expr);
+  while let Some(e) = cur {
+    let ExprKind::If(cond, _, els) = e.kind else { break };
+    if let ExprKind::Let(let_expr) = cond.kind {
+      collect_pat_bindings(let_expr.pat, raps, &mut res);
+    }
+    cur = els;
+  }
+  res
+}
+
 pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint>{
   let mut res:HashSet<ResourceAccessPoint> = unbound_temps_of(block.hir_id, raps);
   for stmt in block.stmts.iter() {
