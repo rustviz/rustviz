@@ -463,6 +463,14 @@ pub fn event_dot_literal_temporary_acquire(from_name: &String, ends_with_stateme
     )
 }
 
+// The start of the temporary of a literal on the right of a `let`, when
+// no variable is moved into it (every element the pattern leaves is a
+// fresh value, #483). Dropped at the end of the statement: with a `ref`
+// binding it is the extended kind, whose start says why it lives on.
+pub fn event_dot_literal_temporary_start() -> String {
+    "The literal on the right of this let builds a temporary. No `ref` binding borrows from it, so Rust drops it at the end of this statement, with whatever the pattern didn't bind by value".to_owned()
+}
+
 //     0
 //     
 // f1  *   the star event
