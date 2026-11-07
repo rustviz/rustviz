@@ -1068,6 +1068,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::TupleTempDrop { ro, .. }
       | ExternalEvent::OrAltMove { ro, .. }
       | ExternalEvent::ChainFailAssign { ro, .. }
+      | ExternalEvent::ChainFailUse { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. }

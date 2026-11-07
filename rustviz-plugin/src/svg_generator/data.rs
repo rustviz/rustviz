@@ -1179,6 +1179,21 @@ pub struct BreakAlt {
     pub in_loop: bool,
 }
 
+/// A borrow of a variable declared outside an `if` let-chain that the
+/// condition makes in a part before one that fails (#688): it lends the
+/// variable to `to`, a function it calls (`y.take()`) or, with
+/// `binding`, a binding of the chain (`let Some(a) = &x`); `to` is empty
+/// when the borrower has no name. `changes`: a mutable borrow that can
+/// change the variable: by a call, or by a binding that a later part
+/// writes or lends on through.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ChainUse {
+    pub to: String,
+    pub mutable: bool,
+    pub binding: bool,
+    pub changes: bool,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -1467,6 +1482,20 @@ pub enum ExternalEvent {
         no_else: bool,
         id: usize
     },
+    // At the start of the `else` branch (or the implicit empty one) of
+    // an `if` whose let-chain condition may have lent `ro` before it
+    // failed (#688): `if let Some(a) = &x && let Some(b) = y.take()`
+    // lends `y` to `take` before the `let` can fail. Those borrows
+    // have ended by then, so nothing about ownership changes; the dot
+    // says what the condition did. `definite`: as for
+    // `MaybeMovedAt::ChainFail`.
+    ChainFailUse {
+        ro: ResourceAccessPoint,
+        uses: Vec<ChainUse>,
+        definite: bool,
+        no_else: bool,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -1577,6 +1606,7 @@ impl ExternalEvent {
             &ExternalEvent::OrAltMove { id, .. } |
             &ExternalEvent::OrAltBorrow { id, .. } |
             &ExternalEvent::ChainFailAssign { id, .. } |
+            &ExternalEvent::ChainFailUse { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -1781,6 +1811,9 @@ pub enum Event {
     // See ExternalEvent::ChainFailAssign. `rc`: the variable's
     // `rc_drop()`, for what dropping the old value does.
     ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, no_else: bool },
+    // See ExternalEvent::ChainFailUse. `is_ref`: the column is a
+    // reference, so what was lent is the resource it points to.
+    ChainFailUse { uses: Vec<ChainUse>, definite: bool, no_else: bool, is_ref: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -2120,6 +2153,9 @@ impl Display for Event {
             Event::ChainFailAssign { .. } => {
                 write!(f, "May have been assigned by the condition")
             },
+            Event::ChainFailUse { .. } => {
+                write!(f, "May have been borrowed by the condition")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -2267,6 +2303,9 @@ impl Event {
             // The column of the value a `ref` binding borrows (#691).
             Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
                 hover_messages::event_dot_param_value_init(my_name, &own.fn_name, own.whole)
+            }
+            Event::ChainFailUse { uses, definite, no_else, is_ref } => {
+                hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *no_else, *is_ref)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -3201,6 +3240,8 @@ impl Visualizable for VisualizationData {
 
             // Holds the old value or the new one: no change (#579).
             (_, Event::ChainFailAssign { .. }) => (*previous_state).clone(),
+            // The borrows have ended (#688): no change.
+            (_, Event::ChainFailUse { .. }) => (*previous_state).clone(),
 
 
             (_, _) => State::Invalid,
@@ -3604,6 +3645,9 @@ impl Visualizable for VisualizationData {
           let rc = if place.is_some() { None } else { ro.rc_drop() };
           vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, no_else: *no_else })]
         },
+        ExternalEvent::ChainFailUse{ro, uses, definite, no_else, ..} => {
+          vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, no_else: *no_else, is_ref: ro.is_ref() })]
+        },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
       }
@@ -3646,7 +3690,7 @@ impl Visualizable for VisualizationData {
                 }
             }
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
-            | ExternalEvent::ChainFailAssign { ro, .. } => {
+            | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
@@ -3958,6 +4002,10 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ChainFailAssign{ro, place, drops_old, no_else, ..} => {
                 let rc = if place.is_some() { None } else { ro.rc_drop() };
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { place, drops_old, rc, no_else }, line_number);
+            },
+            ExternalEvent::ChainFailUse{ro, uses, definite, no_else, ..} => {
+                let is_ref = ro.is_ref();
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailUse { uses, definite, no_else, is_ref }, line_number);
             },
         }
     }

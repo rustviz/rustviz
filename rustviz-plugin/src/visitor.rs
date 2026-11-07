@@ -69,6 +69,10 @@ enum ChainEffectKind {
   /// assignment drops the old value. `held`: it held a value before the
   /// part (a place always does).
   Assign { rap: ResourceAccessPoint, place: Option<String>, drops_old: bool, held: bool },
+  /// `rap` is lent to `to` (a function the part calls, or with
+  /// `binding` a binding of the chain), which doesn't last past the
+  /// condition but happened on the path into the `else` too (#688).
+  Use { rap: ResourceAccessPoint, to: ResourceTy, mutable: bool, binding: bool },
   /// Anything else that lasts: not drawn. `what` / `lasts` are for the
   /// refusal's message.
   Other { name: String, what: &'static str, lasts: &'static str },
@@ -110,6 +114,23 @@ struct ChainFailAssign {
   rap: ResourceAccessPoint,
   place: Option<String>,
   drops_old: bool,
+}
+
+/// A variable that the condition of an `if` let-chain lends before a
+/// part of it that can still fail (#688): the else branch starts with
+/// that said. See `ExternalEvent::ChainFailUse`.
+struct ChainFailUse {
+  rap: ResourceAccessPoint,
+  uses: Vec<ChainUse>,
+  definite: bool,
+}
+
+/// What `chain_fail_moves` finds: see there.
+#[derive(Default)]
+struct ChainFail {
+  moves: Vec<ChainFailMove>,
+  assigns: Vec<ChainFailAssign>,
+  uses: Vec<ChainFailUse>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
@@ -402,6 +423,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           push(ChainEffectKind::Assign { rap: ro.clone(), place: None, drops_old: true, held: held(ro) }),
         _ => {}
       }
+      // A borrow of it that ends inside the condition (#688): lent to a
+      // call (`y.take()`, `s.len()`), or to a binding of the chain
+      // (`let Some(a) = &x`), whose scope ends when the condition fails.
+      // (A borrow into an outer variable is an assignment: above.)
+      match ev {
+        ExternalEvent::PassByStaticReference { from: from @ ResourceTy::Value(rap), to, .. }
+        | ExternalEvent::StaticBorrow { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) && !is_outer(to) =>
+          push(ChainEffectKind::Use { rap: rap.clone(), to: to.clone(), mutable: false, binding }),
+        ExternalEvent::PassByMutableReference { from: from @ ResourceTy::Value(rap), to, .. }
+        | ExternalEvent::MutableBorrow { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) && !is_outer(to) =>
+          push(ChainEffectKind::Use { rap: rap.clone(), to: to.clone(), mutable: true, binding }),
+        _ => {}
+      }
     }
   }
 
@@ -426,9 +460,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// A write through an outer reference, into an element or a field
   /// reached through one (`*r = a`, `v[i] = a`, `r.f = a`) is an
   /// assignment to that place, drawn on that variable's column (#603).
-  fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, has_else: bool) -> (Vec<ChainFailMove>, Vec<ChainFailAssign>) {
+  ///
+  /// A borrow that ends inside the condition (lent to a call, or to a
+  /// binding of the chain) also happened on the path into the else
+  /// branch, which starts with that said (#688), unless the variable
+  /// is moved or assigned there too (that dot is the one that matters).
+  fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, has_else: bool) -> ChainFail {
     let mut out: Vec<ChainFailMove> = Vec::new();
     let mut assigns: Vec<ChainFailAssign> = Vec::new();
+    let mut uses: Vec<ChainFailUse> = Vec::new();
     let later = if has_else { "the condition is false and the else branch runs" }
       else { "the condition is false and the body is skipped" };
     for eff in walk.effects.iter().filter(|e| e.checks_before < walk.checks) {
@@ -479,8 +519,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             m.dropped.push(dest_name);
           }
         }
+        ChainEffectKind::Use { rap, to, mutable, binding } => {
+          let to_name = match to {
+            ResourceTy::Value(r) => r.name().to_owned(),
+            _ => String::new(),
+          };
+          // A binding lent mutably changes the variable only if a later
+          // part writes or lends on through it.
+          let changes = *mutable && (!*binding || match to {
+            ResourceTy::Value(b) => self.chain_writes_through(chain_lo, b),
+            _ => false,
+          });
+          let use_ = ChainUse { to: to_name, mutable: *mutable, binding: *binding, changes };
+          let definite = *binding && eff.checks_before == 0;
+          match uses.iter_mut().find(|u| u.rap == *rap) {
+            Some(u) => {
+              u.definite |= definite;
+              if !u.uses.contains(&use_) {
+                u.uses.push(use_);
+              }
+            }
+            None => uses.push(ChainFailUse { rap: rap.clone(), uses: vec![use_], definite }),
+          }
+        }
       }
     }
+    uses.retain(|u| !out.iter().any(|m| m.rap == u.rap) && !assigns.iter().any(|a| a.rap == u.rap));
     // The else branch would start with it moved or holding a value
     // depending on the order, which one dot can't say. A write through a
     // place (`*b = a`, `v[0] = a`) counts too when the variable it goes
@@ -489,7 +553,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       panic!("`if let` chains that both move and assign a variable declared outside the condition \
               (`{}`) aren't supported yet: both last even when {}", a.rap.name(), later);
     }
-    (out, assigns)
+    ChainFail { moves: out, assigns, uses }
+  }
+
+  /// True if an event of the let-chain from `preprocessed_events[chain_lo..]`
+  /// writes through the chain's binding `b`, or lends it on mutably
+  /// (`*b += 1`, `b.push('x')`). See `chain_fail_moves`.
+  fn chain_writes_through(&self, chain_lo: usize, b: &ResourceAccessPoint) -> bool {
+    fn any(events: &[(usize, ExternalEvent)], b: &ResourceAccessPoint) -> bool {
+      let through = |r: &ResourceTy| !matches!(r, ResourceTy::Value(_)) && r.extract_rap() == Some(b);
+      events.iter().any(|(_, ev)| match ev {
+        ExternalEvent::Branch { branches, .. } => branches.iter().any(|br| any(&br.e_data, b)),
+        ExternalEvent::PassByMutableReference { from, .. }
+        | ExternalEvent::MutableBorrow { from, .. } => from.extract_rap() == Some(b),
+        ExternalEvent::Bind { to, .. }
+        | ExternalEvent::Copy { to, .. }
+        | ExternalEvent::Move { to, .. } => through(to),
+        _ => false,
+      })
+    }
+    any(&self.preprocessed_events[chain_lo..], b)
   }
 
   /// The pattern-binding events of a let-chain: those handed out ids
@@ -3155,11 +3238,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // the pattern doesn't match; the else branch shows that (#327).
         let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
         let mut iflet_tuple: Option<&'tcx rustc_hir::LetExpr<'tcx>> = None;
-        let mut chain_fail: Vec<ChainFailMove> = Vec::new();
+        let mut chain_fail = ChainFail::default();
         // Events handed out ids in the if-branch's range that stay
         // before the split (see the let-chain case below).
         let mut pre_split: HashSet<usize> = HashSet::new();
-        let mut chain_fail_assign: Vec<ChainFailAssign> = Vec::new();
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
@@ -3186,7 +3268,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let mut walk = ChainWalk::default();
             self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
             if_lo = walk.first_lo.unwrap_or(start);
-            (chain_fail, chain_fail_assign) = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
+            chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
             let binds = self.chain_binding_events(&(if_lo..*self.unique_id), &decls);
             // Copying a value out of a variable declared before the `if`
             // changes nothing about that variable, so, as for a lone `if
@@ -3272,7 +3354,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           Some(_) => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line,
           None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line,
         };
-        for a in std::mem::take(&mut chain_fail_assign) {
+        for a in std::mem::take(&mut chain_fail.assigns) {
           self.add_external_event(fail_line, ExternalEvent::ChainFailAssign {
             ro: a.rap,
             place: a.place,
@@ -3282,7 +3364,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           });
           *self.unique_id += 1;
         }
-        for m in std::mem::take(&mut chain_fail) {
+        for m in std::mem::take(&mut chain_fail.moves) {
           self.add_external_event(fail_line, ExternalEvent::LoopExitMove {
             ro: m.rap,
             definite: m.definite,
@@ -3291,6 +3373,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           });
           *self.unique_id += 1;
         }
+        // Borrows it made that have ended by then (#688).
+        let uses_lo = *self.unique_id;
+        for u in std::mem::take(&mut chain_fail.uses) {
+          self.add_external_event(fail_line, ExternalEvent::ChainFailUse {
+            ro: u.rap,
+            uses: u.uses,
+            definite: u.definite,
+            no_else: else_expr.is_none(),
+            id: *self.unique_id,
+          });
+          *self.unique_id += 1;
+        }
+        let uses_ids = uses_lo..*self.unique_id;
         let else_decl = match else_expr {
           Some(e) => {
             // The scrutinee's temporaries are gone by now (see
@@ -3373,8 +3468,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .filter(|(_, e)| (if_ids.contains(&e.get_id()) && !pre_split.contains(&e.get_id()))
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
+            // (Borrows that ended in the condition, #688, don't make a
+            // second path: drawn inline, the condition's events are on
+            // the one path already. Their dots are taken out.)
             let chain_fail_ev = self.preprocessed_events.iter()
-              .any(|(_, e)| else_ids.contains(&e.get_id()));
+              .any(|(_, e)| else_ids.contains(&e.get_id()) && !uses_ids.contains(&e.get_id()));
             // A body that always exits (`return`, a panic, `break` /
             // `continue`) and drops something there is drawn as a
             // branch too: its column ends in those drops, and the
@@ -3389,6 +3487,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // A tuple scrutinee's variables are moved whether or not the
             // body runs (#327), so that's a second path as well.
             if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {
+                self.preprocessed_events.retain(|(_, e)| !uses_ids.contains(&e.get_id()));
+                for evs in self.event_line_map.values_mut() {
+                  evs.retain(|e| !uses_ids.contains(&e.get_id()));
+                }
                 // The body may be skipped, so a `return` / `break` /
                 // panic in it doesn't end the columns it's drawn on;
                 // its drops aren't drawn (#410).
