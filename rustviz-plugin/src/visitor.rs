@@ -1017,6 +1017,17 @@ struct OrConflict {
   places: Vec<ResourceAccessPoint>,
 }
 
+/// What `or_conflict_events` draws for an or-pattern arm's names bound
+/// from different places: events at the pattern, events where a
+/// reference's possible borrows end (#565), and the references it took
+/// out of the pattern's bindings, which are still the arm's own names.
+#[derive(Default)]
+struct OrArmEvents {
+  start: Vec<ExternalEvent>,
+  end: Vec<(usize, ExternalEvent)>,
+  decls: Vec<ResourceAccessPoint>,
+}
+
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// If `fn_expr` names the inherent `ManuallyDrop::drop` or
   /// `ManuallyDrop::take` (resolved through the callee's DefId, not
@@ -3240,11 +3251,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // via `add_external_event` (single-arm inline: events
               // join the global timeline before `visit_expr` so they
               // appear in source order with the body).
-              let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, pat_line, typeck_res);
+              let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, pat_line, typeck_res, &scrutinee_moves);
               // The OrAltMove dots of the names `or_conflicts` lists,
               // added after the moves into the scrutinee tuple below
               // (the tuple holds the values they may take).
               let mut or_events: Vec<ExternalEvent> = Vec::new();
+              // Where the possible borrows of an or-pattern's reference
+              // end (#565); added with the arm's other end events.
+              let mut or_end_events: Vec<(usize, ExternalEvent)> = Vec::new();
               match arm_pat.kind {
                 // (<pat>, <pat>, ..) => <expr>
                 // First need to annotate events that occur between parents (the variables being matched upon)
@@ -3285,7 +3299,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     for (r, e, from, _) in associated_ro.iter_mut() {
                       *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
                     }
-                    or_events.extend(self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name));
+                    let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+                    or_events.extend(or_evs.start);
+                    or_end_events.extend(or_evs.end);
+                    pat_decls.extend(or_evs.decls);
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -3337,7 +3354,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     // `P { a, b } => …` on a struct variable: `a` / `b`
                     // come from `p.a` / `p.b` (#326).
                     self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
-                    or_events.extend(self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name));
+                    let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+                    or_events.extend(or_evs.start);
+                    or_end_events.extend(or_evs.end);
+                    pat_decls.extend(or_evs.decls);
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -3510,6 +3530,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
                 arm_scoped = scoped_in_events(&branch_e_data, &self.exit_drops);
                 all_pat_decls = &all_pat_decls | &arm_scoped;
+              }
+
+              // The end of an or-pattern reference's possible borrows
+              // (#565), where the borrow checker ends them: at the
+              // reference's last use, which can be before the arm ends.
+              for (line, ev) in or_end_events {
+                // Its borrow is drawn by these events, not `print_lifetimes`.
+                if let ExternalEvent::OrAltBorrow { into, .. } = &ev {
+                  self.borrow_map.remove(into.name());
+                }
+                if inline {
+                  self.add_external_event(line, ev);
+                } else {
+                  let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
+                  branch_e_data.insert(at, (line, ev));
+                }
               }
 
               // add callback events - events that need to happen at the end of an arm block
@@ -5002,9 +5038,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// => … }`, #189). Which one `x` comes from is decided at run time.
   /// Those names are returned as `OrConflict`s: the arm draws `x`
   /// as a new value and each place as moved into it only if its
-  /// alternative matched (#533), see `or_conflict_events`. What can't
-  /// be drawn that way panics (reported as "can't visualize this yet")
-  /// rather than draw `x` as taken from the first place.
+  /// alternative matched (#533), or, for a reference `x`, as borrowed
+  /// by it only if its alternative matched (#565); see
+  /// `or_conflict_events`. What can't be drawn that way panics
+  /// (reported as "can't visualize this yet") rather than draw `x` as
+  /// taken from the first place: a reference into both a tuple of values
+  /// moved into the scrutinee (#580) and a place outside it, one through
+  /// a place that is itself a reference, and a `&mut` moved out of one
+  /// of the places. A reference into the moved values only borrows the
+  /// tuple, whichever alternative matched: no conflict.
   fn or_arm_stand_in(
     &self,
     pat: &'tcx Pat<'tcx>,
@@ -5012,6 +5054,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     parents_ty: &[rustc_middle::ty::Ty<'tcx>],
     line: usize,
     typeck_res: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+    tuple_vars: &[ResourceAccessPoint],
   ) -> (&'tcx Pat<'tcx>, Vec<OrConflict>) {
     let PatKind::Or(alts) = pat.kind else { return (pat, Vec::new()) };
     let sources: Vec<BTreeMap<String, (String, Option<ResourceTy>)>> =
@@ -5035,37 +5078,91 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       let mut bs = Vec::new();
       binding_pats(&alts[0], &mut bs);
-      // A reference bound from different places (`ref x`, or a match
-      // on `&t`) would be a borrow of one of them, which has no
-      // maybe-moved drawing.
-      let is_ref = bs.iter().any(|b| matches!(b.kind, PatKind::Binding(_, _, ident, _)
-        if ident.to_string() == *name && typeck_res.node_type(b.hir_id).is_ref()));
-      if is_ref {
-        refuse("the reference");
+      let binding = bs.iter().find(|b| matches!(b.kind, PatKind::Binding(_, _, ident, _) if ident.to_string() == *name));
+      let by_ref = binding.is_some_and(|b| matches!(
+        typeck_res.pat_binding_modes().get(b.hir_id).map(|m| m.0),
+        Some(rustc_hir::ByRef::Yes(..))
+      ));
+      let ty = binding.map(|b| typeck_res.node_type(b.hir_id));
+      // `match (a, b)` moves `a` and `b` into a temporary tuple, which
+      // is drawn only for variables without part columns (#327): with a
+      // struct or tuple `a`, what `x` takes or borrows would be drawn as
+      // taken from `a` itself, which no longer has it.
+      let copied = !by_ref && ty.is_some_and(|t| self.ty_is_copy(t, pat.hir_id.owner));
+      if parents.len() > 1 && !copied {
+        let untracked = sources.iter().filter_map(|m| m.get(name)).any(|(k, _)| {
+          k.split_once(':').and_then(|(i, _)| i.parse::<usize>().ok()).is_some_and(|i| {
+            parents_ty.get(i).is_some_and(|t| !t.is_ref())
+              && !parents[i].extract_rap().is_some_and(|r| tuple_vars.contains(r))
+          })
+        });
+        if untracked {
+          panic!("or-patterns that bind `{}` from different values of a tuple being matched, when a value is a \
+                  struct or tuple or is copied into it (line {}), aren't supported yet", name, line);
+        }
+      }
+      if by_ref {
+        // `match (a, b) { (Some(ref x), _) | (_, Some(ref x)) => … }`:
+        // `a` and `b` are moved into the tuple being matched, and `x`
+        // borrows that tuple's parts, not `a` or `b` (#580). Whichever
+        // alternative matched, it borrows the tuple, which has no column:
+        // the arm draws that like any `ref` into the tuple, so it's no
+        // conflict. Mixed with a place outside the tuple (`match (a, &b)`)
+        // it would be.
+        let from_tuple: Vec<bool> = sources.iter().filter_map(|m| m.get(name)).map(|(k, _)| {
+          parents.len() > 1 && k.split_once(':').and_then(|(i, _)| i.parse::<usize>().ok())
+            .is_some_and(|i| parents_ty.get(i).is_some_and(|t| !t.is_ref()))
+        }).collect();
+        if from_tuple.iter().all(|t| *t) {
+          continue;
+        }
+        if from_tuple.iter().any(|t| *t) {
+          panic!("or-patterns that bind the reference `{}` from both a value moved into the tuple being matched \
+                  and a place outside it (line {}) aren't supported yet", name, line);
+        }
+      } else if ty.is_some_and(|t| t.is_ref() && t.ref_mutability() == Some(rustc_hir::Mutability::Mut)) {
+        // A `&mut` stored in each place, moved out of one of them.
+        refuse("the mutable reference");
       }
       let mut raps = Vec::new();
       for (_, place) in &places {
         match place.as_ref().and_then(|p| p.extract_rap()) {
+          // A place that's itself a reference: `x` would borrow what
+          // it points to, through it.
+          Some(rap) if by_ref && rap.is_ref() => panic!(
+            "or-patterns that bind `{}` through different references being matched (line {}) aren't supported yet",
+            name, line),
           Some(rap) => raps.push(rap.clone()),
           None => refuse("the name"),
         }
       }
       conflicts.push(OrConflict { name: name.clone(), places: raps });
     }
-    let (inner, _) = self.or_arm_stand_in(&alts[0], parents, parents_ty, line, typeck_res);
+    let (inner, _) = self.or_arm_stand_in(&alts[0], parents, parents_ty, line, typeck_res, tuple_vars);
     (inner, conflicts)
   }
 
   /// The events for the names an or-pattern binds from different
   /// places (#533), replacing what the first alternative alone would
-  /// draw in `bound` (a name, how it's bound, from where): each such
-  /// name is bound as a new value (`Evt::Bind`, no arrow), and each
-  /// place it may come from, when the value moves (rather than is
-  /// copied), gets an `OrAltMove`: its resource moves into the name if
-  /// its alternative is the one that matched, so it's maybe-moved
-  /// afterwards. A place in `tuple_vars` (`match (a, b)`) was already
-  /// moved into the temporary tuple `tuple` (#327): it's the tuple's
-  /// copy of its value that may move, so it isn't maybe-moved.
+  /// draw in `bound` (a name, how it's bound, from where):
+  ///
+  /// * A moved or copied name is bound as a new value (`Evt::Bind`, no
+  ///   arrow), and each place it may come from, when the value moves
+  ///   (rather than is copied), gets an `OrAltMove`: its resource moves
+  ///   into the name if its alternative is the one that matched, so
+  ///   it's maybe-moved afterwards. A place in `tuple_vars` (`match (a,
+  ///   b)`) was already moved into the temporary tuple `tuple` (#327):
+  ///   it's the tuple's copy of its value that may move, so it isn't
+  ///   maybe-moved. A struct or tuple name's fields are bound with it,
+  ///   and each place's fields get an `OrAltMove` into the matching
+  ///   field (#565).
+  /// * A reference (`ref x`, or a binding through a reference) borrows
+  ///   whichever place matched (#565): an `OrAltBorrow` per place where
+  ///   the borrow starts, and one where it ends. The borrow checker
+  ///   treats every place as borrowed until the reference's last use,
+  ///   which MIR gives (`arm_end`, the end of the arm, if it doesn't).
+  ///   The reference is taken out of `bound` (its `OrAltBorrow`s draw
+  ///   it) and returned in `decls`.
   fn or_conflict_events(
     &mut self,
     conflicts: &[OrConflict],
@@ -5073,34 +5170,96 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     line: usize,
     tuple_vars: &[ResourceAccessPoint],
     tuple: &str,
-  ) -> Vec<ExternalEvent> {
-    let mut out = Vec::new();
-    for entry in bound.iter_mut() {
-      let Some(c) = conflicts.iter().find(|c| c.name == entry.0.name().as_str()) else { continue };
-      // The bound name's own parts (a tuple or struct, with its own
-      // columns) would need drawing too.
-      if matches!(entry.0, ResourceAccessPoint::Struct(_)) {
-        panic!("or-patterns that bind the struct or tuple `{}` from different places in the value being matched \
-                (line {}) aren't supported yet", c.name, line);
-      }
-      if !matches!(entry.1, Evt::Move | Evt::Copy) {
-        panic!("or-patterns that bind the reference `{}` from different places in the value being matched \
-                (line {}) aren't supported yet", c.name, line);
-      }
-      if matches!(entry.1, Evt::Move) {
-        let names: Vec<String> = c.places.iter().map(|r| r.name().to_string()).collect();
-        for place in &c.places {
-          let id = *self.unique_id;
-          *self.unique_id += 1;
-          out.push(ExternalEvent::OrAltMove {
-            ro: place.clone(), into: c.name.clone(), from: names.clone(),
-            tuple: tuple_vars.contains(place).then(|| tuple.to_owned()), id,
-          });
+    arm_end: usize,
+  ) -> OrArmEvents {
+    let mut out = OrArmEvents::default();
+    let mut taken = Vec::new();
+    for (k, entry) in bound.iter_mut().enumerate() {
+      // The conflict names the binding as written; its column may be
+      // `x₂` when an earlier `x` is in the same function.
+      let written = split_numbered_name(entry.0.name()).map_or(entry.0.name().as_str(), |(base, _)| base);
+      let Some(c) = conflicts.iter().find(|c| c.name == written) else { continue };
+      let xname = entry.0.name().clone();
+      let names: Vec<String> = c.places.iter().map(|r| r.name().to_string()).collect();
+      match entry.1 {
+        Evt::SBorrow | Evt::MBorrow => {
+          let mutable = matches!(entry.1, Evt::MBorrow);
+          let x = entry.0.clone();
+          // Which place `x` borrows isn't known: give it no lender, so
+          // nothing in the arm is drawn on the first place's column.
+          if let Some(rd) = self.borrow_map.get_mut(x.name()) {
+            rd.lender = ResourceTy::Anonymous;
+          }
+          let ends_at = self.or_ref_last_use(x.name(), line).filter(|l| *l >= line && *l <= arm_end).unwrap_or(arm_end);
+          for (i, place) in c.places.iter().enumerate() {
+            for (end, at) in [(false, line), (true, ends_at)] {
+              let id = *self.unique_id;
+              *self.unique_id += 1;
+              let ev = ExternalEvent::OrAltBorrow {
+                ro: place.clone(), into: x.clone(), from: names.clone(), mutable, end, first: i == 0, id,
+              };
+              if end { out.end.push((at, ev)); } else { out.start.push(ev); }
+            }
+          }
+          out.decls.push(x);
+          taken.push(k);
         }
+        Evt::Move | Evt::Copy => {
+          if matches!(entry.1, Evt::Move) {
+            for place in &c.places {
+              let id = *self.unique_id;
+              *self.unique_id += 1;
+              let in_tuple = tuple_vars.contains(place).then(|| tuple.to_owned());
+              out.start.push(ExternalEvent::OrAltMove {
+                ro: place.clone(), into: xname.clone(), from: names.clone(), tuple: in_tuple.clone(), part_of: None, id,
+              });
+              // A struct or tuple moves its fields with it.
+              let prefix = format!("{}.", place.name());
+              for member in self.struct_members_deep(place.name()) {
+                // A reference field isn't moved out of anything that
+                // owns it; the name's own reference fields are drawn
+                // where the pattern binds them.
+                if member.is_ref() {
+                  continue;
+                }
+                let suffix = &member.name()[prefix.len()..];
+                let into = format!("{}.{}", xname, suffix);
+                if !self.raps.contains_key(&into) {
+                  continue;
+                }
+                let id = *self.unique_id;
+                *self.unique_id += 1;
+                out.start.push(ExternalEvent::OrAltMove {
+                  ro: member.clone(), into, from: names.clone(), tuple: in_tuple.clone(),
+                  part_of: Some((xname.clone(), place.name().to_string())), id,
+                });
+              }
+            }
+          }
+          // The name's own fields get their part of the value with it.
+          if matches!(entry.0, ResourceAccessPoint::Struct(_)) {
+            self.bind_struct_fields(line, &xname);
+          }
+          *entry = (entry.0.clone(), Evt::Bind, ResourceTy::Anonymous, None);
+        }
+        _ => panic!("or-patterns that bind `{}` from different places in the value being matched \
+                     (line {}) aren't supported yet", c.name, line),
       }
-      *entry = (entry.0.clone(), Evt::Bind, ResourceTy::Anonymous, None);
+    }
+    for k in taken.into_iter().rev() {
+      bound.remove(k);
     }
     out
+  }
+
+  /// The last line the reference `name`, bound by a pattern on `line`,
+  /// keeps its borrow (#565): the end of the region of the loans MIR
+  /// issues for it there.
+  fn or_ref_last_use(&self, name: &str, line: usize) -> Option<usize> {
+    self.gather_borrow_data(&self.bwf).iter()
+      .filter(|m| m.region.0 == line && m.assigned_place.as_deref() == Some(name))
+      .map(|m| m.region.1)
+      .max()
   }
 
   /// Each binding of a match arm's pattern `alt`, and the place it's

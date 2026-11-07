@@ -2344,6 +2344,17 @@ pub fn event_dot_chain_fail_move(
     out
 }
 
+// "t.0 or t.1", "t.0, t.1 or t.2": the places an or-pattern binds a
+// name from (#533).
+fn or_list(sources: &[String]) -> String {
+    let names: Vec<String> = sources.iter().map(|n| fmt_style(n)).collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} or {}", init.join(", "), last),
+    }
+}
+
 // An or-pattern arm (`(x, _) | (_, x) =>`) binds `into` from a different
 // place in each alternative, and `my_name` is one of them (#533). Which
 // alternative matches is decided at run time, so this place's resource
@@ -2354,27 +2365,93 @@ pub fn event_dot_chain_fail_move(
 // the tuple which may move into `into`, and what it doesn't take stays
 // in the tuple, which the tuple's own drop dot says is dropped: no drop
 // flag on `my_name`, which owns nothing either way.
-pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String], tuple: Option<&str>) -> String {
-    let names: Vec<String> = sources.iter().map(|n| fmt_style(n)).collect();
-    let list = match names.as_slice() {
-        [] => String::new(),
-        [one] => one.clone(),
-        [init @ .., last] => format!("{} or {}", init.join(", "), last),
+// `part_of`: `Some((x, p))` when `my_name` is a field of the place `p`
+// that may move as a whole into the struct or tuple `x`, and `into` is
+// `x`'s matching field (#565). `value`: what's moved has nothing to
+// drop, so there's no drop flag either (#484).
+pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String], tuple: Option<&str>, part_of: Option<&(String, String)>, value: bool) -> String {
+    let me = fmt_style(my_name);
+    let (bound, bound_from) = match part_of {
+        Some((x, p)) => (fmt_style(x), fmt_style(p)),
+        None => (fmt_style(into), me.clone()),
     };
     if let Some(tuple) = tuple {
         return format!(
             "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
-             that binds {1} from {0}, {0}'s resource is moved out of {3} into {1} here; otherwise it stays \
+             that binds {1} from {3}, {0}'s {4} is moved out of {5} into {6} here; otherwise it stays \
              in the tuple",
-            fmt_style(my_name), fmt_style(into), list, temporary_tuple(&tuple.to_owned())
+            me, bound, or_list(sources), bound_from, held(value), temporary_tuple(&tuple.to_owned()), fmt_style(into)
         );
     }
+    let otherwise = if value {
+        format!("otherwise {} still holds it", me)
+    } else {
+        format!("otherwise {} still owns it (Rust tracks this with a runtime drop flag)", me)
+    };
     format!(
         "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
-         that binds {1} from {0}, {0}'s resource is moved into {1} here; otherwise {0} still owns it \
-         (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), fmt_style(into), list
+         that binds {1} from {3}, {0}'s {4} is moved into {5} here; {6}.",
+        me, bound, or_list(sources), bound_from, held(value), fmt_style(into), otherwise
     )
+}
+
+// An or-pattern arm (`(ref x, _) | (_, ref x) =>`) binds the reference
+// `into` from a different place in each alternative, and `my_name` is
+// one of them (#565). Only the alternative that matches borrows its
+// place, but which one that is is decided at run time, so the borrow
+// checker treats every one of them as borrowed while `into` is live.
+pub fn event_dot_or_alt_lend(my_name: &String, into: &String, sources: &[String], mutable: bool, is_copy: bool) -> String {
+    let me = fmt_style(my_name);
+    let x = fmt_style(into);
+    let while_live = if mutable {
+        format!("{} can't be used while {}'s borrow is live", me, x)
+    } else {
+        format!("{} is read-only while {}'s borrow is live", me, x)
+    };
+    format!(
+        "{1} borrows {2}, whichever alternative of the pattern matches. If it's the alternative that binds \
+         {1} from {0}, {0}'s {3} is {4} borrowed by {1} here. Which alternative matches is decided at run \
+         time, so the borrow checker treats {0} as borrowed either way: {5}.",
+        me, x, or_list(sources), held(is_copy), if mutable { "mutably" } else { "immutably" }, while_live
+    )
+}
+
+// The end of the borrow `event_dot_or_alt_lend` started (#565).
+pub fn event_dot_or_alt_reacquire(my_name: &String, into: &String, mutable: bool, is_copy: bool) -> String {
+    format!(
+        "{1}'s borrow ends here, so {0}'s {2} is no longer {3} borrowed (the borrow checker counted it as \
+         borrowed whichever alternative of the pattern matched)",
+        fmt_style(my_name), fmt_style(into), held(is_copy), if mutable { "mutably" } else { "immutably" }
+    )
+}
+
+// The reference's own dot where `event_dot_or_alt_lend`'s borrow starts
+// (#565).
+pub fn event_dot_or_alt_borrow(my_name: &String, sources: &[String], mutable: bool) -> String {
+    format!(
+        "{0} {1} borrows {2}, whichever alternative of the pattern matches",
+        fmt_style(my_name), if mutable { "mutably" } else { "immutably" }, or_list(sources)
+    )
+}
+
+// Line segment of a place while the borrow `event_dot_or_alt_lend`
+// started is live (#565).
+pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, is_copy: bool) -> String {
+    let me = fmt_style(my_name);
+    let x = fmt_style(into);
+    if mutable {
+        format!(
+            "{0}'s {2} is mutably borrowed by {1} if the alternative that binds {1} from {0} matched; \
+             either way, {0} can't be used until {1}'s borrow ends",
+            me, x, held(is_copy)
+        )
+    } else {
+        format!(
+            "{0}'s {2} is immutably borrowed by {1} if the alternative that binds {1} from {0} matched; \
+             either way, {0} is read-only until {1}'s borrow ends",
+            me, x, held(is_copy)
+        )
+    }
 }
 
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is

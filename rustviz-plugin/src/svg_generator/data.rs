@@ -1279,11 +1279,35 @@ pub enum ExternalEvent {
     // b)`) already moved into its temporary tuple (#327), so what may
     // move into `x` is its value in that tuple, and `ro` itself owns
     // nothing either way (the tuple's drop takes what `x` didn't).
+    //
+    // `part_of`: `Some((x, p))` when `ro` is a field column of the place
+    // `p` that may move as a whole into the struct or tuple `x` (#565);
+    // `into` is then `x`'s matching field, and `from` still names the
+    // places `x` may be bound from.
     OrAltMove {
         ro: ResourceAccessPoint,
         into: String,
         from: Vec<String>,
         tuple: Option<String>,
+        part_of: Option<(String, String)>,
+        id: usize
+    },
+    // An or-pattern arm binds the reference `into` from a different
+    // place in each alternative (`(ref x, _) | (_, ref x) =>`, #565).
+    // `ro` is one of those places; `from` names all of them. Which one
+    // `into` borrows is only known at run time, but the borrow checker
+    // can't tell either, so it treats every one of them as borrowed for
+    // as long as `into`'s borrow is live. `end: false` is where that
+    // borrow starts (the pattern), `end: true` where it ends. Drawn as a
+    // dot on `ro`'s column, with no arrow; the event with `first` also
+    // carries `into`'s own dot (its borrow starting / ending).
+    OrAltBorrow {
+        ro: ResourceAccessPoint,
+        into: ResourceAccessPoint,
+        from: Vec<String>,
+        mutable: bool,
+        end: bool,
+        first: bool,
         id: usize
     },
     // only use this event to initialize fn parameters
@@ -1358,6 +1382,21 @@ impl ExternalEvent {
         plain(from) && plain(to)
     }
 
+    /// The column events of an `OrAltBorrow` (#565): the place's, and
+    /// the reference's when the event carries it (`first`).
+    pub fn or_alt_borrow_events(&self) -> (Event, Option<Event>) {
+        let ExternalEvent::OrAltBorrow { ro, into, from, mutable, end, first, .. } = self else {
+            panic!("internal state: or_alt_borrow_events of another event");
+        };
+        let lend = Event::OrAltLend {
+            into: into.clone(), is: ResourceTy::Value(ro.clone()), sources: from.clone(), mutable: *mutable, end: *end,
+        };
+        let borrow = first.then(|| Event::OrAltBorrow {
+            is: ResourceTy::Value(into.clone()), sources: from.clone(), mutable: *mutable, end: *end,
+        });
+        (lend, borrow)
+    }
+
     pub fn is_gos_ev(&self) -> Option<&ResourceAccessPoint> {
         match self {
             ExternalEvent::GoOutOfScope { ro, .. } | ExternalEvent::TemporaryDrop { ro, .. } => Some(ro),
@@ -1378,6 +1417,7 @@ impl ExternalEvent {
             &ExternalEvent::OwnerDropIfTryReturns { id, .. } |
             &ExternalEvent::TupleTempDrop { id, .. } |
             &ExternalEvent::OrAltMove { id, .. } |
+            &ExternalEvent::OrAltBorrow { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -1552,8 +1592,18 @@ pub enum Event {
     OwnerDropIfTryReturns,
     // See ExternalEvent::TupleTempDrop.
     TupleTempDrop { tuple: String, at: TupleDropAt, with: Vec<TupleLeft> },
-    // See ExternalEvent::OrAltMove.
-    OrAltMove { into: String, sources: Vec<String>, tuple: Option<String> },
+    // See ExternalEvent::OrAltMove. `value`: the place holds a value
+    // with nothing to drop, not a resource (#484).
+    OrAltMove { into: String, sources: Vec<String>, tuple: Option<String>, part_of: Option<(String, String)>, value: bool },
+    // The place's side of an ExternalEvent::OrAltBorrow: it may be
+    // borrowed by `into` (`end: false`), or that borrow ends (`end:
+    // true`). Changes the place's state like a StaticLend / MutableLend
+    // and StaticReacquire / MutableReacquire would.
+    OrAltLend { into: ResourceAccessPoint, is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool },
+    // The reference's side of an ExternalEvent::OrAltBorrow: its borrow
+    // of one of `sources` starts or ends. Changes its state like a
+    // StaticBorrow / MutableBorrow and StaticDie / MutableDie would.
+    OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1879,6 +1929,14 @@ impl Display for Event {
             Event::OrAltMove { into, .. } => {
                 write!(f, "May have been moved into {}", into)
             },
+            Event::OrAltLend { into, end, .. } => {
+                if *end { write!(f, "May have been borrowed by {} until here", into.name()) }
+                else { write!(f, "May be borrowed by {}", into.name()) }
+            },
+            Event::OrAltBorrow { end, .. } => {
+                if *end { write!(f, "Borrow of one of several places ends") }
+                else { write!(f, "Borrows one of several places") }
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -1890,6 +1948,35 @@ impl Display for Event {
 }
 
 impl Event {
+    /// For an or-pattern's possible borrow (#565), the plain borrow
+    /// event that changes the column's state the same way.
+    pub fn or_alt_plain_equivalent(&self) -> Option<Event> {
+        let id = 1000000000;
+        match self {
+            Event::OrAltLend { into, is, mutable, end, .. } => {
+                let other = ResourceTy::Value(into.clone());
+                let is = is.clone();
+                Some(match (*mutable, *end) {
+                    (false, false) => Event::StaticLend { to: other, is, id },
+                    (true, false) => Event::MutableLend { to: other, is, id },
+                    (false, true) => Event::StaticReacquire { from: other, is, id, still_borrowed_by: Vec::new() },
+                    (true, true) => Event::MutableReacquire { from: other, is, id, still_borrowed_by: Vec::new() },
+                })
+            }
+            Event::OrAltBorrow { is, mutable, end, .. } => {
+                let other = ResourceTy::Anonymous;
+                let is = is.clone();
+                Some(match (*mutable, *end) {
+                    (false, false) => Event::StaticBorrow { from: other, is, id },
+                    (true, false) => Event::MutableBorrow { from: other, is, id },
+                    (false, true) => Event::StaticDie { to: other, is, id },
+                    (true, true) => Event::MutableDie { to: other, is, id },
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub fn get_id(&self) -> usize {
         match self {
             Event::Duplicate {id: x , ..} | Event::Move {id: x, ..} | Event::StaticLend {id : x, ..} |
@@ -1973,8 +2060,23 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else)
             }
-            Event::OrAltMove { into, sources, tuple } => {
-                hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref())
+            Event::OrAltMove { into, sources, tuple, part_of, value } => {
+                hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
+            }
+            Event::OrAltLend { into, is, sources, mutable, end } => {
+                let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                if *end {
+                    hover_messages::event_dot_or_alt_reacquire(my_name, into.name(), *mutable, is_copy)
+                } else {
+                    hover_messages::event_dot_or_alt_lend(my_name, into.name(), sources, *mutable, is_copy)
+                }
+            }
+            Event::OrAltBorrow { sources, mutable, end, .. } => {
+                match (*end, *mutable) {
+                    (false, _) => hover_messages::event_dot_or_alt_borrow(my_name, sources, *mutable),
+                    (true, false) => hover_messages::event_dot_static_return(my_name, my_name),
+                    (true, true) => hover_messages::event_dot_mut_return(my_name, my_name),
+                }
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -2529,6 +2631,11 @@ impl Visualizable for VisualizationData {
             }
         }
         if event_invalid(event) { return State::Invalid; }
+        // An or-pattern's possible borrow (#565) changes the state the
+        // way the plain borrow event it stands for does.
+        if let Some(plain) = event.or_alt_plain_equivalent() {
+            return self.calc_state(previous_state, &plain, event_line, hash);
+        }
 
         // A value that holds a borrow without being a reference
         // (`let it = v.iter();`, #336) owns its own value: borrowing
@@ -2815,6 +2922,8 @@ impl Visualizable for VisualizationData {
             (_, Event::OrAltMove { tuple: Some(_), .. }) => (*previous_state).clone(),
             (_, Event::OrAltMove { .. }) =>
                 State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
+            // Mapped to their plain equivalents above.
+            (_, Event::OrAltLend { .. }) | (_, Event::OrAltBorrow { .. }) => State::Invalid,
 
 
             (_, _) => State::Invalid,
@@ -3208,8 +3317,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TupleTempDrop{ tuple, at, with, .. } => {
           vec![(line_num, Event::TupleTempDrop { tuple: tuple.clone(), at: *at, with: with.clone() })]
           },
-        ExternalEvent::OrAltMove{into, from, tuple, ..} => {
-          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone() })]
+        ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, ..} => {
+          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value() })]
         },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
@@ -3255,6 +3364,15 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                }
+            }
+            ExternalEvent::OrAltBorrow { ro, into, .. } => {
+                let (lend, borrow) = event.or_alt_borrow_events();
+                if ro == rap {
+                    b_history.push((line_number, lend));
+                }
+                if into == rap {
+                    b_history.extend(borrow.map(|e| (line_number, e)));
                 }
             }
             ExternalEvent::ClosureCall { closure, fates, id } => {
@@ -3531,8 +3649,16 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TupleTempDrop{ro, tuple, at, with, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TupleTempDrop { tuple, at, with }, line_number);
             },
-            ExternalEvent::OrAltMove{ro, into, from, tuple, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from, tuple }, line_number);
+            ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, ..} => {
+                let value = ro.holds_value();
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from, tuple, part_of, value }, line_number);
+            },
+            ExternalEvent::OrAltBorrow{ref ro, ref into, ..} => {
+                let (lend, borrow) = event.or_alt_borrow_events();
+                maybe_append_event(self, &ResourceTy::Value(ro.clone()), lend, line_number);
+                if let Some(b) = borrow {
+                    maybe_append_event(self, &ResourceTy::Value(into.clone()), b, line_number);
+                }
             },
         }
     }
