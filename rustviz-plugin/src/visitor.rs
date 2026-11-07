@@ -2271,11 +2271,30 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .filter(|(_, e)| if_ids.contains(&e.get_id())
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
-            if !events_move_out_of_outer(&body_ev, &if_scope) {
-                // The body may be skipped, so a `return` / `break` /
-                // panic in it doesn't end the columns it's drawn on;
-                // its drops aren't drawn (#410).
+            // A body that always exits (`return`, a panic, `break`)
+            // and drops something there is drawn as a branch too: its
+            // column ends in those drops, and the implicit `else`
+            // carries on (#429). A body that only sometimes exits (the
+            // exit is in a nested `if`) or one on a single line has no
+            // column to end in them, so they aren't drawn (#410).
+            let body_diverges = self.expr_diverges(if_expr);
+            // An `if let` scrutinee that moves something (`v.into_iter()
+            // .next()`) is evaluated before the branch, but its events
+            // sit on the `if` line and would be drawn inside the
+            // diverging branch, where the merge ignores them: `v`
+            // would look unmoved afterwards. Not drawn then.
+            let scrutinee_moves = match guard_expr.kind {
+              ExprKind::Let(l) => !matches!(l.init.kind, ExprKind::Path(_) | ExprKind::Field(..))
+                && !locals_moved_by(self.tcx, l.init).is_empty(),
+              _ => false,
+            };
+            let exit_branch = body_diverges && split < if_end && !scrutinee_moves
+              && body_ev.iter().any(|(_, e)| self.exit_drops.contains(&e.get_id()));
+            let drawn_as_branch = events_move_out_of_outer(&body_ev, &if_scope) || exit_branch;
+            if split >= if_end || !drawn_as_branch {
                 self.discard_exit_drops(if_ids.clone());
+            }
+            if !drawn_as_branch {
                 for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
                     self.preprocessed_events.push((
                         if_end,

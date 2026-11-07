@@ -786,6 +786,13 @@ const EXPECTED_OK: &[&str] = &[
     // An exit drops an unbound temporary (#457) only while its
     // statement is running.
     "exit_temporary_drops",
+    // Exits in an `if` without `else` drop what they leave (#429).
+    "exit_if_no_else_return",
+    "exit_if_no_else_panic",
+    "exit_if_no_else_break",
+    "exit_if_no_else_nested",
+    "exit_if_let_no_else_return",
+    "exit_if_no_else_one_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8493,6 +8500,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              reaches the end of the conditional, and (temporary)'s column doesn't either",
         ],
     },
+    // ─── Exits in an `if` without `else` (#429) ─────────────────────
+    TooltipExpect {
+        name: "exit_if_no_else_return",
+        // The `return s;` in the else-less `if` ends its column in the
+        // drop of `t`; `t` is returned on the path that goes on.
+        must_contain: &[
+            "t goes out of scope. Its resource is dropped.",
+            "t isn't moved in any of the branches above",
+            "t's resource is moved to the caller",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "exit_if_no_else_panic",
+        // The message reads `v` first (#449: the drop used to come
+        // before the read and say nothing was dropped).
+        must_contain: &[
+            "v goes out of scope. Its resource is dropped.",
+            "v isn't moved in any of the branches above",
+        ],
+        must_not_contain: &["v goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "exit_if_no_else_break",
+        must_contain: &[
+            "u goes out of scope. Its resource is dropped.",
+            // (The plugin emits this one with a trailing space.)
+            "u is live in a conditional expression ",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "exit_if_no_else_nested",
+        must_contain: &[
+            "t goes out of scope. Its resource is dropped.",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "exit_if_let_no_else_return",
+        must_contain: &[
+            "t goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+            // `opt` is moved into `s` in the branch that returns (its
+            // column ends at that move), so after the `if` it still
+            // owns its value.
+            "opt still owns its resource here: the branch that moved opt returned before \
+             reaching this point",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "exit_if_no_else_one_line",
+        // One line: no columns, so no drop at the `return`.
+        must_contain: &["t goes out of scope. Its resource is dropped."],
+        must_not_contain: &["=t is live in a conditional expression "],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -10314,8 +10379,9 @@ fn return_drops_what_the_branch_owns() {
         // (#256); `c`: at the `break 'outer`, the `continue` and the end
         // of the inner body.
         ("exit_break_continue_drops", &[("a", 1), ("b", 2), ("c", 3)][..]),
-        // `guess`: at the `continue` and at the end of the loop body (#256).
-        ("exit_continue_in_match", &[("guess", 2), ("secret", 1)][..]),
+        // `guess`: at the `continue`, at the `break` in the `if` without
+        // `else` (#429) and at the end of the loop body (#256).
+        ("exit_continue_in_match", &[("guess", 3), ("secret", 1)][..]),
         ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 2)][..]),
         ("exit_return_after_nested_if", &[("s", 2), ("t", 2)][..]),
         // `m` (moved on one path above): no drop of any kind at the
@@ -10325,6 +10391,18 @@ fn return_drops_what_the_branch_owns() {
         ("exit_path_dependent_drops", &[("s", 1), ("t", 1), ("m", 0), ("m:No", 0), ("m:Flag", 1)][..]),
         // `s` has no value yet at the `return`: dropped only at the end.
         ("exit_return_in_let_if", &[("s", 1), ("s:No", 0), ("t", 2)][..]),
+        // #429: exits in an `if` without `else`. `t` is dropped at the
+        // `return` and then returned (so its scope end drops nothing).
+        ("exit_if_no_else_return", &[("t", 1), ("t:No", 1)][..]),
+        ("exit_if_no_else_panic", &[("v", 2)][..]),
+        // `u`: at the `break`, at the `continue` and at the end of the
+        // loop body (#256).
+        ("exit_if_no_else_break", &[("u", 3), ("s", 1)][..]),
+        ("exit_if_no_else_nested", &[("t", 2), ("u", 2)][..]),
+        ("exit_if_let_no_else_return", &[("t", 2), ("s", 1)][..]),
+        // On one line the `if` is drawn without columns (#333): the
+        // `return`'s drop isn't drawn, only the one at the end.
+        ("exit_if_no_else_one_line", &[("t", 1)][..]),
     ] {
         let rv = run_with_local_backend(name);
         let tooltips = timeline_tooltips(&rv.timeline_panel_string());

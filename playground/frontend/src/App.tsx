@@ -333,9 +333,8 @@ const Description: React.FC = () => (
       <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}
         <code>break</code>/<code>continue</code> are drawn when it&apos;s in an{' '}
-        <code>if</code>/<code>else</code> branch or a <code>match</code> arm, but not
-        in an <code>if</code> without <code>else</code>, and not for{' '}
-        <code>?</code>.
+        <code>if</code> branch (with or without an <code>else</code>, written over
+        several lines) or a <code>match</code> arm, but not for <code>?</code>.
       </li>
       <li>
         A write to a field through a reference (<code>self.n += 1</code> in a{' '}
