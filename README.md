@@ -347,12 +347,17 @@ rather than listed here.
   their own. Overwriting a reference field of a local struct
   (`hold.r = &t` after `H { r: &s }`) keeps `s` borrowed until the
   struct's last use, as the borrow checker does (the struct's type has
-  one lifetime for the reference). Overwriting the whole struct with a
-  struct literal (`hold = H { r: &t }`) drops the old value, so the old
+  one lifetime for the reference); so does overwriting a struct field
+  of it (`o.inner = I { r: &t }`), though when the new value is a call's
+  result (`o.inner = make_inner(&t)`) its borrow of `t` isn't drawn
+  (#638).
+  Overwriting the whole struct (`hold = H { r: &t }`,
+  `hold = make(&t)`, `hold = other`) drops the old value, so the old
   borrow ends at the write, as in rustc (or at the old value's last use,
-  if earlier). Overwriting it with something else
-  (`hold = make(&t)`, another variable) is not handled specially: the
-  old borrow may be drawn ending too late or not at all.
+  if earlier). A struct that holds a borrow and is moved to another
+  variable (`let hold = other;`, `hold = other;`) leaves the borrow
+  drawn on `other`'s field column; `hold`'s field says what it borrows
+  from isn't shown (#637).
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
   through `r: &mut Vec<_>`) is drawn on the collection's column; an
   assignment reads like a plain assignment with the element as the

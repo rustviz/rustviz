@@ -2717,21 +2717,85 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // The loan is live while the old value is used and dead after:
       // if MIR ends it at a later use, it ends there; otherwise (no
       // use since the borrow was stored) it ends at the overwrite.
-      let end = mir_b_data.iter()
+      let kill = mir_b_data.iter()
         .find_map(|m| ExprVisitor::borrow_match(old, m))
-        .filter(|&kill| kill > old.assigned_at)
-        .map_or(line, |kill| kill.min(line));
+        .filter(|&kill| kill > old.assigned_at);
       let lenders = old.all_lenders().into_iter()
         .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
         .collect();
+      // A struct field of a struct (`hold.inner = I { r: &t };`) is a
+      // partial write: `hold` stays live, and its type has one
+      // lifetime for both the old and the new reference, so the borrow
+      // checker keeps the old loan until hold's last use, as for
+      // `hold.r = &t;` (#531). Drawn there on the lender's column only.
+      if st.is_member() {
+        if let Some(kill) = kill.filter(|&kill| kill > line) {
+          let place = ResourceTy::Index(member.clone(), member.name().to_owned(), PlaceWrite::Update);
+          ends.push((kill, lenders, place, old.ref_mutability));
+          continue;
+        }
+      }
+      let end = kill.map_or(line, |kill| kill.min(line));
       ends.push((end, lenders, ResourceTy::Value(member), old.ref_mutability));
     }
     ends
   }
 
+  /// `hold = make(&t);` / `hold = other;` (#569): after
+  /// `struct_field_borrow_ends` has read the old field loans, the
+  /// reference fields hold the new value's borrows instead. A call's are
+  /// what its signature ties each field to, as for `let hold = make(&t);`
+  /// (`register_struct_field_lenders`), resolved before the old ones are
+  /// cleared (`make(hold.r)` borrows what `hold.r` borrowed); for any
+  /// other right-hand side the fields keep no lender of their own, as
+  /// for `let hold = other;`. (A struct literal's initialisers set them
+  /// in `match_rhs`.) Without this, the old lender stayed recorded:
+  /// `make`'s borrow was drawn from `s` instead of `t`.
+  pub fn reassign_struct_field_lenders(&mut self, st: &ResourceAccessPoint, rhs: &'tcx Expr<'tcx>, ty: Ty<'tcx>, line: usize) {
+    let new: Vec<(String, Vec<ResourceTy>)> = match (rhs.kind, ty.ty_adt_def()) {
+      (ExprKind::Call(..) | ExprKind::MethodCall(..), Some(adt)) => adt.all_fields()
+        .map(|f| (format!("{}.{}", st.name(), f.name.as_str()), self.call_field_lenders(rhs, f.name.as_str()).0))
+        .collect(),
+      _ => Vec::new(),
+    };
+    for member in self.struct_members_deep(st.name()) {
+      if let Some(rd) = self.borrow_map.get_mut(member.name()) {
+        rd.lender = ResourceTy::Anonymous;
+        rd.co_lenders = Vec::new();
+        rd.aliasing = VecDeque::new();
+        rd.static_lender = None;
+        rd.borrow_span = None;
+        rd.assigned_at = line;
+      }
+    }
+    for (fname, mut lenders) in new {
+      if lenders.is_empty() || !self.borrow_map.contains_key(&fname) {
+        continue;
+      }
+      let lender = lenders.remove(0);
+      let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+      if let Some(rd) = self.borrow_map.get_mut(&fname) {
+        rd.lender = lender;
+        rd.co_lenders = lenders;
+        rd.aliasing = aliasing;
+      }
+    }
+  }
+
+  /// Draws the ends `struct_field_borrow_ends` found, once the new value
+  /// is in place. A lender the field's new value borrows too
+  /// (`hold = make(hold.r)`, `hold = H { r: hold.r }`) stays borrowed by
+  /// it: no end is drawn there, only where the new borrow ends.
   pub fn draw_struct_field_borrow_ends(&mut self, ends: Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>) {
     for (end, lenders, holder, is_mut) in ends {
+      let now = holder.extract_rap()
+        .and_then(|h| self.borrow_map.get(h.name()))
+        .map(|rd| rd.all_lenders())
+        .unwrap_or_default();
       for l in lenders {
+        if now.contains(&l) {
+          continue;
+        }
         self.add_ev(end, if is_mut { Evt::MDie } else { Evt::SDie }, l, holder.clone(), false);
       }
     }
