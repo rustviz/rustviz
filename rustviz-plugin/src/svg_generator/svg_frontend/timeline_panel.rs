@@ -3930,6 +3930,7 @@ fn render_branches(
             // and any empty body, render passive (Gray-converted
             // leading so it's dashed).
             let is_active = i == 0 && !branch.e_data.is_empty();
+            let arm_label = ty.string_of_branch(i);
             let leading_state = if is_active {
                 parent_active.clone()
             } else {
@@ -3945,7 +3946,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, column_top_y),
-                leading_state.clone(), visualization_data,
+                leading_state.clone(), visualization_data, &arm_label,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with.
@@ -3955,7 +3956,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
-                        leading_state, visualization_data,
+                        leading_state, visualization_data, &arm_label,
                     );
                 }
             }
@@ -3999,7 +4000,7 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state.clone(), visualization_data,
+                    state.clone(), visualization_data, &arm_label,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
@@ -4013,7 +4014,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_bot_y), (parent_x, merge_y),
-                        end_state, visualization_data,
+                        end_state, visualization_data, &arm_label,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -4101,11 +4102,22 @@ fn push_seg_if_renderable(
     p2: (f64, f64),
     state: State,
     visualization_data: &VisualizationData,
+    arm_label: &str,
 ) {
     if !line_drawn(rap, &state) {
         return;
     }
-    let title = timeline_segment_title(&state, rap, visualization_data, None);
+    // A dashed arm column (`Gray`): another arm's code runs on these
+    // rows, so say what the dashes mean instead of repeating the
+    // solid segment's text (#626).
+    let title = if matches!(
+        state,
+        State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray }
+    ) {
+        hover_messages::state_inactive_arm(rap.name(), arm_label)
+    } else {
+        timeline_segment_title(&state, rap, visualization_data, None)
+    };
     segs.push(BranchSeg { p1, p2, state, title });
 }
 

@@ -1103,6 +1103,8 @@ const EXPECTED_OK: &[&str] = &[
     "pattern_mutref_field_let",
     "pattern_mutref_field_iflet",
     "pattern_mutref_field_match",
+    // A dashed arm segment explains itself on hover (#626).
+    "dashed_arm_hover",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9386,6 +9388,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m1's mutable reference is moved (not the resource it points to)",
             "q1's reference is copied (not the value it points to)",
             "u1's mutable reference is moved (not the value it points to)",
+    // A dashed arm segment says what the dashes mean (#626): the arm isn't
+    // running on those lines, so nothing happens to the variable there.
+    // Solid segments keep the ownership text. `c` has no arm columns.
+    TooltipExpect {
+        name: "dashed_arm_hover",
+        must_contain: &[
+            "s on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to s here",
+            "t on the path through the _ arm: the _ arm isn't running on these lines (another arm's code is here), so nothing happens to t here",
+            "opt on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to opt here",
+            "s is the owner of the resource",
+            "t is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "nothing happens to c here",
+            "the if branch isn't running on these lines (another arm's",
+            "the _ arm isn't running on these lines (another branch's",
         ],
     },
     // ─── `let` patterns that ignore parts of a literal (#439) ───────
