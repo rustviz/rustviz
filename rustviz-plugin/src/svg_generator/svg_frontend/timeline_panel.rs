@@ -2072,6 +2072,12 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         | Event::MutableBorrow { is: ResourceTy::Value(_), .. }
         | Event::InitRefParam { .. } => true,
         Event::Move { .. } | Event::LoopExitMove { definite: true, .. } | Event::ClosureCall { .. } => false,
+        // A variable that has gone out of scope holds nothing. When
+        // same-named variables of disjoint branches share a column
+        // (`if let Some(z) = a {…} else if let Some(z) = b {…}`), the
+        // next one's first event initializes a new variable; it isn't an
+        // assignment to the one that ended.
+        Event::OwnerGoOutOfScope | Event::RefGoOutOfScope => false,
         Event::Branch { branch_history, .. } => {
             held || branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| holds_value_after(false, e)))
         }
