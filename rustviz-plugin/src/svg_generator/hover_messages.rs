@@ -458,6 +458,20 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
                 || acquire.strip_prefix(name).is_some_and(|rest| rest.starts_with(" acquires ownership of the resource the `?` takes out of "))))
 }
 
+/// `r = loop { if c { break a; } else { break b; } };` (#561, #586):
+/// the reassignment's line (`acquire` and `reassign` are on one dot)
+/// and the receiver's "acquires ownership of a resource (from whichever
+/// break ended the loop)" say one thing: "r acquires ownership of a new
+/// resource (from whichever break ended the loop); its previous
+/// resource is dropped". `None` unless `acquire` is that line, for the
+/// variable `reassign` is about.
+pub fn reassign_with_break_alt(reassign: &str, acquire: &str) -> Option<String> {
+    const NEW: &str = " acquires ownership of a new resource";
+    let name = acquire.strip_suffix(&format!(" acquires ownership of a resource{}", break_alt_receiver_suffix()))?;
+    let rest = reassign.strip_prefix(name)?.strip_prefix(NEW)?;
+    Some(format!("{name}{NEW}{}{rest}", break_alt_receiver_suffix()))
+}
+
 // A drop of an `Rc` / `Arc` / `Weak` doesn't necessarily free the value
 // it points to: it lowers a count, and only the last `Rc` / `Arc` frees
 // the value (#373). Appended wherever a drop of such an owner is

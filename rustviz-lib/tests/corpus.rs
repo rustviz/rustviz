@@ -1073,6 +1073,10 @@ const EXPECTED_OK: &[&str] = &[
     "loop_break_several_locals",
     "loop_break_several_tuple",
     "loop_break_several_fallthrough",
+    // A reference carried out by a `break` borrows what it borrowed
+    // (#585); `r = loop`'s old value is dropped where the loop ends (#586).
+    "loop_break_ref_lender",
+    "loop_break_reassign_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12020,7 +12024,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // isn't "a copy of k" when `break 0` ran.
         must_contain: &[
             "Move from a to r, if the loop ended with break a",
-            "r acquires ownership of a resource (from whichever break ended the loop)",
+            // `r`'s old value is dropped where the new one arrives (#586).
+            "r acquires ownership of a new resource (from whichever break ended the loop); its previous resource is dropped",
             "r goes out of scope. Its resource is dropped.",
             "a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
@@ -12113,6 +12118,55 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=k goes out of scope. No resource is dropped.",
             "=j goes out of scope. No resource is dropped.",
             "=r goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_ref_lender",
+        // `let r = loop { break ra; }` with `ra` a reference (#585): `r`
+        // borrows what `ra` borrowed, as `let r = ra;` does, and gives it
+        // back at its last use. The old plugin left `r` with no lender
+        // ("what it borrows from isn't shown") and, for a `&mut`, never
+        // gave `a`'s borrow back, so `a`'s scope end said it had nothing
+        // to drop (false: `a` still owns its String). Also `break &b`, a
+        // `break` in a branch, a reference declared in the loop, and two
+        // `break`s that borrow different Strings.
+        must_contain: &[
+            "Return mutably borrowed resource from r to a",
+            "a's resource is no longer mutably borrowed",
+            "a goes out of scope. Its resource is dropped.",
+            "Return immutably borrowed resource from rb to b",
+            "b's resource is no longer immutably borrowed",
+            "Return mutably borrowed resource from r to c",
+            "c goes out of scope. Its resource is dropped.",
+            "Return mutably borrowed resource from r to d",
+            "d goes out of scope. Its resource is dropped.",
+            "Return immutably borrowed resource from r to e",
+            "Return immutably borrowed resource from r to f",
+        ],
+        must_not_contain: &[
+            "what it borrows from isn't shown",
+            "=a goes out of scope. No resource is dropped.",
+            "=c goes out of scope. No resource is dropped.",
+            "=d goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_reassign_drop",
+        // `r = loop { … }` (#586): the old value is dropped when the
+        // loop's value is assigned, so the drop shares the arrival's dot
+        // (row: see `reassign_from_a_loop_drops_where_the_loop_ends`).
+        // With several `break`s the two read as one line; the old plugin
+        // drew the drop on the `t = loop {` row and the arrival on its
+        // own dot.
+        must_contain: &[
+            "r acquires ownership of a new resource; its previous resource is dropped",
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "t acquires ownership of a new resource (from whichever break ended the loop); its previous resource is dropped",
+            "r goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=t acquires ownership of a resource (from whichever break ended the loop)",
         ],
     },
 ];
@@ -15848,6 +15902,53 @@ fn no_join_dot_floats_after_every_branch_moves() {
     ] {
         let timeline = run_with_local_backend(name).timeline_panel_string();
         assert_eq!(unconnected_dots(&timeline, skip), Vec::<String>::new(), "{}: dots no line reaches", name);
+    }
+}
+
+/// #585: `r` borrows what the reference a `break` carries borrowed, and
+/// (borrow-checker view) the lender stays borrowed until `r`'s last use,
+/// the `println!` below the loop. The old plugin never gave the borrow
+/// back (no such dot at all).
+#[test]
+fn a_reference_out_of_a_loop_is_returned_at_the_receivers_last_use() {
+    let rv = run_with_local_backend("loop_break_ref_lender");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (lender, last_use) in [
+        ("a", "println!(\"{}\", r);"),
+        ("c", "println!(\"in branch: {}\", r);"),
+        ("d", "println!(\"in loop: {}\", r);"),
+    ] {
+        let want = code_row_y(&code, last_use);
+        let dots = dots_listing_tooltip(&tl, &format!("{}'s resource is no longer mutably borrowed", lender));
+        assert!(
+            dots.len() == 1 && dots[0].1 == want,
+            "{}'s borrow should end at y={} (`{}`), found {:?}",
+            lender, want, last_use, dots
+        );
+    }
+}
+
+/// #586: in `r = loop { … }` the loop runs first; the old value is
+/// dropped when the loop's value is assigned, with the new value's
+/// arrival (`rows` below `r = loop {`): where the loop ends for a
+/// `break` in a branch, on the `break a;` row for `s`'s unconditional
+/// `break`. The old plugin drew the drop on the `r = loop {` row.
+#[test]
+fn reassign_from_a_loop_drops_where_the_loop_ends() {
+    let rv = run_with_local_backend("loop_break_reassign_drop");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (assign, drop, rows) in [
+        ("r = loop {", "r acquires ownership of a new resource; its previous resource is dropped", 3.0),
+        ("s = loop {", "s acquires ownership of a new resource; its previous resource is dropped", 4.0),
+        ("t = loop {", "t acquires ownership of a new resource (from whichever break ended the loop); its previous resource is dropped", 2.0),
+    ] {
+        let want = code_row_y(&code, assign) + rows * 30.0;
+        let dots = dots_listing_tooltip(&tl, drop);
+        assert!(
+            dots.len() == 1 && dots[0].1 == want,
+            "`{}`: the old value's drop should be at y={} (where the loop ends), found {:?}",
+            assign, want, dots
+        );
     }
 }
 

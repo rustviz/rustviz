@@ -2761,7 +2761,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // borrows from every branch's lender until its last use (#337).
     // Each branch draws its own borrow (`match_rhs`'s If / Match
     // arms); this records the union, so all of them are given back.
-    if let Some(tails) = branch_tails(expr) {
+    // So does a `loop` for the values its `break`s carry (`let r =
+    // loop { break ra; }` borrows what `ra` borrows, #585). A value
+    // naming a variable declared in the loop isn't known before the
+    // loop is visited; `inherit_break_lenders` adds it when its `break`
+    // is paired.
+    let loop_tails = || loop_break_tails(expr)
+      .map(|ts| ts.into_iter().filter(|t| self.locals_registered(t)).collect::<Vec<_>>());
+    if let Some(tails) = branch_tails(expr).or_else(loop_tails) {
       let mut lenders: Vec<ResourceTy> = Vec::new();
       for tail in tails {
         let (l, _, co) = self.get_ref_data_co(tail);
@@ -2799,6 +2806,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => Vec::new(),
     };
     (lender, aliasing, co_lenders)
+  }
+
+  /// Whether every variable `e` names has a column already.
+  fn locals_registered(&self, e: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::intravisit::{self, Visitor};
+    struct Check<'b, 'tcx> { tcx: TyCtxt<'tcx>, raps: &'b HashMap<String, RapData>, ok: bool }
+    impl<'b, 'tcx> Visitor<'tcx> for Check<'b, 'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Path(QPath::Resolved(None, p)) = e.kind {
+          if matches!(p.res, Res::Local(_)) && !self.raps.contains_key(&path_key(p, &self.tcx)) {
+            self.ok = false;
+          }
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let mut c = Check { tcx: self.tcx, raps: &self.raps, ok: true };
+    c.visit_expr(e);
+    c.ok
+  }
+
+  /// `let r = loop { … break k; }` with `r` a reference: once a
+  /// `break` value is paired with `r`, `r` borrows what the loop's
+  /// `break` values borrow, as `let r = k;` would (#585).
+  /// `define_lhs` could only see the values whose variables were
+  /// declared before the loop.
+  pub fn inherit_break_lenders(&mut self, lhs: &ResourceTy, loop_id: rustc_hir::HirId) {
+    let ResourceTy::Value(r) = lhs else { return };
+    if !r.is_ref() || !self.borrow_map.contains_key(r.name()) || self.holder_shadowed(r.name()) {
+      return;
+    }
+    let rustc_hir::Node::Expr(loop_expr) = self.tcx.hir_node(loop_id) else { return };
+    let (lender, aliasing, static_lender, co_lenders) = self.get_ref_data_full(loop_expr);
+    if let Some(rd) = self.borrow_map.get_mut(r.name()) {
+      rd.lender = lender;
+      rd.aliasing = aliasing;
+      rd.static_lender = static_lender;
+      rd.co_lenders = co_lenders;
+    }
   }
 
   fn get_ref_data_single(&self, expr: &'tcx Expr<'tcx>) -> (ResourceTy, VecDeque<String>){
@@ -6242,6 +6288,28 @@ fn insert_in_arm(
     arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
   }
   arm.e_data.insert(at, ev);
+}
+
+/// The values the `break`s of a `loop` carry out of it (`let r = loop
+/// { … break ra; }`), as `branch_tails` gives a conditional's: `None`
+/// for anything else, or a loop none of whose `break`s carries a value.
+pub fn loop_break_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find<'tcx> { id: rustc_hir::HirId, out: Vec<&'tcx Expr<'tcx>> }
+  impl<'tcx> Visitor<'tcx> for Find<'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Break(dest, Some(v)) = e.kind {
+        if dest.target_id == Ok(self.id) {
+          self.out.push(v);
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = e.kind else { return None };
+  let mut f = Find { id: e.hir_id, out: Vec::new() };
+  intravisit::walk_expr(&mut f, e);
+  (!f.out.is_empty()).then_some(f.out)
 }
 
 /// The expressions an `if` / `match` (or a block ending in one)

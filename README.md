@@ -302,11 +302,6 @@ rather than listed here.
   receiver where the loop ends. So do several (`if c { break a; } else
   { break b; }`): each arrow says it happened only if its `break` ended
   the loop, and `a` and `b` are each shown as maybe moved.
-- A reference that a `break` carries out of a loop (`let r = loop {
-  break ra; }`) isn't linked back to what it borrows: its borrow end
-  says "what it borrows from isn't shown", and for a `&mut` the lender
-  is shown with nothing to drop at the end of its scope ("No resource
-  is dropped"), which is false.
 - Leaving early drops what is left behind, right there: a `return` or
   a panic (`panic!()`, `unreachable!()`, `todo!()`, which unwind) drops
   every value the function still owns, a `break` / `continue` the
