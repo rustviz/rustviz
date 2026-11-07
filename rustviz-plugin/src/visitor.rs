@@ -12,7 +12,7 @@ use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_middle::ty::adjustment::*;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
@@ -334,6 +334,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         for a in args {
           self.descend_through_expansion(a);
         }
+        // A panic macro unwinds once its message's arguments have
+        // been evaluated (and borrowed) (#410).
+        self.note_panic(expr);
       }
       ExprKind::MethodCall(_, recv, args, _) => {
         // `write!(dst, …)` is `dst.write_fmt(format_args!(…))`, which
@@ -394,7 +397,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // events, function-dot icon on the timeline). Skip the arms —
       // their bodies are synthetic panics we don't want to surface
       // as user events.
-      ExprKind::Match(scrutinee, _, _) => {
+      ExprKind::Match(scrutinee, _, source) => {
         // `dbg!(a, b)` is `match (a, b,) { args => { …eprint…; (tmp_1, tmp_2) } }`:
         // each argument is passed by value into the macro and handed
         // back as its result. As a statement the result is then
@@ -413,6 +416,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           return;
         }
         self.descend_through_expansion(scrutinee);
+        // `e?`: the `Err` / `None` arm returns from the function.
+        if let rustc_hir::MatchSource::TryDesugar(_) = source {
+          self.note_try(expr);
+        }
       }
       // Symmetric for `if cond { … } else { … }` desugarings (older
       // assert! shapes, `?`'s ControlFlow check, etc.). Walk the
@@ -774,69 +781,256 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 }
 
-impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
-  /// Emit a GoOutOfScope at a `return` for each local that is in
-  /// scope there and still owns a resource (#363): Rust drops them
-  /// when the function returns. Copy values and references own
-  /// nothing to drop. A local named in the returned expression is
-  /// left out: it may be what's returned (moved to the caller).
-  /// Locals declared inside a branch already get their own
-  /// GoOutOfScope at the branch's end.
-  fn drop_locals_on_return(&mut self, ret_expr: &'tcx Expr<'tcx>, ret: Option<&'tcx Expr<'tcx>>) {
-    struct LocalNames<'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, names: HashSet<String> }
-    impl<'tcx> Visitor<'tcx> for LocalNames<'tcx> {
-      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-        if let ExprKind::Path(QPath::Resolved(_, p)) = e.kind {
+/// Names of the locals that evaluating `e` for its value may move out
+/// of, wholly or in part (a field), so a `return e` / `break e` may
+/// hand them on rather than drop them. One that `e` only borrows
+/// (`s.len()`, `&s`, `s == t`) or copies is left out: it's still
+/// dropped at the exit (#410). Shapes not handled below count every
+/// local they name as moved, which errs on the side of not drawing a
+/// drop.
+fn locals_moved_by<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx>) -> BTreeSet<String> {
+  struct Scan<'tcx> {
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+    env: rustc_middle::ty::TypingEnv<'tcx>,
+    moved: BTreeSet<String>,
+  }
+  impl<'tcx> Scan<'tcx> {
+    /// `by_value`: the value of `e` is taken here, not borrowed.
+    fn scan(&mut self, e: &'tcx Expr<'tcx>, by_value: bool) {
+      // An autoref (`s.len()`) borrows the place; a Copy value is
+      // copied out of it.
+      let borrowed = self.typeck.expr_adjustments(e).iter()
+        .any(|a| matches!(a.kind, Adjust::Borrow(_)));
+      let ty = self.typeck.expr_ty(e);
+      let by_value = by_value && !borrowed && !self.tcx.type_is_copy_modulo_regions(self.env, ty);
+      match e.kind {
+        ExprKind::Path(QPath::Resolved(_, p)) => {
           if let Res::Local(id) = p.res {
-            // The variable's own name (`s₂` for a second `let s`).
-            self.names.insert(binding_name(&self.tcx, id));
+            if by_value {
+              self.moved.insert(binding_name(&self.tcx, id));
+            }
           }
         }
-        intravisit::walk_expr(self, e);
+        ExprKind::Path(_) | ExprKind::Lit(_) => {}
+        ExprKind::AddrOf(_, _, inner) => self.scan(inner, false),
+        // Moving a field out moves out of the struct.
+        ExprKind::Field(base, _) => self.scan(base, by_value),
+        // Nothing moves out of an index (only Copy values are read).
+        ExprKind::Index(base, idx, _) => {
+          self.scan(base, false);
+          self.scan(idx, true);
+        }
+        // Only a Box can be moved out of through `*`.
+        ExprKind::Unary(UnOp::Deref, inner) => {
+          let boxed = self.typeck.expr_ty(inner).is_box();
+          self.scan(inner, by_value && boxed);
+        }
+        ExprKind::Unary(_, inner) | ExprKind::Cast(inner, _) | ExprKind::DropTemps(inner) =>
+          self.scan(inner, true),
+        // Comparisons take their operands by reference.
+        ExprKind::Binary(op, l, r) => {
+          let by_ref = matches!(op.node, rustc_hir::BinOpKind::Eq | rustc_hir::BinOpKind::Ne
+            | rustc_hir::BinOpKind::Lt | rustc_hir::BinOpKind::Le
+            | rustc_hir::BinOpKind::Gt | rustc_hir::BinOpKind::Ge);
+          self.scan(l, !by_ref);
+          self.scan(r, !by_ref);
+        }
+        ExprKind::MethodCall(_, recv, args, _) => {
+          self.scan(recv, true);
+          for a in args { self.scan(a, true); }
+        }
+        ExprKind::Call(callee, args) => {
+          self.scan(callee, true);
+          for a in args { self.scan(a, true); }
+        }
+        ExprKind::Tup(items) | ExprKind::Array(items) => {
+          for i in items { self.scan(i, true); }
+        }
+        // A macro's own blocks, e.g. `format!`'s: its arguments are
+        // borrowed (`(&s,)`) in a `let` inside.
+        ExprKind::Block(b, _) if e.span.from_expansion() => {
+          for st in b.stmts {
+            match st.kind {
+              StmtKind::Let(l) => if let Some(init) = l.init { self.scan(init, true) },
+              StmtKind::Expr(x) | StmtKind::Semi(x) => self.scan(x, true),
+              StmtKind::Item(_) => {}
+            }
+          }
+          if let Some(tail) = b.expr {
+            self.scan(tail, by_value);
+          }
+        }
+        _ => {
+          struct All<'a, 'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, moved: &'a mut BTreeSet<String> }
+          impl<'a, 'tcx> Visitor<'tcx> for All<'a, 'tcx> {
+            fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+              if let ExprKind::Path(QPath::Resolved(_, p)) = e.kind {
+                if let Res::Local(id) = p.res {
+                  self.moved.insert(binding_name(&self.tcx, id));
+                }
+              }
+              // A closure's body isn't walked; what it captures is.
+              if let ExprKind::Closure(c) = e.kind {
+                if let Some(upvars) = self.tcx.upvars_mentioned(c.def_id) {
+                  for id in upvars.keys() {
+                    self.moved.insert(binding_name(&self.tcx, *id));
+                  }
+                }
+              }
+              intravisit::walk_expr(self, e);
+            }
+          }
+          All { tcx: self.tcx, moved: &mut self.moved }.visit_expr(e);
+        }
       }
     }
-    let mut returned = LocalNames { tcx: self.tcx, names: HashSet::new() };
-    if let Some(e) = ret {
-      returned.visit_expr(e);
+  }
+  let owner = e.hir_id.owner;
+  let mut scan = Scan {
+    tcx,
+    typeck: tcx.typeck(owner),
+    env: rustc_middle::ty::TypingEnv::post_analysis(tcx, owner),
+    moved: BTreeSet::new(),
+  };
+  scan.scan(e, true);
+  scan.moved
+}
+
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Emit a GoOutOfScope where the function or a loop iteration is
+  /// left early, for each variable dropped there that still owns a
+  /// resource. Rust drops them right there: at a `return` (#363) or
+  /// a panic, which unwinds (#410), every local of the function; at a
+  /// `break` / `continue` (`loop_id` is its target), those declared
+  /// inside the loop. Copy values and references own nothing to drop.
+  ///
+  /// Only variables declared before the innermost if/else or match
+  /// began are dropped here: the exit is drawn on that branch's
+  /// columns, and one declared inside the branch already gets its own
+  /// GoOutOfScope at the branch's end. `value` is the expression the
+  /// exit carries out (`return e`, `break e`); what it may move isn't
+  /// dropped. `how`: `return`, `break`, `continue` or `panic`, for the
+  /// drop of a temporary.
+  fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, how: &str) {
+    let Some(branch_at) = self.exit_frames.iter()
+      .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
+    let ExitFrame::Branch { len: branch_len, .. } = self.exit_frames[branch_at] else { return };
+    let from = match loop_id {
+      None => 0,
+      Some(target) => match self.exit_frames.iter()
+        .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target))
+      {
+        // The branch is inside the loop: drop what the iteration
+        // declared before the branch.
+        Some(i) if i < branch_at => match &self.exit_frames[i] {
+          ExitFrame::Loop { len, .. } => *len,
+          ExitFrame::Branch { .. } => return,
+        },
+        // A labelled block, or a loop inside the branch (no branch
+        // ends there).
+        _ => return,
+      },
+    };
+    let moved = value.map(|e| locals_moved_by(self.tcx, e)).unwrap_or_default();
+    let end = branch_len.min(self.in_scope.len());
+    for rap in self.droppable_locals(from, end, &moved, true, line) {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.exit_drops.insert(id);
+      // An unbound temporary's drop is stated by its own event (#457),
+      // which says what it is; the exit drops it before its scope's end.
+      let temp_ty = rap.is_unbound_temporary().then(|| self.preprocessed_events.iter()
+        .find_map(|(_, e)| match e {
+          ExternalEvent::TemporaryDrop { ro, ty, .. } if ro == &rap => Some(ty.clone()),
+          _ => None,
+        })).flatten();
+      match temp_ty {
+        Some(ty) => {
+          let when = if how == "panic" {
+            "here, as the panic unwinds".to_owned()
+          } else {
+            format!("here, where `{}` leaves early", how)
+          };
+          self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty, when, id });
+        }
+        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id }),
+      }
     }
-    let line = expr_to_line(ret_expr, &self.tcx);
-    // Sorted, so the events' order (and ids) don't depend on HashMap
-    // iteration order.
-    #[expect(clippy::disallowed_methods, reason = "sorted by name below")]
-    let mut owned: Vec<(String, ResourceAccessPoint)> = self.raps.iter()
-      .filter(|(name, rd)| {
-        let base = name.split('.').next().unwrap_or(name);
-        !rd.rap.is_copy() && rd.is_global && rd.scope >= line
-          && !returned.names.contains(base) && !self.skip_raps.contains(*name)
-      })
-      .map(|(name, rd)| (name.clone(), rd.rap.clone()))
-      .collect();
-    owned.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, rap) in owned {
-      if !self.rap_holds_resource_now(&name) && !self.param_never_moved(&name) {
+  }
+
+  /// The locals in `in_scope[from..end]` that own a value to drop at
+  /// an exit, in the order Rust drops them: reverse declaration order,
+  /// a name declared twice (shadowing) once. `moved` are the ones the
+  /// exit's value hands on; `refs` says whether to include
+  /// non-`Copy` references (`&mut T`). A temporary whose scope ended
+  /// before `line` was dropped already.
+  fn droppable_locals(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<ResourceAccessPoint> {
+    if from >= end {
+      return Vec::new();
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out = Vec::new();
+    for name in self.in_scope[from..end].iter().rev().filter(|n| seen.insert(n.as_str())) {
+      let base = name.split('.').next().unwrap_or(name);
+      let Some(rd) = self.raps.get(name) else { continue };
+      if rd.rap.is_copy() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
+        || moved.contains(base) || self.skip_raps.contains(name) {
+        continue;
+      }
+      // A temporary (#400, #457) stays in `in_scope` until its block
+      // ends, but one whose own scope (its statement, for an unbound
+      // one) ended above was dropped there already.
+      if rd.rap.is_temporary() && rd.scope < line {
+        continue;
+      }
+      if !self.owns_value_here(*rd.rap.hash()) {
+        continue;
+      }
+      out.push(rd.rap.clone());
+    }
+    out
+  }
+
+  /// The `?` operator `e?` returns early on `Err` / `None`, dropping
+  /// every value the function owns at that point (#430). That happens
+  /// on the error path only, so it isn't a drop that ends a column:
+  /// each such owner gets a dot saying so, on the line of the `?`.
+  fn note_try(&mut self, try_expr: &'tcx Expr<'tcx>) {
+    let line = span_end_line(&try_expr.span, &self.tcx);
+    let end = self.in_scope.len();
+    for rap in self.droppable_locals(0, end, &BTreeSet::new(), false, line) {
+      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
+        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
+      if dup {
         continue;
       }
       let id = *self.unique_id;
       *self.unique_id += 1;
-      self.exit_drops.insert(id);
-      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id });
+      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id });
     }
   }
 
-  /// A by-value parameter that nothing has moved out of yet. Its
-  /// ownership starts with an `InitRefParam`, which
-  /// `rap_holds_resource_now` doesn't count.
-  fn param_never_moved(&self, name: &str) -> bool {
-    fn moved_from(events: &[(usize, ExternalEvent)], name: &str) -> bool {
-      events.iter().any(|(_, e)| match e {
-        ExternalEvent::Move { from, .. } => from.extract_rap().map_or(false, |r| r.name() == name),
-        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| moved_from(&b.e_data, name)),
-        _ => false,
-      })
+  /// If `call` is a call to a panic function (what `panic!()`,
+  /// `unreachable!()`, `todo!()`, `unimplemented!()` and
+  /// `std::panic::panic_any` call), the line of the panic in the
+  /// user's code. A panic unwinds the stack, dropping every local on
+  /// the way (#410). `std::process::exit` also never returns, but
+  /// runs no destructors, so it isn't one.
+  fn panic_line(&self, call: &'tcx Expr<'tcx>) -> Option<usize> {
+    let ExprKind::Call(callee, _) = call.kind else { return None };
+    let ExprKind::Path(QPath::Resolved(_, path)) = callee.kind else { return None };
+    let Res::Def(DefKind::Fn, def_id) = path.res else { return None };
+    if !matches!(self.tcx.crate_name(def_id.krate).as_str(), "core" | "std") {
+      return None;
     }
-    let is_param = self.preprocessed_events.iter().any(|(_, e)| matches!(e,
-      ExternalEvent::InitRefParam { param, .. } if param.name() == name));
-    is_param && !moved_from(self.preprocessed_events, name)
+    let def_path = self.tcx.def_path(def_id).to_string_no_crate_verbose();
+    let unwinds = (def_path.starts_with("::panicking::")
+        && !def_path.contains("nounwind") && !def_path.contains("cannot_unwind"))
+      || def_path.ends_with("::begin_panic")
+      || def_path == "::panic::panic_any"
+      || def_path == "::panic::resume_unwind";
+    unwinds.then(|| span_to_line(&call.span.source_callsite(), &self.tcx))
   }
 
   /// Whether `e` never completes normally: its type is `!` (`return`,
@@ -883,7 +1077,75 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
-  /// Keep a `return`'s drops (`drop_locals_on_return`) only in a
+  /// Remove the drops of exits (`drop_locals_on_exit`) emitted while
+  /// event ids `ids` were handed out (see `take_branch_events`) and
+  /// still on the function's own column: they're in a branch that
+  /// isn't drawn as one (an `if` without `else`, a single-arm match),
+  /// where they'd end the column for every path.
+  fn discard_exit_drops(&mut self, ids: std::ops::Range<usize>) {
+    let exit_drops = &self.exit_drops;
+    self.preprocessed_events.retain(|(_, e)|
+      !(ids.contains(&e.get_id()) && exit_drops.contains(&e.get_id())));
+  }
+
+  /// The ranges of event ids that bind the value of each of these
+  /// branch bodies to a `let` (`rhs_arm_ids`), for those that have one.
+  fn rhs_ids_of(&self, bodies: impl IntoIterator<Item = Option<&'tcx Expr<'tcx>>>) -> Vec<std::ops::Range<usize>> {
+    bodies.into_iter().flatten()
+      .filter_map(|b| self.rhs_arm_ids.get(&b.hir_id))
+      .map(|&(lo, hi)| lo..hi)
+      .collect()
+  }
+
+  /// `drop_locals_on_exit` for a panic call inside a branch.
+  fn note_panic(&mut self, call: &'tcx Expr<'tcx>) {
+    if let Some(line) = self.panic_line(call) {
+      self.drop_locals_on_exit(line, None, None, "panic");
+    }
+  }
+
+  /// Whether the variable `hash` owns a value at this point on every
+  /// path that reaches it, from the events so far: given one (`let`,
+  /// assignment, by-value parameter) and not moved out since. When a
+  /// conditional above moved it, or gave it a value, on some paths
+  /// only, it's false: whether it's dropped here then depends on the
+  /// path (Rust's drop flag), which an exit's drop dot can't say.
+  fn owns_value_here(&self, hash: u64) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Own { Yes, No, Maybe }
+    fn step(events: &[(usize, ExternalEvent)], hash: u64, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
+      let is = |r: &ResourceTy| *r.hash() == hash;
+      for (_, e) in events {
+        if hide.iter().any(|ids| ids.contains(&e.get_id())) {
+          continue;
+        }
+        own = match e {
+          ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
+            if is(to) => Own::Yes,
+          ExternalEvent::Move { from, .. } if is(from) => Own::No,
+          ExternalEvent::InitRefParam { param, .. } if *param.hash() == hash => Own::Yes,
+          // A branch that diverges doesn't reach this point.
+          ExternalEvent::Branch { branches, .. } => {
+            let mut ends = branches.iter().filter(|b| !b.diverges).map(|b| step(&b.e_data, hash, &[], own));
+            match ends.next() {
+              None => own,
+              Some(first) => if ends.all(|o| o == first) { first } else { Own::Maybe },
+            }
+          }
+          _ => own,
+        };
+      }
+      own
+    }
+    // Events of other branches of the conditionals the exit is in.
+    let hide: Vec<std::ops::Range<usize>> = self.exit_frames.iter().flat_map(|f| match f {
+      ExitFrame::Branch { hide, .. } => hide.clone(),
+      ExitFrame::Loop { .. } => Vec::new(),
+    }).collect();
+    step(self.preprocessed_events, hash, &hide, Own::No) == Own::Yes
+  }
+
+  /// Keep an exit's drops (`drop_locals_on_exit`) only in a
   /// branch that diverges, i.e. one that always leaves through them;
   /// in one that doesn't (the `return` is in a nested `if` without
   /// `else`), they'd end the branch's columns for the paths that go
@@ -1188,6 +1450,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
           }
         }
+        // `std::panic::panic_any(…)` written out (#410): it unwinds
+        // once its argument has been passed.
+        self.note_panic(expr);
       }
       
       // <expr>.<function>([args])
@@ -1784,11 +2049,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
         // Leaving the function also drops every value it still owns
-        // (#363). Inside a branch, those drops are drawn on the
-        // branch's columns, at the `return`.
-        if self.inside_branch {
-          self.drop_locals_on_return(expr, ret);
-        }
+        // (#363), except what `ret` moves to the caller (#410). Inside
+        // a branch, those drops are drawn on the branch's columns, at
+        // the `return`.
+        self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, "return");
       }
 
       // a block eg: {}
@@ -1801,7 +2065,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let new_scope = self.tcx.sess.source_map().lookup_char_pos(expr.span.hi()).line;
         self.current_scope = new_scope;
         let before = label.map(|_| self.rap_names());
+        let entry_len = self.in_scope.len();
         self.visit_block(block); // visit all the statements in the block
+        self.in_scope.truncate(entry_len);
           self.current_scope = prev_scope;
         // A labeled block (`'a: { … break 'a; … }`) can also end by
         // running to its end.
@@ -1929,6 +2195,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // `take_branch_events`. An if-let's pattern bindings happen
         // only when the branch is taken, so they start `if_ids`; the
         // scrutinee is evaluated either way and stays outside.
+        let entry_len = self.in_scope.len();
         let if_lo;
         let if_hash_lo;
         let iflet_bindings: HashSet<ResourceAccessPoint> =
@@ -1945,10 +2212,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             if_hash_lo = self.rap_hashes;
             HashSet::new()
           };
+        // Restored, not reset: this `if` may sit inside another branch
+        // (#410).
+        let prev_inside_branch = self.inside_branch;
         self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
         // Both branches start from the same set of uninitialized
         // `let x;` locals (#234); see join_uninit_locals.
         let uninit_before = self.uninit_locals.clone();
+        // An exit in a branch sees neither the other branch's events
+        // nor the binding of the `if`'s value to a `let` (#410).
+        let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
+        self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide });
         self.visit_expr(&if_expr);
         // Everything declared in each branch, also inside an inline
         // construct nested in it (an `else if let`'s bindings, #501):
@@ -1959,6 +2233,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let if_ids = if_lo..*self.unique_id;
         let else_decl = match else_expr {
           Some(e) => {
+            // The if-body's events stay in `preprocessed_events` until
+            // both branches are visited; they aren't on the `else`'s
+            // path.
+            if let Some(ExitFrame::Branch { hide, .. }) = self.exit_frames.last_mut() {
+              hide.push(if_ids.clone());
+            }
             self.visit_expr(e);
             get_decl_of_expr(e, &self.tcx, &self.raps)
           }
@@ -1971,7 +2251,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let uninit_after_else = std::mem::take(&mut self.uninit_locals);
         self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if), (else_expr, uninit_after_else)]);
         let else_ids = if_ids.end..*self.unique_id;
-        self.inside_branch = false;
+        self.exit_frames.pop();
+        // The `if let` bindings go out of scope with the `if`.
+        self.in_scope.truncate(entry_len);
+        self.inside_branch = prev_inside_branch;
 
         // compute split and merge points
         let line_num = expr_to_line(&guard_expr, &self.tcx);
@@ -2020,6 +2303,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
             if !events_move_out_of_outer(&body_ev, &if_scope) {
+                // The body may be skipped, so a `return` / `break` /
+                // panic in it doesn't end the columns it's drawn on;
+                // its drops aren't drawn (#410).
+                self.discard_exit_drops(if_ids.clone());
                 for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
                     self.preprocessed_events.push((
                         if_end,
@@ -2187,6 +2474,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       }
 
       ExprKind::Loop(block, _, loop_ty, _span) => {
+        // What a `break` / `continue` in the body drops (#410). A
+        // for-loop's frame is pushed where its body is visited, in the
+        // ForLoopDesugar arm.
+        let entry_len = self.in_scope.len();
+        if !matches!(loop_ty, rustc_hir::LoopSource::ForLoop) {
+          self.exit_frames.push(ExitFrame::Loop { id: expr.hir_id, len: entry_len });
+        }
         match loop_ty {
           rustc_hir::LoopSource::While => {
             // rustc lowers `while cond { body }` to:
@@ -2232,13 +2526,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.emit_scope_end(decls, body_end);
                 // A `while` also ends when its condition is false.
                 self.emit_loop_exit_moves(expr, None, &before, true);
-                return;
+              } else {
+                self.inside_branch = true;
+                self.visit_block(block);
+                self.inside_branch = prev;
               }
+            } else {
+              // Defensive fallback if a future rustc tweaks the desugar.
+              self.inside_branch = true;
+              self.visit_block(block);
+              self.inside_branch = prev;
             }
-            // Defensive fallback if a future rustc tweaks the desugar.
-            self.inside_branch = true;
-            self.visit_block(block);
-            self.inside_branch = prev;
           }
           rustc_hir::LoopSource::Loop => {
             // Bare `loop { body }`. No condition, no iterand — render
@@ -2269,6 +2567,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // already handled the body, so walking it again would
             // double-emit events. No-op.
           }
+        }
+        if !matches!(loop_ty, rustc_hir::LoopSource::ForLoop) {
+          self.exit_frames.pop();
+          self.in_scope.truncate(entry_len);
         }
       }
 
@@ -2356,7 +2658,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // locals (#234); see join_uninit_locals.
             let uninit_before = self.uninit_locals.clone();
             let mut uninit_ends = Vec::new();
+            // An exit in an arm doesn't see the binding of any arm's
+            // value to a `let` (#410): it happens after the match. The
+            // earlier arms' own events are out of `preprocessed_events`
+            // by then (`take_branch_events` below), except a lone
+            // arm's, which has no siblings.
+            let entry_len = self.in_scope.len();
+            let match_lo = *self.unique_id;
+            let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
+            self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide });
             for arm in arms.iter() {
+              // An arm's pattern bindings are out of scope in the next.
+              self.in_scope.truncate(entry_len);
               let arm_hash_lo = self.rap_hashes;
               let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
               let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
@@ -2543,14 +2856,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 pat_decls.extend(guard_decls);
               }
 
-              // visit expr
+              // visit expr. inside_branch is restored, not reset: the
+              // match may sit inside another branch (#410).
+              let prev_inside_branch = self.inside_branch;
               self.inside_branch = true;
               self.uninit_locals = uninit_before.clone();
               let body_lo = *self.unique_id;
               self.visit_expr(arm.body);
               let body_ids = body_lo..*self.unique_id;
               uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
-              self.inside_branch = false;
+              self.inside_branch = prev_inside_branch;
 
               all_pat_decls = &all_pat_decls | &pat_decls;
               let mut arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
@@ -2622,11 +2937,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
             }
             self.join_uninit_locals(uninit_ends);
+            self.exit_frames.pop();
+            self.in_scope.truncate(entry_len);
             // Single-arm: events already routed through
             // add_external_event during the loop, nothing else
             // to do — bail out of the Normal arm before the
-            // multi-arm Branch construction below.
+            // multi-arm Branch construction below. An exit in the
+            // lone arm isn't drawn: the arm isn't a column of its
+            // own (#410).
             if inline {
+                self.discard_exit_drops(match_lo..*self.unique_id);
                 return;
             }
             // Variables introduced by an arm's pattern only exist
@@ -2773,6 +3093,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 //                             columns aren't empty.
                 let prev_inside_branch = self.inside_branch;
                 self.inside_branch = true;
+                // A `break` / `continue` names the inner `loop` as its
+                // target, and drops the loop variable too (#410).
+                let entry_len = self.in_scope.len();
+                if let Some(outer_arm) = arms.first() {
+                  self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len });
+                }
                 if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
                   let pat_name = binding_name(&self.tcx, pat_hirid);
                   let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -2872,12 +3198,34 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 if let Some(loop_expr) = arms.first().map(|a| a.body) {
                   self.emit_loop_exit_moves(loop_expr, None, &before, true);
                 }
+                if arms.first().is_some() {
+                  self.exit_frames.pop();
+                }
+                self.in_scope.truncate(entry_len);
               }
             }
           }
+          // `e?`: the `Err` / `None` arm returns from the function
+          // (#430). The scrutinee `Try::branch(e)` was visited above.
+          rustc_hir::MatchSource::TryDesugar(_) => self.note_try(expr),
           _ => {}
         }
       }
+      // `break` / `continue` leave the loop's iteration, dropping
+      // what it declared (#410); a `break` in a labelled block
+      // (no loop) drops nothing drawn here.
+      ExprKind::Break(dest, value) => {
+        intravisit::walk_expr(self, expr);
+        if let Ok(target) = dest.target_id {
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), "break");
+        }
+      }
+      ExprKind::Continue(dest) => {
+        if let Ok(target) = dest.target_id {
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), None, Some(target), "continue");
+        }
+      }
+
       _ => {
         intravisit::walk_expr(self, expr);
       }
