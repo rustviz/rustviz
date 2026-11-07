@@ -2390,7 +2390,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // via `add_external_event` (single-arm inline: events
               // join the global timeline before `visit_expr` so they
               // appear in source order with the body).
-              match arm.pat.kind {
+              let arm_pat = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, pat_line);
+              match arm_pat.kind {
                 // (<pat>, <pat>, ..) => <expr>
                 // First need to annotate events that occur between parents (the variables being matched upon)
                 // and the pattern bindings in each arm.
@@ -2413,7 +2414,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   // `t.1`. (A tuple-literal scrutinee has one parent per
                   // element already.)
                   let part_parents = if parents.len() == 1 {
-                    self.pat_parts(arm.pat, &parents[0], parents_ty[0])
+                    self.pat_parts(arm_pat, &parents[0], parents_ty[0])
                   } else {
                     None
                   };
@@ -2463,7 +2464,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     let mut associated_ro = Vec::new();
                     // `P { a, b } => …` on a struct variable: `a` / `b`
                     // come from `p.a` / `p.b` (#326).
-                    self.get_dec_of_pat_parts(arm.pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
+                    self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -3942,6 +3943,96 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .cloned()
       .collect();
     declared
+  }
+
+  /// The pattern that stands for a match arm's or-pattern
+  /// (`Ok(s) | Err(s) =>`) when drawing its bindings: the first
+  /// alternative (#503). Every alternative binds the same names with
+  /// the same types and binding modes. What can differ is the place a
+  /// name is bound from, when that place has a column of its own: a
+  /// value of a tuple of several matched values (`match (a, b) {
+  /// (Some(x), _) | (_, Some(x)) => … }`), or a part of a tuple or
+  /// struct with element / field columns (`match t { (x, _) | (_, x)
+  /// => … }`, #189). Which one `x` comes from is then decided at run
+  /// time, so that panics (reported as "can't visualize this yet")
+  /// rather than draw `x` as taken from the first.
+  fn or_arm_stand_in(
+    &self,
+    pat: &'tcx Pat<'tcx>,
+    parents: &[ResourceTy],
+    parents_ty: &[rustc_middle::ty::Ty<'tcx>],
+    line: usize,
+  ) -> &'tcx Pat<'tcx> {
+    let PatKind::Or(alts) = pat.kind else { return pat };
+    let first = self.or_alt_sources(&alts[0], parents, parents_ty);
+    for alt in &alts[1..] {
+      let other = self.or_alt_sources(alt, parents, parents_ty);
+      if let Some(name) = first.keys().find(|n| other.get(*n) != first.get(*n)) {
+        panic!("or-patterns that bind `{}` from different places in the value being matched (line {}) \
+                aren't supported yet",
+          name, line);
+      }
+    }
+    self.or_arm_stand_in(&alts[0], parents, parents_ty, line)
+  }
+
+  /// Each binding of a match arm's pattern `alt`, and the place it's
+  /// bound from, the way the arm code below picks it (one parent per
+  /// element of a tuple-literal scrutinee, then `pat_parts`).
+  fn or_alt_sources(
+    &self,
+    alt: &'tcx Pat<'tcx>,
+    parents: &[ResourceTy],
+    parents_ty: &[rustc_middle::ty::Ty<'tcx>],
+  ) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    match alt.kind {
+      PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) if parents.len() > 1 && ps.len() == parents.len() => {
+        for (i, p) in ps.iter().enumerate() {
+          self.pat_sources(p, &parents[i], parents_ty[i], &format!("{}:", i), &mut out);
+        }
+      }
+      _ if parents.len() == 1 => self.pat_sources(alt, &parents[0], parents_ty[0], "", &mut out),
+      _ => {
+        let mut bs = Vec::new();
+        binding_pats(alt, &mut bs);
+        for b in bs {
+          if let PatKind::Binding(_, _, ident, _) = b.kind {
+            out.insert(ident.to_string(), "*".to_owned());
+          }
+        }
+      }
+    }
+    out
+  }
+
+  /// See `or_alt_sources`; mirrors `get_dec_of_pat_parts`.
+  fn pat_sources(
+    &self,
+    pat: &'tcx Pat<'tcx>,
+    parent: &ResourceTy,
+    parent_ty: rustc_middle::ty::Ty<'tcx>,
+    prefix: &str,
+    out: &mut BTreeMap<String, String>,
+  ) {
+    let whole = |p: &'tcx Pat<'tcx>, out: &mut BTreeMap<String, String>| {
+      let mut bs = Vec::new();
+      binding_pats(p, &mut bs);
+      for b in bs {
+        if let PatKind::Binding(_, _, ident, _) = b.kind {
+          out.insert(ident.to_string(), format!("{}{}", prefix, parent.real_name()));
+        }
+      }
+    };
+    match self.pat_parts(pat, parent, parent_ty) {
+      Some(subs) => for (sp, part) in subs {
+        match part {
+          Some((part_rty, part_ty)) => self.pat_sources(sp, &part_rty, part_ty, prefix, out),
+          None => whole(sp, out),
+        }
+      },
+      None => whole(pat, out),
+    }
   }
 
   /// Set the uninitialized-locals state after a branch construct from

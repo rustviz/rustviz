@@ -242,8 +242,6 @@ panic.
 - A closure that uses one field or element (`move || p.name.len()`,
   `move || t.0.len()`) is drawn as capturing the whole variable, so its
   other fields are shown as moved.
-- An or-pattern arm (`Ok(s) | Err(s) => …`) binds nothing, so the
-  matched value is shown as still dropping what the arm moved out.
 
 **Crashes the plugin:** some valid programs do. The playground then shows
 "RustViz can't visualize this program yet" with a link to report it.

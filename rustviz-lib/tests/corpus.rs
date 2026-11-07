@@ -768,6 +768,11 @@ const EXPECTED_OK: &[&str] = &[
     "field_mut_borrow_through_ref",
     // Copying out of an `if let` scrutinee doesn't branch it (#496).
     "if_let_copy_and_move_out_of_scrutinee",
+    // Or-pattern arms bind their names like a single pattern (#503).
+    "or_pattern_arm",
+    "or_pattern_arms",
+    "or_pattern_if_let",
+    "or_pattern_shadow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8297,6 +8302,60 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g2 is moved into the call (an FnOnce closure can only be called once). u, which g2 captured, is dropped during the call",
         ],
     },
+    // ─── Or-pattern arms (#503) ──────────────────────────────────────
+    TooltipExpect {
+        name: "or_pattern_arm",
+        // `Ok(s) | Err(s) =>` moves the String out of `r` whichever
+        // variant it is; `s` drops it at the end of the arm, so `r` has
+        // nothing left to drop. (main drew no `s` at all and had `r`
+        // drop the String.)
+        must_contain: &[
+            "Partial move from r to s",
+            "r's resource is moved",
+            "s acquires ownership of a resource",
+            "s goes out of scope. Its resource is dropped.",
+            "r goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "or_pattern_arms",
+        // Nested (`Some(Ok(s) | Err(s))`), through a reference
+        // (`match &r { Ok(t) | Err(t) => … }` borrows), and with a guard
+        // on Copy values (`Ok(k) | Err(k) if k > 0`).
+        must_contain: &[
+            "Partial move from o to s",
+            "s goes out of scope. Its resource is dropped.",
+            "o goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Partial immutable borrow from r to t",
+            "t immutably borrows a resource",
+            "r goes out of scope. Its resource is dropped.",
+            "Partial copy from n to k",
+            "k is initialized with a copy of n",
+        ],
+        must_not_contain: &["o goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "or_pattern_if_let",
+        // `if let Ok(s) | Err(s) = r` binds `s` too.
+        must_contain: &[
+            "Move from r to s",
+            "s acquires ownership of a resource",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "or_pattern_shadow",
+        // An or-pattern binding that shadows an outer `s` gets its own
+        // column `s₂` (#253, #503); the outer `s` is still live after.
+        must_contain: &[
+            "Partial move from r to s₂",
+            "s₂ goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -10061,6 +10120,27 @@ fn guard_that_moves_is_refused() {
     let msg = err.to_string();
     assert!(msg.contains("match guards that move or assign a variable declared outside the guard (`s`"),
         "expected the guard-move refusal, got:\n{}", msg);
+}
+
+/// An or-pattern over a tuple of several matched values that binds `x`
+/// from `a` in one alternative and from `b` in the other (#503): which
+/// one `x` comes from is only known at run time, so the plugin refuses
+/// rather than draw `x` as taken from `a`.
+#[test]
+fn or_pattern_binding_from_different_values_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    let src = "fn main() {\n\
+               \x20   let a: Option<String> = None;\n\
+               \x20   let b = Some(String::from(\"b\"));\n\
+               \x20   match (a, b) {\n\
+               \x20       (Some(x), _) | (_, Some(x)) => println!(\"{}\", x),\n\
+               \x20       _ => println!(\"none\"),\n\
+               \x20   }\n\
+               }\n";
+    let err = Rustviz::new(src).expect_err("an or-pattern binding from either value must not render");
+    let msg = err.to_string();
+    assert!(msg.contains("or-patterns that bind `x` from different places in the value being matched"),
+        "expected the or-pattern refusal, got:\n{}", msg);
 }
 
 /// A `return` inside a branch drops every value the function still owns

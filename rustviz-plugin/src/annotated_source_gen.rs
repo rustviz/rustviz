@@ -376,6 +376,12 @@ pub fn annotate_pat(&mut self, pat: &Pat) {
         self.annotate_pat(p);
       }
     },
+    // `Ok(s) | Err(s)`: each alternative's `s` is the same variable (#503).
+    PatKind::Or(alts) => {
+      for p in alts.iter() {
+        self.annotate_pat(p);
+      }
+    },
     _ => {}
   }
 }
