@@ -1317,8 +1317,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               };
 
               // add event
+              // (None if the old reference was moved on, `let r2 = r;`
+              // before `r = &mut t;`: r had no borrow left to end, #209.)
               let borrowers = get_borrowers(&lhs_rty.real_name(), &self.borrow_map);
-              if borrowers.len() > 1 { // there is another active reference at this point, the resource cannot be returned
+              if self.ref_handed_off(lhs_rap.name()) {
+              }
+              else if borrowers.len() > 1 { // there is another active reference at this point, the resource cannot be returned
                 self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
                 *self.unique_id += 1;
               }

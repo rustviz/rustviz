@@ -570,6 +570,10 @@ const EXPECTED_OK: &[&str] = &[
     "reassign_after_maybe_move_no_else",
     "reassign_after_maybe_move_match",
     "reassign_after_nested_maybe_move",
+    // A moved `&mut` ends no borrow (#209); one coerced into an
+    // annotated `let` / struct field is reborrowed, not moved (#289).
+    "mutref_moved_on",
+    "mutref_coerced_reborrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4275,14 +4279,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "r is assigned a copy of s's reference",
             "s's reference is copied (not the resource it points to)",
-            "m is assigned n's mutable reference (moved out of n)",
-            "n's mutable reference is moved (not the resource it points to)",
+            // `m = n;` assigns to an `&mut String` place, so rustc
+            // reborrows `&mut *n` instead of moving n (#289); n is
+            // usable again after m's last use.
+            "Mutable reborrow from n to m",
             "t is assigned the result of first",
             "Immutable borrow from a to u",
         ],
         must_not_contain: &[
             "r is initialized with a copy of s",
             "m is bound to a mutable reference",
+            "n's mutable reference is moved",
             "t is initialized with a copy of first",
         ],
     },
@@ -5711,6 +5718,48 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s was moved in at least one branch above, so it can't be used after the branches \
              (until it's assigned again). If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "mutref_moved_on",
+        // r → r2 → r3 moves one `&mut`; only r3, the last holder,
+        // ends the borrow and returns it to s. q is moved to q2, so
+        // reassigning q later ends nothing of q's old borrow of t.
+        must_contain: &[
+            "Move from r to r2",
+            "Move from r2 to r3",
+            "Return mutably borrowed resource from r3 to s",
+            "Move from q to q2",
+            "Return mutably borrowed resource from q2 to t",
+            "Return mutably borrowed resource from q to s",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from r to s",
+            "r's mutable borrow ends",
+            "r2's mutable borrow ends",
+            "Return mutably borrowed resource from r2 to s",
+            "Return mutably borrowed resource from q to t",
+        ],
+    },
+    TooltipExpect {
+        name: "mutref_coerced_reborrow",
+        // `let r2: &mut String = r;` and `Holder { r: a }` reborrow
+        // (rustc inserts `&mut *r`): r / a are usable again after the
+        // new reference's last use, which gives the borrow back to
+        // *r / *a, like the explicit `&mut *r`.
+        must_contain: &[
+            "Mutable reborrow from r to r2",
+            "the resource r points to is mutably borrowed by r2 through r; r can't be used while the borrow is live",
+            "Return mutably borrowed resource from r2 to *r",
+            "Mutable reborrow from a to h.r",
+            "Return mutably borrowed resource from h.r to *a",
+        ],
+        must_not_contain: &[
+            "Move from r to r2",
+            "r's resource is moved",
+            "Move from a to h.r",
+            "a's resource is moved",
+            "Return mutably borrowed resource from h.r to t",
         ],
     },
 ];
