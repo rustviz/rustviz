@@ -842,6 +842,9 @@ const EXPECTED_OK: &[&str] = &[
     // A `let`-extended temporary dropped at a `return` says so (#553).
     "let_temp_dropped_at_return",
     "let_temp_dropped_at_return_only",
+    // ... and at a `break` / `continue` or a panic (#553 with #410).
+    "let_temp_dropped_at_break",
+    "let_temp_dropped_at_panic",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9123,6 +9126,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Every path out of `f` is a `return`: the temporary is never
         // dropped at the end of the block.
         must_contain: &[
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it \
+             lived past its statement. Its resource is dropped.",
+        ],
+        must_not_contain: &["goes out of scope at the end of the block"],
+    },
+    TooltipExpect {
+        name: "let_temp_dropped_at_break",
+        // The early exits #410 added drop the `let`-extended temporary
+        // declared in the loop body too, and say where. The `_ => {}`
+        // path reaches the end of the body (that drop keeps "at the end
+        // of the block", so it can't be forbidden by text here).
+        must_contain: &[
+            "(temporary) goes out of scope here, where `break` leaves early: a let borrowed it, so it \
+             lived past its statement. Its resource is dropped.",
+            "(temporary) goes out of scope here, where `continue` leaves early: a let borrowed it, so it \
+             lived past its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept \
+             alive past the end of its statement. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "let_temp_dropped_at_panic",
+        // Every path out of `g` panics or returns: the temporary is
+        // dropped as the panic unwinds, or at the `return`.
+        must_contain: &[
+            "(temporary) goes out of scope here, as the panic unwinds: a let borrowed it, so it lived \
+             past its statement. Its resource is dropped.",
             "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it \
              lived past its statement. Its resource is dropped.",
         ],
