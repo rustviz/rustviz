@@ -199,6 +199,9 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               unlent_refs: HashSet::new(),
               temp_count: 0,
               temp_drops_noted: HashSet::new(),
+              destructure_srcs: HashMap::new(),
+              destructure_moved: HashSet::new(),
+              destructure_ref_data: HashMap::new(),
               break_moves: Vec::new(),
             };
             visitor.visit_body(hir_body);
@@ -280,6 +283,9 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           unlent_refs: HashSet::new(),
           temp_count: 0,
               temp_drops_noted: HashSet::new(),
+          destructure_srcs: HashMap::new(),
+          destructure_moved: HashSet::new(),
+          destructure_ref_data: HashMap::new(),
           break_moves: Vec::new(),
         };
         visitor.visit_body(hir_body);

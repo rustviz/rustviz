@@ -454,6 +454,18 @@ pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool) -
     )
 }
 
+// `let (ref a, ..) = (s, t);`: s is moved into the tuple temporary,
+// which has no column. That temporary is dropped at the end of the
+// statement, or, when a `ref` binding borrows from it, at the end of
+// the block; this tooltip is where that drop is stated.
+pub fn event_dot_move_to_temporary(my_name: &String, extended: bool) -> String {
+    format!(
+        "{0}'s resource is moved into a temporary that is dropped at the end of {1}",
+        fmt_style(my_name),
+        if extended { "the block (a `ref` binding borrows from it)" } else { "this statement" }
+    )
+}
+
 // def fn(p):
 //  p
 //  |

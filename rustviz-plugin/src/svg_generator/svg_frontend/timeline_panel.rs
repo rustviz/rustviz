@@ -2423,7 +2423,7 @@ fn render_arrow (
             // get the resource owners involved in the event
             let (from, to) = ResourceAccessPoint_extract(external_event);
             match (from, to) { // don't render arrow for anything to caller or anonymous or fn -> fn
-                (ResourceTy::Anonymous, _) | (_, ResourceTy::Caller) | (_, ResourceTy::Anonymous)
+                (ResourceTy::Anonymous, _) | (_, ResourceTy::Caller) | (_, ResourceTy::Anonymous) | (_, ResourceTy::Temporary { .. })
                 | (ResourceTy::Value(ResourceAccessPoint::Function(_)), ResourceTy::Value(ResourceAccessPoint::Function(_))) => return,
                 // A borrow stored in an element (`v[0] = &u`) and its
                 // end are drawn on the lender's column only (#282).

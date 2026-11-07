@@ -1305,8 +1305,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // assignment 
       // ex a = <expr>
       ExprKind::Assign(lhs_expr, rhs_expr, _,) => {
+        // `a = lhs` inside a destructuring assignment: draw it as
+        // `a = <the part of the RHS lhs holds>`. That part was
+        // already visited with the whole RHS.
+        let destructure_hid = local_of_path(rhs_expr)
+          .filter(|h| self.destructure_srcs.contains_key(h));
+        let rhs_expr: &'tcx Expr<'tcx> = match destructure_hid {
+          Some(h) => self.destructure_srcs[&h],
+          None => rhs_expr,
+        };
         self.visit_expr(lhs_expr);
-        self.visit_expr(rhs_expr);
+        if destructure_hid.is_none() {
+          self.visit_expr(rhs_expr);
+        }
 
         // Writing to a `static mut` (`COUNTER += inc`): the static has no
         // column (see the Path arm below), so there's no LHS resource to
@@ -1462,8 +1473,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               //   }
               // }
 
-              // update lhs_rty with new lender information
-              let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = self.get_ref_data_full(&rhs_expr);
+              // update lhs_rty with new lender information (for a
+              // destructuring assignment, as computed before any of
+              // its parts was drawn: in `(r1, r2) = (r2, r1)`, r1's
+              // lender has changed by the time r2 is assigned)
+              let precomputed = destructure_hid.and_then(|h| self.destructure_ref_data.remove(&h));
+              let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = match precomputed {
+                Some(d) => d,
+                None => self.get_ref_data_full(&rhs_expr),
+              };
               let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
               r.assigned_at = line_num;
               r.aliasing = new_aliasing;
@@ -1561,7 +1579,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // y was moved out before reassignment). A value moved
                 // on only some paths above counts; the event says so
                 // (`maybe_moved` below).
-                if self.rap_holds_resource_now(rap.name()) {
+                //
+                // A destructuring assignment that also moves y's old
+                // value out (`(a, b) = (b, a)`) doesn't drop it, even
+                // if that move is drawn after y's new value arrives.
+                if self.rap_holds_resource_now(rap.name())
+                  && !self.destructure_moved.contains(rap.name()) {
                   Some(rap.clone())
                 } else {
                   None
@@ -1658,6 +1681,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
       // a block eg: {}
       ExprKind::Block(block, label) => {
+        if self.visit_destructuring_assign(block) {
+          return;
+        }
         // this scoping logic isn't necessary except for when defining functions inside of functions
         let prev_scope = self.current_scope;
         let new_scope = self.tcx.sess.source_map().lookup_char_pos(expr.span.hi()).line;
@@ -2939,6 +2965,271 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => {}
       }
       cur = self.tcx.parent_hir_id(cur);
+    }
+  }
+
+  /// Destructuring assignment: `(a, b) = (b, a);`, `[x, y] = arr;`,
+  /// `P { x, y } = p;`, `(s, n) = pair();`. rustc lowers it, before
+  /// HIR, to a block
+  ///
+  /// ```text
+  /// { let (lhs, lhs) = (b, a); a = lhs; b = lhs; }
+  /// ```
+  ///
+  /// whose `let` has `LocalSource::AssignDesugar`. The `lhs` bindings
+  /// are compiler temporaries, so they get no columns (#151). Each
+  /// `a = lhs` is drawn as an assignment from the part of the RHS
+  /// that `lhs` holds, paired up the same way `let` patterns are
+  /// (`bind_pat`): `a = b`, `b = a`.
+  ///
+  /// The parts are all read before anything is assigned, so in a
+  /// swap of Strings both values move out before either arrives. The
+  /// assignments are drawn so that a variable's move out comes before
+  /// its new value arrives where possible (`(b, a) = (c, b)` draws
+  /// `a = b` first). A cycle (`(a, b) = (b, a)`) can't be ordered
+  /// that way; after drawing it, each variable whose new value was
+  /// drawn before its old one left gets a second "acquires" event so
+  /// it ends up owning. Its old value is never drawn as dropped.
+  ///
+  /// Returns false (and does nothing) if `block` isn't this lowering.
+  pub fn visit_destructuring_assign(&mut self, block: &'tcx rustc_hir::Block<'tcx>) -> bool {
+    let (local, init) = match block.stmts.first() {
+      Some(Stmt { kind: StmtKind::Let(local), .. })
+        if matches!(local.source, rustc_hir::LocalSource::AssignDesugar) =>
+      {
+        match local.init {
+          Some(init) => (local, init),
+          None => return false,
+        }
+      }
+      _ => return false,
+    };
+    // The remaining statements are `place = lhs;`, one per binding.
+    let mut assigns: Vec<(&'tcx Expr<'tcx>, &'tcx Expr<'tcx>, HirId)> = Vec::new();
+    for stmt in &block.stmts[1..] {
+      let e = match stmt.kind {
+        StmtKind::Semi(e) | StmtKind::Expr(e) => e,
+        _ => return false,
+      };
+      match e.kind {
+        ExprKind::Assign(place, rhs, _) => match local_of_path(rhs) {
+          Some(hid) => assigns.push((e, place, hid)),
+          None => return false,
+        },
+        _ => return false,
+      }
+    }
+    if block.expr.is_some() {
+      return false;
+    }
+
+    // Calls, borrows and reads inside the RHS.
+    self.visit_expr(init);
+
+    let mut pairs: Vec<(HirId, &'tcx Expr<'tcx>)> = Vec::new();
+    let mut discarded: Vec<&'tcx Expr<'tcx>> = Vec::new();
+    self.pair_destructure(local.pat, init, &mut pairs, &mut discarded);
+    let src_of: HashMap<HirId, &'tcx Expr<'tcx>> = pairs.iter().cloned().collect();
+
+    // Places whose value this statement moves out (a non-Copy RHS
+    // part that names a variable, `b` in `(a, b) = (b, a)`).
+    let moved_name = |this: &Self, e: &'tcx Expr<'tcx>| -> Option<String> {
+      if !matches!(e.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+        return None;
+      }
+      let ty = this.tcx.typeck(e.hir_id.owner).node_type(e.hir_id);
+      if ty.is_ref() && ty.ref_mutability() == Some(Mutability::Not) {
+        return None;
+      }
+      if !ty.is_ref() && this.ty_is_copy(ty, e.hir_id.owner) {
+        return None;
+      }
+      let name = expr_to_rap_name(e, &this.tcx)?;
+      this.raps.contains_key(&name).then_some(name)
+    };
+    let mut moved: HashSet<String> = HashSet::new();
+    for (_, e) in &pairs {
+      if let Some(n) = moved_name(self, e) { moved.insert(n); }
+    }
+    for e in &discarded {
+      if let Some(n) = moved_name(self, e) { moved.insert(n); }
+    }
+
+    // Draw order: an assignment to `x` waits for the assignment that
+    // moves x's old value out (Kahn's algorithm, ties in source
+    // order, so the output is deterministic).
+    let dest_name: Vec<Option<String>> = assigns.iter()
+      .map(|(_, place, _)| expr_to_rap_name(place, &self.tcx)).collect();
+    let src_moved: Vec<Option<String>> = assigns.iter()
+      .map(|(_, _, hid)| src_of.get(hid).and_then(|e| moved_name(self, e))).collect();
+    let n = assigns.len();
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut done = vec![false; n];
+    while order.len() < n {
+      let ready = (0..n).find(|&i| !done[i] && !(0..n).any(|j| {
+        !done[j] && j != i && dest_name[i].is_some() && src_moved[j] == dest_name[i]
+      }));
+      // Only a cycle is left: take the first one in source order.
+      let i = ready.unwrap_or_else(|| (0..n).find(|&i| !done[i]).unwrap());
+      done[i] = true;
+      order.push(i);
+    }
+    // Destinations whose new value is drawn before their old value
+    // moves out (cycles only).
+    let mut reacquire: Vec<String> = Vec::new();
+    for (pos, &i) in order.iter().enumerate() {
+      if let Some(d) = &dest_name[i] {
+        if order[pos + 1..].iter().any(|&j| src_moved[j].as_ref() == Some(d)) && !reacquire.contains(d) {
+          reacquire.push(d.clone());
+        }
+      }
+    }
+
+    // A reference destination's new lender, before anything moves.
+    let mut ref_data: HashMap<HirId, (ResourceTy, VecDeque<String>, Option<StaticLender>, Vec<ResourceTy>)> = HashMap::new();
+    for (_, place, hid) in &assigns {
+      let ty = self.tcx.typeck(place.hir_id.owner).node_type(place.hir_id);
+      if ty.is_ref() {
+        if let Some(src) = src_of.get(hid) {
+          ref_data.insert(*hid, self.get_ref_data_full(src));
+        }
+      }
+    }
+
+    self.destructure_srcs = src_of;
+    self.destructure_moved = moved;
+    self.destructure_ref_data = ref_data;
+    // Parts nothing is assigned to (`(a, _) = (s, t)`) are moved
+    // into the temporary and dropped with it, at the end of the
+    // statement. The temporary has no column, so the move's tooltip
+    // is where that drop is stated (unless the type has nothing to
+    // drop).
+    for e in &discarded {
+      if moved_name(self, e).is_some() {
+        let ty = self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id);
+        let needs_drop = ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner));
+        let to = if needs_drop { ResourceTy::Temporary { extended: false } } else { ResourceTy::Anonymous };
+        self.match_rhs(to, e, Evt::Move);
+      }
+    }
+    for &i in &order {
+      self.visit_expr(assigns[i].0);
+    }
+    let line = span_to_line(&local.span, &self.tcx);
+    // A struct's non-Copy fields moved out with it, so they own
+    // again too.
+    let mut stack: Vec<String> = reacquire;
+    stack.reverse();
+    while let Some(name) = stack.pop() {
+      if let Some(rd) = self.raps.get(&name) {
+        let rap = rd.rap.clone();
+        self.add_ev(line, Evt::Bind, ResourceTy::Value(rap), ResourceTy::Anonymous, false);
+        let mut children: Vec<String> = self.struct_children(&name).into_iter()
+          .filter(|c| !c.is_copy())
+          .map(|c| c.name().clone())
+          .collect();
+        children.reverse();
+        stack.extend(children);
+      }
+    }
+    self.destructure_srcs.clear();
+    self.destructure_moved.clear();
+    self.destructure_ref_data.clear();
+    true
+  }
+
+  /// Pair each binding of a destructuring assignment's pattern with
+  /// the part of the RHS it receives (`(a, b)` against `(e1, e2)`
+  /// gives a ← e1, b ← e2). Where the RHS isn't written out in the
+  /// same shape (`(a, b) = pair()`, `(a, b) = t`), every binding
+  /// inside gets the whole expression, as `let` does (`bind_walk`).
+  /// RHS parts no binding receives (`_`, `..`) go to `discarded`.
+  fn pair_destructure(
+    &self,
+    pat: &'tcx Pat<'tcx>,
+    src: &'tcx Expr<'tcx>,
+    pairs: &mut Vec<(HirId, &'tcx Expr<'tcx>)>,
+    discarded: &mut Vec<&'tcx Expr<'tcx>>,
+  ) {
+    // `(p1, .., pn)` against `(e1, …, em)`: the parts before `..`
+    // pair from the front, the rest from the back.
+    let pair_seq = |this: &Self, pats: &'tcx [Pat<'tcx>], dd: Option<usize>, exprs: &'tcx [Expr<'tcx>],
+                        pairs: &mut Vec<(HirId, &'tcx Expr<'tcx>)>, discarded: &mut Vec<&'tcx Expr<'tcx>>| -> bool {
+      let split = dd.unwrap_or(pats.len());
+      let (front, back) = pats.split_at(split);
+      if front.len() + back.len() > exprs.len() || (dd.is_none() && pats.len() != exprs.len()) {
+        return false;
+      }
+      let back_start = exprs.len() - back.len();
+      for (p, e) in front.iter().zip(exprs.iter()) {
+        this.pair_destructure(p, e, pairs, discarded);
+      }
+      for e in &exprs[front.len()..back_start] {
+        discarded.push(e);
+      }
+      for (p, e) in back.iter().zip(exprs[back_start..].iter()) {
+        this.pair_destructure(p, e, pairs, discarded);
+      }
+      true
+    };
+    let paired = match (pat.kind, src.kind) {
+      (PatKind::Binding(_, hid, _, None), _) => {
+        pairs.push((hid, src));
+        true
+      }
+      (PatKind::Wild, _) => {
+        discarded.push(src);
+        true
+      }
+      (PatKind::Tuple(pats, dd), ExprKind::Tup(exprs)) => {
+        pair_seq(self, pats, dd.as_opt_usize(), exprs, pairs, discarded)
+      }
+      (PatKind::TupleStruct(_, pats, dd), ExprKind::Call(callee, args))
+        if matches!(callee.kind, ExprKind::Path(QPath::Resolved(_, p))
+          if matches!(p.res, Res::Def(DefKind::Ctor(..), _))) =>
+      {
+        pair_seq(self, pats, dd.as_opt_usize(), args, pairs, discarded)
+      }
+      (PatKind::Slice(before, mid, after), ExprKind::Array(elems))
+        if mid.is_none_or(|m| matches!(m.kind, PatKind::Wild)) =>
+      {
+        let dd = mid.map(|_| before.len());
+        let pats: Vec<&'tcx Pat<'tcx>> = before.iter().chain(after.iter()).collect();
+        let split = dd.unwrap_or(pats.len());
+        if pats.len() > elems.len() || (dd.is_none() && pats.len() != elems.len()) {
+          false
+        } else {
+          let back_start = elems.len() - (pats.len() - split);
+          for (p, e) in pats[..split].iter().zip(elems.iter()) {
+            self.pair_destructure(p, e, pairs, discarded);
+          }
+          for e in &elems[split..back_start] {
+            discarded.push(e);
+          }
+          for (p, e) in pats[split..].iter().zip(elems[back_start..].iter()) {
+            self.pair_destructure(p, e, pairs, discarded);
+          }
+          true
+        }
+      }
+      (PatKind::Struct(_, pat_fields, _), ExprKind::Struct(_, expr_fields, rustc_hir::StructTailExpr::None)) => {
+        for ef in expr_fields.iter() {
+          match pat_fields.iter().find(|pf| pf.ident.name == ef.ident.name) {
+            Some(pf) => self.pair_destructure(pf.pat, ef.expr, pairs, discarded),
+            None => discarded.push(ef.expr),
+          }
+        }
+        true
+      }
+      _ => false,
+    };
+    if !paired {
+      // Shapes don't line up: every binding receives (part of) src.
+      pat.walk_always(|p| {
+        if let PatKind::Binding(_, hid, _, _) = p.kind {
+          pairs.push((hid, src));
+        }
+      });
     }
   }
 

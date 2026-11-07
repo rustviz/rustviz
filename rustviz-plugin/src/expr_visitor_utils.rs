@@ -129,6 +129,18 @@ pub fn path_key(p: &Path, tcx: &TyCtxt) -> String {
   if matches!(p.res, Res::Local(_)) { name } else { fn_key(&name) }
 }
 
+/// The local a path expression names (`x` resolving to a `let` or
+/// pattern binding), if it is one.
+pub fn local_of_path(expr: &Expr) -> Option<HirId> {
+  match expr.kind {
+    ExprKind::Path(QPath::Resolved(None, p)) => match p.res {
+      Res::Local(hid) => Some(hid),
+      _ => None,
+    },
+    _ => None,
+  }
+}
+
 pub fn bool_of_mut (m: Mutability) -> bool {
   match m {
     Mutability::Not => {
@@ -601,7 +613,8 @@ pub fn collect_event_live_vars(
                                 out.insert(rap.clone());
                             }
                         }
-                        ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Index(..) => {}
+                        ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Index(..)
+                        | ResourceTy::Temporary { .. } => {}
                     }
                 }
             }
@@ -837,7 +850,7 @@ pub fn get_non_anon_lenders(b_map: &HashMap<String, RefData>) -> HashMap<String,
     // active borrower of both `a` and `b` (#171).
     for l in v.all_lenders() {
       match l {
-        ResourceTy::Anonymous => {},
+        ResourceTy::Anonymous | ResourceTy::Temporary { .. } => {},
         _ => {
           let lender = l.real_name();
           res.entry(lender.clone())
@@ -854,7 +867,7 @@ pub fn get_non_anon_lenders(b_map: &HashMap<String, RefData>) -> HashMap<String,
 pub fn get_borrowers(borrower: &String, borrow_map: &HashMap<String, RefData>) -> HashSet<String> {
   let lender = borrow_map.get(borrower).unwrap().lender.clone();
   match lender {
-    ResourceTy::Anonymous | ResourceTy::Caller => HashSet::from([borrower.to_owned()]),
+    ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Temporary { .. } => HashSet::from([borrower.to_owned()]),
     _ => {
       let mut res:HashSet<String> = HashSet::new();
       #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "builds a set; order is lost")]
@@ -870,7 +883,7 @@ pub fn get_borrowers(borrower: &String, borrow_map: &HashMap<String, RefData>) -
 
 pub fn get_aliasing_data(r: &ResourceTy, borrow_map: &HashMap<String, RefData>) -> VecDeque<String> {
   match r {
-    ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) => VecDeque::new(),
+    ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) | ResourceTy::Temporary { .. } => VecDeque::new(),
     ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
       match borrow_map.get(x.name()) {
         Some(r_data) => r_data.aliasing.to_owned(),

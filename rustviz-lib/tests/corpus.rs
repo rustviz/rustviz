@@ -672,6 +672,11 @@ const EXPECTED_OK: &[&str] = &[
     "for_copy_elements",
     "copy_param_wording",
     "reassign_one_bullet",
+    // — Destructuring assignment (#151): `(a, b) = (b, a)` draws each
+    //   variable assigned from its part of the RHS; rustc's `lhs`
+    //   temporaries get no column.
+    "tuple_destructure_assign",
+    "destructure_assign_parts",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5544,6 +5549,76 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. No resource is dropped.",
             "i is live in a conditional expression",
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_destructure_assign",
+        // `(x, y) = (y, x)`, `(a, b) = (b, a)` (Strings), and
+        // `(s, n) = pair()`. Before #151 the compiler's `lhs`
+        // temporary had its own column and every arrow went through
+        // it.
+        must_contain: &[
+            "Copy from y to x",
+            "Copy from x to y",
+            "Move from b to a",
+            "Move from a to b",
+            "a's resource is moved",
+            "b's resource is moved",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "Move from pair to s",
+            "Copy from pair to n",
+            "s acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "lhs, immutable",
+            "Copy from lhs to x",
+            "Move from b to lhs",
+            "Move from lhs to a",
+            // The swap moves both old values out; neither is dropped.
+            "a acquires ownership of a new resource; its previous resource is dropped",
+            "b acquires ownership of a new resource; its previous resource is dropped",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "destructure_assign_parts",
+        // Rotation `(a, b, c) = (b, c, a)`; `(a, _) = (s, t)` moves t
+        // into the temporary, which is dropped at the end of the
+        // statement; `(p, q) = (q, p)` swaps structs and their fields
+        // go along; `Pt { x, y } = Pt { x: 1, y: 2 }`.
+        must_contain: &[
+            "Move from b to a",
+            "Move from c to b",
+            "Move from a to c",
+            "c goes out of scope. Its resource is dropped.",
+            "Move from s to a",
+            "a acquires ownership of a new resource; its previous resource is dropped",
+            // t is moved into the tuple temporary, which is dropped at the
+            // end of the statement; it has no column, so the move's
+            // tooltip says so.
+            "t's resource is moved into a temporary that is dropped at the end of this statement",
+            "t goes out of scope. No resource is dropped.",
+            "Move from q to p",
+            "Move from p to q",
+            "Move from q.name to p.name",
+            "Move from p.name to q.name",
+            "p.name goes out of scope. Its resource is dropped.",
+            "q.name goes out of scope. Its resource is dropped.",
+            "x is bound to a copyable value",
+            "y is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "lhs, immutable",
+            // Before #151, the `_` part read as never moved.
+            "t goes out of scope. Its resource is dropped.",
+            // The drop is real and must be stated.
+            "t's resource is moved",
+            "b acquires ownership of a new resource; its previous resource is dropped",
+            "c acquires ownership of a new resource; its previous resource is dropped",
+            "p acquires ownership of a new resource; its previous resource is dropped",
+            "p.name goes out of scope. No resource is dropped.",
         ],
     },
     // ─── Functions returning a reference (#171) ──────────────────────
