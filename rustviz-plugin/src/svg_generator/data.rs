@@ -1890,13 +1890,13 @@ impl Event {
                         safe_message(hover_messages::event_dot_copy_ref_to_caller, &self.deref_name(my_name), to),
                     ResourceTy::Caller => safe_message(hover_messages::event_dot_copy_to_caller, &self.deref_name(my_name), to),
                     _ if !to.is_closure() && matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
-                        hover_messages::event_dot_ref_copied(my_name),
+                        hover_messages::event_dot_ref_copied(my_name, is.extract_rap().map_or(false, |r| r.points_to_copy())),
                     _ => safe_message(hover_messages::event_dot_copy_to, &self.deref_name(my_name), to)
                 }
             }
             // Moving a `&mut` moves the reference, not its referent.
-            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), ..} if !to.is_closure() => {
-                hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller))
+            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(r)), ..} if !to.is_closure() => {
+                hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller), r.pointee_copy)
             }
             Event::Move{ is: ResourceTy::Index(_, place, _), ..} if place.starts_with('*') => {
                 hover_messages::event_dot_move_through_element(place)

@@ -2461,14 +2461,15 @@ fn render_arrow (
             // dot tooltip for this event (data.rs).
             // A returned `&T` is a copy of the reference, not of the data.
             // A returned `&mut T` moves the reference, not the data.
-            let message = match external_event {
+            let ptc = rap.points_to_copy();
+            let message: Box<dyn Fn(&String, &String) -> String> = match external_event {
                 ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::StaticRef(_)), .. } =>
-                    hover_messages::event_dot_copy_ref_to_caller,
-                ExternalEvent::Copy { .. } => hover_messages::event_dot_copy_to_caller,
+                    Box::new(hover_messages::event_dot_copy_ref_to_caller),
+                ExternalEvent::Copy { .. } => Box::new(hover_messages::event_dot_copy_to_caller),
                 ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), .. } =>
-                    |name: &String, _: &String| hover_messages::event_dot_ref_moved(name, true),
-                _ if rap.holds_value() => hover_messages::event_dot_move_to_caller_value,
-                _ => hover_messages::event_dot_move_to_caller,
+                    Box::new(move |name: &String, _: &String| hover_messages::event_dot_ref_moved(name, true, ptc)),
+                _ if rap.holds_value() => Box::new(hover_messages::event_dot_move_to_caller_value),
+                _ => Box::new(hover_messages::event_dot_move_to_caller),
             };
             let title = match external_event {
                 // `p.x` returned from behind a reference p: the field
