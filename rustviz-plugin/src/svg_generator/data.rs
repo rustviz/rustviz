@@ -186,6 +186,10 @@ pub struct Owner {
     /// True iff this owner is an unbound temporary (see
     /// `ResourceAccessPoint::is_unbound_temporary`).
     pub unbound_temp: bool,
+    /// True iff this owner is the temporary that the struct / tuple /
+    /// array literal on the right of a `let` builds (#439), which the
+    /// variables in the literal are moved into.
+    pub let_literal_temp: bool,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
     /// True iff this owner isn't a reference but its value holds a
@@ -585,6 +589,12 @@ impl ResourceAccessPoint {
 
     pub fn is_unbound_temporary(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { unbound_temp: true, .. }))
+    }
+
+    /// True iff this RAP is the temporary a literal on the right of a
+    /// `let` builds (#439); see `Owner::let_literal_temp`.
+    pub fn is_let_literal_temporary(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { let_literal_temp: true, .. }))
     }
 
     /// True iff this RAP is a lifetime-extended temporary (see
@@ -2212,6 +2222,11 @@ impl Event {
                     ResourceTy::Caller => safe_message(if v { hover_messages::event_dot_move_to_caller_value } else { hover_messages::event_dot_move_to_caller }, &self.deref_name(my_name), to),
                     ResourceTy::Temporary { tuple: Some(t), .. } => hover_messages::event_dot_move_to_tuple_temporary(&self.deref_name(my_name), t, v),
                     ResourceTy::Temporary { extended, tuple: None } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
+                    // `vec![s];`: s is moved into the temporary the macro or
+                    // literal builds, which nothing takes (#570). (A `let`'s
+                    // literal, #439, says where it's dropped on its column.)
+                    ResourceTy::Value(rap) if rap.is_unbound_temporary() && !rap.is_let_literal_temporary() =>
+                        hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), false),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
                             &is.extract_rap().map_or(String::new(), |r| r.drop_note())),
@@ -2314,7 +2329,7 @@ impl Event {
                     // variable is bound to a reference, which never
                     // owns its referent.
                     hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref())
-                } else if matches!(is, ResourceTy::Value(rap) if rap.is_temporary() || rap.is_unbound_temporary())
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_let_literal_temporary())
                     && matches!(from, ResourceTy::Value(f) if !f.is_fn()) {
                     // `let (ref a, ..) = (s, t);`: s is moved into the
                     // temporary the literal builds (#439).
@@ -2325,6 +2340,11 @@ impl Event {
                     // `let (x, _) = (m(), n());`: the literal's own value
                     // (#483).
                     hover_messages::event_dot_literal_temporary_start()
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary())
+                    && matches!(from, ResourceTy::Value(f) if !f.is_fn()) {
+                    // `vec![s];`: s is moved into the temporary (#570).
+                    let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
+                    hover_messages::event_dot_unbound_temporary_takes(&from_name)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
                     // `make();`, `make().len()`: nothing takes the value.
                     safe_message(hover_messages::event_dot_unbound_temporary_acquire, &self.deref_name(my_name), from)

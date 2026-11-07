@@ -1812,7 +1812,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
         if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-          self.note_temporary_drop(expr, name);
+          self.note_temporary_drop(expr, name, Vec::new());
         }
 
         // need to specifically handle println! macro because it's common
@@ -1886,7 +1886,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let line_num = expr_to_line(&rcvr, &self.tcx);
         let fn_name = name_and_generic_args.ident.as_str().to_owned();
         self.add_fn(fn_name.clone());
-        self.note_temporary_drop(expr, fn_name.clone());
+        self.note_temporary_drop(expr, fn_name.clone(), Vec::new());
         // Recurse into the receiver first: in a chain like
         // `v.iter().map(f).collect()` that visits `v.iter()` (and
         // `.map(f)`) before this call, so events come out in
@@ -4149,51 +4149,82 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// True iff building the literal `e` moves a value that needs drop out
-  /// of a place (`P { name: s, .. }`, `vec![s]`, `(t, 1)`). Such a move
-  /// into a temporary isn't drawn yet, so the temporary gets no column
-  /// (the variable would be shown owning its value to the end of its
-  /// scope either way).
-  fn literal_moves_a_place(&self, e: &'tcx Expr<'tcx>) -> bool {
+  /// The places that building the literal `e` moves a value that needs
+  /// drop out of (`P { name: s, .. }`, `vec![s]`, `(t, 1)`), nested
+  /// literals included. None when the literal takes a place by struct
+  /// update (`P { n: 1, ..p }` moves only some of p's fields, which
+  /// isn't drawn).
+  fn literal_moved_places(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
     let typeck = self.tcx.typeck(e.hir_id.owner);
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner);
     let elems: Vec<&'tcx Expr<'tcx>> = match e.kind {
       ExprKind::Struct(_, fields, tail) => {
-        let mut v: Vec<_> = fields.iter().map(|f| f.expr).collect();
-        if let rustc_hir::StructTailExpr::Base(b) = tail { v.push(b); }
-        v
+        if let rustc_hir::StructTailExpr::Base(b) = tail {
+          if is_place_expr(b) { return None; }
+        }
+        fields.iter().map(|f| f.expr).collect()
       }
       ExprKind::Tup(items) | ExprKind::Array(items) => items.iter().collect(),
       ExprKind::Repeat(x, _) => vec![x],
       _ => match vec_macro_elems(e) {
         Some(items) => items.iter().collect(),
         // `vec![]`, a `format!`: nothing is moved in.
-        None => return false,
+        None => return Some(Vec::new()),
       },
     };
-    elems.into_iter().any(|x| {
-      (is_place_expr(x) && typeck.expr_ty(x).needs_drop(self.tcx, env))
-        || (matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) && self.literal_moves_a_place(x))
-    })
+    let mut places = Vec::new();
+    for x in elems {
+      if is_place_expr(x) {
+        if typeck.expr_ty(x).needs_drop(self.tcx, env) { places.push(x); }
+      } else if matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
+        places.extend(self.literal_moved_places(x)?);
+      }
+    }
+    Some(places)
   }
 
   /// `vec![String::new()];`, `format!(..).len()`: a std macro's result
   /// is a temporary like a call's (#469). `name` is the column of the
   /// macro, like a fn's.
   fn note_macro_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, name: &str) {
-    if self.literal_moves_a_place(expr) {
-      return;
-    }
-    self.note_temporary_drop(expr, name.to_owned());
+    self.note_container_temporary_drop(expr, name.to_owned());
   }
 
   /// `P { .. };`, `let _ = (make(), 1);`, `[a(), b()].len()`: a literal
   /// that nothing takes is a temporary like a call's result (#469).
   fn note_literal_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, name: String) {
-    if self.literal_moves_a_place(expr) {
+    if self.is_drawn_tuple_scrutinee(expr) {
       return;
     }
-    self.note_temporary_drop(expr, name);
+    self.note_container_temporary_drop(expr, name);
+  }
+
+  /// `match (x, y) { .. }`, `if let P = (x, y) { .. }`: a tuple of
+  /// variables that a match or `if let` scrutinizes already has its
+  /// moves and its drop drawn as "the temporary tuple (x, y)" (#327),
+  /// so it gets no `(temporary)` column as well.
+  fn is_drawn_tuple_scrutinee(&self, expr: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    if !matches!(expr.kind, ExprKind::Tup(_)) || self.tuple_scrutinee_moves(expr).is_empty() {
+      return false;
+    }
+    match self.tcx.parent_hir_node(expr.hir_id) {
+      Node::Expr(m) => match m.kind {
+        ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) => s.hir_id == expr.hir_id,
+        ExprKind::Let(l) if l.init.hir_id == expr.hir_id => matches!(self.tcx.parent_hir_node(m.hir_id),
+          Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == m.hir_id)),
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
+  /// A macro's or literal's temporary. A variable moved into it
+  /// (`vec![s];`, `let _ = P { name: t, n: 1 };`) is drawn moving into
+  /// its column, so it stops owning the value (#570).
+  fn note_container_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, name: String) {
+    let Some(places) = self.literal_moved_places(expr) else { return };
+    self.note_temporary_drop(expr, name, places);
   }
 
   /// A call whose result is a temporary that Rust drops at the end of
@@ -4203,18 +4234,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// needs drop, and only for the shapes where the value certainly isn't
   /// moved on: anything else (a field moved out of it, a `match` that
   /// binds part of it by value, a borrow a `let` extends) says nothing.
-  fn note_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, fn_name: String) {
+  fn note_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, fn_name: String, into: Vec<&'tcx Expr<'tcx>>) -> Option<ResourceAccessPoint> {
     if self.temp_drops_noted.contains(&expr.hir_id) {
-      return;
+      return None;
     }
     let typeck = self.tcx.typeck(expr.hir_id.owner);
     let ty = typeck.expr_ty(expr);
     let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
     if !ty.needs_drop(self.tcx, env) || !self.is_unmoved_temporary(expr, typeck, env) {
-      return;
+      return None;
     }
-    let Some((when, end_line, owner)) = self.temporary_scope_end(expr) else { return };
-    self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner);
+    let (when, end_line, owner) = self.temporary_scope_end(expr)?;
+    self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into)
   }
 
   /// The `(temporary N)` column of a value nothing takes: it acquires
@@ -4228,11 +4259,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     when: &str,
     end_line: usize,
     owner: Option<HirId>,
-  ) {
+    into: Vec<&'tcx Expr<'tcx>>,
+  ) -> Option<ResourceAccessPoint> {
     // Branch events are sliced out by line, so a one-line `match` / `if`
     // can't hold a column of its own (the same limit as #354 / #459).
     if self.inside_one_line_branch(expr) {
-      return;
+      return None;
     }
     self.temp_drops_noted.insert(expr.hir_id);
 
@@ -4252,10 +4284,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let line = expr_to_line(expr, &self.tcx);
     self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
+    // Variables moved into the temporary (`vec![s];`, #570).
+    for x in into {
+      let Some(src) = fetch_rap(x, &self.tcx, &self.raps) else { continue };
+      self.update_rap(&src, line);
+      self.add_ev(expr_to_line(x, &self.tcx), Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
+    }
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
     let id = *self.unique_id;
-    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), literal: false, early: false, id });
+    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp.clone(), ty: Some(ty), when: when.to_owned(), literal: false, early: false, id });
     *self.unique_id += 1;
+    Some(tmp)
   }
 
   /// `for x in make_vec()`, `for x in v`, `for x in vec![..]`: the head
@@ -4277,7 +4316,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // isn't something a student wrote.
     let shown = strip_module_paths(&ty.to_string());
     let shown = if shown.contains('{') { "iterator".to_owned() } else { shown };
-    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None);
+    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, Vec::new());
   }
 
   /// True iff `expr` sits inside an `if` / `match` that starts and ends
@@ -6000,13 +6039,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     });
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
+    // The variables moved into it read as moving into the literal on
+    // the right of the `let`, not into one nothing binds (#570).
     if extended {
       self.add_owner(tmp_name.clone(), mutable, false, false, false, self.current_scope, !self.inside_branch);
+      if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
+        o.let_literal_temp = true;
+      }
     } else {
       let (when, end_line, owner) = self.temporary_scope_end(e)?;
       self.add_owner(tmp_name.clone(), false, false, false, false, end_line, !self.inside_branch);
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.unbound_temp = true;
+        o.let_literal_temp = true;
       }
       self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
       let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
