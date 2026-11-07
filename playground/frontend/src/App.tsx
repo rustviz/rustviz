@@ -352,13 +352,19 @@ const Description: React.FC = () => (
         <code>h.r = &amp;s</code> through a reference, or a call that may
         store <code>&amp;s</code>, like{' '}
         <code>point(&amp;mut hold, &amp;s)</code>) is drawn only as a
-        borrow on <code>s</code>&apos;s column. The element value a
+        borrow on <code>s</code>&apos;s column. A copy out of an element{' '}
+        (<code>let first = v[0];</code>) is drawn on <code>v</code>&apos;s
+        column too. The element value a
         write replaces is dropped only in the tooltip&apos;s words, not on a
         column. So is a write through a reference stored in an element (
         <code>*slots[0] += 10</code>), without showing which variable it
         changes;
         a read through one (<code>let n = *slots[0];</code>) is an arrow out of
         <code>slots</code>&apos;s column, likewise without naming the variable.
+      </li>
+      <li>
+        A reference to a slice or <code>str</code> (<code>&amp;[i32]</code>) still
+        says &quot;resource&quot; where &quot;value&quot; would be exact.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

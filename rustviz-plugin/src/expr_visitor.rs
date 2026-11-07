@@ -1808,6 +1808,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
   }
 
+  /// The elements of an array literal (or `vec![…]`) going into `lhs`.
+  /// Each element that is a variable (`[s, t]`, `vec![x, y]`) is moved
+  /// into `lhs` (copied if its type is Copy), drawn as an arrow from the
+  /// variable. Other elements (literals, calls) have nothing to draw
+  /// beyond `lhs` getting its value. A reference element (`[&s]`)
+  /// stores a borrow we don't track, so it's left out.
+  pub fn match_array_elems(&mut self, lhs: ResourceTy, elems: &'tcx [Expr<'tcx>], line_num: usize) {
+    let mut drew_source = false;
+    for elem in elems {
+      let name = match elem.kind {
+        ExprKind::Path(_) | ExprKind::Field(..) if !elem.span.from_expansion() => {
+          expr_to_rap_name(elem, &self.tcx).filter(|n| self.raps.contains_key(n))
+        }
+        _ => None,
+      };
+      let ty = self.tcx.typeck(elem.hir_id.owner).node_type(elem.hir_id);
+      let Some(name) = name else { continue };
+      if ty.is_ref() {
+        continue;
+      }
+      let is_copy = self.ty_is_copy(ty, elem.hir_id.owner);
+      let e = if is_copy { Evt::Copy } else { Evt::Move };
+      self.match_rhs(lhs.clone(), elem, e);
+      drew_source = true;
+      // A struct moved into the array takes its fields with it.
+      if !is_copy {
+        let mut stack = self.struct_children(&name);
+        while let Some(child) = stack.pop() {
+          stack.extend(self.struct_children(child.name()));
+          if !child.is_copy() {
+            self.add_ev(line_num, Evt::Move, ResourceTy::Anonymous, ResourceTy::Value(child), false);
+          }
+        }
+      }
+    }
+    if !drew_source && !matches!(lhs, ResourceTy::Anonymous) {
+      self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+    }
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     // A tuple built in the argument list (`show((s, 1))`,
@@ -1820,6 +1860,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
         return;
       }
+    }
+    // An array (or `vec![…]`) built in the argument list
+    // (`f([s, t])`, `f(vec![s])`): each element is passed into the
+    // call with it, so `s` is moved into the call (#297).
+    let built_elems = match arg.kind {
+      ExprKind::Array(elems) if !arg.span.from_expansion() => Some(elems),
+      _ => vec_macro_elems(arg),
+    };
+    if let Some(elems) = built_elems {
+      self.add_fn(fn_name.clone());
+      for elem in elems.iter() {
+        let is_var = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..));
+        if is_var {
+          self.match_arg(elem, fn_name.clone());
+        }
+      }
+      return;
     }
     self.add_fn(fn_name.clone());
     if let ExprKind::Closure(closure) = arg.kind {
@@ -3143,6 +3200,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // drop. `source_callsite` resolves to the user's `let` line.
     let user_span = rhs.span.source_callsite();
     let line_num = span_to_line(&user_span, &self.tcx);
+    // `vec![s, t]` / `vec![x; n]`: the elements the user wrote are
+    // moved (or copied) into the new Vec, like an array literal's.
+    if let Some(elems) = vec_macro_elems(rhs) {
+      self.match_array_elems(lhs, elems, line_num);
+      return;
+    }
     self.bind_from_anonymous(line_num, lhs);
     return;
   }
@@ -3594,6 +3657,45 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             }
           }
         }
+      }
+    }
+    // Array literal `[e0, e1]` / `[e; N]` (#297): the array's elements
+    // have no columns, so it's one value; variables written as
+    // elements are moved or copied into it.
+    ExprKind::Array(elems) => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      self.match_array_elems(lhs, elems, line_num);
+    }
+    ExprKind::Repeat(elem, _) => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      self.match_array_elems(lhs, std::slice::from_ref(elem), line_num);
+    }
+    // `let first = v[0];` (#297): a copy of one element (moving out of
+    // an index doesn't compile, E0507 / E0508). Drawn as a copy out of
+    // `v[0]` on v's column; v keeps its resource.
+    // Only into a variable: an element-to-element copy (`v[2] = v[0]`)
+    // or a write through a reference (`*r = v[0]`) stays undrawn, as
+    // before.
+    // (A reference copied out of a collection whose stored borrows are
+    // tracked, `let r = refs[0];`, is the arm below, #349.)
+    ExprKind::Index(recv, _, _) if matches!(lhs, ResourceTy::Value(_))
+      && !(lhs.is_ref() && !lhs.is_mutref() && self.stored_ref_lenders(rhs).is_some()) => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      let elem_ty = self.tcx.typeck(rhs.hir_id.owner).node_type(rhs.hir_id);
+      let holder = expr_to_rap_name(recv, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .map(|rd| rd.rap.to_owned())
+        .filter(|r| !r.is_fn());
+      match holder {
+        // An element that is itself a reference (`let r = refs[0];`)
+        // copies a borrow whose lender we don't track; leave it as a
+        // plain new binding.
+        Some(rap) if !elem_ty.is_ref() && !rhs.span.from_expansion() => {
+          self.update_rap(&rap, line_num);
+          let place = self.place_label(rhs, rap.name());
+          self.add_ev(line_num, evt, lhs, ResourceTy::Index(rap, place, Default::default()), false);
+        }
+        _ => self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false),
       }
     }
 

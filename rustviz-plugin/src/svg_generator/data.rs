@@ -1836,6 +1836,11 @@ impl Event {
                 // the reference in slots[0] points to (#438).
                 hover_messages::event_dot_copy_through_element(place)
             }
+            // `let first = v[0];`: one element is copied out of the
+            // resource v owns (or points to); v keeps all of it.
+            Event::Duplicate{ is: ResourceTy::Index(r, place, _), .. } => {
+                hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
+            }
             Event::Duplicate{ to, is, ..} => {
                 match to {
                     // A `move` closure capturing a Copy value copies it (#311).

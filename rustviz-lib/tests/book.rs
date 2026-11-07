@@ -219,14 +219,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c4_11_array_slice",
-        status: Missing,
-        note: "array literal `a` has no creation event (#179)",
+        status: Correct,
         must_contain: &[
             "Immutable borrow from a to slice",
             "Return immutably borrowed value from slice to a",
-            "a goes out of scope. No resource is dropped.",
+            "L2 a is bound to a copyable value",
+            "a goes out of scope",
         ],
-        must_not_contain: &["Return immutably borrowed resource from slice to a"],
+        must_not_contain: &["a goes out of scope. No resource is dropped.", "Return immutably borrowed resource from slice to a"],
         ..E
     },
     Snippet {
@@ -618,9 +618,12 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_07_vec_index_copy",
-        status: Missing,
-        note: "`let first = v[0];` emits nothing (#179)",
-        must_contain: &["push reads from/writes to v (implicitly mutably borrowed)", "first goes out of scope. No resource is dropped."],
+        must_contain: &[
+            "push reads from/writes to v (implicitly mutably borrowed)",
+            "first is initialized with a copy of v[0]",
+            "L6 first goes out of scope",
+        ],
+        must_not_contain: &["first goes out of scope. No resource is dropped."],
         ..E
     },
     Snippet {
@@ -1005,8 +1008,9 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c13_11_sort_by_key_fnmut",
         status: Missing,
-        note: "the closure's &mut capture of num_sort_operations is not shown; `list` has no creation event",
-        must_contain: &["sort_by_key reads from/writes to list (implicitly mutably borrowed)", "list goes out of scope. No resource is dropped."],
+        note: "the closure's &mut capture of num_sort_operations is not shown",
+        must_contain: &["sort_by_key reads from/writes to list (implicitly mutably borrowed)", "list is bound to a copyable value", "list goes out of scope"],
+        must_not_contain: &["list goes out of scope. No resource is dropped."],
         ..E
     },
     Snippet {

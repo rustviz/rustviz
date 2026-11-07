@@ -48,8 +48,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
 
     let line_num = expr_to_line(e, &self.tcx);
-    if matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..)) && !e.span.from_expansion() {
-      // `User { email, .. }` / `(s, 1)` as the returned value: the
+    if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
+      || vec_macro_elems(e).is_some() {
+      // `User { email, .. }` / `(s, 1)` / `[s, t]` as the returned value: the
       // literal's field initialisers move/copy their sources into
       // the returned value.
       self.match_rhs(to_ro, e, evt);
