@@ -236,6 +236,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               live_tuples: Vec::new(),
               binding_columns: Vec::new(),
               break_binds: Vec::new(),
+              deferred_breaks: Vec::new(),
+              line_override: None,
               break_pats: Vec::new(),
               loop_breaks: Vec::new(),
             };
@@ -333,6 +335,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               all_paths_exit: false,
           borrow_floor: HashMap::new(),
           break_binds: Vec::new(),
+          deferred_breaks: Vec::new(),
+          line_override: None,
           break_pats: Vec::new(),
           loop_breaks: Vec::new(),
           in_scope: Vec::new(),

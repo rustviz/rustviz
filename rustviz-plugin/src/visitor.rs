@@ -3365,6 +3365,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.emit_scope_end(decls, body_end);
             // A bare `loop` ends only through a `break`.
             self.emit_loop_exit_moves(expr, None, &before, false);
+            self.pair_deferred_breaks(expr);
           }
           rustc_hir::LoopSource::ForLoop => {
             // For-loops are entered via the outer Match(ForLoopDesugar)
@@ -4258,18 +4259,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         intravisit::walk_expr(self, expr);
         // `let r = loop { break k; }`: `r` gets `k` (#431).
         if let (Ok(target), Some(value)) = (dest.target_id, value) {
-          if let Some((_, pat, scope, inside)) = self.break_pats.iter().rev().find(|(id, ..)| *id == target).cloned() {
-            // The bindings live in the `let`'s scope, not the loop's.
-            let loop_scope = std::mem::replace(&mut self.current_scope, scope);
-            let loop_inside = std::mem::replace(&mut self.inside_branch, inside);
-            self.bind_pat(pat, value, false);
-            self.current_scope = loop_scope;
-            self.inside_branch = loop_inside;
-          } else
-          if let Some((_, lhs, evt)) = self.break_binds.iter().rev().find(|(id, ..)| *id == target).cloned() {
-            self.match_rhs(lhs, value, evt);
+          let has_receiver = self.break_pats.iter().any(|(id, ..)| *id == target)
+            || self.break_binds.iter().any(|(id, ..)| *id == target);
+          if has_receiver && self.break_is_conditional(target) && self.loop_break_values(target) == 1 {
+            // In a branch of the loop (`if c { break s; }`): the value
+            // moves out of the loop with the `break`, so it reaches
+            // `r` where the loop ends. Inside the loop `s` is still
+            // owned where the branches join (#350).
+            self.deferred_breaks.push((target, value));
           } else {
-            self.loop_breaks.push((target, value));
+            self.pair_break_value(target, value);
           }
         }
         if let Ok(target) = dest.target_id {
@@ -6745,6 +6744,67 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let names = self.raps.keys().cloned().collect();
     names
+  }
+
+  /// Pair what `break value` carries out of the loop `target` with
+  /// the loop's receiver: `let r = loop { … }` (a binding or a
+  /// pattern), as `let r = value;` would (#431, #452).
+  fn pair_break_value(&mut self, target: HirId, value: &'tcx Expr<'tcx>) {
+    if let Some((_, pat, scope, inside)) = self.break_pats.iter().rev().find(|(id, ..)| *id == target).cloned() {
+      // The bindings live in the `let`'s scope, not the loop's.
+      let loop_scope = std::mem::replace(&mut self.current_scope, scope);
+      let loop_inside = std::mem::replace(&mut self.inside_branch, inside);
+      self.bind_pat(pat, value, false);
+      self.current_scope = loop_scope;
+      self.inside_branch = loop_inside;
+    } else if let Some((_, lhs, evt)) = self.break_binds.iter().rev().find(|(id, ..)| *id == target).cloned() {
+      self.match_rhs(lhs, value, evt);
+    } else {
+      self.loop_breaks.push((target, value));
+    }
+  }
+
+  /// Whether a `break` to the loop `target` is in a branch of an
+  /// if/else or a match inside it, so it runs on some paths only.
+  fn break_is_conditional(&self, target: HirId) -> bool {
+    self.exit_frames.iter()
+      .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target))
+      .is_some_and(|i| self.exit_frames[i + 1..].iter().any(|f| matches!(f, ExitFrame::Branch { .. })))
+  }
+
+  /// How many `break value`s leave the loop `target`.
+  fn loop_break_values(&self, target: HirId) -> usize {
+    struct Count(HirId, usize);
+    impl<'tcx> Visitor<'tcx> for Count {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Break(dest, Some(_)) = e.kind {
+          if dest.target_id == Ok(self.0) {
+            self.1 += 1;
+          }
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let rustc_hir::Node::Expr(loop_expr) = self.tcx.hir_node(target) else { return 0 };
+    let mut c = Count(target, 0);
+    intravisit::walk_expr(&mut c, loop_expr);
+    c.1
+  }
+
+  /// At the end of `loop_expr`: the values its `break`s in branches
+  /// carried reach the loop's receiver, on the line the loop ends.
+  fn pair_deferred_breaks(&mut self, loop_expr: &'tcx Expr<'tcx>) {
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred_breaks)
+      .into_iter().partition(|(id, _)| *id == loop_expr.hir_id);
+    self.deferred_breaks = rest;
+    if mine.is_empty() {
+      return;
+    }
+    self.line_override = Some(span_end_line(&loop_expr.span, &self.tcx));
+    for (target, value) in mine {
+      self.pair_break_value(target, value);
+    }
+    self.line_override = None;
   }
 
   /// At the end of `loop_expr`: a variable declared before the loop

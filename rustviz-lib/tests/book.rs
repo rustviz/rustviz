@@ -1188,10 +1188,12 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_04_loop_break_string",
-        status: Wrong,
-        note: "`break String::from(..)` gives s a String; never shown, and s shown not dropped",
-        must_contain: &["counter is bound to a copyable value"],
-        known_wrong: &["s goes out of scope. No resource is dropped."],
+        must_contain: &[
+            "counter is bound to a copyable value",
+            "s acquires ownership of a resource",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=s goes out of scope. No resource is dropped."],
         ..E
     },
     Snippet {

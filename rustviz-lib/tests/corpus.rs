@@ -1005,6 +1005,7 @@ const EXPECTED_OK: &[&str] = &[
     "loop_break_value_outer_var",
     "loop_break_value_labelled",
     "loop_break_value_receivers",
+    "loop_break_value_in_branch",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11226,20 +11227,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r acquires ownership of a resource",
             "r goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["r goes out of scope. No resource is dropped."],
+        must_not_contain: &["=r goes out of scope. No resource is dropped."],
     },
     TooltipExpect {
         name: "loop_break_value_outer_var",
-        // `break s` moves `s`; `break n * 2` copies.
+        // `break s` (in an `if`) moves `s` out of the loop: `r` has it
+        // where the loop ends (#350's approach), so `s` has nothing to
+        // drop at the end of `main` and `r` does. `break n * 2` copies.
         must_contain: &[
             "Move from s to r",
             "r goes out of scope. Its resource is dropped.",
             "s goes out of scope. No resource is dropped.",
-            "doubled is bound to a value",
+            "doubled is bound to a copyable value",
         ],
         must_not_contain: &[
-            "r goes out of scope. No resource is dropped.",
-            "s goes out of scope. Its resource is dropped.",
+            "=r goes out of scope. No resource is dropped.",
+            "=s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_value_in_branch",
+        // `break a` in a match arm, `break b` in an `if` / `else`: the
+        // values reach `r` and `q` at the end of their loops.
+        must_contain: &[
+            "Move from a to r",
+            "Move from b to q",
+            "r goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=r goes out of scope. No resource is dropped.",
+            "=q goes out of scope. No resource is dropped.",
+            "=a goes out of scope. Its resource is dropped.",
+            "=b goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -11248,7 +11270,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to w",
             "w goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["w goes out of scope. No resource is dropped."],
+        must_not_contain: &["=w goes out of scope. No resource is dropped."],
     },
     TooltipExpect {
         name: "loop_break_value_receivers",
@@ -11261,8 +11283,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "a goes out of scope. No resource is dropped.",
-            "b goes out of scope. No resource is dropped.",
+            "=a goes out of scope. No resource is dropped.",
+            "=b goes out of scope. No resource is dropped.",
         ],
     },
 ];
