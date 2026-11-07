@@ -773,6 +773,11 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_arms",
     "or_pattern_if_let",
     "or_pattern_shadow",
+    // A collection's drop says it drops what it holds (#542).
+    "collection_drop_holds",
+    "collection_drop_holds_flag",
+    // An array of Strings drops every String it holds (#544).
+    "array_of_strings_drop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1913,7 +1918,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. Its resource is dropped.",
             "opt was moved in at least one branch above, so it can't be used after the branches \
              (until it's assigned again). If the branch that ran didn't move it, its resource is \
-             dropped when opt goes out of scope.",
+             dropped (including the String it holds, if any) when opt goes out of scope.",
         ],
         must_not_contain: &[
             "may have been moved",
@@ -2403,7 +2408,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "entry reads from/writes to map (implicitly mutably borrowed)",
             "Move from k to entry",
             "v goes out of scope. Its resource is dropped.",
-            "map goes out of scope. Its resource is dropped.",
+            "map goes out of scope. Its resource is dropped (including every key it holds).",
         ],
         must_not_contain: &[
             "v's resource is moved",
@@ -2840,7 +2845,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from last to w",
             "check reads from s",
             "w goes out of scope",
-            "words goes out of scope. Its resource is dropped.",
+            "words goes out of scope. Its resource is dropped (including every String it holds).",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -3033,7 +3038,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first_mut reads from/writes to v (implicitly mutably borrowed)",
             "t's resource is moved",
             "t goes out of scope. No resource is dropped.",
-            "v goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped (including every P it holds).",
         ],
         must_not_contain: &[
             "t goes out of scope. Its resource is dropped.",
@@ -3425,7 +3430,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "opt isn't moved in any of the branches above",
             "self isn't moved in any of the branches above",
-            "opt goes out of scope. Its resource is dropped.",
+            "opt goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
         must_not_contain: &["="],
     },
@@ -3930,7 +3935,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from s to opt",
             "Mutable borrow from name to n",
             "Return mutably borrowed resource from n to name",
-            "name goes out of scope. Its resource is dropped.",
+            "name goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "Partial immutable borrow from num to k",
         ],
         must_not_contain: &[
@@ -3972,8 +3977,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from s to take",
             "opt was moved in at least one branch above, so it can't be used after the branches \
              (until it's assigned again). If the branch that ran didn't move it, its resource is \
-             dropped when opt goes out of scope.",
-            "opt goes out of scope. Its resource is dropped here only if no branch above moved it \
+             dropped (including the String it holds, if any) when opt goes out of scope.",
+            "opt goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
             "s was moved in at least one branch above, so it can't be used after the branches \
              (until it's assigned again). If the branch that ran didn't move it, its resource is \
@@ -4401,7 +4406,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "take reads from/writes to opt (implicitly mutably borrowed)",
             "Move from default to unwrap_or",
             "default goes out of scope. No resource is dropped.",
-            "opt goes out of scope. Its resource is dropped.",
+            "opt goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "trim reads from text (implicitly borrowed)",
             "contains reads from needle",
         ],
@@ -7751,7 +7756,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "names is the owner of the resource",
             "nums is the owner of the resource",
-            "names goes out of scope. Its resource is dropped.",
+            "names goes out of scope. Its resource is dropped (including every String it holds).",
         ],
         must_not_contain: &[
             "names owns a value that can hold references (names isn't a reference itself)",
@@ -7946,8 +7951,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // A value whose only droppable contents are Rcs says the Rc inside
         // only lowers a count; a collection adds that its own buffer is
         // freed. A Vec of (Rc, String), a HashMap keyed by String and a
-        // struct with its own Drop impl also own other data, so they keep
-        // main's plain sentence.
+        // struct with its own Drop impl also own other data, so they get no
+        // Rc sentence (the Vec and HashMap say what they hold instead, #542).
         must_contain: &[
             "o goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
             "b goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
@@ -7957,8 +7962,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed).",
             "h goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed).",
             "d's resource is moved into drop, which drops it (the Rc inside only lowers its reference count)",
-            "mixed goes out of scope. Its resource is dropped.",
-            "keyed goes out of scope. Its resource is dropped.",
+            "mixed goes out of scope. Its resource is dropped (including every (Rc<i32>, String) it holds).",
+            "keyed goes out of scope. Its resource is dropped (including every key and value it holds).",
             "n goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -7970,8 +7975,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v goes out of scope. Its resource is dropped.",
             "h goes out of scope. Its resource is dropped.",
             "d's resource is moved into drop, which drops it.",
-            "mixed goes out of scope. Its resource is dropped (",
-            "keyed goes out of scope. Its resource is dropped (",
+            "mixed goes out of scope. Its resource is dropped.",
+            "mixed goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+            "keyed goes out of scope. Its resource is dropped.",
+            "keyed goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
             "n goes out of scope. Its resource is dropped (",
         ],
     },
@@ -8046,13 +8053,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from s to a",
             "Move from t to a",
             "s goes out of scope. No resource is dropped.",
-            "a goes out of scope. Its resource is dropped.",
+            "a goes out of scope. Its resource is dropped (including every String it holds).",
             "Copy from x to nums",
             "nums is initialized with a copy of x",
             "zeros is bound to a copyable value",
             "Move from p to ps",
             "p.name goes out of scope. No resource is dropped.",
-            "ps goes out of scope. Its resource is dropped.",
+            "ps goes out of scope. Its resource is dropped (including every P it holds).",
         ],
         must_not_contain: &[
             // Whole-tooltip match (#518): "ps goes out of scope. Its resource is dropped." is correct.
@@ -8326,7 +8333,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Partial move from o to s",
             "s goes out of scope. Its resource is dropped.",
-            "o goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "o goes out of scope. Its resource is dropped (including the Result<String, String> it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Partial immutable borrow from r to t",
             "t immutably borrows a resource",
             "r goes out of scope. Its resource is dropped.",
@@ -8355,6 +8362,88 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "collection_drop_holds",
+        // Dropping a collection / Option / Box also drops what it holds;
+        // the element type is known, the count isn't, so none is given.
+        // Elements that need no drop (Vec<i32>, Option<i32>) add nothing.
+        must_contain: &[
+            "words goes out of scope. Its resource is dropped (including every String it holds).",
+            "pair goes out of scope. Its resource is dropped (including every String it holds).",
+            "queue goes out of scope. Its resource is dropped (including every String it holds).",
+            "slice goes out of scope. Its resource is dropped (including every String it holds).",
+            "maybe goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "boxed goes out of scope. Its resource is dropped (including the String it holds).",
+            "both goes out of scope. Its resource is dropped (including every key and value it holds).",
+            "keys goes out of scope. Its resource is dropped (including every key it holds).",
+            "vals goes out of scope. Its resource is dropped (including every value it holds).",
+            "rows goes out of scope. Its resource is dropped (including every Vec<String> it holds).",
+            "again acquires ownership of a new resource; its previous resource is dropped (including every String it holds)",
+            "gone's resource is moved into drop, which drops it (including every String it holds)",
+            "nums goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=words goes out of scope. Its resource is dropped.",
+            "=pair goes out of scope. No resource is dropped.",
+            "=queue goes out of scope. Its resource is dropped.",
+            "=slice goes out of scope. Its resource is dropped.",
+            "=maybe goes out of scope. Its resource is dropped.",
+            "=boxed goes out of scope. Its resource is dropped.",
+            "=both goes out of scope. Its resource is dropped.",
+            "=keys goes out of scope. Its resource is dropped.",
+            "=vals goes out of scope. Its resource is dropped.",
+            "=rows goes out of scope. Its resource is dropped.",
+            "=again acquires ownership of a new resource; its previous resource is dropped",
+            "=gone's resource is moved into drop, which drops it",
+            "nums goes out of scope. Its resource is dropped (including every i32 it holds).",
+            "=maybe_num goes out of scope. Its resource is dropped.",
+            "maybe_num goes out of scope. Its resource is dropped (including the i32 it holds, if any).",
+        ],
+    },
+    TooltipExpect {
+        name: "collection_drop_holds_flag",
+        // The drop-flag scope end, the branch merge and `drop(x)` carry the
+        // same parenthetical.
+        must_contain: &[
+            "words goes out of scope. Its resource is dropped (including every String it holds) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "maybe goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "words was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (including every String it holds) when words goes out of scope.",
+            "maybe's resource is moved into drop, which drops it (including the String it holds, if any)",
+            "_v goes out of scope. Its resource is dropped (including every String it holds).",
+        ],
+        must_not_contain: &[
+            "words goes out of scope. Its resource is dropped here only if",
+            "maybe goes out of scope. Its resource is dropped here only if",
+            "its resource is dropped when words goes out of scope.",
+            "=maybe's resource is moved into drop, which drops it",
+            "=_v goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "array_of_strings_drop",
+        // `[String; N]` owns its Strings: dropping the array drops each
+        // one (#544). Strings moved into an array literal are owned by
+        // the array, so they don't go out of scope with a drop of their
+        // own. A `[i32; 3]` has nothing to drop.
+        must_contain: &[
+            "names goes out of scope. Its resource is dropped (including every String it holds).",
+            "moved goes out of scope. Its resource is dropped (including every String it holds).",
+            "first goes out of scope. No resource is dropped.",
+            "second goes out of scope. No resource is dropped.",
+            "again acquires ownership of a new resource; its previous resource is dropped (including every String it holds)",
+            "again goes out of scope. Its resource is dropped (including every String it holds).",
+            "gone's resource is moved into drop, which drops it (including every String it holds)",
+            "gone goes out of scope. No resource is dropped.",
+            "maybe goes out of scope. Its resource is dropped (including every String it holds) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=names goes out of scope. No resource is dropped.",
+            "=moved goes out of scope. No resource is dropped.",
+            "first goes out of scope. Its resource is dropped",
+            "second goes out of scope. Its resource is dropped",
+            "nums goes out of scope. Its resource is dropped (including every i32 it holds).",
+        ],
     },
 ];
 

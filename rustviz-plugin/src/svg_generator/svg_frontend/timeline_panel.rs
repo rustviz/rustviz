@@ -1101,7 +1101,7 @@ fn render_dot(
                         hover_messages::event_dot_branch_merge_moved_with_drop(
                             &is.real_name(),
                             is.extract_rap().map_or(false, |r| r.holds_value()),
-                            is.extract_rap().and_then(|r| r.rc_drop()),
+                            &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
                         )
                     };
                     let m_data = EventDotData {
@@ -1222,7 +1222,7 @@ fn render_dot(
                             hash: *hash as u64,
                             dot_x: cx,
                             dot_y: cy,
-                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, ro.rc_drop()),
+                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note()),
                             p1x: cx - 3, p1y: cy - 1,
                             p2x: cx + 3, p2y: cy - 1,
                             p3x: cx,     p3y: cy + 3,
@@ -1290,7 +1290,7 @@ fn render_dot(
                                 title.push_str(&hover_messages::event_dot_holder_drop_suffix());
                             } else {
                                 title.push_str(". Its resource is dropped");
-                                title.push_str(&hover_messages::rc_drop_note(ro.rc_drop()));
+                                title.push_str(&ro.drop_note());
                                 title.push('.');
                             }
                             title
@@ -1331,12 +1331,12 @@ fn render_dot(
                 Event::OwnerDropAtReassign { .. } | Event::TemporaryDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
-                    // A reassignment that drops an Rc/Arc/Weak says it only lowers a count (#373).
-                    let rc = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false }) {
-                        visualization_data.timelines[hash].resource_access_point.rc_drop()
-                    } else { None };
-                    let title = if rc.is_some() {
-                        hover_messages::event_dot_owner_drop_at_reassign(&name, rc)
+                    // A reassignment that drops something says what else goes with it (#373, #542).
+                    let note = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false }) {
+                        visualization_data.timelines[hash].resource_access_point.drop_note()
+                    } else { String::new() };
+                    let title = if !note.is_empty() {
+                        hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
                     } else {
                         event.print_message_with_name(&mut name)
                     };

@@ -467,7 +467,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_04_match_moves_string",
-        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when opt goes out of scope.", "opt goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (including the String it holds, if any) when opt goes out of scope.", "opt goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
         must_not_contain: &[JOIN_OPT],
         ..E
     },
@@ -476,7 +476,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Partial immutable borrow from opt to s",
             "Return immutably borrowed resource from s to opt",
-            "opt goes out of scope. Its resource is dropped.",
+            "opt goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "L4+ s's immutable borrow ends",
             "L4+ opt's resource is no longer immutably borrowed",
         ],
@@ -491,7 +491,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_07_if_let_else_string",
         note: "on the else path name is dropped at the end of main (drop flag), not at the branch's end (#179)",
-        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when name goes out of scope.", "name goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (including the String it holds, if any) when name goes out of scope.", "name goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
         must_not_contain: &[
             "name was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "name goes out of scope. No resource is dropped.",
@@ -615,7 +615,7 @@ const BOOK: &[Snippet] = &[
             "Move from s to push",
             "push reads from/writes to v (implicitly mutably borrowed)",
             "s goes out of scope. No resource is dropped.",
-            "v goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
         ..E
     },
@@ -676,7 +676,7 @@ const BOOK: &[Snippet] = &[
             "Move from field_name to insert",
             "Move from field_value to insert",
             "field_name goes out of scope. No resource is dropped.",
-            "map goes out of scope. Its resource is dropped.",
+            "map goes out of scope. Its resource is dropped (including every key and value it holds).",
         ],
         ..E
     },
@@ -1136,7 +1136,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from b to c",
             "b goes out of scope. No resource is dropped.",
-            "c goes out of scope. Its resource is dropped.",
+            "c goes out of scope. Its resource is dropped (including the String it holds).",
         ],
         ..E
     },
@@ -1256,7 +1256,7 @@ const BOOK: &[Snippet] = &[
             "L7 f holds an immutable reference",
             "L7 Immutable borrow from v to f: first's signature gives the reference it returns the same lifetime as its argument",
             "L8 Return immutably borrowed resource from f to v",
-            "v goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
         must_not_contain: &[
             "v's resource is moved to the caller",
@@ -1461,14 +1461,14 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x16_match_arm_block_body",
         note: "control for c6_04: a block-bodied arm draws s's drop on canvas",
-        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when opt goes out of scope.", "opt goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (including the String it holds, if any) when opt goes out of scope.", "opt goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
         must_not_contain: &[JOIN_OPT],
         ..E
     },
     Snippet {
         id: "x17_match_arm_fn_call_body",
         note: "control: fn-call arm body",
-        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when opt goes out of scope.", "opt goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (including the String it holds, if any) when opt goes out of scope.", "opt goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
         must_not_contain: &[JOIN_OPT],
         ..E
     },
