@@ -1040,6 +1040,46 @@ fn binding_pats<'tcx>(pat: &'tcx Pat<'tcx>, out: &mut Vec<&'tcx Pat<'tcx>>) {
   }
 }
 
+/// Refuse an or-pattern that binds `name` from different parts of the
+/// variable `whole`, which a tuple (or struct) literal being matched
+/// moved into a temporary (`match (s, u) { (p, (x, _) | (_, x)) => … }`,
+/// `let (p, (x, _) | (_, x)) = (s, u);`): what `x` doesn't take of `u`
+/// is dropped with the temporary, which `u`'s parts don't show (#612).
+fn or_refuse_temporary_parts(name: &str, whole: &str, line: usize) -> ! {
+  panic!("or-patterns that bind `{}` from different parts of `{}`, which the tuple or struct being matched \
+          moves into a temporary (line {}), aren't supported yet", name, whole, line)
+}
+
+/// Whether `pat` has an or-pattern anywhere in it.
+fn pat_has_or(pat: &Pat<'_>) -> bool {
+  let mut found = false;
+  pat.walk_short(|p| {
+    found |= matches!(p.kind, PatKind::Or(_));
+    !found
+  });
+  found
+}
+
+/// Every way of matching sub-patterns side by side (`(p, q)`), given
+/// the ways each one matches (see `or_alt_sources`): one map per
+/// combination, each with the bindings of both.
+fn or_sources_product(
+  left: Vec<BTreeMap<String, (String, Option<ResourceTy>)>>,
+  right: Vec<BTreeMap<String, (String, Option<ResourceTy>)>>,
+) -> Vec<BTreeMap<String, (String, Option<ResourceTy>)>> {
+  let mut out = Vec::new();
+  for l in &left {
+    for r in &right {
+      let mut m = l.clone();
+      m.extend(r.iter().map(|(k, v)| (k.clone(), v.clone())));
+      if !out.contains(&m) {
+        out.push(m);
+      }
+    }
+  }
+  out
+}
+
 /// The by-reference bindings in a fn parameter's pattern that borrow
 /// the parameter value itself, which the function owns: `ref s` in
 /// `fn f(ref s: String)`, `ref a` in `fn g((ref a, b): (String, i32))`.
@@ -6258,6 +6298,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .collect();
         self.premove_into_literal(&pairs, sub_exprs[d..tail_start].iter().collect(), is_skipped);
         for (sp, se) in pairs {
+          self.refuse_or_in_literal(sp, se, is_skipped);
           self.bind_pat(sp, se, is_skipped);
         }
       }
@@ -6269,6 +6310,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           && sub_pats.len() == sub_exprs.len() =>
       {
         for (sp, se) in sub_pats.iter().zip(sub_exprs.iter()) {
+          self.refuse_or_in_literal(sp, se, is_skipped);
           self.bind_pat(sp, se, is_skipped);
         }
       }
@@ -6289,7 +6331,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.premove_into_literal(&pairs, ignored, is_skipped);
         for pf in pat_fields {
           match expr_fields.iter().find(|f| f.ident.name == pf.ident.name) {
-            Some(ef) => self.bind_pat(pf.pat, ef.expr, is_skipped),
+            Some(ef) => {
+              self.refuse_or_in_literal(pf.pat, ef.expr, is_skipped);
+              self.bind_pat(pf.pat, ef.expr, is_skipped);
+            }
             None => self.bind_walk(pf.pat, init, is_skipped),
           }
         }
@@ -6303,8 +6348,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if self.member_place_name(init).is_some() =>
       {
         let place = self.member_place_name(init).unwrap();
-        let ty = self.tcx.typeck(init.hir_id.owner).node_type(init.hir_id);
-        self.bind_pat_from_member(pat, &place, ty, init, is_skipped, &[]);
+        let typeck = self.tcx.typeck(init.hir_id.owner);
+        let ty = typeck.node_type(init.hir_id);
+        // An or-pattern nested in the pattern (`let (a, (x, _) | (_, x))
+        // = t;`) can bind a name from different places too (#612).
+        let conflicts = if is_skipped {
+          Vec::new()
+        } else {
+          let parent = ResourceTy::Value(self.raps.get(&place).unwrap().rap.to_owned());
+          let line = span_to_line(&pat.span, &self.tcx);
+          self.or_arm_stand_in(pat, std::slice::from_ref(&parent), &[ty], line, typeck, &[]).1
+        };
+        self.bind_pat_from_member(pat, &place, ty, init, is_skipped, &conflicts);
       }
       // `let ((x, _) | (_, x)) = t;`: `x` comes from `t.0` or `t.1`,
       // whichever alternative matches, like in such a match arm
@@ -6377,6 +6432,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// `let (p, (x, _) | (_, x)) = (s, u);`: the literal moves `u` into
+  /// a temporary, which drops what `x` doesn't take at the end of the
+  /// `let`. Pairing `(x, _) | (_, x)` with `u` would draw `u.0` and
+  /// `u.1` as maybe-moved, each dropped by a drop flag at `u`'s scope
+  /// end, so it's refused (#612).
+  fn refuse_or_in_literal(&self, sub_pat: &'tcx Pat<'tcx>, elem: &'tcx Expr<'tcx>, is_skipped: bool) {
+    if is_skipped || !pat_has_or(sub_pat) {
+      return;
+    }
+    let Some(place) = self.member_place_name(elem) else { return };
+    let typeck = self.tcx.typeck(elem.hir_id.owner);
+    let parent = ResourceTy::Value(self.raps.get(&place).unwrap().rap.to_owned());
+    let line = span_to_line(&sub_pat.span, &self.tcx);
+    let (_, conflicts) = self.or_arm_stand_in(sub_pat, std::slice::from_ref(&parent), &[typeck.node_type(elem.hir_id)], line, typeck, &[]);
+    if let Some(c) = conflicts.first() {
+      or_refuse_temporary_parts(&c.name, &place, line);
+    }
+  }
+
   /// `init` names a tuple- or struct-typed variable or field (`t`,
   /// `p`, `p.pair`) whose parts have columns of their own: its RAP
   /// name.
@@ -6420,6 +6494,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ) {
     match pat.kind {
       PatKind::Wild => {}
+      // An or-pattern nested in the pattern: its first alternative
+      // stands for it, as in `or_arm_stand_in` (#612). A name it binds
+      // from different places is one of `or_conflicts`.
+      PatKind::Or(alts) => {
+        self.bind_pat_from_member(&alts[0], member, member_ty, init, is_skipped, or_conflicts);
+      }
       // A by-value binding of a non-reference part.
       PatKind::Binding(annotation, hirid, _, None)
         if matches!(annotation.0, rustc_hir::ByRef::No) && self.raps.contains_key(member) =>
@@ -6757,6 +6837,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a place that is itself a reference, and a `&mut` moved out of one
   /// of the places. A reference into the moved values only borrows the
   /// tuple, whichever alternative matched: no conflict.
+  ///
+  /// An or-pattern nested inside the pattern (`(a, (x, _) | (_, x))`,
+  /// #612) is the same: the pattern matches as if each of its
+  /// alternatives were spelled out in full (`(a, (x, _)) | (a, (_,
+  /// x))`), so the places are collected over every such combination.
+  /// A nested or-pattern is left in the returned pattern; the code
+  /// that draws the bindings (`get_dec_of_pat_parts`,
+  /// `bind_pat_from_member`) draws its first alternative.
   pub(crate) fn or_arm_stand_in(
     &self,
     pat: &'tcx Pat<'tcx>,
@@ -6766,11 +6854,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     typeck_res: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
     tuple_vars: &[ResourceAccessPoint],
   ) -> (&'tcx Pat<'tcx>, Vec<OrConflict>) {
-    let PatKind::Or(alts) = pat.kind else { return (pat, Vec::new()) };
-    let sources: Vec<BTreeMap<String, (String, Option<ResourceTy>)>> =
-      alts.iter().map(|alt| self.or_alt_sources(alt, parents, parents_ty)).collect();
+    let mut stand_in = pat;
+    while let PatKind::Or(alts) = stand_in.kind {
+      stand_in = &alts[0];
+    }
+    if !pat_has_or(pat) {
+      return (pat, Vec::new());
+    }
+    let sources = self.or_alt_sources(pat, parents, parents_ty);
     let mut conflicts = Vec::new();
-    for name in sources[0].keys() {
+    let Some(first) = sources.first() else { return (stand_in, conflicts) };
+    for name in first.keys() {
       let mut places: Vec<(String, Option<ResourceTy>)> = Vec::new();
       for m in &sources {
         if let Some(src) = m.get(name) {
@@ -6787,7 +6881,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 aren't supported yet", why, name, line)
       };
       let mut bs = Vec::new();
-      binding_pats(&alts[0], &mut bs);
+      binding_pats(stand_in, &mut bs);
       let binding = bs.iter().find(|b| matches!(b.kind, PatKind::Binding(_, _, ident, _) if ident.to_string() == *name));
       let by_ref = binding.is_some_and(|b| matches!(
         typeck_res.pat_binding_modes().get(b.hir_id).map(|m| m.0),
@@ -6846,10 +6940,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           None => refuse("the name"),
         }
       }
+      // `match (s, u) { (p, (x, _) | (_, x)) => … }`: `u` was moved into
+      // the temporary tuple, so what `x` doesn't take of it is dropped
+      // with that tuple, not by a drop flag at `u`'s scope end. Only the
+      // tuple's own elements (`a`, `b` in `match (a, b)`) are drawn that
+      // way (#612).
+      if parents.len() > 1 {
+        let parent_raps: Vec<&ResourceAccessPoint> = parents.iter().filter_map(|p| p.extract_rap()).collect();
+        if let Some(part) = raps.iter().find(|r| !parent_raps.contains(r)) {
+          let whole = parent_raps.iter()
+            .find(|p| part.name().starts_with(&format!("{}.", p.name())))
+            .map_or_else(|| part.name().to_string(), |p| p.name().to_string());
+          or_refuse_temporary_parts(name, &whole, line);
+        }
+      }
       conflicts.push(OrConflict { name: name.clone(), places: raps });
     }
-    let (inner, _) = self.or_arm_stand_in(&alts[0], parents, parents_ty, line, typeck_res, tuple_vars);
-    (inner, conflicts)
+    (stand_in, conflicts)
   }
 
   /// `or_conflict_events` for an `if let` / `while let` pattern
@@ -7004,35 +7111,50 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .max()
   }
 
-  /// Each binding of a match arm's pattern `alt`, and the place it's
-  /// bound from (as a key that tells places apart, and the place), the
-  /// way the arm code below picks it (one parent per element of a
-  /// tuple-literal scrutinee, then `pat_parts`).
+  /// For each way `pat` can match (each alternative of an or-pattern,
+  /// with the or-patterns nested in it spelled out, #612): each of its
+  /// bindings, and the place it's bound from (as a key that tells
+  /// places apart, and the place), the way the arm code below picks it
+  /// (one parent per element of a tuple-literal scrutinee, then
+  /// `pat_parts`).
   fn or_alt_sources(
     &self,
-    alt: &'tcx Pat<'tcx>,
+    pat: &'tcx Pat<'tcx>,
     parents: &[ResourceTy],
     parents_ty: &[rustc_middle::ty::Ty<'tcx>],
-  ) -> BTreeMap<String, (String, Option<ResourceTy>)> {
-    let mut out = BTreeMap::new();
-    match alt.kind {
-      PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) if parents.len() > 1 && ps.len() == parents.len() => {
-        for (i, p) in ps.iter().enumerate() {
-          self.pat_sources(p, &parents[i], parents_ty[i], &format!("{}:", i), &mut out);
+  ) -> Vec<BTreeMap<String, (String, Option<ResourceTy>)>> {
+    match pat.kind {
+      PatKind::Or(alts) => {
+        let mut out = Vec::new();
+        for alt in alts {
+          for m in self.or_alt_sources(alt, parents, parents_ty) {
+            if !out.contains(&m) {
+              out.push(m);
+            }
+          }
         }
+        out
       }
-      _ if parents.len() == 1 => self.pat_sources(alt, &parents[0], parents_ty[0], "", &mut out),
+      PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) if parents.len() > 1 && ps.len() == parents.len() => {
+        let mut out = vec![BTreeMap::new()];
+        for (i, p) in ps.iter().enumerate() {
+          out = or_sources_product(out, self.pat_sources(p, &parents[i], parents_ty[i], &format!("{}:", i)));
+        }
+        out
+      }
+      _ if parents.len() == 1 => self.pat_sources(pat, &parents[0], parents_ty[0], ""),
       _ => {
+        let mut out = BTreeMap::new();
         let mut bs = Vec::new();
-        binding_pats(alt, &mut bs);
+        binding_pats(pat, &mut bs);
         for b in bs {
           if let PatKind::Binding(_, _, ident, _) = b.kind {
             out.insert(ident.to_string(), ("*".to_owned(), None));
           }
         }
+        vec![out]
       }
     }
-    out
   }
 
   /// See `or_alt_sources`; mirrors `get_dec_of_pat_parts`.
@@ -7042,9 +7164,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     parent: &ResourceTy,
     parent_ty: rustc_middle::ty::Ty<'tcx>,
     prefix: &str,
-    out: &mut BTreeMap<String, (String, Option<ResourceTy>)>,
-  ) {
-    let whole = |p: &'tcx Pat<'tcx>, out: &mut BTreeMap<String, (String, Option<ResourceTy>)>| {
+  ) -> Vec<BTreeMap<String, (String, Option<ResourceTy>)>> {
+    let whole = |p: &'tcx Pat<'tcx>| {
+      let mut out = BTreeMap::new();
       let mut bs = Vec::new();
       binding_pats(p, &mut bs);
       for b in bs {
@@ -7052,15 +7174,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           out.insert(ident.to_string(), (format!("{}{}", prefix, parent.real_name()), Some(parent.clone())));
         }
       }
+      out
     };
-    match self.pat_parts(pat, parent, parent_ty) {
-      Some(subs) => for (sp, part) in subs {
-        match part {
-          Some((part_rty, part_ty)) => self.pat_sources(sp, &part_rty, part_ty, prefix, out),
-          None => whole(sp, out),
+    // `(x, _) | (_, x)` nested in the pattern, on a part with columns
+    // of its own: each alternative is a way to match it.
+    if let PatKind::Or(alts) = pat.kind {
+      let mut out = Vec::new();
+      for alt in alts {
+        for m in self.pat_sources(alt, parent, parent_ty, prefix) {
+          if !out.contains(&m) {
+            out.push(m);
+          }
         }
-      },
-      None => whole(pat, out),
+      }
+      return out;
+    }
+    match self.pat_parts(pat, parent, parent_ty) {
+      Some(subs) => {
+        let mut out = vec![BTreeMap::new()];
+        for (sp, part) in subs {
+          let sub = match part {
+            Some((part_rty, part_ty)) => self.pat_sources(sp, &part_rty, part_ty, prefix),
+            None => vec![whole(sp)],
+          };
+          out = or_sources_product(out, sub);
+        }
+        out
+      }
+      None => vec![whole(pat)],
     }
   }
 

@@ -3887,6 +3887,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     scope: usize,
     res: &mut Vec<(ResourceAccessPoint, Evt, ResourceTy, Option<bool>)>,
   ) {
+    // An or-pattern nested in the pattern (`(a, (x, _) | (_, x))`):
+    // like a whole arm's or-pattern, its first alternative stands for
+    // it (`or_arm_stand_in`, #612), so a name it binds from the same
+    // part in every alternative is bound from that part.
+    if let PatKind::Or(alts) = pat.kind {
+      if let Some(first) = alts.first() {
+        self.get_dec_of_pat_parts(first, ty_results, parent, parent_ty, scope, res);
+      }
+      return;
+    }
     match self.pat_parts(pat, parent, parent_ty) {
       Some(subs) => {
         for (sp, part) in subs {
