@@ -10086,12 +10086,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it whatever of a's and b's resources x didn't take",
             // The `_` arm takes nothing out of the tuple.
             "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it a's and b's resources",
-            "a was moved or dropped in every branch above",
-            "a goes out of scope. No resource is dropped.",
-            "b goes out of scope. No resource is dropped.",
+            // #694: no join dot (every branch finds a and b moved into
+            // the tuple); the scope end gives the reason.
+            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
+            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
             "x goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            "=a was moved or dropped in every branch above",
+            "=b was moved or dropped in every branch above",
             "Move from a to x",
             "Move from b to x",
             "otherwise a still owns it",
@@ -10156,11 +10159,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // c isn't bound by the arm: all of it goes with the tuple.
             "The temporary tuple (a, b, c) is dropped after this arm, when the match ends, and with it c's resource and whatever of a's and b's resources x didn't take",
             "The temporary tuple (a, b, c) is dropped after this arm, when the match ends, and with it a's, b's and c's resources",
+            // `one_arm`: a one-arm match is drawn inline.
             "a goes out of scope. No resource is dropped.",
             "b goes out of scope. No resource is dropped.",
-            "c goes out of scope. No resource is dropped.",
+            // `three`: no join dot (#694); the scope end gives the reason.
+            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
+            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
+            "c goes out of scope. No resource is dropped: c was moved or dropped in every branch above.",
         ],
         must_not_contain: &[
+            "=a was moved or dropped in every branch above",
+            "=b was moved or dropped in every branch above",
+            "=c was moved or dropped in every branch above",
             "still owns it",
             "drop flag",
             "only if no branch above moved it",
@@ -10497,8 +10507,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x immutably borrows a resource",
             "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it a's and b's resources",
-            "a goes out of scope. No resource is dropped.",
-            "b goes out of scope. No resource is dropped.",
+            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
+            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
         ],
         must_not_contain: &[
             "x borrows a or b",
@@ -10987,8 +10997,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
             "The temporary tuple (a, b) is dropped here, at the end of the if branch, and with it whatever of a's and b's resources x didn't take",
             "The pattern didn't match, so the temporary tuple (a, b) is dropped here, before the else branch runs, and with it a's and b's resources",
-            "a goes out of scope. No resource is dropped.",
-            "b goes out of scope. No resource is dropped.",
+            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
+            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
             "x acquires ownership of a resource",
         ],
         must_not_contain: &[
@@ -11180,7 +11190,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w's resource is moved into the",
             // it3 / words don't take part in the `if` around the `return`.
             "words is live in a conditional expression",
-            "words was moved or dropped in every branch",
+            "=words was moved or dropped in every branch", // #694: no join dot (the scope-end tooltip states it instead)
         ],
     },
     // ─── A let-chain that assigns / calls / moves out of a Box, then fails (#579) ───
