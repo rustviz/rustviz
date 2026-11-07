@@ -1105,6 +1105,12 @@ const EXPECTED_OK: &[&str] = &[
     "pattern_mutref_field_match",
     // A dashed arm segment explains itself on hover (#626).
     "dashed_arm_hover",
+    // A `let` whose value is an `as` cast is bound (#729); a struct
+    // declared in an `if` arm ends its field columns (#730); a block's
+    // tail copy comes after its `let` on one line (#731).
+    "cast_let_binding",
+    "struct_in_branch_field_scope_end",
+    "block_tail_copy_order",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12520,6 +12526,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=p's value is moved",
         ],
     },
+    // `let n = v.len() as i32;` records the binding like `let m =
+    // v.len();`: before, n had no binding dot and no line, only loose
+    // dots (#729). A cast of a variable copies it; of a reference
+    // dereference it copies what the reference points to.
+    TooltipExpect {
+        name: "cast_let_binding",
+        must_contain: &[
+            "n is initialized with a copy of len",
+            "m is initialized with a copy of len",
+            "n holds a copyable value",
+            "b is initialized with a copy of a",
+            "c is bound to a copyable value",
+            "e is initialized with a copy of *d",
+        ],
+        must_not_contain: &[],
+    },
+    // A struct declared in an `if` arm: its field columns end with it, and
+    // its scope end doesn't claim its fields were moved out (#730). On main,
+    // `fresh` (never moved from) said `fresh.x and fresh.s were moved out
+    // earlier, so no resource is dropped`, which is false: `fresh.s`'s
+    // String is dropped there.
+    TooltipExpect {
+        name: "struct_in_branch_field_scope_end",
+        must_contain: &[
+            "moved goes out of scope",
+            "moved.x goes out of scope",
+            "fresh goes out of scope. Its resource is dropped.",
+            "fresh.x goes out of scope",
+            "fresh.s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "moved.x was moved out earlier",
+            "fresh.x and fresh.s were moved out earlier",
+            "no resource is dropped",
+        ],
+    },
+    // The order of the dots on one row is pinned by
+    // `a_block_tail_is_bound_before_it_is_copied`.
+    TooltipExpect {
+        name: "block_tail_copy_order",
+        must_contain: &[
+            "t is bound to a copyable value",
+            "t goes out of scope",
+            "k is initialized with a copy of t",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -16332,6 +16385,35 @@ fn a_break_value_in_a_branch_moves_where_the_loop_ends() {
             name, brk, row, want, dots
         );
     }
+}
+
+/// #731: in `let k = { let t = m * 2; t };` the block's `let` and the copy
+/// of its tail into `k` share a line. `t` is bound first, then copied
+/// into `k`, then goes out of scope below, with a line down its column.
+/// Before, the copy was drawn on the line's row and `t`'s binding and
+/// scope end on a row below it: `t` was copied before it had a value.
+#[test]
+fn a_block_tail_is_bound_before_it_is_copied() {
+    let rv = run_with_local_backend("block_tail_copy_order");
+    let timeline = rv.timeline_panel_string();
+    let tips = tooltip_lines(&timeline);
+    let bound = "t is bound to a copyable value";
+    let copied = "t's value is copied";
+    let dots: Vec<&Vec<String>> = tips.iter().filter(|t| t.iter().any(|l| l == copied)).collect();
+    assert_eq!(dots.len(), 1, "dots copying t out: {:?}", dots);
+    let want = [bound.to_string(), copied.to_string()];
+    assert!(
+        dots[0].starts_with(&want),
+        "the dot where t is copied reads {:?}; t must be bound before it is copied",
+        dots[0]
+    );
+    let bound_at = dots_listing(&timeline, bound);
+    let copied_at = dots_listing(&timeline, copied);
+    let gone_at = dots_listing(&timeline, "t goes out of scope");
+    assert_eq!(bound_at.len(), 1, "t's binding dots: {:?}", bound_at);
+    assert_eq!(bound_at, copied_at, "t is bound and copied at the same row");
+    assert_eq!(gone_at.len(), 1, "t's scope-end dots: {:?}", gone_at);
+    assert!(gone_at[0].1 > bound_at[0].1, "t's scope end {:?} must be below its binding {:?}", gone_at, bound_at);
 }
 
 /// The row numbers (1-based) of the code panel's lines whose row lies in

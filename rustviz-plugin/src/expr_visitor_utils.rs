@@ -618,6 +618,18 @@ pub fn collect_pat_bindings(
     PatKind::Binding(_, hir_id, _, sub_pat) => {
       if let Some(rd) = raps.get(&binding_name(tcx, hir_id)) {
         out.insert(rd.rap.to_owned());
+        // A struct's field columns (`p.x`) are declared with it and go
+        // out of scope with it (#730).
+        if let ResourceAccessPoint::Struct(st) = &rd.rap {
+          if !st.is_member {
+            #[expect(clippy::iter_over_hash_type, clippy::disallowed_methods, reason = "collected into a set")]
+            for f in raps.values() {
+              if matches!(&f.rap, ResourceAccessPoint::Struct(m) if m.is_member && m.owner == st.hash) {
+                out.insert(f.rap.to_owned());
+              }
+            }
+          }
+        }
         // The temporary a `let r = &…;` keeps alive is declared with r.
         if let Some(t) = rd.extended_temp.as_ref().and_then(|t| raps.get(t)) {
           out.insert(t.rap.to_owned());
