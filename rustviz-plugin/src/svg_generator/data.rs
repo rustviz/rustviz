@@ -1100,6 +1100,17 @@ pub enum ChainFailHow {
     Call,
 }
 
+/// Where a `for` loop's iterator is dropped (#482, #592).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopLeft {
+    /// Where the loop ends.
+    End,
+    /// At a `return` inside the loop.
+    Return,
+    /// At a `break` to an outer loop, leaving this one.
+    Break,
+}
+
 /// What a `for` loop does with a head it moves (`for s in v`, `for s
 /// in it`), when the loop's iterator has drop glue (#482).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1288,11 +1299,11 @@ pub enum ExternalEvent {
     },
     // `ro` was moved into a `for` loop as its iterator (`for s in it`,
     // `LoopHead::Iterator`), and the loop drops that iterator: where
-    // the loop ends, or (`early`) at a `return` inside it (#482). `ro`
+    // the loop ends, or (`left`) at a `return` or an outer `break` (#482, #592). `ro`
     // doesn't own it any more, so its state doesn't change.
     LoopIteratorDrop {
         ro: ResourceAccessPoint,
-        early: bool,
+        left: LoopLeft,
         id: usize
     },
     // At the end of a loop: `ro` (declared outside the loop) was moved
@@ -1667,7 +1678,7 @@ pub enum Event {
     // An unbound temporary is dropped (see ExternalEvent).
     TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool },
     // See ExternalEvent::LoopIteratorDrop.
-    LoopIteratorDrop { early: bool },
+    LoopIteratorDrop { left: LoopLeft },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
@@ -2191,8 +2202,8 @@ impl Event {
             Event::TupleTempDrop { tuple, at, with } => {
                 hover_messages::event_dot_tuple_temp_drop(tuple, *at, with)
             }
-            Event::LoopIteratorDrop { early } => {
-                hover_messages::event_dot_loop_iterator_drop(my_name, *early)
+            Event::LoopIteratorDrop { left } => {
+                hover_messages::event_dot_loop_iterator_drop(my_name, *left)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -3442,8 +3453,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TemporaryDrop{ ty, when, literal, early, .. } => {
           vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early })]
         },
-        ExternalEvent::LoopIteratorDrop{ early, .. } => {
-          vec![(line_num, Event::LoopIteratorDrop { early: *early })]
+        ExternalEvent::LoopIteratorDrop{ left, .. } => {
+          vec![(line_num, Event::LoopIteratorDrop { left: *left })]
         },
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
@@ -3788,8 +3799,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early }, line_number);
             },
-            ExternalEvent::LoopIteratorDrop{ro, early, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { early }, line_number);
+            ExternalEvent::LoopIteratorDrop{ro, left, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left }, line_number);
             },
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);

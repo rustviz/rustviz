@@ -229,6 +229,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// a borrow (`Some(n)` on `it.next()`, #391): their borrow is part of
   /// that value's, and ends at their own last use (#575).
   pub pattern_copies: HashSet<String>,
+  // While the pattern of `for (a, b) in &v` is registered: the borrow
+  // of the head that each reference binding is (#576).
+  pub pattern_lender: Option<(Evt, ResourceTy)>,
   // Temporaries given a column of their own in this fn body because a
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
@@ -245,8 +248,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub unbranched_temps: HashSet<ResourceAccessPoint>,
   // The variables moved into the `for` loops being visited as their
   // iterators (`for s in it`, `LoopHead::Iterator`), innermost last: a
-  // `return` inside drops each loop's iterator (#482).
-  pub loop_iterators: Vec<ResourceAccessPoint>,
+  // `return` inside drops each loop's iterator (#482), and so does a
+  // `break 'outer` out of the loops inside `'outer` (#592). Each is
+  // paired with its loop's id (the desugared `loop` expression).
+  pub loop_iterators: Vec<(rustc_hir::HirId, ResourceAccessPoint)>,
   // State for the destructuring assignment being visited
   // (`(a, b) = (b, a);`, see `visit_destructuring_assign`). rustc
   // lowers it to `{ let (lhs, lhs) = (b, a); a = lhs; b = lhs; }`;

@@ -1466,8 +1466,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
       return;
     }
-    for ro in self.loop_iterators.clone() {
-      let id = self.add_loop_iterator_drop(ro, line, true);
+    for (_, ro) in self.loop_iterators.clone() {
+      let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Return);
+      self.exit_drops.insert(id);
+    }
+  }
+
+  /// A `break 'outer` out of an inner `for` loop leaves it too (#592):
+  /// the iterator variables the loops inside the target took (`for s in
+  /// it`) are dropped at the `break`, on their own columns, where
+  /// `drop_locals_on_exit` draws the exit's other drops (in a branch
+  /// inside the target loop). The target loop's own iterator is dropped
+  /// where that loop ends. An iterator a loop built from its head (`for
+  /// s in row`) is a `(temporary N)` column declared inside the target
+  /// loop, which `drop_locals_on_exit` drops itself (#410).
+  fn drop_inner_loop_iterators(&mut self, line: usize, target: HirId, left: LoopLeft) {
+    let Some(branch_at) = self.exit_frames.iter()
+      .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
+    let loop_at = self.exit_frames.iter()
+      .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target));
+    if !loop_at.is_some_and(|i| i < branch_at) {
+      return;
+    }
+    let inner: Vec<ResourceAccessPoint> = self.loop_iterators.iter()
+      .filter(|(lp, _)| *lp != target
+        && self.tcx.hir_parent_iter(*lp).any(|(id, _)| id == target))
+      .map(|(_, ro)| ro.clone())
+      .collect();
+    for ro in inner {
+      let id = self.add_loop_iterator_drop(ro, line, left);
       self.exit_drops.insert(id);
     }
   }
@@ -1476,10 +1503,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `line`: where the loop ends, or (`early`) at a `return` inside it
   /// (#482). Drawn on `ro`'s column, which doesn't own it any more.
   /// Returns the event's id.
-  pub fn add_loop_iterator_drop(&mut self, ro: ResourceAccessPoint, line: usize, early: bool) -> usize {
+  pub fn add_loop_iterator_drop(&mut self, ro: ResourceAccessPoint, line: usize, left: LoopLeft) -> usize {
     let id = *self.unique_id;
     *self.unique_id += 1;
-    self.add_external_event(line, ExternalEvent::LoopIteratorDrop { ro, early, id });
+    self.add_external_event(line, ExternalEvent::LoopIteratorDrop { ro, left, id });
     id
   }
 
@@ -4128,15 +4155,38 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   // never reaching the destination's timeline, so the
                   // column wouldn't render at all. The Bind shortcut
                   // sidesteps that and matches the macro-RHS path.
-                  let _ = iterand_evt;
-                  let _ = head_rty;
+                  //
+                  // A head that is a variable moved into the loop
+                  // (`for (n, s) in pairs`) still moves it: draw that on
+                  // the head, into no particular binding, as the single
+                  // binding does (#527).
+                  if matches!(iterand_evt, Some(Evt::Move)) {
+                    if iterator_needs_drop {
+                      if head_is_iterator {
+                        iterator_head = head_rty.extract_rap().cloned();
+                        self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty.clone(), LoopHead::Iterator);
+                      } else {
+                        self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty.clone(), LoopHead::Collection);
+                      }
+                    } else {
+                      self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty.clone(), false);
+                    }
+                  }
+                  // `for (a, b) in &pairs` / `&mut pairs`: each reference
+                  // binding borrows the head (#576).
+                  if matches!(iterand_evt, Some(Evt::SBorrow) | Some(Evt::MBorrow)) {
+                    self.pattern_lender = iterand_evt.clone().map(|e| (e, head_rty.clone()));
+                  }
                   self.register_pattern_bindings_anon(user_pat, for_line);
+                  self.pattern_lender = None;
                 }
 
                 // Visit body — events flow into the global timeline.
                 let before = self.rap_names();
                 if let Some(ro) = &iterator_head {
-                  self.loop_iterators.push(ro.clone());
+                  if let Some(loop_expr) = arms.first().map(|a| a.body) {
+                    self.loop_iterators.push((loop_expr.hir_id, ro.clone()));
+                  }
                 }
                 self.visit_expr(body_expr);
                 if iterator_head.is_some() {
@@ -4167,7 +4217,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // The loop drops its iterator where it ends, however it
                 // ends (running out, a `break`) (#482).
                 if let Some(ro) = iterator_head {
-                  self.add_loop_iterator_drop(ro, span_end_line(&expr.span, &self.tcx), false);
+                  self.add_loop_iterator_drop(ro, span_end_line(&expr.span, &self.tcx), LoopLeft::End);
                 }
               }
             }
@@ -4185,6 +4235,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         intravisit::walk_expr(self, expr);
         if let Ok(target) = dest.target_id {
           self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), "break");
+          self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, LoopLeft::Break);
         }
       }
       ExprKind::Continue(dest) => {
@@ -5479,6 +5530,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       PatKind::Binding(_, hirid, ident, sub_pat) => {
         let name = binding_name(&self.tcx, hirid);
         let pat_ty = self.tcx.typeck(hirid.owner).pat_ty(pat);
+        let lender = if pat_ty.is_ref() { self.pattern_lender.clone() } else { None };
         if pat_ty.is_ref() {
           let pointee_copy = self.ref_pointee_is_copy(pat_ty, hirid.owner);
           self.add_ref(
@@ -5486,7 +5538,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             bool_of_mut(pat_ty.ref_mutability().unwrap()),
             false,
             line,
-            ResourceTy::Anonymous,
+            lender.as_ref().map_or(ResourceTy::Anonymous, |(_, l)| l.clone()),
             std::collections::VecDeque::new(),
             self.current_scope,
             false,
@@ -5505,9 +5557,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // Acquire event so the column has at least one entry on its
         // timeline (otherwise the renderer gives it no column).
         let to_rty = ResourceTy::Value(self.raps.get(&name).unwrap().rap.to_owned());
-        self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
-        if let Some(sp) = sub_pat {
-          self.register_pattern_bindings_anon(sp, line);
+        match lender {
+          Some((e, l)) => self.add_ev(line, e, to_rty, l, false),
+          None => self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false),
+        }
+        if let Some(sub) = sub_pat {
+          self.register_pattern_bindings_anon(sub, line);
         }
       }
       PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) => {

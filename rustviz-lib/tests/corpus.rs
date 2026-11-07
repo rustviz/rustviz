@@ -994,6 +994,12 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_fnonce_call",
     "edition2024/if_let_chain_box_move",
     "edition2024/if_let_chain_nested_effects",
+    // A tuple-pattern for loop moves or borrows its head (#527, #576),
+    // and a `break 'outer` drops the iterators of the loops it leaves
+    // (#592).
+    "for_tuple_pattern_move",
+    "for_tuple_pattern_borrow",
+    "for_iterator_break_outer",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11134,6 +11140,73 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["s goes out of scope. Its resource is dropped here only if no branch above moved it"],
     },
+    TooltipExpect {
+        name: "for_tuple_pattern_move",
+        // #527: `for (n, s) in pairs` moves `pairs` into the loop's
+        // iterator just like `for s in pairs` does; the iterator is
+        // #571's `(temporary)` column, dropped when the loop ends (after
+        // the `break`, the elements it hasn't handed out). The
+        // composite-pattern path drew no move, so `pairs` read "goes out
+        // of scope. Its resource is dropped.", dropped a second time.
+        // `it` is already an iterator: its drop is a drop dot on its own
+        // column, as for `for s in it3` (#482).
+        must_contain: &[
+            "pairs's resource is moved into the `for` loop's iterator",
+            "ids's resource is moved into the `for` loop's iterator",
+            "it's resource is moved into the `for` loop, which uses it as its iterator",
+            "it's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
+            "This temporary IntoIter<(i32, String)> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<(i32, i32)> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "pairs goes out of scope. No resource is dropped.",
+            "ids goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "pairs goes out of scope. Its resource is dropped.",
+            "ids goes out of scope. Its resource is dropped.",
+            "it goes out of scope. Its resource is dropped.",
+            "The iterator is dropped when the loop ends",
+        ],
+    },
+    TooltipExpect {
+        name: "for_tuple_pattern_borrow",
+        // #576: `for (n, s) in &pairs` borrows `pairs` for the loop, and
+        // `&mut m` borrows `m` mutably (so `m` can't be used inside). The
+        // composite-pattern path drew no borrow of the head: `n` and `s`
+        // were references "bound to" nothing, `pairs` untouched.
+        must_contain: &[
+            "pairs's resource is immutably borrowed by n; pairs is read-only while the borrow is live",
+            "pairs's resource is immutably borrowed by s; pairs is read-only while the borrow is live",
+            "m's resource is mutably borrowed by n; m can't be used while the borrow is live",
+            "m's resource is mutably borrowed by s; m can't be used while the borrow is live",
+            "m's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "n is bound to an immutable reference",
+            "s is bound to an immutable reference",
+            "n's mutable borrow ends (what it borrows from isn't shown)",
+            "s's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "for_iterator_break_outer",
+        // #592: `break 'outer` leaves the inner `for` loop too, so its
+        // iterator (what `row` still holds) is dropped at the `break`:
+        // the `(temporary 2)` column of `for s in row`, and the variable
+        // iterator `it` of the second function. Drawn in the `if`/`else`
+        // branch that leaves (a `break` in an `if` without `else` isn't
+        // drawn, like a `return`).
+        must_contain: &[
+            "This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+        ],
+        must_not_contain: &[
+            "the function returns from inside the loop",
+            "(temporary 3)",
+            // Stated once, with #410's wording.
+            "is left early, while this temporary is still alive",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13903,6 +13976,22 @@ fn loop_iterator_drop_dots_sit_where_the_loop_is_left() {
         row("for word in words {") + 6.0 * step,
         "words's resource is moved into the `for` loop, which uses it as its iterator",
     );
+}
+
+/// #592: the drops at a `break 'outer` sit on the `break`'s row, not at
+/// the closing brace of the loop the iterator belongs to.
+#[test]
+fn break_outer_iterator_drops_sit_on_the_break() {
+    let rv = run_with_local_backend("for_iterator_break_outer");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (text, row) in [
+        ("This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", "break 'outer;"),
+        ("it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", "break 'scan;"),
+    ] {
+        let ys = dots_with_tooltip(&timeline, text);
+        assert_eq!(ys.len(), 1, "one dot {:?}: {:?}", text, ys);
+        assert_eq!(ys[0].1, code_row_y(&code, row), "{:?} isn't on the `{}` row", text, row);
+    }
 }
 
 /// cy of every timeline dot whose tooltip contains `needle` (the dot
