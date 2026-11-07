@@ -1084,8 +1084,20 @@ pub enum MaybeMovedAt {
     /// the condition moves it (variable or function names; empty when
     /// it has no name). `dropped`: the chain's bindings among `to` that
     /// are dropped when the condition fails (they hold what was moved
-    /// and need drop).
-    ChainFail { to: Vec<String>, dropped: Vec<String>, no_else: bool },
+    /// and need drop). `how`: what the condition does to it (#579).
+    ChainFail { to: Vec<String>, dropped: Vec<String>, no_else: bool, how: ChainFailHow },
+}
+
+/// How a let-chain's condition moves a variable (`MaybeMovedAt::ChainFail`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ChainFailHow {
+    /// Moves it (`let Some(a) = x`, `take(s)`).
+    Move,
+    /// Moves out of the place it owns, written as the String: `*b` of a
+    /// `Box` (#579).
+    Out(String),
+    /// Calls it, a closure that can only be called once (#579).
+    Call,
 }
 
 /// What a `for` loop does with a head it moves (`for s in v`, `for s
@@ -1364,6 +1376,18 @@ pub enum ExternalEvent {
         first: bool,
         id: usize
     },
+    // At the start of the `else` branch (or the implicit empty one) of
+    // an `if` whose let-chain condition may have assigned `ro` a new
+    // value before it failed (#579): `if let Some(a) = y && { z = a;
+    // z > 0 }`. `ro` held a value before, so it holds the old or the new
+    // one there; nothing about ownership changes. `drops_old`: the
+    // assignment drops the old value.
+    ChainFailAssign {
+        ro: ResourceAccessPoint,
+        drops_old: bool,
+        no_else: bool,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -1473,6 +1497,7 @@ impl ExternalEvent {
             &ExternalEvent::TupleTempDrop { id, .. } |
             &ExternalEvent::OrAltMove { id, .. } |
             &ExternalEvent::OrAltBorrow { id, .. } |
+            &ExternalEvent::ChainFailAssign { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -1662,6 +1687,9 @@ pub enum Event {
     // of one of `sources` starts or ends. Changes its state like a
     // StaticBorrow / MutableBorrow and StaticDie / MutableDie would.
     OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool },
+    // See ExternalEvent::ChainFailAssign. `rc`: the variable's
+    // `rc_drop()`, for what dropping the old value does.
+    ChainFailAssign { drops_old: bool, rc: Option<RcDrop>, no_else: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1998,6 +2026,9 @@ impl Display for Event {
                 if *end { write!(f, "Borrow of one of several places ends") }
                 else { write!(f, "Borrows one of several places") }
             },
+            Event::ChainFailAssign { .. } => {
+                write!(f, "May have been assigned by the condition")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -2118,8 +2149,11 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, true)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else } } => {
-                hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else)
+            Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else, how } } => {
+                hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else, how)
+            }
+            Event::ChainFailAssign { drops_old, rc, no_else } => {
+                hover_messages::event_dot_chain_fail_assign(my_name, *drops_old, *rc, *no_else)
             }
             Event::OrAltMove { into, sources, tuple, part_of, value, .. } => {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
@@ -3022,6 +3056,9 @@ impl Visualizable for VisualizationData {
             // Mapped to their plain equivalents above.
             (_, Event::OrAltLend { .. }) | (_, Event::OrAltBorrow { .. }) => State::Invalid,
 
+            // Holds the old value or the new one: no change (#579).
+            (_, Event::ChainFailAssign { .. }) => (*previous_state).clone(),
+
 
             (_, _) => State::Invalid,
         }
@@ -3420,6 +3457,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, ..} => {
           vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value(), in_let: *in_let })]
         },
+        ExternalEvent::ChainFailAssign{ro, drops_old, no_else, ..} => {
+          vec![(line_num, Event::ChainFailAssign { drops_old: *drops_old, rc: ro.rc_drop(), no_else: *no_else })]
+        },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
       }
@@ -3461,7 +3501,8 @@ impl Visualizable for VisualizationData {
                                         id: *id}));
                 }
             }
-            ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. } => {
+            ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
+            | ExternalEvent::ChainFailAssign { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
@@ -3769,6 +3810,10 @@ impl Visualizable for VisualizationData {
                 if let Some(b) = borrow {
                     maybe_append_event(self, &ResourceTy::Value(into.clone()), b, line_number);
                 }
+            },
+            ExternalEvent::ChainFailAssign{ro, drops_old, no_else, ..} => {
+                let rc = ro.rc_drop();
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { drops_old, rc, no_else }, line_number);
             },
         }
     }

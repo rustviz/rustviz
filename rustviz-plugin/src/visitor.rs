@@ -61,14 +61,19 @@ struct ChainEffect {
 
 enum ChainEffectKind {
   /// `rap` is moved out of, to `to`. `binding`: by a `let`'s pattern.
-  Move { rap: ResourceAccessPoint, to: ResourceTy, binding: bool },
-  /// Anything else that lasts (an assignment to `name`, ...): not
-  /// drawn. `what` / `lasts` are for the refusal's message.
+  /// `how`: also a move out of `*rap`, or a call of the closure `rap`
+  /// (#579).
+  Move { rap: ResourceAccessPoint, to: ResourceTy, binding: bool, how: ChainFailHow },
+  /// `rap` is assigned a new value (#579). `drops_old`: the assignment
+  /// drops its old value. `held`: it held a value before the part.
+  Assign { rap: ResourceAccessPoint, drops_old: bool, held: bool },
+  /// Anything else that lasts: not drawn. `what` / `lasts` are for the
+  /// refusal's message.
   Other { name: String, what: &'static str, lasts: &'static str },
 }
 
-const CHAIN_ASSIGN: &str = "assign to a variable declared outside the condition";
-const CHAIN_CALL: &str = "call a closure declared outside the condition that can only be called once";
+const CHAIN_ASSIGN_REF: &str = "assign a new reference to a variable declared outside the condition";
+const CHAIN_ASSIGN_PLACE: &str = "assign to a place reached through a variable declared outside the condition";
 const CHAIN_MOVE_THROUGH: &str = "move out of a value behind a variable declared outside the condition";
 
 /// State of a walk down an `if` let-chain (`visit_if_let_chain`).
@@ -93,6 +98,16 @@ struct ChainFailMove {
   definite: bool,
   to: Vec<String>,
   dropped: Vec<String>,
+  how: ChainFailHow,
+}
+
+/// A variable that the condition of an `if` let-chain assigns a new
+/// value before a part of it that can still fail (#579): on the path
+/// into the `else` it holds the old value or the new one. See
+/// `ExternalEvent::ChainFailAssign`.
+struct ChainFailAssign {
+  rap: ResourceAccessPoint,
+  drops_old: bool,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
@@ -270,27 +285,59 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ) {
     let line = expr_to_line(part, &self.tcx);
     let is_outer = |r: &ResourceTy| r.extract_rap().is_some_and(|rap| outer.contains(rap));
-    for (_, ev) in &self.preprocessed_events[mark..] {
-      let kind = match ev {
-        // (Into another outer variable, it's an assignment: below.)
-        ExternalEvent::Move { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) && !is_outer(to) =>
-          ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding },
-        ExternalEvent::ClosureCall { closure, .. } if is_outer(closure) =>
-          ChainEffectKind::Other { name: closure.real_name(), what: CHAIN_CALL, lasts: "the call moves it" },
-        // Out of a place reached through it (`*b` of a `Box`).
-        ExternalEvent::Move { from, to, .. } if is_outer(from) && !is_outer(to) =>
-          ChainEffectKind::Other { name: from.real_name(), what: CHAIN_MOVE_THROUGH, lasts: "the move lasts" },
+    let checks_before = walk.checks;
+    let mut push = |kind| walk.effects.push(ChainEffect { kind, checks_before, line });
+    let held = |rap: &ResourceAccessPoint| self.rap_ownership_before(mark, rap.name()) == Ownership::Held;
+    // Also the events of a conditional inside the part (`{ if c { z =
+    // a; } z > 0 }`): they last the same way.
+    fn flatten<'e>(events: &'e [(usize, ExternalEvent)], out: &mut Vec<&'e ExternalEvent>) {
+      for (_, ev) in events {
+        match ev {
+          ExternalEvent::Branch { branches, .. } => branches.iter().for_each(|b| flatten(&b.e_data, out)),
+          _ => out.push(ev),
+        }
+      }
+    }
+    let mut events = Vec::new();
+    flatten(&self.preprocessed_events[mark..], &mut events);
+    for ev in events {
+      // What the event does to the place it takes from.
+      match ev {
+        ExternalEvent::Move { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) =>
+          push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: ChainFailHow::Move }),
+        // An outer closure that can only be called once: the call
+        // moves it (#579).
+        ExternalEvent::ClosureCall { closure: c @ ResourceTy::Value(rap), .. } if is_outer(c) =>
+          push(ChainEffectKind::Move { rap: rap.clone(), to: ResourceTy::Anonymous, binding: false, how: ChainFailHow::Call }),
+        // Out of a `Box`: `take(*b)` (#579).
+        ExternalEvent::Move { from: from @ ResourceTy::Deref(rap), to, .. } if is_outer(from) =>
+          push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: ChainFailHow::Out(format!("*{}", rap.name())) }),
+        ExternalEvent::Move { from, .. } if is_outer(from) =>
+          push(ChainEffectKind::Other { name: from.real_name(), what: CHAIN_MOVE_THROUGH, lasts: "the move lasts" }),
+        _ => {}
+      }
+      // What it does to the place it writes to: an assignment.
+      match ev {
         ExternalEvent::Bind { to, .. }
         | ExternalEvent::Copy { to, .. }
-        | ExternalEvent::Move { to, .. }
-        | ExternalEvent::StaticBorrow { to, .. }
+        | ExternalEvent::Move { to, .. } if is_outer(to) => match to {
+          ResourceTy::Value(rap) if rap.is_ref() =>
+            push(ChainEffectKind::Other { name: rap.name().to_owned(), what: CHAIN_ASSIGN_REF, lasts: "the assignment lasts" }),
+          ResourceTy::Value(rap) =>
+            push(ChainEffectKind::Assign { rap: rap.clone(), drops_old: false, held: held(rap) }),
+          ResourceTy::Deref(rap) =>
+            push(ChainEffectKind::Other { name: format!("*{}", rap.name()), what: CHAIN_ASSIGN_PLACE, lasts: "the assignment lasts" }),
+          ResourceTy::Index(_, place, _) | ResourceTy::DerefField(_, place, _) =>
+            push(ChainEffectKind::Other { name: place.clone(), what: CHAIN_ASSIGN_PLACE, lasts: "the assignment lasts" }),
+          _ => {}
+        },
+        ExternalEvent::StaticBorrow { to, .. }
         | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) =>
-          ChainEffectKind::Other { name: to.real_name(), what: CHAIN_ASSIGN, lasts: "the assignment lasts" },
+          push(ChainEffectKind::Other { name: to.real_name(), what: CHAIN_ASSIGN_REF, lasts: "the assignment lasts" }),
         ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) =>
-          ChainEffectKind::Other { name: ro.name().to_owned(), what: CHAIN_ASSIGN, lasts: "the assignment lasts" },
-        _ => continue,
-      };
-      walk.effects.push(ChainEffect { kind, checks_before: walk.checks, line });
+          push(ChainEffectKind::Assign { rap: ro.clone(), drops_old: true, held: held(ro) }),
+        _ => {}
+      }
     }
   }
 
@@ -303,20 +350,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// holds, and is drawn in the if-branch alone. `chain_lo`: index in
   /// `preprocessed_events` of the chain's first event.
   ///
-  /// Other lasting effects (an assignment to an outer variable, a call
-  /// of an outer `FnOnce` closure) that come before a part that can
-  /// fail are refused, as for match guards.
-  fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, has_else: bool) -> Vec<ChainFailMove> {
+  /// A call of an outer `FnOnce` closure moves it, and `take(*b)` moves
+  /// out of the `Box` `b`: both are such moves (#579). An assignment to
+  /// an outer variable lasts the same way: the else branch starts with
+  /// it holding its old value or the new one (#579). Other lasting
+  /// effects that come before a part that can fail are refused, as for
+  /// match guards: a new reference assigned to an outer variable (which
+  /// borrow is live in the else branch isn't known), a write through
+  /// an outer reference or into part of an outer value, an assignment
+  /// to a variable that held no value before (the else branch would
+  /// start with it maybe initialized), or a variable both moved and
+  /// assigned.
+  fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, has_else: bool) -> (Vec<ChainFailMove>, Vec<ChainFailAssign>) {
     let mut out: Vec<ChainFailMove> = Vec::new();
+    let mut assigns: Vec<ChainFailAssign> = Vec::new();
+    let later = if has_else { "the condition is false and the else branch runs" }
+      else { "the condition is false and the body is skipped" };
     for eff in walk.effects.iter().filter(|e| e.checks_before < walk.checks) {
       match &eff.kind {
         ChainEffectKind::Other { name, what, lasts } => {
-          let later = if has_else { "the condition is false and the else branch runs" }
-            else { "the condition is false and the body is skipped" };
           panic!("`if let` chains that {} (`{}`, line {}) aren't supported yet: {} even when {}",
             what, name, eff.line, lasts, later);
         }
-        ChainEffectKind::Move { rap, to, binding } => {
+        ChainEffectKind::Assign { rap, drops_old, held } => {
+          if !held {
+            panic!("`if let` chains that assign to a variable declared outside the condition that \
+                    may hold no value before (`{}`, line {}) aren't supported yet: after the \
+                    assignment it holds one even when {}", rap.name(), eff.line, later);
+          }
+          match assigns.iter_mut().find(|a| a.rap == *rap) {
+            Some(a) => a.drops_old |= drops_old,
+            None => assigns.push(ChainFailAssign { rap: rap.clone(), drops_old: *drops_old }),
+          }
+        }
+        ChainEffectKind::Move { rap, to, binding, how } => {
           // A `let`'s bindings with only irrefutable parts up to them:
           // every way into the else branch passes the move. A move by
           // an expression may sit inside a conditional of its own
@@ -325,7 +392,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let i = match out.iter().position(|m| m.rap == *rap) {
             Some(i) => i,
             None => {
-              out.push(ChainFailMove { rap: rap.clone(), definite: false, to: Vec::new(), dropped: Vec::new() });
+              out.push(ChainFailMove { rap: rap.clone(), definite: false, to: Vec::new(), dropped: Vec::new(), how: how.clone() });
               out.len() - 1
             }
           };
@@ -349,7 +416,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
-    out
+    // The else branch would start with it moved or holding a value
+    // depending on the order, which one dot can't say.
+    if let Some(a) = assigns.iter().find(|a| out.iter().any(|m| m.rap == a.rap)) {
+      panic!("`if let` chains that both move and assign a variable declared outside the condition \
+              (`{}`) aren't supported yet: both last even when {}", a.rap.name(), later);
+    }
+    (out, assigns)
   }
 
   /// The pattern-binding events of a let-chain: those handed out ids
@@ -2710,6 +2783,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // Events handed out ids in the if-branch's range that stay
         // before the split (see the let-chain case below).
         let mut pre_split: HashSet<usize> = HashSet::new();
+        let mut chain_fail_assign: Vec<ChainFailAssign> = Vec::new();
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
@@ -2733,7 +2807,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let mut walk = ChainWalk::default();
             self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
             if_lo = walk.first_lo.unwrap_or(start);
-            chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
+            (chain_fail, chain_fail_assign) = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
             let binds = self.chain_binding_events(&(if_lo..*self.unique_id), &decls);
             // Copying a value out of a variable declared before the `if`
             // changes nothing about that variable, so, as for a lone `if
@@ -2809,7 +2883,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let if_ids = if_lo..*self.unique_id;
         // A let-chain condition that moved a variable before a part
         // that then failed (#281): the else branch (or the implicit
-        // empty one) starts with that variable maybe-moved. Emitted
+        // empty one) starts with that variable maybe-moved, or, for an
+        // assignment, maybe holding its new value (#579). Emitted
         // before the else branch is visited, so it's the first of its
         // events and a reassignment in it sees the drop flag (#335).
         // It's drawn on the `} else {` line; without an `else`, on the
@@ -2818,11 +2893,20 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           Some(_) => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line,
           None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line,
         };
+        for a in std::mem::take(&mut chain_fail_assign) {
+          self.add_external_event(fail_line, ExternalEvent::ChainFailAssign {
+            ro: a.rap,
+            drops_old: a.drops_old,
+            no_else: else_expr.is_none(),
+            id: *self.unique_id,
+          });
+          *self.unique_id += 1;
+        }
         for m in std::mem::take(&mut chain_fail) {
           self.add_external_event(fail_line, ExternalEvent::LoopExitMove {
             ro: m.rap,
             definite: m.definite,
-            at: MaybeMovedAt::ChainFail { to: m.to, dropped: m.dropped, no_else: else_expr.is_none() },
+            at: MaybeMovedAt::ChainFail { to: m.to, dropped: m.dropped, no_else: else_expr.is_none(), how: m.how },
             id: *self.unique_id,
           });
           *self.unique_id += 1;

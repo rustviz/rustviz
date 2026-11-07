@@ -322,8 +322,9 @@ const Description: React.FC = () => (
         results); a match guard&apos;s events appear only in its own arm, and
         an <code>if let</code> chain&apos;s (after its first part, except
         copies out of a variable) only in the{' '}
-        <code>if</code> branch, apart from its moves, which the{' '}
-        <code>else</code> branch starts with as &quot;may have been moved&quot;;{' '}
+        <code>if</code> branch, apart from its moves and assignments, which the{' '}
+        <code>else</code> branch starts with as &quot;may have been moved&quot; or
+        &quot;may have been assigned&quot;;{' '}
         <code>async</code>/<code>await</code> aren&apos;t visualized.
       </li>
       <li>

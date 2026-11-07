@@ -873,6 +873,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::LoopExitMove { ro, .. }
       | ExternalEvent::TupleTempDrop { ro, .. }
       | ExternalEvent::OrAltMove { ro, .. }
+      | ExternalEvent::ChainFailAssign { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. }
@@ -1214,6 +1215,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // No prior ownership event: the variable was declared but never
     // initialized (`let mut y; y = x;`), so there's nothing to drop.
     ownership_after(self.preprocessed_events, rap_name, None).unwrap_or(Ownership::None)
+  }
+
+  /// `rap_ownership_now` as of before `preprocessed_events[end..]`.
+  pub fn rap_ownership_before(&self, end: usize, rap_name: &str) -> Ownership {
+    ownership_after(&self.preprocessed_events[..end], rap_name, None).unwrap_or(Ownership::None)
   }
 
   /// True when a let-chain's condition may have moved `name` before it
