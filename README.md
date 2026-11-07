@@ -401,11 +401,11 @@ rather than listed here.
   the others: `(temporary 2)`, ...), dropped where Rust drops it. Left
   out (their drops are not stated): a field moved out of a temporary
   (`make().name`), a scrutinee some pattern binds by value (`match
-  make() { Some(s) => .. }`), a macro or literal that moves a variable
-  into the temporary (`vec![s];`, `P { name: s, .. };`; the move itself
-  isn't drawn either, so `s` is shown owning its value, #570), and a
-  temporary nested inside a borrowed value (`let p = Wrapper { r:
-  &String::new() };`).
+  make() { Some(s) => .. }`), a macro or literal that takes a place by
+  struct update (`P { n: 1, ..p };`), and a temporary nested inside a
+  borrowed value (`let p = Wrapper { r: &String::new() };`). A variable
+  moved into such a macro or literal (`vec![s];`, `P { name: s, .. };`)
+  is drawn moving into the temporary's column.
   Temporaries with nothing to drop (`&Point { x: 4 }`) get no column.
 
 The plugin has its own per-feature TODO checklist in

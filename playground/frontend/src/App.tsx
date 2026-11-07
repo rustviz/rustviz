@@ -397,8 +397,10 @@ const Description: React.FC = () => (
         the iterator a <code>for</code> loop makes from its head) gets a short{' '}
         <code>(temporary)</code> column too (numbered together). Not drawn or
         mentioned: a field moved out of a temporary (<code>make().name</code>),
-        a scrutinee that a pattern binds by value, and a macro or literal that
-        moves a variable into the temporary (<code>vec![s];</code>).
+        a scrutinee that a pattern binds by value, and a literal that takes a
+        variable by struct update (<code>P {'{'} n: 1, ..p {'}'};</code>). A
+        variable moved into a <code>vec![..]</code> or literal that nothing
+        binds (<code>vec![s];</code>) is drawn moving into the temporary.
       </li>
     </ul>
     <p>
