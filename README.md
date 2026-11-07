@@ -313,9 +313,14 @@ rather than listed here.
   column to draw that on.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
-- `async` / `await`, and user-defined macros (only standard-library
-  macros like `println!`, `vec!`, `assert!` are unwrapped; a user macro
-  shows only what it passes on to them).
+- `async` / `await` aren't visualized.
+- User-defined macros (`macro_rules!`) that use a variable are refused
+  with "can't visualize this program yet" rather than drawn, since
+  what the macro does to the variable (`take!(z)` expanding to
+  `drop(z)`) isn't modelled. Standard-library macros like `println!`,
+  `vec!`, `assert!` are unwrapped, and a user macro that only forwards
+  a variable to one of them (`show!(w)` → `println!`) is shown as that
+  read; a macro that uses no variable renders.
 - A `for` loop variable taken from a range or a call (`for i in 0..n`,
   `for c in s.chars()`) has no start or end on its timeline, only the
   reads in the body.

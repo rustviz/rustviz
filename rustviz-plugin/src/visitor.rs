@@ -278,12 +278,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.visit_expr(expr);
       return;
     }
+    // A node the user's own `macro_rules!` body produced (as opposed to
+    // one a std macro it forwards to produced): if it uses a variable
+    // the caller passed in, what it does to that variable (a move into
+    // `drop($e)`, a `let t = $e;`, an assignment, ...) isn't modelled,
+    // and drawing nothing would make later tooltips false (#342).
+    // Blocks and `DropTemps` are just containers; their statements are
+    // checked one by one below.
+    if !matches!(expr.kind, ExprKind::Block(..) | ExprKind::DropTemps(_)) {
+      self.refuse_user_macro_use(expr.span, |v| v.visit_expr(expr));
+    }
     match expr.kind {
       ExprKind::Block(b, _) => {
         for s in b.stmts {
           match s.kind {
             StmtKind::Let(l) => {
               if let Some(init) = l.init {
+                if l.span.from_expansion() {
+                  self.refuse_user_macro_use(l.span, |v| v.visit_expr(init));
+                }
                 self.descend_through_expansion(init);
               }
             }
@@ -388,6 +401,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.descend_through_expansion(guard);
       }
       _ => {}
+    }
+  }
+
+  /// Panic (reported as "can't visualize this yet") if `span` was
+  /// produced directly by a user-defined `macro_rules!` and the
+  /// subtree walked by `walk` uses a local variable written outside
+  /// the macro (i.e. passed in as an argument). A user macro that only
+  /// forwards its argument to a std macro (`println!`) never gets here:
+  /// the nodes carrying the argument belong to the std macro.
+  fn refuse_user_macro_use(
+    &self,
+    span: rustc_span::Span,
+    walk: impl FnOnce(&mut LocalUseFinder<'tcx>),
+  ) {
+    if !span.from_expansion() {
+      return;
+    }
+    let data = span.ctxt().outer_expn_data();
+    let is_user_bang = matches!(data.kind,
+        rustc_span::hygiene::ExpnKind::Macro(rustc_span::hygiene::MacroKind::Bang, _))
+      && data.macro_def_id.is_some_and(|d| d.is_local());
+    if !is_user_bang {
+      return;
+    }
+    let mut finder = LocalUseFinder { tcx: self.tcx, found: None };
+    walk(&mut finder);
+    if let Some(var) = finder.found {
+      let name = user_macro_name(span).unwrap_or_else(|| String::from("a macro!"));
+      panic!("user-defined macros that use a variable (`{}`, line {}) aren't supported yet \
+              (the use inside `{}` isn't visualized)",
+        var.1, var.0, name);
     }
   }
 
@@ -507,6 +551,36 @@ fn own_param_ref_bindings<'tcx>(
     PatKind::Ref(..) => {}
     PatKind::Wild | PatKind::Never | PatKind::Missing | PatKind::Err(_)
     | PatKind::Expr(_) | PatKind::Range(..) => {}
+  }
+}
+
+/// Finds the first use of a local variable written by the user (not
+/// synthesized by a macro) inside an expression.
+struct LocalUseFinder<'tcx> {
+  tcx: rustc_middle::ty::TyCtxt<'tcx>,
+  /// (line, name) of the first such use.
+  found: Option<(usize, String)>,
+}
+
+impl<'tcx> LocalUseFinder<'tcx> {
+  fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+    Visitor::visit_expr(self, expr);
+  }
+}
+
+impl<'tcx> Visitor<'tcx> for LocalUseFinder<'tcx> {
+  fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+    if self.found.is_some() {
+      return;
+    }
+    if let ExprKind::Path(QPath::Resolved(None, path)) = expr.kind {
+      if matches!(path.res, Res::Local(_)) && !expr.span.from_expansion() {
+        let name = path.segments.last().map(|s| s.ident.as_str().to_owned()).unwrap_or_default();
+        self.found = Some((expr_to_line(expr, &self.tcx), name));
+        return;
+      }
+    }
+    intravisit::walk_expr(self, expr);
   }
 }
 
@@ -2611,6 +2685,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     // as the from_expansion check on ExprKind::If/Match: macro
     // internals shouldn't appear as user-visible variables.
     if local.span.from_expansion() {
+      // ... but a `let t = $e;` from the user's own macro moves or
+      // copies a variable the caller passed in (#342).
+      if let Some(init) = local.init {
+        self.refuse_user_macro_use(local.span, |v| v.visit_expr(init));
+      }
       return;
     }
     let local_line = self.tcx.sess.source_map().lookup_char_pos(local.span.lo()).line;

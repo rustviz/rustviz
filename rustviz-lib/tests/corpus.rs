@@ -619,6 +619,8 @@ const EXPECTED_OK: &[&str] = &[
     // `p.x += k` through a reference keeps "modified through", with no
     // "(copied from k)" (#260).
     "field_compound_assign_through_ref",
+    // — User macros: one that forwards to println! still renders (#342).
+    "user_macro_forwards",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6332,6 +6334,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.name acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
+
+    // ─── User macros (#342) ──────────────────────────────────────────
+    // A user macro that only forwards to a formatting macro still
+    // renders (#206); one that touches no variable is untouched.
+    TooltipExpect {
+        name: "user_macro_forwards",
+        must_contain: &[
+            "show! reads from w through an implicit reference, so w isn't moved",
+            "show_block! reads from v through an implicit reference, so v isn't moved",
+            "println! reads from n through an implicit reference, so n isn't moved",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -8090,6 +8105,43 @@ fn struct_box_contains_long_member_labels() {
             }
         }
         assert!(checked >= 2, "{}: expected labels inside a struct box", name);
+    }
+}
+
+/// #342: a user-defined macro whose body does something to a variable it
+/// was given (`drop($e)`, `$e.len()`, `let t = $e;`) used to draw nothing,
+/// so the variable was later said to drop a String it had given away.
+/// Such programs are refused. (A macro that only forwards to `println!`
+/// still renders: see the `user_macro_forwards` fixture.)
+#[test]
+fn user_macro_that_uses_a_variable_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    let cases = [
+        // the expansion is a call
+        "macro_rules! take { ($e:expr) => { drop($e) }; }\n\
+         fn main() {\n\
+         \x20   let z = String::from(\"f\");\n\
+         \x20   take!(z);\n\
+         }\n",
+        // the expansion is a method call
+        "macro_rules! len { ($e:expr) => { $e.len() }; }\n\
+         fn main() {\n\
+         \x20   let z = String::from(\"f\");\n\
+         \x20   let n = len!(z);\n\
+         }\n",
+        // the expansion is a statement list with a `let`
+        "macro_rules! mk { ($e:expr) => { let t = $e; drop(t); }; }\n\
+         fn main() {\n\
+         \x20   let z = String::from(\"f\");\n\
+         \x20   mk!(z);\n\
+         }\n",
+    ];
+    for src in cases {
+        let err = Rustviz::new(src).expect_err("a user macro that uses a variable must not render");
+        let msg = err.to_string();
+        assert!(msg.contains("user-defined macros that use a variable (`z`, line 4) aren't supported yet"),
+            "expected the user-macro refusal for:\n{}\ngot:\n{}", src, msg);
+        assert!(msg.starts_with("RustViz can't visualize this program yet"), "{}", msg);
     }
 }
 
