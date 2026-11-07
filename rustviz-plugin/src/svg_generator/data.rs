@@ -2615,6 +2615,12 @@ pub struct VisualizationData {
     /// the let-chain bindings the plugin found (`chain_binding_columns`,
     /// #583, #584); `render_svg` adds the arms' pattern bindings.
     pub binding_columns: Vec<(u64, u64)>,
+
+    /// Arrows of a struct write that share a track (#624): event id ->
+    /// the id of its track's first arrow. Filled in by `render_svg` (see
+    /// `struct_write_tracks`); the renderer draws a line's tracks half a
+    /// row apart instead of a whole row per arrow.
+    pub arrow_tracks: HashMap<usize, usize>,
 }
 
 /// About a numbered column (`s₂`): a variable of the same name as an

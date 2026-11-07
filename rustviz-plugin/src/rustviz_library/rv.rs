@@ -43,6 +43,7 @@ impl Rustviz {
       fn_start_lines,
       shadow_notes,
       binding_columns,
+      arrow_tracks: HashMap::new(),
     };
     /* ******************************************
             --- Render SVG images ---

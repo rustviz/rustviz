@@ -2505,6 +2505,27 @@ fn arrow_order_of(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> i64
     }
 }
 
+/// How far below its line's row an arrow runs: a whole row per arrow
+/// before it on the line (`arrow_order_of`), or, on a struct write whose
+/// arrows share tracks (`VisualizationData::arrow_tracks`), half a row
+/// per track before its own (#624). 0 means drawn level on the row.
+fn arrow_dip_of(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> i64 {
+    let arrow_order = arrow_order_of(vd, row, ev);
+    match vd.arrow_tracks.get(&ev.get_id()) {
+        Some(&track) if arrow_order > 0 => {
+            let mut firsts: Vec<usize> = Vec::new();
+            for x in fetch_line_map(vd, ev.get_id()).get(&row).into_iter().flatten() {
+                let first = vd.arrow_tracks.get(&x.get_id()).copied().unwrap_or(x.get_id());
+                if !firsts.contains(&first) {
+                    firsts.push(first);
+                }
+            }
+            firsts.iter().position(|&f| f == track).unwrap_or(0) as i64 * LINE_SPACE / 2
+        }
+        _ => LINE_SPACE * arrow_order,
+    }
+}
+
 /// Is `ev` a return (a borrow's end) whose source column is where another
 /// return, drawn level on the same row, ends: a reborrow's end followed by
 /// its lender's end (`s` to `r`, then `r` to `x`)?
@@ -2522,7 +2543,7 @@ fn returns_chain_on_row(vd: &VisualizationData, row: usize, ev: &ExternalEvent) 
             && !of.is_same_underlying(ot)
             && ot_rap.hash() == src.hash()
             && of_rap.hash() != src.hash()
-            && arrow_order_of(vd, l, other) == 0
+            && arrow_dip_of(vd, l, other) == 0
             && column_event_y(vd, of_rap.hash(), id, l) == column_event_y(vd, ot_rap.hash(), id, l)
     })
 }
@@ -3037,8 +3058,6 @@ fn render_arrow (
                     }
                 },
                 (from_variable, to_variable, e) => {
-                    let arrow_order = arrow_order_of(visualization_data, *line_number, external_event);
-
                     let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, e.get_id());
                     let to_timeline = fetch_timeline(to_variable.hash(), visualization_data, resource_owners_layout, e.get_id());
 
@@ -3050,11 +3069,12 @@ fn render_arrow (
                     // row ends (`s` gives back to `r`, `r` to `x`) would be
                     // drawn level with it and read as one long arrow
                     // through `r`'s dot (#577). It dips half a row instead.
-                    let chained = arrow_order == 0 && y1 == y2
+                    let dip = arrow_dip_of(visualization_data, *line_number, external_event);
+                    let chained = dip == 0 && y1 == y2
                         && returns_chain_on_row(visualization_data, *line_number, external_event);
-                    let row_drop = if chained { LINE_SPACE / 2 } else { LINE_SPACE * arrow_order };
+                    let row_drop = if chained { LINE_SPACE / 2 } else { dip };
                     let y_row = if chained { y1 + row_drop } else { get_y_axis_pos(*line_number) + row_drop };
-                    if (arrow_order > 0 || chained) && x2 <= x1{ // trapezoid
+                    if row_drop > 0 && x2 <= x1{ // trapezoid
                         let x3 = from_timeline.x_val + 20;
                         let x4 = to_timeline.x_val - 20;
                         let y3 = y_row;
@@ -3065,7 +3085,7 @@ fn render_arrow (
                         data.coordinates.push((x3 as f64, y3 as f64));
                         data.coordinates.push((x2 as f64, y2 as f64));
     
-                    } else if (arrow_order > 0 || chained) && x2 > x1 { // deeper trapezoid
+                    } else if row_drop > 0 && x2 > x1 { // deeper trapezoid
                         let x3 = from_timeline.x_val - 20;
                         let x4 = to_timeline.x_val + 20;
                         let y3 = y_row;
