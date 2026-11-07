@@ -373,6 +373,11 @@ const Description: React.FC = () => (
         only if it returns early.
       </li>
       <li>
+        A <code>loop</code> with several <code>break</code>s that hand references
+        to a function call (<code>take(loop {'{'} … {'}'})</code>) shows the
+        borrows ending a line before the call.
+      </li>
+      <li>
         A write to a field through a reference (<code>self.n += 1</code> in a{' '}
         <code>&amp;mut self</code> method) is drawn on the reference&apos;s
         column. For a local <code>let r = &amp;mut s;</code> outside{' '}

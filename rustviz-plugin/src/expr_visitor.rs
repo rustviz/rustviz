@@ -1098,7 +1098,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     if let Some(alt) = &self.break_alt {
       if let ExternalEvent::Move { break_alt, .. } | ExternalEvent::Copy { break_alt, .. }
-        | ExternalEvent::Bind { break_alt, .. } = &mut event {
+        | ExternalEvent::Bind { break_alt, .. } | ExternalEvent::StaticBorrow { break_alt, .. }
+        | ExternalEvent::MutableBorrow { break_alt, .. } = &mut event {
         *break_alt = Some(alt.clone());
       }
     }
@@ -1507,8 +1508,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id, break_alt: None },
       Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None },
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move },
-      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
-      Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
+      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
+      Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
@@ -3450,9 +3451,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let id = *self.unique_id;
       *self.unique_id += 1;
       let ev = if k.is_mut {
-        ExternalEvent::MutableBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, via: Some(via), id }
+        ExternalEvent::MutableBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, break_alt: None, via: Some(via), id }
       } else {
-        ExternalEvent::StaticBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, via: Some(via), id }
+        ExternalEvent::StaticBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, break_alt: None, via: Some(via), id }
       };
       self.update_rap(&lender, line);
       self.add_external_event(line, ev);
@@ -3545,9 +3546,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let id = *self.unique_id;
       *self.unique_id += 1;
       let ev = if is_mut {
-        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
       } else {
-        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
       };
       self.add_external_event(line, ev);
     }
@@ -4182,9 +4183,9 @@ pub fn pattern_ref_copy_borrow(
   let id = *self.unique_id;
   *self.unique_id += 1;
   Some(if is_mut {
-    ExternalEvent::MutableBorrow { from: lender, to, is_partial: false, is_reborrow: false, via: Some(via), id }
+    ExternalEvent::MutableBorrow { from: lender, to, is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id }
   } else {
-    ExternalEvent::StaticBorrow { from: lender, to, is_partial: false, is_reborrow: false, via: Some(via), id }
+    ExternalEvent::StaticBorrow { from: lender, to, is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id }
   })
 }
 
@@ -4226,9 +4227,9 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   for lender in lenders.iter() {
     let id = *self.unique_id;
     let ev = if is_mut {
-      ExternalEvent::MutableBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+      ExternalEvent::MutableBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
     } else {
-      ExternalEvent::StaticBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+      ExternalEvent::StaticBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
     };
     self.add_external_event(line_num, ev);
     *self.unique_id += 1;
@@ -4269,9 +4270,9 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     for lender in lenders.iter() {
       let id = *self.unique_id;
       let ev = if frap.is_mutref() {
-        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
       } else {
-        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
       };
       self.add_external_event(line_num, ev);
       *self.unique_id += 1;
@@ -5420,7 +5421,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       for lender in lenders {
         let id = *self.unique_id;
         self.add_external_event(line_num, ExternalEvent::StaticBorrow {
-          from: lender, to: lhs.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id,
+          from: lender, to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id,
         });
         *self.unique_id += 1;
       }

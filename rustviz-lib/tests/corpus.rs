@@ -1094,6 +1094,8 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_inline_read",
     // A struct moved over one that holds a reference (#700).
     "borrow_struct_moved_over",
+    // A borrow one of several `break`s makes says which (#657, #661).
+    "loop_break_borrow_alt",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12320,6 +12322,49 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "hold.r holds an immutable reference; it can read the borrowed resource",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "loop_break_borrow_alt",
+        // Several `break`s that borrow (#657, #661): only the `break` that
+        // ended the loop made its borrow, as only it made its move or copy
+        // ("Move from ra to r, if the loop ended with break ra"). rustc
+        // coerces `break rb` to the `&mut String` that `break ra` fixed,
+        // which reborrows `rb` (rb is usable again after r's last use),
+        // and in `r = loop` both are reborrows. The lender's "can't be
+        // used while the borrow is live" holds whichever `break` ran:
+        // rustc rejects that use while `r` is live (E0505 / E0499). The
+        // old plugin drew each borrow as made, with no `break` named.
+        must_contain: &[
+            "Move from ra to r, if the loop ended with break ra",
+            "Mutable reborrow from rb to r, if the loop ended with break rb",
+            "the resource rb points to is mutably borrowed by r through rb, if the loop ended with break rb; rb can't be used while the borrow is live",
+            "Immutable borrow from e to r, if the loop ended with break &e",
+            "Immutable borrow from f to r, if the loop ended with break &f",
+            "e's resource is immutably borrowed by r, if the loop ended with break &e; e is read-only while the borrow is live",
+            "f's resource is immutably borrowed by r, if the loop ended with break &f; f is read-only while the borrow is live",
+            "Mutable borrow from g to r, if the loop ended with break &mut g",
+            "h's resource is mutably borrowed by r, if the loop ended with break &mut h; h can't be used while the borrow is live",
+            "Mutable reborrow from rp to r, if the loop ended with break rp",
+            "Mutable reborrow from rq to r, if the loop ended with break rq",
+            "the resource rp points to is mutably borrowed by r through rp, if the loop ended with break rp; rp can't be used while the borrow is live",
+            "the resource rq points to is mutably borrowed by r through rq, if the loop ended with break rq; rq can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "=Mutable reborrow from rb to r",
+            "=the resource rb points to is mutably borrowed by r through rb; rb can't be used while the borrow is live",
+            "=Immutable borrow from e to r",
+            "=Immutable borrow from f to r",
+            "=e's resource is immutably borrowed by r; e is read-only while the borrow is live",
+            "=f's resource is immutably borrowed by r; f is read-only while the borrow is live",
+            "=Mutable borrow from g to r",
+            "=Mutable borrow from h to r",
+            "=g's resource is mutably borrowed by r; g can't be used while the borrow is live",
+            "=h's resource is mutably borrowed by r; h can't be used while the borrow is live",
+            "=Mutable reborrow from rp to r",
+            "=Mutable reborrow from rq to r",
+            "=the resource rp points to is mutably borrowed by r through rp; rp can't be used while the borrow is live",
+            "=the resource rq points to is mutably borrowed by r through rq; rq can't be used while the borrow is live",
+        ],
     },
 ];
 

@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1606,6 +1606,15 @@ fn render_dot(
                         Event::Duplicate { break_alt: Some(alt), .. } => {
                             data.title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));
                         }
+                        // The lender of a borrow one of the `break`s
+                        // made (`break rb` reborrowing a `&mut`, #657):
+                        // it was lent only if that `break` ended the
+                        // loop.
+                        Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => {
+                            if let Some(alt) = borrow_break_alt(*id, visualization_data) {
+                                data.title = hover_messages::with_break_alt_lend(&data.title, &alt.brk);
+                            }
+                        }
                         Event::Acquire { is, break_alt: Some(_), .. } | Event::Copy { is, break_alt: Some(_), .. } => {
                             // Which `break` ran isn't known here, so
                             // name no source: what a literal would say.
@@ -2005,6 +2014,17 @@ fn collect_closure_captures(
         }
     }
     out
+}
+
+// The `break` a borrow came from, when it is one of several `break`
+// values reaching a loop's receiver (#657). The lend event doesn't
+// carry it, so look up the borrow it came from.
+fn borrow_break_alt<'v>(id: usize, visualization_data: &'v VisualizationData) -> Option<&'v BreakAlt> {
+    visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
+        ExternalEvent::StaticBorrow { id: i, break_alt: Some(alt), .. }
+        | ExternalEvent::MutableBorrow { id: i, break_alt: Some(alt), .. } if *i == id => Some(alt),
+        _ => None,
+    })
 }
 
 // Source-side dot of a closure capture that reborrows through a
@@ -3078,7 +3098,9 @@ fn render_arrow (
                 }
             }
             if let ExternalEvent::Move { break_alt: Some(alt), .. }
-                 | ExternalEvent::Copy { break_alt: Some(alt), .. } = external_event {
+                 | ExternalEvent::Copy { break_alt: Some(alt), .. }
+                 | ExternalEvent::StaticBorrow { break_alt: Some(alt), .. }
+                 | ExternalEvent::MutableBorrow { break_alt: Some(alt), .. } = external_event {
                 title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));
             }
             if let ExternalEvent::StaticBorrow { via: Some(via), .. }
