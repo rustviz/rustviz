@@ -153,8 +153,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 let b_name = self.src_name_of_local(b_place, &loc_to_source_name);
                 let a_name = self.src_name_of_local(a_place, &loc_to_source_name);
 
+                // A loan that is never live (the `&s` MIR takes of a
+                // `ref s` binding for a match guard that doesn't use `s`)
+                // ends where it's issued.
+                let region_end = loan_regions.get(b_idx).map_or(assignment_line, |r| r.1);
                 res.push(MIRBorrowData {borrow_idx: b_idx.index(), 
-                                        region: (assignment_line, loan_regions.get(b_idx).unwrap().1),
+                                        region: (assignment_line, region_end),
                                         borrowed_place: b_name, 
                                         assigned_place: a_name,
                                         span: self.location_to_span(location, &body_with_facts)});
@@ -212,6 +216,25 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
           res
     }
 
+
+    /// The last line in `lines` (first, last) on which the variable
+    /// `name` (its RAP name, see `mir_local_names`) is live, from
+    /// Polonius' liveness: its last use, or the end of a loop it's used
+    /// in.
+    pub fn last_live_line(&self, name: &str, lines: (usize, usize)) -> Option<usize> {
+        let bwf = self.bwf;
+        let p_output = Output::compute(bwf.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
+        let names = self.mir_local_names(bwf);
+        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
+        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
+        #[expect(clippy::disallowed_methods, reason = "only takes the greatest line")]
+        let last = p_output.var_live_on_entry.iter()
+            .filter(|(_, vars)| vars.iter().any(|v| locals.contains(v)))
+            .map(|(p, _)| self.location_to_line(self.point_to_location(*p, bwf), bwf))
+            .filter(|l| lines.0 <= *l && *l <= lines.1)
+            .max();
+        last
+    }
 
     // would be nice to use MIR to figure out where drops occur rather than our own internal state logic
     pub fn gather_drop_data(&self, body_with_facts: &BodyWithBorrowckFacts) -> HashMap<String, usize> {

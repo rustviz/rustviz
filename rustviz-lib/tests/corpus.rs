@@ -875,6 +875,14 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_else_reassign",
     "edition2024/if_let_chain_field_move",
     "edition2024/if_let_chain_closure_move",
+    // A `ref` binding in a match arm keeps its borrow until its last use,
+    // not to the end of the arm (#599); a guard that doesn't use a `ref`
+    // binding used to panic (#611).
+    "match_ref_binding_last_use",
+    "match_ref_binding_last_use_arms",
+    "match_ref_mut_guard_last_use",
+    "match_ref_guard_unused",
+    "match_shared_ref_binding_last_use",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9504,6 +9512,65 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["only if no branch above called it"],
     },
+    // #599: a `ref` binding's borrow ends at its last use, where the
+    // borrow checker ends it, so the lender can be used again later in
+    // the arm. `match_ref_binding_borrow_ends_at_last_use` checks the
+    // rows (the texts are the same as before, on other rows).
+    TooltipExpect {
+        name: "match_ref_binding_last_use",
+        must_contain: &[
+            "t.0's resource is immutably borrowed by x; t.0 is read-only while the borrow is live",
+            "t.0's resource is no longer immutably borrowed",
+            "t.0's resource is mutably borrowed by push_str; t.0 can't be used while the borrow is live",
+            "x's immutable borrow ends",
+            "x goes out of scope",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_ref_binding_last_use_arms",
+        must_contain: &[
+            "o's resource is immutably borrowed by s; o is read-only while the borrow is live",
+            "o's resource is no longer immutably borrowed",
+            "o's resource is mutably borrowed by take; o can't be used while the borrow is live",
+            "s's immutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_ref_mut_guard_last_use",
+        must_contain: &[
+            "o's resource is mutably borrowed by s; o can't be used while the borrow is live",
+            "o's resource is no longer mutably borrowed",
+            "o's resource is immutably borrowed by println!; o is read-only while the borrow is live",
+            "s's mutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
+    // The same through a shared reference: `x` reborrows through `o`,
+    // with no loan of its own; `o`'s borrow of `t` lasts while `x` is
+    // live (#372), so it too ends after the `println!`.
+    TooltipExpect {
+        name: "match_shared_ref_binding_last_use",
+        must_contain: &[
+            "t's resource is immutably borrowed by o; t is read-only while the borrow is live",
+            "t's resource is no longer immutably borrowed",
+            "o's immutable borrow ends",
+            "x's immutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
+    // #611: used to panic in `gather_borrow_data` (the guard's loan of
+    // `s` is never live).
+    TooltipExpect {
+        name: "match_ref_guard_unused",
+        must_contain: &[
+            "o's resource is immutably borrowed by s; o is read-only while the borrow is live",
+            "o's resource is no longer immutably borrowed",
+            "s's immutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -12233,4 +12300,57 @@ fn chained_return_arrows_are_visibly_separate() {
     assert_eq!(none_arm[0].1, y + 30.0, "the next line moved: {:?}", none_arm);
     let rv = run_with_local_backend("match_local_ref_reborrow");
     assert_eq!(unnumbered_code_rows(&rv.code_panel_string()), 0, "a blank row was added for the dip");
+}
+
+/// A `ref` / `ref mut` binding in a match arm returns its borrow at its
+/// last use, where the borrow checker ends it, not at the end of the arm
+/// (#599). The lender is used again later in the same arm (which only
+/// compiles because the borrow has ended); the borrow must end on a row
+/// above that use, and the lender's "being shared" segment must not
+/// reach it.
+#[test]
+fn match_ref_binding_borrow_ends_at_last_use() {
+    // (fixture, lender, who it lends to, the pattern binding,
+    // mutability, the lender's later use)
+    for (name, lender, borrower, binding, m, later) in [
+        ("match_ref_binding_last_use", "t.0", "x", "x", "immutabl",
+         "t.0's resource is mutably borrowed by push_str; t.0 can't be used while the borrow is live"),
+        ("match_ref_binding_last_use_arms", "o", "s", "s", "immutabl",
+         "o's resource is mutably borrowed by take; o can't be used while the borrow is live"),
+        ("match_ref_mut_guard_last_use", "o", "s", "s", "mutabl",
+         "o's resource is immutably borrowed by println!; o is read-only while the borrow is live"),
+        // `x` reborrows through `o` (`o: &(String, String)`).
+        ("match_shared_ref_binding_last_use", "t", "o", "x", "immutabl",
+         "t.0's resource is mutably borrowed by push_str; t.0 can't be used while the borrow is live"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let tl = rv.timeline_panel_string();
+        let y = |text: &str| -> f64 {
+            dots_listing_tooltip(&tl, text).into_iter().map(|d| d.1).reduce(f64::min)
+                .unwrap_or_else(|| panic!("{}: no dot {:?}", name, text))
+        };
+        let only = if m == "mutabl" { "can't be used" } else { "is read-only" };
+        let lent = y(&format!("{0}'s resource is {1}y borrowed by {2}; {0} {3} while the borrow is live", lender, m, borrower, only));
+        let back = y(&format!("{}'s resource is no longer {}y borrowed", lender, m));
+        let used = y(later);
+        assert!(lent < back && back < used,
+            "{}: {} is lent at y={}, gets it back at y={}, is used again at y={}",
+            name, lender, lent, back, used);
+        // The binding's own column says so on the same row, before it
+        // goes out of scope at the arm's end.
+        let ends = y(&format!("{}'s {}e borrow ends", binding, m));
+        let gone = y(&format!("{} goes out of scope", binding));
+        assert!(ends == back && ends < gone,
+            "{}: {}'s borrow ends at y={} (the lender gets it back at y={}), it goes out of scope at y={}",
+            name, binding, ends, back, gone);
+        let lent_state = format!("{}'s resource is being shared", lender);
+        let reach = start_tags(&tl, "line")
+            .into_iter()
+            .filter(|t| timeline_tooltips(t).iter().any(|x| x.starts_with(&lent_state)))
+            .map(|t| num_attr(t, "y2"))
+            .fold(0.0, f64::max);
+        assert!(reach <= back,
+            "{}: {}'s \"being shared\" segment runs to y={}, past the borrow's end at y={}",
+            name, lender, reach, back);
+    }
 }
