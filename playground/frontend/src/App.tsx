@@ -371,9 +371,9 @@ const Description: React.FC = () => (
         A reference to a slice or <code>str</code> (<code>&amp;[i32]</code>) still
         says &quot;resource&quot; where &quot;value&quot; would be exact.
         column.
-        Overwriting a whole struct that holds a reference (
-        <code>hold = H {'{'} r: &amp;t {'}'}</code>) doesn&apos;t draw the old
-        borrow ending (rustc ends it at the write).
+        Overwriting a whole struct that holds a reference with something other
+        than a struct literal (<code>hold = make(&amp;t)</code>) may draw the old
+        borrow ending too late, or not at all (rustc ends it at the write).
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

@@ -2511,6 +2511,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     });
   }
 
+  /// `hold = H { .. };` overwrites a struct whose reference fields
+  /// borrow: the old value is dropped, so each of those borrows ends
+  /// at the overwrite (or earlier, where MIR ends the loan because the
+  /// old value was last used), with the usual return to the lender
+  /// (#538). Returns the ends to draw, `(line, lenders, field, mutable)`;
+  /// call before the struct literal's initialisers overwrite the field
+  /// loans in `borrow_map`, and draw them with `draw_struct_field_borrow_ends`.
+  pub fn struct_field_borrow_ends(&self, st: &ResourceAccessPoint, line: usize) -> Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)> {
+    let mir_b_data = self.gather_borrow_data(self.bwf);
+    let mut ends = Vec::new();
+    for member in self.struct_members_deep(st.name()) {
+      if !member.is_ref() {
+        continue;
+      }
+      let Some(old) = self.borrow_map.get(member.name()) else { continue };
+      if !matches!(old.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) || old.assigned_at > line {
+        continue;
+      }
+      // The loan is live while the old value is used and dead after:
+      // if MIR ends it at a later use, it ends there; otherwise (no
+      // use since the borrow was stored) it ends at the overwrite.
+      let end = mir_b_data.iter()
+        .find_map(|m| ExprVisitor::borrow_match(old, m))
+        .filter(|&kill| kill > old.assigned_at)
+        .map_or(line, |kill| kill.min(line));
+      let lenders = old.all_lenders().into_iter()
+        .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+        .collect();
+      ends.push((end, lenders, ResourceTy::Value(member), old.ref_mutability));
+    }
+    ends
+  }
+
+  pub fn draw_struct_field_borrow_ends(&mut self, ends: Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>) {
+    for (end, lenders, holder, is_mut) in ends {
+      for l in lenders {
+        self.add_ev(end, if is_mut { Evt::MDie } else { Evt::SDie }, l, holder.clone(), false);
+      }
+    }
+  }
+
   /// After `let h = init;` was drawn: a holder whose initializer
   /// isn't a call (`[&a, &b]`, `vec![&s]`, which `match_rhs` draws
   /// as a plain bind) gets a borrow arrow from each lender (#349).
