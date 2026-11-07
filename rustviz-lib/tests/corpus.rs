@@ -920,6 +920,8 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_ref_tuple_scrutinee",
     // A struct holding a borrow, moved to another variable (#637).
     "borrow_struct_moved_holder",
+    // A struct field of a struct overwritten by a call (#638).
+    "borrow_struct_field_overwrite_call",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -10140,6 +10142,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "moved out of other.r",
         ],
     },
+    TooltipExpect {
+        name: "borrow_struct_field_overwrite_call",
+        // `o.inner = mk(&t);` overwrites a struct field of `o` with a
+        // call's result: o.inner.r borrows t, as mk's signature says, and
+        // gives it back at its last use. The old borrow of s lasts until
+        // o's last use (a partial write; o's type has one lifetime, so a
+        // `s.push` between the write and the println! is E0502), and is
+        // ended on s's column, not handed back from o.inner.r, which no
+        // longer points to s. #569's plugin drew no borrow of t (or v, w,
+        // b) and returned o.inner.r's borrow to s (p.inner.r's to u,
+        // o.inner.r's to a). See
+        // `struct_field_overwrite_by_call_borrows_per_signature`.
+        must_contain: &[
+            "Immutable borrow from t to o.inner.r: mk's signature gives the struct it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from o.inner.r to t",
+            "s's resource is no longer immutably borrowed",
+            "Mutable borrow from v to p.inner.r: M::new's signature gives the struct it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from p.inner.r to v",
+            "u's resource is no longer mutably borrowed",
+            "Immutable borrow from w to o.inner.r: view's signature gives the struct it returns the same lifetime as the value it was called on",
+            "Return immutably borrowed resource from o.inner.r to w",
+            "a's resource is no longer immutably borrowed",
+            "Immutable borrow from b to o.inner.r: mk's signature gives the struct it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from o.inner.r to b",
+        ],
+        must_not_contain: &[
+            // The old lender handed back from a field that now points
+            // to the new value's lender.
+            "Return immutably borrowed resource from o.inner.r to s",
+            "Return mutably borrowed resource from p.inner.r to u",
+            "Return immutably borrowed resource from o.inner.r to a",
+            // `O { inner: mk(&b), .. }`: b is shown.
+            "o.inner.r's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -12193,6 +12230,28 @@ fn struct_overwrite_by_call_or_variable_ends_old_borrow_at_the_write() {
         assert!(end(v)[0].1 < code_row_y(&code, later), "{}'s borrow should end before `{}`", v, later);
     }
     assert_eq!(end("x").len(), 1, "{:?}", end("x"));
+}
+
+/// #638: `o.inner = mk(&t);` is a partial write, so s's old borrow ends
+/// at o's last use (the println!), as for `o.inner = I { r: &f };`
+/// (#531), while the borrow of t that o.inner.r now holds starts at the
+/// write. Same for the `&mut` version (u, v) and a method call (a, w).
+#[test]
+fn struct_field_overwrite_by_call_borrows_per_signature() {
+    let rv = run_with_local_backend("borrow_struct_field_overwrite_call");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (tip, line) in [
+        ("s's resource is no longer immutably borrowed", "println!(\"{} {}\", o.inner.r, o.n);"),
+        ("t's resource is immutably borrowed by o.inner.r; t is read-only while the borrow is live", "o.inner = mk(&t);"),
+        ("u's resource is no longer mutably borrowed", "println!(\"{}\", p.n);"),
+        ("v's resource is mutably borrowed by p.inner.r; v can't be used while the borrow is live", "p.inner = M::new(&mut v);"),
+        ("a's resource is no longer immutably borrowed", "println!(\"{} {}\", o.n, o.inner.r);"),
+        ("w's resource is immutably borrowed by o.inner.r; w is read-only while the borrow is live", "o.inner = w.view();"),
+    ] {
+        let dots = dots_listing_tooltip(&svg, tip);
+        assert_eq!(dots.len(), 1, "{}: {:?}", tip, dots);
+        assert_eq!(dots[0].1, code_row_y(&code, line), "`{}` should be on the row of `{}`: {:?}", tip, line, dots);
+    }
 }
 
 /// #637: a struct moved to another variable takes its field's borrow

@@ -346,9 +346,7 @@ rather than listed here.
   (`hold.r = &t` after `H { r: &s }`) keeps `s` borrowed until the
   struct's last use, as the borrow checker does (the struct's type has
   one lifetime for the reference); so does overwriting a struct field
-  of it (`o.inner = I { r: &t }`), though when the new value is a call's
-  result (`o.inner = make_inner(&t)`) its borrow of `t` isn't drawn
-  (#638).
+  of it (`o.inner = I { r: &t }`, `o.inner = make_inner(&t)`).
   Overwriting the whole struct (`hold = H { r: &t }`,
   `hold = make(&t)`, `hold = other`) drops the old value, so the old
   borrow ends at the write, as in rustc (or at the old value's last use,
