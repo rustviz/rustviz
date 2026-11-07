@@ -253,6 +253,39 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
   pub all_paths_exit: bool,
+
+  // `let r = loop { … break k; };` (#431): the loop's id, what its
+  // `break` values go to (`r`) and how (move or copy). A `break` with a
+  // value, in that loop, pairs the value with `r` the way `let r = k;`
+  // would.
+  pub break_binds: Vec<(rustc_hir::HirId, ResourceTy, Evt)>,
+  // A tuple/struct pattern bound to a loop's value: bound against each
+  // `break` value (#452).
+  pub break_pats: Vec<(rustc_hir::HirId, &'tcx Pat<'tcx>, usize, bool)>,
+  // `break` values seen in a loop whose receiver isn't known yet (the
+  // loop is the right-hand side of an assignment, a tuple pattern, an
+  // argument…): `match_rhs` pairs them once it is.
+  pub loop_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>)>,
+  // A `break value` in a branch of a loop (`if c { break s; }`) leaves
+  // the loop, so its value reaches the receiver where the loop ends,
+  // not in the branch (#350's approach to loop exits): the loop's id
+  // and the value, paired at the loop's end.
+  pub deferred_breaks: Vec<(rustc_hir::HirId, &'tcx Expr<'tcx>)>,
+  // While set, events are placed on this line (the end of the loop
+  // whose `break` values are being paired).
+  pub line_override: Option<usize>,
+
+  // Names of the variables in scope right now, in declaration order
+  // (#410). `add_rap` pushes; a block, a match arm, an `if let` and a
+  // loop truncate it back when they end, which takes their own
+  // variables (pattern bindings included) out of scope.
+  pub in_scope: Vec<String>,
+
+  // The constructs a `return`, `break`, `continue` or panic leaves,
+  // innermost last, each with `in_scope.len()` where it began: an
+  // if/else or a match (whose branch the exit is in), and loops, by
+  // the HirId a `break` / `continue` names as its target.
+  pub exit_frames: Vec<ExitFrame>,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -264,6 +297,19 @@ pub struct BreakMove {
   pub brk: rustc_hir::HirId,
   pub rap: ResourceAccessPoint,
   pub definite: bool,
+}
+
+/// See `ExprVisitor::exit_frames`.
+#[derive(Clone)]
+pub enum ExitFrame {
+  // `hide`: ranges of event ids (see `take_branch_events`) that can
+  // be among `preprocessed_events` while a branch of the conditional
+  // is visited but aren't on the path through it: the if-body's while
+  // the `else` is visited, and, for `let x = if … / match …`, the
+  // events binding each branch's value to `x` (`rhs_arm_ids`), which
+  // only happen once the conditional has finished.
+  Branch { len: usize, hide: Vec<std::ops::Range<usize>> },
+  Loop { id: rustc_hir::HirId, len: usize },
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -651,6 +697,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // Functions are keyed in their own namespace (see `fn_key`), so a
     // variable and a function with the same name get separate RAPs.
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
+    self.in_scope.push(key.clone());
     self.raps.entry(key).or_insert_with(|| {
       self.rap_hashes += 1;
       RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None, temp_owner: None }
@@ -711,6 +758,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   pub fn add_external_event(&mut self, line_num: usize, event: ExternalEvent) {
+    let line_num = self.line_override.unwrap_or(line_num);
     // Drop events whose source or destination is a `// rustviz: skip`-
     // marked variable. The marked RAP still exists (so non-skipped
     // code that references it doesn't crash on lookup), but every
@@ -1925,6 +1973,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
+    // `f(loop { … break k; })`: what `break` carries is the argument
+    // (#452).
+    if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = arg.kind {
+      let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
+        .filter(|(id, _)| *id == arg.hir_id).map(|(_, v)| *v).collect();
+      self.loop_breaks.retain(|(id, _)| *id != arg.hir_id);
+      for value in seen {
+        self.match_arg(value, fn_name.clone());
+      }
+      return;
+    }
     // A tuple built in the argument list (`show((s, 1))`,
     // `v.push((s, n))`): each element is passed into the call with it,
     // so `s` is moved into the call (#189).
@@ -3003,7 +3062,9 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     let is_block_local = |r: &ResourceAccessPoint| {
       self.raps.get(r.name()).map_or(false, |rd| !rd.is_global && rd.rap.hash() == r.hash())
     };
-    let mut vars: Vec<ResourceAccessPoint> = vars.into_iter().filter(|r| is_block_local(r)).collect();
+    // An unbound temporary (#457) is dropped by its own event, at the
+    // end of its statement, not with the block.
+    let mut vars: Vec<ResourceAccessPoint> = vars.into_iter().filter(|r| is_block_local(r) && needs_scope_end(r)).collect();
     // A struct's field columns (`p.name`) go out of scope with it.
     let owners: HashSet<u64> = vars.iter().filter_map(|r| match r {
       ResourceAccessPoint::Struct(st) if !st.is_member => Some(st.hash),
@@ -3903,6 +3964,19 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       for arm in arms.iter() {
         self.match_rhs_arm(lhs.clone(), arm.body, evt.clone());
       }
+    }
+    // `let r = loop { … break k; };`: `r` gets what `break` carries
+    // out (#431). A `break` is visited with the loop body, which
+    // `process_let_binding` does after this, so it only registers where
+    // the values go; `visit_expr`'s `Break` arm pairs them.
+    ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => {
+      let seen: Vec<&'tcx Expr<'tcx>> = self.loop_breaks.iter()
+        .filter(|(id, _)| *id == rhs.hir_id).map(|(_, v)| *v).collect();
+      self.loop_breaks.retain(|(id, _)| *id != rhs.hir_id);
+      for value in seen {
+        self.match_rhs(lhs.clone(), value, evt.clone());
+      }
+      self.break_binds.push((rhs.hir_id, lhs, evt));
     }
     ExprKind::DropTemps(exp) => {
       self.match_rhs(lhs, &exp, evt);
