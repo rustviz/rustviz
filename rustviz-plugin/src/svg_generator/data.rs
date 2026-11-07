@@ -2075,6 +2075,120 @@ pub fn convert_back(s: &State) -> State {
     }
 }
 
+/// The end of a reference column's borrow (StaticDie / MutableDie on
+/// the reference itself), or the reference handed to the caller by a
+/// `return` (a copy of it, so the column has nothing left).
+fn ends_reference(e: &Event) -> bool {
+    matches!(e,
+        Event::StaticDie { .. } | Event::MutableDie { .. }
+        | Event::Duplicate { to: ResourceTy::Caller, .. })
+}
+
+/// An event that gives a reference column a (new) reference.
+fn starts_reference(e: &Event) -> bool {
+    matches!(e,
+        Event::StaticBorrow { .. } | Event::MutableBorrow { .. }
+        | Event::Acquire { .. } | Event::Copy { .. } | Event::InitRefParam { .. })
+}
+
+/// Whether a reference column still holds a reference after the events
+/// before `rest`: its next event uses the reference it has, rather than
+/// giving it a new one or ending its scope. A borrow made through it
+/// (`println!("{}", r)`, `&mut *r`), a move or copy of it, a return to
+/// the caller, or the end of its borrow all use it. In a conditional, an
+/// arm that uses it first is enough; one that doesn't touch the column
+/// is passed over.
+fn reference_used_later(rest: &[(usize, Event)]) -> bool {
+    for (_, e) in rest {
+        match e {
+            Event::StaticLend { .. } | Event::MutableLend { .. }
+            | Event::StaticDie { .. } | Event::MutableDie { .. }
+            | Event::Duplicate { .. } | Event::Move { .. } => return true,
+            Event::Branch { branch_history, .. } => {
+                if branch_history.iter().any(|b| reference_used_later(&b.e_data)) {
+                    return true;
+                }
+                if branch_history.iter().any(|b| !b.e_data.is_empty()) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// #700, #722: a reference column's borrow end recorded on the row
+/// where it gets a new reference, after that new reference (`y = &x;`
+/// ends y's old borrow and starts a new one), is the old value's end
+/// when it gives back a lender none of the row's new borrows borrow
+/// from, or when the column goes on using a reference afterwards (so
+/// the new one doesn't end here). Put such ends before the new
+/// reference, so the row's dot reads "y's immutable borrow ends • y
+/// immutably borrows …" and the column goes on from it holding the new
+/// one. An end of the new reference (`r = &b;` with r unused after)
+/// stays after it. The rows and arrows don't change: only the order of
+/// the column's own events on that row.
+fn old_borrow_ends_first(history: &mut [(usize, Event)]) {
+    // A named lender's column (not `Deref(r)`, the stand-in for a
+    // temporary or a value the plugin doesn't show).
+    let lender = |r: &ResourceTy| match r {
+        ResourceTy::Value(r) => Some(*r.hash()),
+        _ => None,
+    };
+    let mut i = 0;
+    while i < history.len() {
+        let row = history[i].0;
+        let mut j = i;
+        while j < history.len() && history[j].0 == row {
+            j += 1;
+        }
+        if let Some(first_start) = (i..j).find(|&k| starts_reference(&history[k].1)) {
+            let used_later = reference_used_later(&history[j..]);
+            // The named lenders of the row's new borrows, or None if the
+            // new reference is a copy or move of another one (whose
+            // lender isn't recorded here) or borrows something unnamed.
+            let new_lenders: Option<Vec<u64>> = history[first_start..j].iter()
+                .filter(|(_, e)| starts_reference(e))
+                .map(|(_, e)| match e {
+                    Event::StaticBorrow { from, .. } | Event::MutableBorrow { from, .. } => lender(from),
+                    _ => None,
+                })
+                .collect();
+            let old_end = |e: &Event| match e {
+                Event::StaticDie { to, .. } | Event::MutableDie { to, .. } => used_later
+                    || new_lenders.as_ref().zip(lender(to)).is_some_and(|(ls, l)| !ls.contains(&l)),
+                _ => false,
+            };
+            let (ends, rest): (Vec<_>, Vec<_>) = history[first_start..j].iter().cloned()
+                .partition(|(_, e)| old_end(e));
+            for (slot, ev) in history[first_start..j].iter_mut().zip(ends.into_iter().chain(rest)) {
+                *slot = ev;
+            }
+        }
+        i = j;
+    }
+}
+
+/// For each event of a reference column's `history`: whether it is an
+/// end (`ends_reference`) that leaves the column holding a reference,
+/// because the column goes on using one (`reference_used_later`). The
+/// column's line then runs on through it. Two causes: the end is of
+/// the reference the column held before an assignment, drawn on a row
+/// after the new one (`(r1, r2) = (r2, r1);`, `t = first(&y, &x);`),
+/// or the new reference has no event of its own (`hold = other;`
+/// before #637); or it is a `return` of the reference on one path of a
+/// conditional that isn't drawn as branches (inside a loop).
+fn ends_kept_alive(is_ref: bool, history: &[(usize, Event)]) -> Vec<bool> {
+    (0..history.len())
+        .map(|i| is_ref && ends_reference(&history[i].1) && reference_used_later(&history[i + 1..]))
+        .collect()
+}
+
+fn holds_reference(state: &State) -> bool {
+    matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. })
+}
+
 // merge redundant states together
 pub fn clean_states(states: &Vec<(usize, usize, State)>) -> Vec<(usize, usize, State)> {
     let mut cleaned_states: Vec<(usize, usize, State)> = Vec::new();
@@ -3061,6 +3175,24 @@ impl Visualizable for VisualizationData {
                 }
             },
 
+            // A `&T` is only moved as part of a struct (`let hold =
+            // other;` moves other.r): the field has no reference left.
+            (State::PartialPrivilege{..}, Event::Move{to: to_ro,..}) if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
+            // A reference whose reference was moved out (`let q2 = q;`)
+            // is given a new one (`q = &mut s;`, #722): it holds that,
+            // as when it was first initialized with a borrow.
+            (State::ResourceMoved{ .. }, Event::StaticBorrow{ .. })
+            | (State::ResourceMoved{ .. }, Event::Copy{ .. }) if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
+            (State::ResourceMoved{ .. }, Event::MutableBorrow{ .. }) if self.is_mutref(hash) =>
+                State::FullPrivilege { s: LineState::Full },
+            // `r2 = r1;` while r2 still holds its old `&T` (its end is
+            // drawn on a row below, `(r1, r2) = (r2, r1);`, #722): r2
+            // holds the copy.
+            (State::PartialPrivilege{ .. }, Event::Copy{ .. }) if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
+
             (State::FullPrivilege{..}, Event::MutableLend{ to: to_ro ,..}) => {
             // Assumption: variables can lend mutably if
             // 1) variable instance is mutable or 2) variable is a mutable reference
@@ -3313,8 +3445,13 @@ impl Visualizable for VisualizationData {
             states.push((branch_start, begin, branch_state_converter(&previous_state)));
         }
 
+        let is_ref = self.is_ref(hash);
+        if is_ref {
+            old_borrow_ends_first(history);
+        }
+        let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = begin;
-        for (l, e) in history {
+        for (i, (l, e)) in history.iter_mut().enumerate() {
             // For let-as-rhs (`let s = if … { … } else { … };`) the
             // parent's pre-branch state is OOS — the variable
             // doesn't exist yet — but the rows between this arm's
@@ -3384,7 +3521,11 @@ impl Visualizable for VisualizationData {
                     previous_line = *merge_point;
                 }
                 _ => {
-                    previous_state = self.calc_state(&previous_state, e, *l, hash);
+                    // An end that leaves the reference column holding a
+                    // reference (`ends_kept_alive`) doesn't end its line.
+                    if !(kept[i] && holds_reference(&previous_state)) {
+                        previous_state = self.calc_state(&previous_state, e, *l, hash);
+                    }
                     previous_line = *l;
                 }
             }
@@ -3406,9 +3547,14 @@ impl Visualizable for VisualizationData {
 
 
     fn compute_timeline_states(&self, history: & mut Vec<(usize, Event)>, states: & mut Vec<(usize, usize, State)>, hash: &u64) {
+        let is_ref = self.is_ref(hash);
+        if is_ref {
+            old_borrow_ends_first(history);
+        }
+        let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = 1;
         let mut previous_state = State::OutOfScope;
-        for (l, e) in history {
+        for (i, (l, e)) in history.iter_mut().enumerate() {
             states.push((previous_line, *l, previous_state.clone()));
             match e {
                 Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
@@ -3462,7 +3608,11 @@ impl Visualizable for VisualizationData {
 
                 }
                 _ => {
-                    previous_state = self.calc_state(&previous_state, e, *l, hash);
+                    // An end that leaves the reference column holding a
+                    // reference (`ends_kept_alive`) doesn't end its line.
+                    if !(kept[i] && holds_reference(&previous_state)) {
+                        previous_state = self.calc_state(&previous_state, e, *l, hash);
+                    }
                     previous_line = *l;
                 }
             }

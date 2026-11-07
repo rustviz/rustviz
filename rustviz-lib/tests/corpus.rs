@@ -1092,6 +1092,8 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_else_write_through",
     "edition2024/if_let_chain_no_else_borrow",
     "edition2024/if_let_chain_inline_read",
+    // A struct moved over one that holds a reference (#700).
+    "borrow_struct_moved_over",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12306,6 +12308,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t isn't moved in any of the branches above",
         ],
     },
+    // #700: the column of hold.r after `hold = other;` (geometry in
+    // `reference_column_reaches_its_last_use`). The old borrow of a ends
+    // at the write. The loan hold.r holds afterwards is #637's, not
+    // pinned here: main still returns b from other.r.
+    TooltipExpect {
+        name: "borrow_struct_moved_over",
+        must_contain: &[
+            "hold.r's immutable borrow ends",
+            "a's resource is no longer immutably borrowed",
+            "hold.r holds an immutable reference; it can read the borrowed resource",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -15808,6 +15823,120 @@ fn match_ref_binding_borrow_ends_at_last_use() {
         assert!(reach <= back,
             "{}: {}'s \"being shared\" segment runs to y={}, past the borrow's end at y={}",
             name, lender, reach, back);
+    }
+}
+
+/// Dots in a timeline panel whose tooltip lines satisfy `want` and that
+/// no `<line>` reaches: none ends within a few pixels of the dot's centre
+/// or runs through it.
+fn lone_dots(svg: &str, want: impl Fn(&[String]) -> bool) -> Vec<(f64, f64, Vec<String>)> {
+    let lines = svg_lines(svg);
+    let reached = |cx: f64, cy: f64| lines.iter().any(|&(x1, y1, x2, y2)| {
+        let end = |x: f64, y: f64| (x - cx).abs() <= 6.0 && (y - cy).abs() <= 6.0;
+        let through = (x1 - x2).abs() < 0.01
+            && (x1 - cx).abs() <= 3.0
+            && y1.min(y2) - 1.0 <= cy
+            && cy <= y1.max(y2) + 1.0;
+        end(x1, y1) || end(x2, y2) || through
+    });
+    let mut out = Vec::new();
+    for tips in tooltip_lines(svg) {
+        if !want(&tips) {
+            continue;
+        }
+        for (x, y) in dots_where(svg, |l| l == tips.as_slice()) {
+            if !reached(x, y) {
+                out.push((x, y, tips.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out.dedup();
+    out
+}
+
+/// #700, #722: a reference column's line runs to the reference's last
+/// use. Main stopped it early, so the use (or the next event) was a dot
+/// no line reached, and the reference looked dead where it is read:
+/// - after `y = &x;` (and `hold = H { r: &t };`, `r = s;`, `m = n;`,
+///   `t = first(&y, &x);`), whose end of the old borrow was recorded
+///   after the new one and ended the column;
+/// - after `hold = other;` (moving a struct over one that holds a
+///   reference) and `(r1, r2) = (r2, r1);`, whose end of the old borrow
+///   is drawn on a row below the assignment;
+/// - after `q = &mut s;` gives a moved-out `&mut` a new reference;
+/// - after a `return &s[..]` inside an `if` in a loop (Book ch. 4), on
+///   a path that goes on to use s.
+#[test]
+fn reference_column_reaches_its_last_use() {
+    // A scope end stands alone after the column ended, as does a
+    // temporary's drop.
+    let skip = |tips: &[String]| tips.iter().any(|t| {
+        t.split_once(" goes out of scope").is_some_and(|(who, _)| !who.contains(' '))
+            || t.contains("temporary")
+    });
+    for name in [
+        "advanced_deref",
+        "basic_if7",
+        "basic_if12",
+        "basic_while",
+        "borrow_field_overwrite_direct",
+        "borrow_struct_overwrite_call",
+        "borrow_struct_overwrite_whole",
+        "borrow_struct_moved_over",
+        "fn_ret_ref_reassign",
+        "moved_ref_state",
+        "mutref_moved_on",
+        "ref_swap_keeps_borrow",
+        "book/c4_09_first_word_str",
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        assert_eq!(lone_dots(&timeline, |t| !skip(t)), Vec::new(), "{}: dots no line reaches", name);
+    }
+    // These also have dots of a reference while it is itself mutably
+    // reborrowed (`m = n;` lends n to m): like any lender's column, it
+    // draws no line while `&mut`-borrowed (#722's first group), and the
+    // reborrow's end is its last use. Check the uses after a reassignment.
+    for (name, uses) in [
+        ("aliasing2", &["println! no longer borrows the resource b points to"][..]),
+        ("ref_reassign_wording", &[
+            "println! no longer borrows the value r points to",
+            "r is assigned a copy of s's reference",
+            "push no longer borrows the resource m points to",
+            "println! no longer borrows the resource m points to",
+            "println! no longer borrows the resource t points to",
+        ][..]),
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        for used in uses {
+            let lone = lone_dots(&timeline, |t| t.iter().any(|l| l == used));
+            assert_eq!(lone, Vec::new(), "{}: no line reaches the dot of {:?}", name, used);
+            assert!(!dots_listing_tooltip(&timeline, used).is_empty(), "{}: no dot lists {:?}", name, used);
+        }
+    }
+}
+
+/// #700: when a reference gets a new reference on a row where its old
+/// borrow ends, the row's dot lists the end first: "y's immutable borrow
+/// ends • y immutably borrows a value". Main listed the new borrow first,
+/// which reads as if the new borrow ended at once.
+#[test]
+fn reassigned_reference_ends_its_old_borrow_first() {
+    for (name, end, start) in [
+        ("advanced_deref", "y's immutable borrow ends", "y immutably borrows a value"),
+        ("advanced_deref2", "y's mutable borrow ends", "y mutably borrows a value"),
+        ("basic_if12", "c's immutable borrow ends", "c immutably borrows a value"),
+        ("borrow_struct_overwrite_whole", "hold.r's immutable borrow ends", "hold.r immutably borrows a resource"),
+        ("borrow_struct_overwrite_whole", "p.a's immutable borrow ends", "p.a immutably borrows a resource"),
+        ("ref_reassign_wording", "r's immutable borrow ends", "r is assigned a copy of s's reference"),
+        ("ref_reassign_wording", "m's mutable borrow ends", "m mutably borrows a resource"),
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        let in_order = dots_where(&timeline, |l| l == [end, start]);
+        let reversed = dots_where(&timeline, |l| l == [start, end]);
+        assert!(!in_order.is_empty() && reversed.is_empty(),
+            "{}: want a dot \"{} • {}\" (got {:?} in that order, {:?} reversed)",
+            name, end, start, in_order, reversed);
     }
 }
 
