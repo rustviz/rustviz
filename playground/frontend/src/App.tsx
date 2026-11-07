@@ -327,8 +327,9 @@ const Description: React.FC = () => (
         <code>if</code> without <code>else</code>.
       </li>
       <li>
-        Writes to a field through a reference (<code>self.n += 1</code> in a{' '}
-        <code>&amp;mut self</code> method) aren&apos;t drawn. A write to a tuple
+        A write to a field through a reference (<code>self.n += 1</code> in a{' '}
+        <code>&amp;mut self</code> method) is drawn on the reference&apos;s
+        column, not on the borrowed struct&apos;s. A write to a tuple
         field (<code>t.0 = x</code>) or a method result&apos;s field is drawn on
         the column of the variable it is reached from; the old value&apos;s drop
         is stated in the tooltip only. A write to an
