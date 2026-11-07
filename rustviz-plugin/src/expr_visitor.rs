@@ -1013,8 +1013,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
       }
       ExprKind::Unary(UnOp::Deref, exp) => {
-        let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
         let line_num = expr_to_line(&exp, &self.tcx);
+        // `*slots[0] += 10` with slots: `Vec<&mut i32>`: the write goes
+        // through the reference stored in the element slots[0], into
+        // what it points to. slots isn't a reference, so this isn't
+        // `*slots` (#396). The same holds for a `Box` element
+        // (`*boxes[0] = 5`) and for a field of an element
+        // (`*hs[0].r += 1`). Which variable the element points to
+        // isn't known statically, so the event goes on the
+        // collection's column, as an element write whose place starts
+        // with `*` (see `ResourceTy::Index`).
+        if let Some(coll) = index_base(exp) {
+          let typeck = self.tcx.typeck(expr.hir_id.owner);
+          let pointee_ty = typeck.expr_ty(expr);
+          // `*refs[0] = &u` (the target is itself a reference): a
+          // borrow we don't track, like `v[0] = &u`. Not drawn.
+          if pointee_ty.is_ref() {
+            return None;
+          }
+          let name = expr_to_rap_name(coll, &self.tcx)?;
+          let rap = self.raps.get(&name)?.rap.to_owned();
+          if rap.is_fn() {
+            return None;
+          }
+          self.update_rap(&rap, line_num);
+          let place = match self.place_label(expr, &format!("*{}", name)) {
+            p if p.starts_with('*') => p,
+            _ => format!("*{}[…]", name),
+          };
+          let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+          let write = if self.tcx.type_is_copy_modulo_regions(env, pointee_ty) {
+            PlaceWrite::AssignCopy
+          } else if pointee_ty.needs_drop(self.tcx, env) {
+            PlaceWrite::AssignDropsOld
+          } else {
+            PlaceWrite::AssignOwned
+          };
+          return Some(ResourceTy::Index(rap, place, write));
+        }
+        let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
         match rhs_rap {
           Some(x) => {
             self.update_rap(&x, line_num);

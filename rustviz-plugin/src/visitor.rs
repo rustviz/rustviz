@@ -1155,7 +1155,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             }
             Some(lhs_rty @ (ResourceTy::Deref(_) | ResourceTy::Index(..))) => {
               let lhs_rty = match lhs_rty {
-                ResourceTy::Index(r, place, _) => ResourceTy::Index(r, place, PlaceWrite::Update),
+                ResourceTy::Index(r, place, w) => ResourceTy::Index(r, place, w.into_update()),
                 other => other,
               };
               self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
@@ -1192,8 +1192,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_))) => {
             self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
           }
-          Some(ResourceTy::Index(r, place, _)) => {
-            self.add_ev(line_num, Evt::Bind, ResourceTy::Index(r, place, PlaceWrite::Update), ResourceTy::Anonymous, false);
+          Some(ResourceTy::Index(r, place, w)) => {
+            self.add_ev(line_num, Evt::Bind, ResourceTy::Index(r, place, w.into_update()), ResourceTy::Anonymous, false);
           }
           _ => {}
         }
@@ -1486,7 +1486,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // `v[i] += k`: k is an operand, not the element's new
           // value, so don't draw it as copied into v[i].
           let compound = match &lhs_rty {
-            ResourceTy::Index(r, place, _) => ResourceTy::Index(r.clone(), place.clone(), PlaceWrite::Update),
+            ResourceTy::Index(r, place, w) => ResourceTy::Index(r.clone(), place.clone(), w.into_update()),
             other => other.clone(),
           };
           self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);

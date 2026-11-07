@@ -449,6 +449,8 @@ const EXPECTED_OK: &[&str] = &[
     //   modification of v's resource, directly or through a reference.
     "index_assign",
     "index_assign_through_ref",
+    // A write through a reference / Box stored in an element (#396).
+    "write_through_element_ref",
     // Nested struct fields of fn params and pattern bindings get
     // columns (#239); a struct param's reference field borrows from
     // the caller (#351).
@@ -4645,6 +4647,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource dst points to is modified through dst[0]",
             "the resource r points to is modified through r[0]",
             "the value previously in",
+        ],
+    },
+    // ─── Writes through a reference stored in an element (#396) ─────
+    TooltipExpect {
+        name: "write_through_element_ref",
+        // `*slots[0] += 10` writes through the `&mut i32` in slots[0];
+        // slots is a Vec, not a reference, so "the resource slots
+        // points to … through *slots" was false. An assignment
+        // (`*names[0] = s`) reads like a plain assignment with the
+        // place as the subject; `+=` keeps "modified through". What
+        // the element points to is a "value" when it needs no drop
+        // (an i32), a "resource" when it does (a String) (#484).
+        must_contain: &[
+            "the value slots[0] points to is modified through *slots[0]",
+            "*slots[1] is assigned a new value",
+            // A named Copy source is named (`*slots[1] = k`).
+            "*slots[1] is assigned a copy of k",
+            "Move from s to *names[0]",
+            "the value hs[0].r points to is modified through *hs[0].r",
+            "*boxes[0] is assigned a new value",
+            // Overwriting a String through the stored reference drops the
+            // old String; no column shows it, so the tooltip says it.
+            "*names[0] acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "the resource slots points to is modified through *slots",
+            "the resource names points to is modified through *names",
+            "Move from s to *names",
+            "the resource boxes points to is modified through *boxes",
+            // An i32 is a value, not a resource (#484).
+            "the resource slots[0] points to is modified through *slots[0]",
+            "the resource hs[0].r points to is modified through *hs[0].r",
+            // An assignment is not "modified through"; the arrow carries
+            // the move or copy.
+            "*names[0] is assigned a copy of",
+            "(copied from",
+            "(moved from",
+            "the value previously in",
+            "the resource names[0] points to is modified through *names[0]",
+            "the value slots[1] points to is modified through *slots[1]",
+            "the value boxes[0] points to is modified through *boxes[0]",
         ],
     },
     TooltipExpect {

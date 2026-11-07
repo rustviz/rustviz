@@ -64,6 +64,17 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
   }
 }
 
+/// For a place reached through an index projection (`v[0]`,
+/// `ps[0].r`, `grid[1][2]`), the collection that is indexed first:
+/// `v`, `ps`, `grid`. None for places without an index (`p.r`, `r`).
+pub fn index_base<'a, 'tcx>(expr: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
+  match expr.kind {
+    ExprKind::Index(recv, _, _) => Some(index_base(recv).unwrap_or(recv)),
+    ExprKind::Field(inner, _) => index_base(inner),
+    _ => None,
+  }
+}
+
 /// Walk a chain of `Path` / `Field` / `AddrOf` / `Unary` / `DropTemps`
 /// expressions and produce the qualified RAP name, e.g. `r`, `r.s`,
 /// `r.a.b`, or `self.n`. Returns `None` for anything outside that
