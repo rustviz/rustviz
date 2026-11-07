@@ -855,6 +855,9 @@ const EXPECTED_OK: &[&str] = &[
     "tuple_scrutinee_drops",
     // A `ref` binding out of `(x, y)` borrows the tuple, not x (#580).
     "tuple_scrutinee_ref",
+    // An early exit nested in an arm / if branch drops a tuple
+    // scrutinee at the exit (#327 on #410); `process::exit` drops nothing.
+    "tuple_scrutinee_exit_drops",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9306,6 +9309,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p was moved in at least one branch above",
             "x goes out of scope. Its resource is dropped here only if no branch above moved it",
             "p goes out of scope. Its resource is dropped here only if no branch above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_exit_drops",
+        // A `return` that leaves a match arm or an `if let` branch from
+        // inside a nested `if` drops the tuple scrutinee right there, as
+        // it drops the function's other values (#410), checked with a
+        // Drop-printing program: at `return 0` the arm's own values go
+        // first, then the tuple (holding y's value), then the locals
+        // declared before the match. `std::process::exit` runs no
+        // destructors, so that arm drops nothing.
+        must_contain: &[
+            "The temporary tuple (x, y) is dropped when this arm leaves the match early, and with it y's resource",
+            "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
+            "The temporary tuple (s, t) is dropped when this arm leaves the match early, and with it s's and t's resources",
+            "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it p's resource",
+            "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
+            "m's resource is moved into the temporary tuple (m, n)",
+        ],
+        must_not_contain: &[
+            // `_ => std::process::exit(1)`: the process ends without
+            // dropping anything.
+            "The temporary tuple (m, n) is dropped when this arm leaves the match early",
+            "=y goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
         ],
     },
 ];

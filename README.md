@@ -443,8 +443,10 @@ rather than listed here.
   The exception is a tuple of variables matched by `if let` or `match`
   (`if let (Some(a), _) = (x, y)`): it gets no column, but a drop dot
   on `x`'s and `y`'s columns says where it's dropped and what of their
-  values goes with it. Anything else in such a tuple (`(x, make())`)
-  is still left out.
+  values goes with it, also at a `return`, `break`, `continue` or panic
+  that leaves the arm or `if let` branch early (even from an `if`
+  without `else`), but not at a `?` there. Anything else in such a
+  tuple (`(x, make())`) is still left out.
   Temporaries with nothing to drop (`&Point { x: 4 }`) get no column.
 
 The plugin has its own per-feature TODO checklist in

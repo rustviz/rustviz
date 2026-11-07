@@ -279,6 +279,26 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub literal_temps: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
   // The elements of such a literal already moved into its temporary.
   pub premoved: HashSet<rustc_hir::HirId>,
+
+  // The tuple-literal scrutinees (`match (x, y)`, `if let … = (x, y)`)
+  // whose arm or if branch is being visited, innermost last (#327). A
+  // `return`, `break`, `continue` or panic that leaves the arm drops
+  // the tuple, and what of the variables' values is still in it.
+  pub live_tuples: Vec<LiveTuple<'tcx>>,
+}
+
+/// See `ExprVisitor::live_tuples`.
+#[derive(Clone)]
+pub struct LiveTuple<'tcx> {
+  // The index in `exit_frames` of the if/else or match frame whose
+  // branch holds the tuple, and that frame's `len`.
+  pub frame: usize,
+  pub len: usize,
+  pub scrutinee: &'tcx Expr<'tcx>,
+  pub tuple: String,
+  pub pat: &'tcx Pat<'tcx>,
+  // `MatchArmExit` or `IfExit`.
+  pub at: TupleDropAt,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`

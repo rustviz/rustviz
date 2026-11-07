@@ -404,7 +404,8 @@ const Description: React.FC = () => (
         <code>for</code> head) drop without being drawn or mentioned, except a
         tuple of variables matched by <code>if let</code> or{' '}
         <code>match</code> (<code>(x, y)</code>): where it&apos;s dropped is
-        stated on <code>x</code>&apos;s and <code>y</code>&apos;s columns.
+        stated on <code>x</code>&apos;s and <code>y</code>&apos;s columns
+        (not when a <code>?</code> leaves early).
       </li>
     </ul>
     <p>

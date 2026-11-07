@@ -996,19 +996,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// exit carries out (`return e`, `break e`); what it may move isn't
   /// dropped. `how`: `return`, `break`, `continue` or `panic`, for the
   /// drop of a temporary.
+  ///
+  /// A tuple-literal scrutinee whose arm or if branch the exit leaves
+  /// (`live_tuples`) is dropped too, before the locals declared before
+  /// its match / `if let` (#327). It has no column, and its drop
+  /// doesn't end one, so it is stated even where the locals' drops
+  /// aren't drawn (the exit is in an `if` without `else`).
   fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, how: &str) {
     let Some(branch_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
     let ExitFrame::Branch { len: branch_len, .. } = self.exit_frames[branch_at] else { return };
-    let from = match loop_id {
-      None => 0,
+    // `frame_floor`: the exit leaves the constructs from this frame on.
+    let (from, frame_floor) = match loop_id {
+      None => (0, 0),
       Some(target) => match self.exit_frames.iter()
         .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target))
       {
         // The branch is inside the loop: drop what the iteration
         // declared before the branch.
         Some(i) if i < branch_at => match &self.exit_frames[i] {
-          ExitFrame::Loop { len, .. } => *len,
+          ExitFrame::Loop { len, .. } => (*len, i + 1),
           ExitFrame::Branch { .. } => return,
         },
         // A labelled block, or a loop inside the branch (no branch
@@ -1018,7 +1025,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let moved = value.map(|e| locals_moved_by(self.tcx, e)).unwrap_or_default();
     let end = branch_len.min(self.in_scope.len());
-    for rap in self.droppable_locals(from, end, &moved, true, line) {
+    // Innermost last, so popped first: Rust drops the tuple of an
+    // inner match before what an outer one holds.
+    let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.iter()
+      .filter(|t| t.frame >= frame_floor).cloned().collect();
+    for (idx, rap) in self.droppable_locals_at(from, end, &moved, true, line) {
+      // A tuple is dropped before the locals declared before its match.
+      while tuples.last().is_some_and(|t| idx < t.len) {
+        let t = tuples.pop().unwrap();
+        self.drop_tuple_on_exit(&t, line);
+      }
       let id = *self.unique_id;
       *self.unique_id += 1;
       self.exit_drops.insert(id);
@@ -1044,6 +1060,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id }),
       }
     }
+    while let Some(t) = tuples.pop() {
+      self.drop_tuple_on_exit(&t, line);
+    }
+  }
+
+  /// The drop of the live tuple scrutinee `t` at an exit on `line`
+  /// (#327), worded as #327's "when this arm leaves the match early" /
+  /// "when the if branch leaves early". Not an `exit_drops` event: it
+  /// ends no column, so it stays wherever the exit is drawn.
+  fn drop_tuple_on_exit(&mut self, t: &LiveTuple<'tcx>, line: usize) {
+    for ev in self.tuple_drop_events(t.scrutinee, &t.tuple, Some(t.pat), t.at) {
+      self.add_external_event(line, ev);
+    }
   }
 
   /// The locals in `in_scope[from..end]` that own a value to drop at
@@ -1053,12 +1082,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// non-`Copy` references (`&mut T`). A temporary whose scope ended
   /// before `line` was dropped already.
   fn droppable_locals(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<ResourceAccessPoint> {
+    self.droppable_locals_at(from, end, moved, refs, line).into_iter().map(|(_, r)| r).collect()
+  }
+
+  /// `droppable_locals`, each with its index in `in_scope`.
+  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize) -> Vec<(usize, ResourceAccessPoint)> {
     if from >= end {
       return Vec::new();
     }
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::new();
-    for name in self.in_scope[from..end].iter().rev().filter(|n| seen.insert(n.as_str())) {
+    for (idx, name) in self.in_scope[from..end].iter().enumerate().rev()
+      .map(|(i, n)| (from + i, n)).filter(|(_, n)| seen.insert(n.as_str())) {
       let base = name.split('.').next().unwrap_or(name);
       let Some(rd) = self.raps.get(name) else { continue };
       if rd.rap.is_copy() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
@@ -1074,7 +1109,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if !self.owns_value_here(*rd.rap.hash()) {
         continue;
       }
-      out.push(rd.rap.clone());
+      out.push((idx, rd.rap.clone()));
     }
     out
   }
@@ -2343,7 +2378,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // nor the binding of the `if`'s value to a `let` (#410).
         let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
         self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide });
+        // An exit in the if branch drops the tuple scrutinee (#327).
+        let live_tuple = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()).map(|let_expr| LiveTuple {
+          frame: self.exit_frames.len() - 1,
+          len: entry_len,
+          scrutinee: let_expr.init,
+          tuple: match self.tuple_scrutinee_target(let_expr.init) {
+            ResourceTy::Temporary { tuple: Some(t), .. } => t,
+            _ => String::new(),
+          },
+          pat: let_expr.pat,
+          at: TupleDropAt::IfExit,
+        });
+        let live = live_tuple.is_some();
+        self.live_tuples.extend(live_tuple);
         self.visit_expr(&if_expr);
+        if live {
+          self.live_tuples.pop();
+        }
         // Everything declared in each branch, also inside an inline
         // construct nested in it (an `else if let`'s bindings, #501):
         // see raps_declared_since.
@@ -2535,16 +2587,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           front.extend(self.tuple_drop_events(let_expr.init, &tuple_name, None, at).into_iter().map(|e| (if_end, e)));
           else_ev.splice(0..0, front);
 
-          if if_diverges {
-            // Leaving early drops it then: stated next to the moves on
-            // the `if let` line, before the drops at the exit.
-            let at = (0..if_ev.len()).rev()
-              .find(|&k| if_ev[k].0 == line_num && matches!(if_ev[k].1, ExternalEvent::Move { .. }))
-              .map_or(0, |k| k + 1);
-            let evs: Vec<(usize, ExternalEvent)> = self.tuple_drop_events(let_expr.init, &tuple_name, Some(let_expr.pat), TupleDropAt::IfExit)
-              .into_iter().map(|e| (line_num, e)).collect();
-            if_ev.splice(at..at, evs);
-          } else {
+          // A branch that leaves early drops it at its exit instead:
+          // see drop_locals_on_exit.
+          if !if_diverges {
             let evs = self.tuple_drop_events(let_expr.init, &tuple_name, Some(let_expr.pat), TupleDropAt::IfEnd);
             if_ev.extend(evs.into_iter().map(|e| (if_end, e)));
           }
@@ -3043,18 +3088,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
               }
               // An arm that leaves early (`_ => return 0`) drops the tuple
-              // as it leaves (#327). Stated next to the move into it,
-              // before the arm's own drops at its exit.
+              // at its exit instead (#327): see drop_locals_on_exit.
               let arm_diverges = self.expr_diverges(arm.body);
-              if arm_diverges && !scrutinee_moves.is_empty() {
-                for ev in self.tuple_drop_events(guard_expr, &tuple_name, Some(arm.pat), TupleDropAt::MatchArmExit) {
-                  if inline {
-                    self.add_external_event(pat_line, ev);
-                  } else {
-                    branch_e_data.push((pat_line, ev));
-                  }
-                }
-              }
 
               // A struct bound by the pattern (`Some(y) =>` with `y: P`)
               // gets field columns (`y.name`, `y.n`). They receive their
@@ -3111,7 +3146,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.inside_branch = true;
               self.uninit_locals = uninit_before.clone();
               let body_lo = *self.unique_id;
+              // An exit in the arm drops the tuple scrutinee (#327).
+              let live = !scrutinee_moves.is_empty();
+              if live {
+                self.live_tuples.push(LiveTuple {
+                  frame: self.exit_frames.len() - 1,
+                  len: entry_len,
+                  scrutinee: guard_expr,
+                  tuple: tuple_name.clone(),
+                  pat: arm.pat,
+                  at: TupleDropAt::MatchArmExit,
+                });
+              }
               self.visit_expr(arm.body);
+              if live {
+                self.live_tuples.pop();
+              }
               let body_ids = body_lo..*self.unique_id;
               uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
               self.inside_branch = prev_inside_branch;
@@ -3186,7 +3236,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // each variable's value the pattern didn't move out
               // (#327). It has no column: a drop dot on each such
               // variable's says so. (An arm that leaves early drops it
-              // there: see above.)
+              // at its `return` / `break` / `continue` / panic.)
               if !arm_diverges {
                 let (at, line) = if past_match {
                   (TupleDropAt::MatchArmStmt, end)
@@ -3706,10 +3756,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// When the temporary of `expr` is dropped, in words, and the line
-  /// that happens on: the end of the enclosing statement, the block's
-  /// final expression, the match arm, the `if` / `while` condition, the
-  /// `for` loop or the closure body.
   /// One TupleTempDrop per variable of the tuple-literal `scrutinee`
   /// whose value (or part of it) is still in the tuple after `pat`
   /// matched (`None`: it didn't), each listing all of them (#327).
@@ -3723,6 +3769,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }).collect()
   }
 
+  /// When the temporary of `expr` is dropped, in words, and the line
+  /// that happens on: the end of the enclosing statement, the block's
+  /// final expression, the match arm, the `if` / `while` condition, the
+  /// `for` loop or the closure body.
   fn temporary_scope_end(&self, expr: &'tcx Expr<'tcx>) -> Option<(&'static str, usize, Option<HirId>)> {
     use rustc_hir::Node;
     let mut cur = expr.hir_id;
