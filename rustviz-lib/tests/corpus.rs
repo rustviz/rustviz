@@ -2120,8 +2120,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "show reads from x",
             "x goes out of scope. Its resource is dropped.",
             "opt was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
-             dropped (including the String it holds, if any) when opt goes out of scope.",
+             (until it's assigned again). If the branch that ran didn't move it, its resource (including the String it holds, if any) is \
+             dropped when opt goes out of scope.",
         ],
         must_not_contain: &[
             "may have been moved",
@@ -4191,9 +4191,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from opt to x",
             "Move from s to take",
             "opt was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
-             dropped (including the String it holds, if any) when opt goes out of scope.",
-            "opt goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it \
+             (until it's assigned again). If the branch that ran didn't move it, its resource (including the String it holds, if any) is \
+             dropped when opt goes out of scope.",
+            "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
             "s was moved in at least one branch above, so it can't be used after the branches \
              (until it's assigned again). If the branch that ran didn't move it, its resource is \
@@ -6903,7 +6903,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from x to a",
             "Move from a to consume",
-            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "=x goes out of scope. Its resource is dropped.",
@@ -8701,7 +8701,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Partial move from o to s",
             "s goes out of scope. Its resource is dropped.",
-            "o goes out of scope. Its resource is dropped (including the Result<String, String> it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "o goes out of scope. Its resource (including the Result<String, String> it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Partial immutable borrow from r to t",
             "t immutably borrows a resource",
             "r goes out of scope. Its resource is dropped.",
@@ -9109,7 +9109,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             // `v` is a `Vec<String>`: its drop says what it holds (#542).
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource is dropped (including every String it holds). If the `?` succeeds, nothing \
+             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
              happens to v here.",
         ],
         must_not_contain: &[
@@ -9308,11 +9308,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "keys goes out of scope. Its resource is dropped (including every key it holds).",
             "vals goes out of scope. Its resource is dropped (including every value it holds).",
             "rows goes out of scope. Its resource is dropped (including every Vec<String> it holds).",
-            "again acquires ownership of a new resource; its previous resource is dropped (including every String it holds)",
+            "again acquires ownership of a new resource; its previous resource (including every String it holds) is dropped",
             "gone's resource is moved into drop, which drops it (including every String it holds)",
             "nums goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            "its previous resource is dropped (including",
             "=words goes out of scope. Its resource is dropped.",
             "=pair goes out of scope. No resource is dropped.",
             "=queue goes out of scope. Its resource is dropped.",
@@ -9335,13 +9336,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The drop-flag scope end, the branch merge and `drop(x)` carry the
         // same parenthetical.
         must_contain: &[
-            "words goes out of scope. Its resource is dropped (including every String it holds) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "maybe goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "words was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (including every String it holds) when words goes out of scope.",
+            "words goes out of scope. Its resource (including every String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "maybe goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "words was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource (including every String it holds) is dropped when words goes out of scope.",
             "maybe's resource is moved into drop, which drops it (including the String it holds, if any)",
             "_v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
         must_not_contain: &[
+            "Its resource is dropped (including every String it holds) here only if",
+            "Its resource is dropped (including the String it holds, if any) here only if",
+            "its resource is dropped (including every String it holds) when words goes out of scope",
             "words goes out of scope. Its resource is dropped here only if",
             "maybe goes out of scope. Its resource is dropped here only if",
             "its resource is dropped when words goes out of scope.",
@@ -9359,10 +9363,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m goes out of scope. Its resource is dropped (including every key it holds).",
             "w goes out of scope. Its resource is dropped (including every String it holds).",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and names's \
-             resource is dropped (including every String it holds). If the `?` succeeds, nothing happens \
+             resource (including every String it holds) is dropped. If the `?` succeeds, nothing happens \
              to names here.",
         ],
         must_not_contain: &[
+            "resource is dropped (including every String it holds). If the `?`",
             "=v goes out of scope. Its resource is dropped.",
             "=o goes out of scope. Its resource is dropped.",
             "=m goes out of scope. Its resource is dropped.",
@@ -9381,13 +9386,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "moved goes out of scope. Its resource is dropped (including every String it holds).",
             "first goes out of scope. No resource is dropped.",
             "second goes out of scope. No resource is dropped.",
-            "again acquires ownership of a new resource; its previous resource is dropped (including every String it holds)",
+            "again acquires ownership of a new resource; its previous resource (including every String it holds) is dropped",
             "again goes out of scope. Its resource is dropped (including every String it holds).",
             "gone's resource is moved into drop, which drops it (including every String it holds)",
             "gone goes out of scope. No resource is dropped.",
-            "maybe goes out of scope. Its resource is dropped (including every String it holds) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "maybe goes out of scope. Its resource (including every String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            "its previous resource is dropped (including",
+            "Its resource is dropped (including every String it holds) here only if",
             "=names goes out of scope. No resource is dropped.",
             "=moved goes out of scope. No resource is dropped.",
             "first goes out of scope. Its resource is dropped",
@@ -9715,7 +9722,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from x to a",
             "Move from a to consume",
             "x may have been moved: when the condition moves x to a and then turns out false, the else branch runs after that move, so x can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // The condition, not a branch, may have moved it (maintainer, #581).
@@ -9732,7 +9739,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from x to a",
             "x may have been moved: when the condition moves x to a and then turns out false, the body is skipped but the move has happened, so x can't be used after the if. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // The condition, not a branch, may have moved it (maintainer, #581).
@@ -9779,7 +9786,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The old value is still in `x` only if the condition didn't move
         // it, so its drop at the reassignment is decided by a drop flag.
         must_contain: &[
-            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "x acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -9795,7 +9802,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "p.name may have been moved: when the condition moves p.name to a and then turns out false, the else branch runs after that move, so p.name can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
             "p goes out of scope. p.name may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag). p.id is dropped.",
-            "p.name goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "p.name goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["only if no branch above moved it", "moved out in at least one branch above"],
     },

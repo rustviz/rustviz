@@ -343,9 +343,10 @@ pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String 
 // communicate both events.
 pub fn event_dot_owner_drop_at_reassign(my_name: &String, note: &str) -> String {
     let my_name_fmt = fmt_style(my_name);
+    let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} acquires ownership of a new resource; its previous resource is dropped{1}",
-        my_name_fmt, note
+        "{0} acquires ownership of a new resource; its previous resource{1} is dropped{2}",
+        my_name_fmt, holds, rest
     )
 }
 
@@ -427,10 +428,12 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool) -> St
 /// that `reassign` (`event_dot_owner_drop_at_reassign`) already says, for
 /// the same variable, with more (#506, #519).
 pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
-    const SUFFIX: &str = " acquires ownership of a new resource; its previous resource is dropped";
-    // (an Rc / Arc / Weak's drop note may follow the suffix, #373)
-    reassign.split_once(SUFFIX)
-        .is_some_and(|(name, _)| acquire.strip_suffix(" acquires ownership of a resource") == Some(name))
+    const INFIX: &str = " acquires ownership of a new resource; its previous resource";
+    // (a holds note, #542, sits before "is dropped" and an Rc / Arc /
+    // Weak's drop note after it, #373)
+    reassign.split_once(INFIX)
+        .is_some_and(|(name, tail)| (tail.starts_with(" is dropped") || tail.starts_with(" (including "))
+            && acquire.strip_suffix(" acquires ownership of a resource") == Some(name))
 }
 
 // A drop of an `Rc` / `Arc` / `Weak` doesn't necessarily free the value
@@ -438,6 +441,14 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
 // the value (#373). Appended wherever a drop of such an owner is
 // stated; empty for any other owner. RustViz doesn't count references,
 // so it can't say whether this is the last one.
+/// Splits a `drop_note` for a sentence where "is dropped" isn't the end:
+/// a holds note (" (including every String it holds)", #542) goes right
+/// after "resource", before "is dropped"; an Rc note stays after it.
+/// Returns (before "is dropped", after it).
+pub fn split_drop_note(note: &str) -> (&str, &str) {
+    if note.starts_with(" (including ") { (note, "") } else { ("", note) }
+}
+
 pub fn rc_drop_note(rc: Option<RcDrop>) -> String {
     match rc {
         None => String::new(),
@@ -504,10 +515,11 @@ pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String
 // `note`: what else the drop drops, or an Rc's count note (#542).
 pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> String {
     let my_name_fmt = fmt_style(my_name);
+    let (holds, rest) = split_drop_note(note);
     format!(
         "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
-         resource is dropped{1}. If the `?` succeeds, nothing happens to {0} here.",
-        my_name_fmt, note
+         resource{1} is dropped{2}. If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt, holds, rest
     )
 }
 
@@ -2204,11 +2216,12 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, not
             my_name_fmt
         );
     }
+    let (holds, rest) = split_drop_note(note);
     format!(
         "{0} was moved in at least one branch above, so it can't be used after the branches \
-         (until it's assigned again). If the branch that ran didn't move it, its resource is \
-         dropped{1} when {0} goes out of scope.",
-        my_name_fmt, note
+         (until it's assigned again). If the branch that ran didn't move it, its resource{1} is \
+         dropped{2} when {0} goes out of scope.",
+        my_name_fmt, holds, rest
     )
 }
 
@@ -2228,10 +2241,11 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String 
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).
 pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool) -> String {
+    let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} goes out of scope. Its resource is dropped{1} here only if {2} moved it \
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it \
          (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), note, moved_above(by_cond)
+        fmt_style(my_name), holds, rest, moved_above(by_cond)
     )
 }
 
