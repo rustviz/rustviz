@@ -683,7 +683,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => None,
       };
     }
+    if def.is_enum() { return self.enum_holds_phrase(ty); }
     None
+  }
+
+  /// `holds_phrase` for an enum with no field columns of its own
+  /// (`Result<T, E>`, `Cow`, a local enum): the distinct types of the
+  /// variants' fields that need drop. Which variant a value is isn't
+  /// known statically, so say `, if any` when some variant holds none,
+  /// and `, whichever variant it is` when every variant holds exactly
+  /// one value of the same type. (#684)
+  fn enum_holds_phrase(&self, ty: Ty<'tcx>) -> Option<String> {
+    let tcx = self.tcx;
+    let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
+    let rustc_middle::ty::TyKind::Adt(def, args) = ty.kind() else { return None };
+    let mut names: Vec<String> = Vec::new();
+    let mut some_variant_empty = false;
+    let mut some_variant_many = false;
+    for v in def.variants() {
+      let held: Vec<String> = v.fields.iter()
+        .map(|f| tcx.normalize_erasing_regions(env, rustc_middle::ty::Unnormalized::new(f.ty(tcx, args))))
+        .filter(|t| t.needs_drop(tcx, env))
+        .map(|t| self.short_ty_name(t))
+        .collect();
+      if held.is_empty() { some_variant_empty = true; }
+      if held.len() > 1 { some_variant_many = true; }
+      for n in held { if !names.contains(&n) { names.push(n); } }
+    }
+    if names.is_empty() { return None; }
+    let list = match names.len() {
+      1 => names[0].clone(),
+      2 => format!("{} or {}", names[0], names[1]),
+      _ => format!("{}, or {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
+    };
+    let det = if some_variant_many { "every" } else { "the" };
+    let tail = if some_variant_empty { ", if any" }
+      else if names.len() == 1 && !some_variant_many { ", whichever variant it is" }
+      else { "" };
+    Some(format!("{det} {list} it holds{tail}"))
   }
 
   // Marks the owner (or struct field) just registered as `name` from
@@ -2753,6 +2790,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             self.add_union_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
           } else {
             self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+            self.mark_owner_type(&name, ty);
           }
           self.register_holder(&name, expr, ty);
         }
@@ -3469,6 +3507,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                             self.add_union_owner(name.clone(), muta, is_copy, self.ty_is_plain(ty, pat.hir_id.owner), interior_mut, scope, false);
                         } else {
                             self.add_owner(name.clone(), muta, is_copy, self.ty_is_plain(ty, pat.hir_id.owner), interior_mut, scope, false);
+                            self.mark_owner_type(&name, ty);
                         }
                     }
                 }
