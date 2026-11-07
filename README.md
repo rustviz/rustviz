@@ -467,24 +467,25 @@ rather than listed here.
   s = make().name;`, drawn moving out of the column), the fields a
   struct update takes from its base (`let q = P { name: s, ..make() };`,
   drawn moving to `q`'s fields), or what the pattern of a `match`, `if
-  let`, `while let` or `let`-`else` binds by value, from the temporary
-  or from a field of it (`match make() { (a, _) => .. }`, `let Ok(s) =
-  make() else { .. }`, `match make().name { n => .. }`; the bindings are
-  drawn from the call, not from the column). Its drop says the rest goes
-  with it (for a `let`-`else`, all of it before the `else` block runs,
-  if the pattern doesn't match). A `ref` binding of a value (`let ref t
-  = String::from("a");`, `let P { ref name, .. } = make_p();`) borrows a
-  `(temporary)` column that lives to the end of the block, and a literal
-  of only fresh values (`let (ref a, _) = (make(), make());`) is a
-  temporary column too, with nothing drawn moving in. A pattern that
-  also moves a part of the value out by value (`let (ref a, b) =
-  make_pair();`) gets no temporary column. Left out (their drops are not stated): temporaries that aren't a call's
+  let`, `while let`, `let`-`else` or plain `let` binds by value, from
+  the temporary or from a field of it (`match make() { (a, _) => .. }`,
+  `let Ok(s) = make() else { .. }`, `match make().name { n => .. }`,
+  `let (a, _) = make();`; the bindings are drawn from the call, not from
+  the column). Its drop says the rest goes with it (for a `let`-`else`,
+  all of it before the `else` block runs, if the pattern doesn't match).
+  A `ref` binding of a value (`let ref t = String::from("a");`, `let P {
+  ref name, .. } = make_p();`) borrows a `(temporary)` column that lives
+  to the end of the block, and a literal of only fresh values (`let (ref
+  a, _) = (make(), make());`) is a temporary column too, with nothing
+  drawn moving in. A pattern that also moves a part of the value out by
+  value (`let (ref a, b) = make_pair();`) gets no temporary column. Left out (their drops are not stated): temporaries that aren't a call's
   result (`vec![..];`, `format!(..);`, a struct literal), the scrutinee
   of `if let` / `while let`, a `for` loop's head (`for x in
-  make().iter()`), the part of a temporary that a plain `let` pattern
-  leaves (`let (a, _) = make();`, `let (a, _) = make().pair;`), and a
-  temporary nested inside a borrowed value (`let p = Wrapper { r:
-  &String::new() };`). A binding taken from a matched field (`n` in `match make().name
+  make().iter()`), what a destructuring assignment leaves in a call's
+  result (`(m, _) = make();`), a call's result that a `let` pattern with
+  a `ref` binding extends (`let (ref r, _) = make();`), and a temporary
+  nested inside a borrowed value (`let p = Wrapper { r: &String::new()
+  };`). A binding taken from a matched field (`n` in `match make().name
   { n => .. }`) is drawn acquiring its value with no arrow from the
   call.
   The exception is a tuple of variables matched by `if let` or `match`

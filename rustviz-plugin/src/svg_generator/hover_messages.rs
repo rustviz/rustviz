@@ -432,6 +432,15 @@ pub fn event_dot_unbound_temporary_part_acquire(_my_name: &String, from_name: &S
             "A temporary holds the value that {0}, for the match to inspect its field {1}. The pattern of the arm that runs can move that field, or parts of it, into its bindings; what is left in the temporary is dropped with it after the match",
             source, fmt_style(f)
         ),
+        // `let (a, _) = pair();` (#623): the pattern can't fail.
+        TempPart::Let(None) => format!(
+            "A temporary holds the value that {0}, for the `let` pattern to take apart. The pattern moves parts of it into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
+            source
+        ),
+        TempPart::Let(Some(f)) => format!(
+            "A temporary holds the value that {0}, for the `let` pattern to take its field {1} apart. The pattern moves parts of that field into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
+            source, fmt_style(f)
+        ),
         TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) => format!(
             "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
             source, let_kind(part)
@@ -540,6 +549,14 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
         ),
         TempPart::Match(Some(f)) => format!(
             "This temporary {0} is dropped {1}, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field {2}",
+            fmt_style(ty), when, fmt_style(f)
+        ),
+        TempPart::Let(None) => format!(
+            "This temporary {0} is dropped {1}, and with it whatever the pattern didn't move out of it",
+            fmt_style(ty), when
+        ),
+        TempPart::Let(Some(f)) => format!(
+            "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2}",
             fmt_style(ty), when, fmt_style(f)
         ),
         TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) => format!(

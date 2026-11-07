@@ -252,6 +252,9 @@ pub enum TempPart {
     WhileLet(Option<String>),
     /// The same for a `let`-`else` (#605).
     LetElse(Option<String>),
+    /// The same for a plain `let` whose pattern takes the value apart
+    /// (`let (a, _) = pair();`, #623).
+    Let(Option<String>),
     /// The base of a struct update (`P { n: 1, ..make_p() }`): these
     /// fields, which the literal doesn't name, are moved out (#605).
     UpdateBase(Vec<String>),

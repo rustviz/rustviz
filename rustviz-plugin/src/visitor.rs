@@ -5168,9 +5168,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// the fields a struct update takes from its base (`..make_p()`), or
   /// what the pattern of a `match` / `if let` / `while let` / `let`-`else`
   /// binds by value, from the temporary or from a field of it (`match
-  /// make_p().name { .. }`, #605). None for any other use (a plain `let`
-  /// pattern that takes a field apart, `let (a, _) = make().pair;`, can
-  /// leave part of the field in it), and when nothing that needs
+  /// make_p().name { .. }`, #605), or what a `let` pattern takes apart
+  /// (`let (a, _) = pair();`, #623). None for any other use, and when
+  /// nothing that needs
   /// dropping can be left (`match make() { Some(s) => .., None => .. }`
   /// on an `Option<String>`: the arm that binds `s` takes all of it).
   fn temp_part_moved(
@@ -5253,14 +5253,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         (left || self.pat_leaves_temp_drop(l.pat, sty, typeck, env) || self.pat_rejects_drop(l.pat, sty, typeck, env))
           .then_some(TempPart::LetElse(path))
       }
-      // `let t = make_q().a;`. A pattern that takes the field apart
-      // (`let (a, _) = make().pair;`) can leave part of it in the
-      // temporary, which "everything but its field" would deny.
+      // `let t = make_q().a;`.
+      Node::LetStmt(l) if matches!(l.pat.kind, PatKind::Binding(ann, .., None) if ann.0 == rustc_hir::ByRef::No) => {
+        self.field_moved_part(top, path, left, typeck, env)
+      }
+      // `let (a, _) = pair();`, `let (b, _) = make().pair;`: the pattern
+      // takes the value (or the field) apart, and can leave parts of it
+      // in the temporary, which is dropped at the end of the statement
+      // (#623). A `ref` binding extends the temporary instead (#483); a
+      // destructuring assignment's `let` isn't the user's.
       Node::LetStmt(l) => {
-        if !matches!(l.pat.kind, PatKind::Binding(ann, .., None) if ann.0 == rustc_hir::ByRef::No) {
+        if l.span.from_expansion() || !matches!(l.source, rustc_hir::LocalSource::Normal)
+          || !l.init.is_some_and(|i| i.hir_id == top.hir_id) {
           return None;
         }
-        self.field_moved_part(top, path, left, typeck, env)
+        let mut by_ref = false;
+        l.pat.each_binding(|ann, _, _, _| by_ref |= ann.0 != rustc_hir::ByRef::No);
+        if by_ref || !(left || self.pat_leaves_temp_drop(l.pat, sty, typeck, env)) {
+          return None;
+        }
+        Some(TempPart::Let(path))
       }
       _ => self.field_moved_part(top, path, left, typeck, env),
     }

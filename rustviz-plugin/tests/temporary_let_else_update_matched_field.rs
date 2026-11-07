@@ -1,8 +1,9 @@
-// #605: three more temporaries that something is moved out of. What is
+// #605, #623: more temporaries that something is moved out of. What is
 // left in them is dropped with them (edition 2024 timing): a `let`-`else`
 // scrutinee right after its pattern is matched (before the `else` block
 // runs), a struct update's base at the end of its statement, a temporary
-// whose field is matched on when the match ends.
+// whose field is matched on when the match ends, a plain `let`'s at the
+// end of the statement.
 struct P {
     name: String,
     tag: String,
@@ -52,6 +53,10 @@ fn res() -> Result<String, String> {
     Ok(String::from("r"))
 }
 
+fn pair() -> (String, String) {
+    (String::from("a"), String::from("b"))
+}
+
 fn opt_pair() -> Option<(String, String)> {
     Some((String::from("a"), String::from("b")))
 }
@@ -73,8 +78,9 @@ fn main() {
     if let Some(y) = make_o().opt {
         println!("{}", y);
     }
-    // The pattern leaves pair.1 in the temporary too: "everything in it
-    // but its field pair" would be false. Not drawn (README Limitations).
+    // A plain `let` pattern that takes the value (or a field) apart
+    // leaves the `_` parts in the temporary (#623).
     let (c, _) = make_w().pair;
-    println!("{} {} {} {} {} {} {} {}", s, b, x, q.tag, r.n, k.name, k.n, c);
+    let (d, _) = pair();
+    println!("{} {} {} {} {} {} {} {} {}", s, b, x, q.tag, r.n, k.name, k.n, c, d);
 }

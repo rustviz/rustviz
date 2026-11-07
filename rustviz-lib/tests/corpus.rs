@@ -13150,9 +13150,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // temporary when the match ends; an `if let`'s when its block ends.
         // `R { n: 2, ..make_r() }` leaves only an i32 in the temporary: no
         // column. `K { name: .., ..make_k() }` only copies `n` out of its
-        // base, which is dropped whole. `let (c, _) = make_w().pair;`
-        // leaves pair.1 in its temporary, whose drop is not stated (README
-        // Limitations); #469's column there was wrong (see below).
+        // base, which is dropped whole. A plain `let` pattern (#623):
+        // `let (c, _) = make_w().pair;` leaves pair.1 and `other` in the
+        // temporary, `let (d, _) = pair();` the `_` String; both are
+        // dropped at the end of the `let` (before the next statement).
+        // #469's column for the first was wrong (see below).
         must_contain: &[
             "Move from res to (temporary)",
             "A temporary holds the value that res returns, for the `let`-`else` to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
@@ -13175,11 +13177,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from make_o to (temporary 7)",
             "This temporary O is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it everything in it but what the pattern moved out of its field opt (all of it, if the pattern didn't match)",
             "q.tag goes out of scope. Its resource is dropped.",
+            "Move from make_w to (temporary 8)",
+            "A temporary holds the value that make_w returns, for the `let` pattern to take its field pair apart. The pattern moves parts of that field into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
+            "This temporary W is dropped at the end of this statement, and with it everything in it but what the pattern moved out of its field pair",
+            "Move from pair to (temporary 9)",
+            "A temporary holds the value that pair returns, for the `let` pattern to take apart. The pattern moves parts of it into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
+            "This temporary (String, String) is dropped at the end of this statement, and with it whatever the pattern didn't move out of it",
         ],
         must_not_contain: &[
             // Nothing is left in make_r()'s temporary that needs dropping.
             "Move from make_r to (temporary",
-            "(temporary 8)",
+            "(temporary 10)",
             // #571's wording would deny the moves out of these temporaries.
             "=This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
             "=This temporary Result<String, String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
@@ -13189,7 +13197,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "everything in it but its field name",
             // `let (c, _) = make_w().pair;` moves only pair.0 out (#469's
             // column said all of pair was; the `_` String stays in the
-            // temporary). Not drawn now.
+            // temporary).
             "its field pair, which was moved out of it",
             "'s field pair is moved to c",
         ],
