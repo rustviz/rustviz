@@ -311,9 +311,12 @@ rather than listed here.
 - `if let` chains (`if let Some(a) = x && let Some(b) = y`): the
   condition's events are drawn in the `if` branch, except those of its
   first part's expression (`x` above), which runs either way and is
-  drawn before the split. When a later part fails, the parts that
-  already ran (e.g. a borrow made by the first `let`) aren't shown in
-  the `else` column.
+  drawn before the split. When a part moves a variable and a later
+  part can still fail (`x` into `a` above, then `y` isn't `Some`), the
+  `else` branch (or, without an `else`, the path that skips the body)
+  starts with that variable "may have been moved". Other events of the
+  parts that ran before the failing one (e.g. a borrow made by the
+  first `let`) aren't shown in the `else` column.
 - Assignments to a place that has no column of its own are drawn on
   the column of the variable the place is reached from, like an
   element write: a tuple field

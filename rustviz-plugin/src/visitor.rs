@@ -15,11 +15,6 @@ use rustc_middle::ty::adjustment::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 
-/// Which kind of condition `refuse_lasting_guard_effects` is checking,
-/// for its message.
-#[derive(Clone, Copy)]
-enum CondKind { MatchGuard, IfLetChain { has_else: bool } }
-
 /// True if `expr` is an `&&` chain with at least one `let` in it.
 fn is_let_chain(expr: &Expr) -> bool {
   match expr.kind {
@@ -30,6 +25,74 @@ fn is_let_chain(expr: &Expr) -> bool {
     ExprKind::Let(_) => true,
     _ => false,
   }
+}
+
+/// True if `pat` matches every value of its type. Conservative: only
+/// bindings, `_`, tuples, references / boxes, and struct patterns (not
+/// enum variants) of such patterns count.
+fn pat_is_irrefutable(pat: &Pat, typeck: &rustc_middle::ty::TypeckResults) -> bool {
+  let is_struct = |qpath: &QPath| matches!(typeck.qpath_res(qpath, pat.hir_id),
+    Res::Def(DefKind::Struct | DefKind::Ctor(CtorOf::Struct, _), _));
+  match pat.kind {
+    PatKind::Wild => true,
+    PatKind::Binding(_, _, _, sub) => sub.is_none_or(|p| pat_is_irrefutable(p, typeck)),
+    PatKind::Tuple(pats, _) => pats.iter().all(|p| pat_is_irrefutable(p, typeck)),
+    PatKind::Box(p) | PatKind::Deref(p) | PatKind::Ref(p, ..) => pat_is_irrefutable(p, typeck),
+    PatKind::Struct(ref qpath, fields, _) =>
+      is_struct(qpath) && fields.iter().all(|f| pat_is_irrefutable(f.pat, typeck)),
+    PatKind::TupleStruct(ref qpath, pats, _) =>
+      is_struct(qpath) && pats.iter().all(|p| pat_is_irrefutable(p, typeck)),
+    _ => false,
+  }
+}
+
+/// A lasting effect of a part of an `if` let-chain on a variable
+/// declared outside the condition (#281), recorded while walking the
+/// chain (`visit_if_let_chain`). `checks_before`: how many parts that
+/// can fail come before it (for a `let`'s bindings, including that
+/// `let`'s own pattern). Whether the effect is on the path into the
+/// `else` depends on what comes after it, so it's judged once the
+/// whole chain has been walked.
+struct ChainEffect {
+  kind: ChainEffectKind,
+  checks_before: usize,
+  line: usize,
+}
+
+enum ChainEffectKind {
+  /// `rap` is moved out of, to `to`. `binding`: by a `let`'s pattern.
+  Move { rap: ResourceAccessPoint, to: ResourceTy, binding: bool },
+  /// Anything else that lasts (an assignment to `name`, ...): not
+  /// drawn. `what` / `lasts` are for the refusal's message.
+  Other { name: String, what: &'static str, lasts: &'static str },
+}
+
+const CHAIN_ASSIGN: &str = "assign to a variable declared outside the condition";
+const CHAIN_CALL: &str = "call a closure declared outside the condition that can only be called once";
+const CHAIN_MOVE_THROUGH: &str = "move out of a value behind a variable declared outside the condition";
+
+/// State of a walk down an `if` let-chain (`visit_if_let_chain`).
+#[derive(Default)]
+struct ChainWalk {
+  /// The event id just after the chain's first part: see
+  /// `visit_if_let_chain`.
+  first_lo: Option<usize>,
+  /// Parts that can fail, so far: `bool` conditions and refutable
+  /// `let` patterns.
+  checks: usize,
+  effects: Vec<ChainEffect>,
+  /// The chain's bindings whose type needs drop, by name.
+  drop_bindings: HashSet<String>,
+}
+
+/// A variable that the condition of an `if` let-chain moves before a
+/// part of it that can still fail (#281): on the path into the `else`
+/// it may have been moved. See `MaybeMovedAt::ChainFail`.
+struct ChainFailMove {
+  rap: ResourceAccessPoint,
+  definite: bool,
+  to: Vec<String>,
+  dropped: Vec<String>,
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
@@ -108,18 +171,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Let(let_expr) => {
         let mark = self.preprocessed_events.len();
         self.visit_expr(let_expr.init);
-        self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::MatchGuard);
+        self.refuse_lasting_guard_effects(mark, outer, expr);
         let mark = self.preprocessed_events.len();
         let (bound, _) = self.register_iflet_let_bindings(let_expr, None);
         if !whole_guard {
-          self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::MatchGuard);
+          self.refuse_lasting_guard_effects(mark, outer, expr);
         }
         guard_decls.extend(bound);
       }
       _ => {
         let mark = self.preprocessed_events.len();
         self.visit_expr(expr);
-        self.refuse_lasting_guard_effects(mark, outer, expr, CondKind::MatchGuard);
+        self.refuse_lasting_guard_effects(mark, outer, expr);
       }
     }
   }
@@ -131,56 +194,158 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ///
   /// The chain's first part always runs, so its events (for a `let`,
   /// its scrutinee's) are drawn before the split, like a lone `if
-  /// let`'s scrutinee: `first_lo` is set to the event id just after it,
-  /// and the caller starts the if-branch's events there. Everything
-  /// after that is drawn in the if-branch. That's only accurate for
-  /// effects that end inside the condition: if a later part fails, the
-  /// else branch (or, without an `else`, the code after the `if`) runs
-  /// in the state the earlier parts left behind (rustc: "borrow of
-  /// partially moved value" after `if let Some(a) = x && a.len() > 5`).
-  /// So, as for match guards, a later part that moves out of or assigns
-  /// to a variable in `outer` is refused instead of drawn. The exception
-  /// is the bindings of the chain's last part: they happen only when the
-  /// whole chain succeeds. The `while let` caller passes an empty
-  /// `outer`: the loop is drawn inline, with no branch to get wrong.
+  /// let`'s scrutinee: `walk.first_lo` is set to the event id just
+  /// after it, and the caller starts the if-branch's events there.
+  /// Everything after that is drawn in the if-branch. That's only the
+  /// whole story for effects that end inside the condition: if a later
+  /// part fails, the else branch (or, without an `else`, the code after
+  /// the `if`) runs in the state the earlier parts left behind (rustc:
+  /// "borrow of partially moved value" after `if let Some(a) = x &&
+  /// a.len() > 5`). So the effects on variables in `outer` are recorded
+  /// in `walk.effects`, and `chain_fail_moves` turns them into what the
+  /// else branch starts with (#281). The `while let` caller passes an
+  /// empty `outer`: the loop is drawn inline, with no branch to get
+  /// wrong.
   fn visit_if_let_chain(
     &mut self,
     expr: &'tcx Expr<'tcx>,
-    is_last: bool,
     outer: &HashSet<ResourceAccessPoint>,
-    kind: CondKind,
     decls: &mut HashSet<ResourceAccessPoint>,
-    first_lo: &mut Option<usize>,
+    walk: &mut ChainWalk,
   ) {
     match expr.kind {
-      ExprKind::DropTemps(inner) => self.visit_if_let_chain(inner, is_last, outer, kind, decls, first_lo),
+      ExprKind::DropTemps(inner) => self.visit_if_let_chain(inner, outer, decls, walk),
       ExprKind::Binary(op, lhs, rhs) if op.node == rustc_hir::BinOpKind::And => {
-        self.visit_if_let_chain(lhs, false, outer, kind, decls, first_lo);
-        self.visit_if_let_chain(rhs, is_last, outer, kind, decls, first_lo);
+        self.visit_if_let_chain(lhs, outer, decls, walk);
+        self.visit_if_let_chain(rhs, outer, decls, walk);
       }
       ExprKind::Let(let_expr) => {
         let mark = self.preprocessed_events.len();
         self.visit_expr(let_expr.init);
-        if first_lo.is_some() {
-          self.refuse_lasting_guard_effects(mark, outer, expr, kind);
+        if walk.first_lo.is_some() {
+          self.record_chain_effects(mark, outer, expr, walk, false);
         }
-        first_lo.get_or_insert(*self.unique_id);
+        walk.first_lo.get_or_insert(*self.unique_id);
+        let typeck = self.tcx.typeck(let_expr.pat.hir_id.owner);
+        if !pat_is_irrefutable(let_expr.pat, typeck) {
+          walk.checks += 1;
+        }
+        let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, let_expr.pat.hir_id.owner);
+        let_expr.pat.each_binding(|_, hir_id, _, ident| {
+          if typeck.node_type(hir_id).needs_drop(self.tcx, env) {
+            walk.drop_bindings.insert(ident.name.to_string());
+          }
+        });
         let mark = self.preprocessed_events.len();
         let bound = self.register_iflet_let_bindings(let_expr, None).0;
-        if !is_last {
-          self.refuse_lasting_guard_effects(mark, outer, expr, kind);
-        }
+        self.record_chain_effects(mark, outer, expr, walk, true);
         decls.extend(bound);
       }
       _ => {
         let mark = self.preprocessed_events.len();
         self.visit_expr(expr);
-        if first_lo.is_some() {
-          self.refuse_lasting_guard_effects(mark, outer, expr, kind);
+        if walk.first_lo.is_some() {
+          self.record_chain_effects(mark, outer, expr, walk, false);
         }
-        first_lo.get_or_insert(*self.unique_id);
+        walk.first_lo.get_or_insert(*self.unique_id);
+        walk.checks += 1;
       }
     }
+  }
+
+  /// Record in `walk.effects` the lasting effects that events from
+  /// `preprocessed_events[mark..]` (a let-chain part) have on variables
+  /// in `outer`. See `visit_if_let_chain`.
+  fn record_chain_effects(
+    &self,
+    mark: usize,
+    outer: &HashSet<ResourceAccessPoint>,
+    part: &'tcx Expr<'tcx>,
+    walk: &mut ChainWalk,
+    binding: bool,
+  ) {
+    let line = expr_to_line(part, &self.tcx);
+    let is_outer = |r: &ResourceTy| r.extract_rap().is_some_and(|rap| outer.contains(rap));
+    for (_, ev) in &self.preprocessed_events[mark..] {
+      let kind = match ev {
+        // (Into another outer variable, it's an assignment: below.)
+        ExternalEvent::Move { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) && !is_outer(to) =>
+          ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding },
+        ExternalEvent::ClosureCall { closure, .. } if is_outer(closure) =>
+          ChainEffectKind::Other { name: closure.real_name(), what: CHAIN_CALL, lasts: "the call moves it" },
+        // Out of a place reached through it (`*b` of a `Box`).
+        ExternalEvent::Move { from, to, .. } if is_outer(from) && !is_outer(to) =>
+          ChainEffectKind::Other { name: from.real_name(), what: CHAIN_MOVE_THROUGH, lasts: "the move lasts" },
+        ExternalEvent::Bind { to, .. }
+        | ExternalEvent::Copy { to, .. }
+        | ExternalEvent::Move { to, .. }
+        | ExternalEvent::StaticBorrow { to, .. }
+        | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) =>
+          ChainEffectKind::Other { name: to.real_name(), what: CHAIN_ASSIGN, lasts: "the assignment lasts" },
+        ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) =>
+          ChainEffectKind::Other { name: ro.name().to_owned(), what: CHAIN_ASSIGN, lasts: "the assignment lasts" },
+        _ => continue,
+      };
+      walk.effects.push(ChainEffect { kind, checks_before: walk.checks, line });
+    }
+  }
+
+  /// What the `else` branch of an `if` whose condition is the let-chain
+  /// `walk` was recorded from starts with (#281): each outer variable
+  /// that a part of the condition moves before a later part that can
+  /// fail. When that later part fails, the else branch runs after the
+  /// move. A move with no part that can fail after it (the last
+  /// `let`'s bindings, typically) happens only when the whole condition
+  /// holds, and is drawn in the if-branch alone. `chain_lo`: index in
+  /// `preprocessed_events` of the chain's first event.
+  ///
+  /// Other lasting effects (an assignment to an outer variable, a call
+  /// of an outer `FnOnce` closure) that come before a part that can
+  /// fail are refused, as for match guards.
+  fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, has_else: bool) -> Vec<ChainFailMove> {
+    let mut out: Vec<ChainFailMove> = Vec::new();
+    for eff in walk.effects.iter().filter(|e| e.checks_before < walk.checks) {
+      match &eff.kind {
+        ChainEffectKind::Other { name, what, lasts } => {
+          let later = if has_else { "the condition is false and the else branch runs" }
+            else { "the condition is false and the body is skipped" };
+          panic!("`if let` chains that {} (`{}`, line {}) aren't supported yet: {} even when {}",
+            what, name, eff.line, lasts, later);
+        }
+        ChainEffectKind::Move { rap, to, binding } => {
+          // A `let`'s bindings with only irrefutable parts up to them:
+          // every way into the else branch passes the move. A move by
+          // an expression may sit inside a conditional of its own
+          // (`a || take(s)`), so it's only "may have been".
+          let definite = *binding && eff.checks_before == 0;
+          let i = match out.iter().position(|m| m.rap == *rap) {
+            Some(i) => i,
+            None => {
+              out.push(ChainFailMove { rap: rap.clone(), definite: false, to: Vec::new(), dropped: Vec::new() });
+              out.len() - 1
+            }
+          };
+          let m = &mut out[i];
+          m.definite |= definite;
+          let ResourceTy::Value(dest) = to else { continue };
+          let dest_name = dest.name().to_owned();
+          if m.to.contains(&dest_name) {
+            continue;
+          }
+          m.to.push(dest_name.clone());
+          // A binding of the chain that took the value is dropped when
+          // the condition fails, unless a later part moved it on.
+          let moved_on = self.preprocessed_events[chain_lo..].iter().any(|(_, ev)| matches!(ev,
+            ExternalEvent::Move { from, .. }
+              if from.extract_rap().is_some_and(|r| r == dest
+                || r.name().starts_with(&format!("{}.", dest_name)))));
+          if *binding && !dest.is_fn() && walk.drop_bindings.contains(&dest_name) && !moved_on {
+            m.dropped.push(dest_name);
+          }
+        }
+      }
+    }
+    out
   }
 
   /// Panic (reported as "can't visualize this yet") if any event from
@@ -191,15 +356,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     mark: usize,
     outer: &HashSet<ResourceAccessPoint>,
     guard_part: &'tcx Expr<'tcx>,
-    kind: CondKind,
   ) {
-    let (what, cond, later) = match kind {
-      CondKind::MatchGuard => ("match guards", "the guard", "the guard is false and a later arm runs"),
-      CondKind::IfLetChain { has_else: true } =>
-        ("`if let` chains", "the condition", "the condition is false and the else branch runs"),
-      CondKind::IfLetChain { has_else: false } =>
-        ("`if let` chains", "the condition", "the condition is false and the body is skipped"),
-    };
     let is_outer = |r: &ResourceTy| r.extract_rap().is_some_and(|rap| outer.contains(rap));
     for (_, ev) in &self.preprocessed_events[mark..] {
       let culprit = match ev {
@@ -211,14 +368,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         | ExternalEvent::StaticBorrow { to, .. }
         | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) => to,
         ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) => {
-          panic!("{} that assign to an outer variable (`{}`, line {}) aren't supported yet",
-            what, ro.name(), expr_to_line(guard_part, &self.tcx));
+          panic!("match guards that assign to an outer variable (`{}`, line {}) aren't supported yet",
+            ro.name(), expr_to_line(guard_part, &self.tcx));
         }
         _ => continue,
       };
-      panic!("{} that move or assign a variable declared outside {} (`{}`, line {}) \
-              aren't supported yet: the effect lasts even when {}",
-        what, cond, culprit.real_name(), expr_to_line(guard_part, &self.tcx), later);
+      panic!("match guards that move or assign a variable declared outside the guard (`{}`, line {}) \
+              aren't supported yet: the effect lasts even when the guard is false and a later arm runs",
+        culprit.real_name(), expr_to_line(guard_part, &self.tcx));
     }
   }
 
@@ -2349,6 +2506,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // the pattern doesn't match; the else branch shows that (#327).
         let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
         let mut iflet_tuple: Option<&'tcx rustc_hir::LetExpr<'tcx>> = None;
+        let mut chain_fail: Vec<ChainFailMove> = Vec::new();
         let iflet_bindings: HashSet<ResourceAccessPoint> =
           if let ExprKind::Let(let_expr) = guard_expr.kind {
             self.visit_expr(let_expr.init);
@@ -2365,13 +2523,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
             let outer: HashSet<ResourceAccessPoint> =
               self.raps.values().map(|rd| rd.rap.clone()).filter(|r| !r.is_fn()).collect();
-            let kind = CondKind::IfLetChain { has_else: else_expr.is_some() };
             if_hash_lo = self.rap_hashes;
             let mut decls = HashSet::new();
             let start = *self.unique_id;
-            let mut first_lo = None;
-            self.visit_if_let_chain(guard_expr, true, &outer, kind, &mut decls, &mut first_lo);
-            if_lo = first_lo.unwrap_or(start);
+            let chain_lo = self.preprocessed_events.len();
+            let mut walk = ChainWalk::default();
+            self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
+            if_lo = walk.first_lo.unwrap_or(start);
+            chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
             decls
           } else {
             self.visit_expr(&guard_expr);
@@ -2415,6 +2574,26 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let else_hash_lo = self.rap_hashes;
         let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
         let if_ids = if_lo..*self.unique_id;
+        // A let-chain condition that moved a variable before a part
+        // that then failed (#281): the else branch (or the implicit
+        // empty one) starts with that variable maybe-moved. Emitted
+        // before the else branch is visited, so it's the first of its
+        // events and a reassignment in it sees the drop flag (#335).
+        // It's drawn on the `} else {` line; without an `else`, on the
+        // `if` line, where the condition fails and the body is skipped.
+        let fail_line = match else_expr {
+          Some(_) => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line,
+          None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line,
+        };
+        for m in std::mem::take(&mut chain_fail) {
+          self.add_external_event(fail_line, ExternalEvent::LoopExitMove {
+            ro: m.rap,
+            definite: m.definite,
+            at: MaybeMovedAt::ChainFail { to: m.to, dropped: m.dropped, no_else: else_expr.is_none() },
+            id: *self.unique_id,
+          });
+          *self.unique_id += 1;
+        }
         let else_decl = match else_expr {
           Some(e) => {
             // The if-body's events stay in `preprocessed_events` until
@@ -2486,9 +2665,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .filter(|(_, e)| if_ids.contains(&e.get_id())
                 || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
               .cloned().collect();
+            let chain_fail_ev = self.preprocessed_events.iter()
+              .any(|(_, e)| else_ids.contains(&e.get_id()));
             // A tuple scrutinee's variables are moved whether or not the
             // body runs (#327), so that's a second path as well.
-            if scrutinee_moves.is_empty() && !events_move_out_of_outer(&body_ev, &if_scope) {
+            if scrutinee_moves.is_empty() && !events_move_out_of_outer(&body_ev, &if_scope) && !chain_fail_ev {
                 // The body may be skipped, so a `return` / `break` /
                 // panic in it doesn't end the columns it's drawn on;
                 // its drops aren't drawn (#410).
@@ -2665,16 +2846,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // No `else` (and the body moves something, see above): the
           // implicit empty `else` is a second path that leaves every
           // variable as it was (#257).
+          // Its events are the scrutinee's moves (#327), or those of a
+          // let-chain condition that failed after a move (#281), if any.
           None => {
-            // The scrutinee's moves (#327) are all this path has.
             let else_map = create_line_map(&else_ev);
             (
-            vec!["If".to_owned(), "Else".to_owned()],
-            vec![if_slice, else_slice],
-            vec![
-              ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits },
-              ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
-            ],
+              vec!["If".to_owned(), "Else".to_owned()],
+              vec![if_slice, else_slice],
+              vec![
+                ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits },
+                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
+              ],
             )
           }
         };
@@ -2743,7 +2925,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   // is drawn inline (no Branch), so the chain's events
                   // are shown unconditionally; nothing to refuse. Their
                   // scope ends are emitted after the body, below.
-                  self.visit_if_let_chain(cond, true, &HashSet::new(), CondKind::IfLetChain { has_else: false }, &mut bindings, &mut None);
+                  self.visit_if_let_chain(cond, &HashSet::new(), &mut bindings, &mut ChainWalk::default());
                 } else {
                   self.visit_expr(cond);
                 }
@@ -5480,7 +5662,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       let definite = !ends_otherwise && definite_breaks.len() == all_breaks;
       self.add_external_event(line, ExternalEvent::LoopExitMove {
-        ro: m.rap.clone(), definite, labeled_block: block.is_some(), id: *self.unique_id,
+        ro: m.rap.clone(), definite,
+        at: if block.is_some() { MaybeMovedAt::LabeledBlock } else { MaybeMovedAt::Loop },
+        id: *self.unique_id,
       });
       *self.unique_id += 1;
     }

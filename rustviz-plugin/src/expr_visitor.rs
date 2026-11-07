@@ -5156,6 +5156,12 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro.name() == rap_name => {
         return Some(Ownership::None);
       }
+      // The start of an `else` branch that a let-chain condition may
+      // have moved it before (#281). It held the value before the
+      // condition, which moved it.
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } if ro.name() == rap_name => {
+        return Some(Ownership::Maybe);
+      }
       ExternalEvent::Move { from, to, .. } => {
         if is_rap(to) {
           return Some(Ownership::Held);

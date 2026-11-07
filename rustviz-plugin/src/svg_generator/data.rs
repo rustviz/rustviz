@@ -1034,6 +1034,25 @@ pub struct TupleLeft {
     pub rc: Option<RcDrop>,
 }
 
+/// Where an `ExternalEvent::LoopExitMove` happens.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum MaybeMovedAt {
+    /// The end of a loop.
+    Loop,
+    /// The end of a labeled block (`'a: { … break 'a; … }`).
+    LabeledBlock,
+    /// The start of the `else` branch (`no_else`: the implicit empty
+    /// one) of an `if` whose let-chain condition moves the variable in
+    /// a part that a part which can be false comes after
+    /// (`if let Some(a) = x && a.len() > 5`, #281). On that path the
+    /// move has happened by the time the condition fails. `to`: where
+    /// the condition moves it (variable or function names; empty when
+    /// it has no name). `dropped`: the chain's bindings among `to` that
+    /// are dropped when the condition fails (they hold what was moved
+    /// and need drop).
+    ChainFail { to: Vec<String>, dropped: Vec<String>, no_else: bool },
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -1196,12 +1215,13 @@ pub enum ExternalEvent {
     // in a branch that then `break`s out of the loop, so after the
     // loop it may have been moved (`definite`: it has been, because
     // every way out of the loop is such a `break`).
-    // `labeled_block`: the `break` leaves a labeled block (`'a: { … }`),
-    // not a loop.
+    // `at`: where that is; also used at the start of the `else` branch
+    // of an `if` whose let-chain condition may have moved `ro` before
+    // it failed (#281), see `MaybeMovedAt`.
     LoopExitMove {
         ro: ResourceAccessPoint,
         definite: bool,
-        labeled_block: bool,
+        at: MaybeMovedAt,
         id: usize
     },
     // The `?` operator returns early on `Err` / `None`, dropping what
@@ -1483,7 +1503,7 @@ pub enum Event {
     // An unbound temporary is dropped (see ExternalEvent).
     TemporaryDrop { ty: Option<String>, when: String, literal: bool },
     // See ExternalEvent::LoopExitMove.
-    LoopExitMove { definite: bool, labeled_block: bool },
+    LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
     OwnerDropIfTryReturns,
@@ -1896,8 +1916,14 @@ impl Event {
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
             }
-            Event::LoopExitMove { definite, labeled_block } => {
-                hover_messages::event_dot_loop_exit_move(my_name, *definite, *labeled_block)
+            Event::LoopExitMove { definite, at: MaybeMovedAt::Loop } => {
+                hover_messages::event_dot_loop_exit_move(my_name, *definite, false)
+            }
+            Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock } => {
+                hover_messages::event_dot_loop_exit_move(my_name, *definite, true)
+            }
+            Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else } } => {
+                hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -3114,8 +3140,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TemporaryDrop{ ty, when, literal, .. } => {
           vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal })]
         },
-        ExternalEvent::LoopExitMove{definite, labeled_block, ..} => {
-          vec![(line_num, Event::LoopExitMove { definite: *definite, labeled_block: *labeled_block })]
+        ExternalEvent::LoopExitMove{definite, at, ..} => {
+          vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
         ExternalEvent::OwnerDropIfTryReturns{..} => {
           vec![(line_num, Event::OwnerDropIfTryReturns)]
@@ -3434,8 +3460,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TemporaryDrop{ro, ty, when, literal, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal }, line_number);
             },
-            ExternalEvent::LoopExitMove{ro, definite, labeled_block, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, labeled_block }, line_number);
+            ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
             },
             ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);

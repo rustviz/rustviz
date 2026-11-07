@@ -2227,6 +2227,67 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
     }
 }
 
+// At the start of the `else` branch of an `if` whose let-chain
+// condition moves the variable in one part and can still be false in a
+// later one (`if let Some(a) = x && a.len() > 5`, #281): on that path
+// the else branch runs after the move (rustc: "borrow of partially
+// moved value"). `definite`: every way into the else branch passes the
+// move (the parts before it can't fail). `no_else`: there's no `else`,
+// so it's the path where the body is skipped. `to`: where the condition
+// moves it; `dropped`: those of them (the chain's own bindings) that
+// are dropped when the condition fails, with what they hold.
+pub fn event_dot_chain_fail_move(
+    my_name: &String,
+    definite: bool,
+    to: &[String],
+    dropped: &[String],
+    no_else: bool,
+) -> String {
+    fn join(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        match fmt.len() {
+            0 | 1 => fmt.concat(),
+            n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+        }
+    }
+    let name = fmt_style(my_name);
+    let moves = if to.is_empty() {
+        format!("the condition moves {}", name)
+    } else {
+        format!("the condition moves {} to {}", name, join(to))
+    };
+    let if_kw = fmt_style(&"if".to_owned());
+    let mut out = match (definite, no_else) {
+        (false, false) => format!(
+            "{0} may have been moved: when {1} and then turns out false, the else branch runs \
+             after that move, so {0} can't be used here",
+            name, moves),
+        (true, false) => format!(
+            "{0} was moved: {1} before it can turn out false, so the else branch runs after that \
+             move, and {0} can't be used here",
+            name, moves),
+        (false, true) => format!(
+            "{0} may have been moved: when {1} and then turns out false, the body is skipped but \
+             the move has happened, so {0} can't be used after the {2}",
+            name, moves, if_kw),
+        (true, true) => format!(
+            "{0} was moved: {1} before it can turn out false, so the move has happened even when \
+             the body is skipped, and {0} can't be used after the {2}",
+            name, moves, if_kw),
+    };
+    if !dropped.is_empty() {
+        let plural = dropped.len() > 1;
+        out.push_str(&format!(
+            ". When the condition fails after that move, {} {} out of scope and {} {} dropped.",
+            join(dropped),
+            if plural { "go" } else { "goes" },
+            if plural { "their resources" } else { "its resource" },
+            if plural { "are" } else { "is" },
+        ));
+    }
+    out
+}
+
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
 // moved into the call, and each value it captured by value is dropped
 // or moved out of it inside the call. `fates` comes from the closure
