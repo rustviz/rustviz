@@ -80,12 +80,31 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
 // that shadow the same number of variables share a column: they are
 // never in scope together (sibling blocks, different arms of a `match`,
 // the two blocks of an `if`, the two `if let`s of an `else if let`
-// chain), so at most one of them exists at a time, unless their types
-// differ (see `retyped` below, e.g. `(ref x, _) => …` in one `match` and
-// `Ok(x) => …` in a later one): the later one then gets a subscript
-// although it shadows nothing, and its header says so. A subscript can't
-// be part of a Rust identifier, so these names never clash with a real
-// variable. (#173)
+// chain), so at most one of them exists at a time, unless they are
+// different kinds of value (see `ColumnKind` below, e.g. `(ref x, _) =>
+// …` in one `match` and `Ok(x) => …` in a later one, #598). Then the
+// later one gets a column of its own, under a name with `SCOPE_MARK`s
+// appended: it shadows nothing, so it is labelled `x` like the first,
+// and the marks are removed from the output (`display_text`); its
+// header says it is a different variable. Neither a subscript nor the
+// mark can be part of a Rust identifier, so these names never clash
+// with a real variable. (#173)
+
+/// Appended to the name of a column for a variable of the same name as
+/// another in a separate scope, which can't share its column (#598).
+/// A private-use character: invisible in the output, which drops it.
+pub const SCOPE_MARK: char = '\u{E000}';
+
+/// `s` with the `SCOPE_MARK`s (see above) removed: what is shown.
+pub fn display_text(s: &str) -> String {
+  s.replace(SCOPE_MARK, "")
+}
+
+/// The identifier a binding's column name (`s`, `s₂`, `s` + marks) was
+/// written as.
+pub fn written_name(name: &str) -> &str {
+  split_numbered_name(name).map_or(name, |(base, _)| base).trim_end_matches(SCOPE_MARK)
+}
 
 /// Per-fn-body table built by `collect_binding_names`.
 #[derive(Default)]
@@ -190,8 +209,8 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
     span: Span,
     hir_id: HirId,
     ident: String,
-    // Its type (if the fn's typeck results have it), as text.
-    ty: Option<String>,
+    // What kind of column it needs (if the fn's typeck results have it).
+    kind: Option<ColumnKind>,
     // Where the binding is in scope (`binding_scope`).
     scope: (u32, u32),
   }
@@ -214,8 +233,9 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
             // taken to stay in scope to the end of the fn.
             let scope = binding_scope(self.tcx, hir_id, self.body_span)
               .unwrap_or((ident.span.lo().0, self.body_span.hi().0));
-            let ty = self.typeck.and_then(|t| t.node_type_opt(hir_id)).map(|t| t.to_string());
-            self.out.push(Binding { span: ident.span, hir_id, ident: ident.to_string(), ty, scope });
+            let kind = self.typeck.and_then(|t| t.node_type_opt(hir_id))
+              .map(|ty| ColumnKind::of(*self.tcx, hir_id.owner, ty));
+            self.out.push(Binding { span: ident.span, hir_id, ident: ident.to_string(), kind, scope });
           }
           if let Some(sp) = sub {
             self.visit_pat(sp);
@@ -255,48 +275,83 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
     depth[i] = in_scope.len();
   }
   // Bindings sharing a column share one RAP, which the first of them
-  // registers, so they must be variables of the same type: a reference
-  // `x` and a later `String` `x` sharing one drew the `String` as a
-  // reference, or panicked looking up its borrow (#598). A binding whose
-  // type differs from that of the first one of its name and depth gets
-  // a column of its own (shared with others of its name, depth and type),
-  // numbered after all the others so it can't take the name of a
-  // binding that shadows.
-  let first_at_depth = |i: usize| (0..i).find(|&j| c.out[j].ident == c.out[i].ident && depth[j] == depth[i]);
-  let retyped: Vec<bool> = (0..n).map(|i| first_at_depth(i).is_some_and(|j| c.out[j].ty != c.out[i].ty)).collect();
-  let mut next_free: HashMap<&str, usize> = HashMap::new();
-  for i in (0..n).filter(|&i| !retyped[i]) {
-    let m = next_free.entry(c.out[i].ident.as_str()).or_insert(0);
-    *m = (*m).max(depth[i] + 1);
-  }
-  let mut retyped_cols: HashMap<(&str, usize, &Option<String>), String> = HashMap::new();
+  // registers, so they must be the same kind of value: a reference `x`
+  // and a later `String` `x` sharing one drew the `String` as a
+  // reference, or panicked looking up its borrow (#598). Each kind of
+  // the bindings of one name and depth gets a column of its own: the
+  // first kind the plain (or numbered) name, the others that name with
+  // one, two, … `SCOPE_MARK`s, shown the same.
+  let mut kinds_seen: HashMap<(&str, usize), Vec<&Option<ColumnKind>>> = HashMap::new();
   let mut col_names: Vec<String> = Vec::with_capacity(n);
   for i in 0..n {
     let ident = c.out[i].ident.as_str();
-    if !retyped[i] {
-      col_names.push(numbered_name(ident, depth[i] + 1));
-      continue;
-    }
-    let name = retyped_cols.entry((ident, depth[i], &c.out[i].ty)).or_insert_with(|| {
-      let m = next_free.get_mut(ident).expect("the first binding of a name isn't retyped");
-      *m += 1;
-      numbered_name(ident, *m)
-    });
-    col_names.push(name.clone());
+    let seen = kinds_seen.entry((ident, depth[i])).or_default();
+    let k = match seen.iter().position(|k| **k == c.out[i].kind) {
+      Some(k) => k,
+      None => { seen.push(&c.out[i].kind); seen.len() - 1 }
+    };
+    let marked = format!("{}{}", ident, SCOPE_MARK.to_string().repeat(k));
+    col_names.push(numbered_name(&marked, depth[i] + 1));
   }
   // Second pass: names and header notes.
+  let line_of = |i: usize| tcx.sess.source_map().lookup_char_pos(c.out[i].span.lo()).line;
   for i in 0..n {
     let name = col_names[i].clone();
-    if split_numbered_name(&name).is_some() {
-      let line = tcx.sess.source_map().lookup_char_pos(c.out[i].span.lo()).line;
+    let split = kinds_seen[&(c.out[i].ident.as_str(), depth[i])].len() > 1;
+    if split_numbered_name(&name).is_some() || split {
       let note = names.notes.entry(name.clone())
-        .or_insert_with(|| ShadowNote { shadows: shadowed[i].map(|j| col_names[j].clone()), lines: Vec::new() });
-      note.lines.push(line);
+        .or_insert_with(|| ShadowNote { shadows: shadowed[i].map(|j| col_names[j].clone()), lines: Vec::new(), apart_from: Vec::new() });
+      note.lines.push(line_of(i));
+      // The same-named variables of the other columns.
+      if split {
+        for j in (0..n).filter(|&j| c.out[j].ident == c.out[i].ident && depth[j] == depth[i] && col_names[j] != name) {
+          if !note.apart_from.contains(&line_of(j)) {
+            note.apart_from.push(line_of(j));
+          }
+        }
+        note.apart_from.sort();
+      }
     }
     names.by_span.push((c.out[i].span, name.clone()));
     names.by_hir.insert(c.out[i].hir_id, name);
   }
   names
+}
+
+/// What kind of column a variable needs (#598): what its RAP is
+/// registered as, so variables of the same name in separate scopes can
+/// share a column only if this is the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ColumnKind {
+  /// A reference (`&` or `&mut`).
+  Ref(Mutability),
+  /// A struct or tuple, which has a column per field: one per type.
+  Fields(String),
+  /// A `Copy` value.
+  Copy,
+  /// Any other owner.
+  Owner,
+}
+
+impl ColumnKind {
+  fn of<'tcx>(tcx: TyCtxt<'tcx>, owner: rustc_hir::OwnerId, ty: Ty<'tcx>) -> ColumnKind {
+    use rustc_middle::ty::TyKind;
+    if let Some(m) = ty.ref_mutability() {
+      return ColumnKind::Ref(m);
+    }
+    let fields = match ty.kind() {
+      TyKind::Adt(adt, _) => adt.is_struct() && !ty_is_special_owner(&ty) && adt.all_fields().next().is_some(),
+      TyKind::Tuple(elems) => !elems.is_empty(),
+      _ => false,
+    };
+    if fields {
+      ColumnKind::Fields(ty.to_string())
+    } else if tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(tcx, owner), ty) {
+      ColumnKind::Copy
+    } else {
+      ColumnKind::Owner
+    }
+  }
 }
 
 /// Name (and `raps` key) of the local variable bound by the binding

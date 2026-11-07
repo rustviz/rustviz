@@ -49,6 +49,10 @@ impl Rustviz {
     ****************************************** */
     let (code_panel, timeline_panel, height) =
       svg_generation::render_svg(a_src_str, src_str, &mut vd, &hidden_source_lines);
+    // A column of a variable of the same name as another in a separate
+    // scope is named with marks the output doesn't show (#598).
+    let code_panel = crate::expr_visitor_utils::display_text(&code_panel);
+    let timeline_panel = crate::expr_visitor_utils::display_text(&timeline_panel);
     Ok(Rustviz { code_panel, timeline_panel, height })
   }
 }

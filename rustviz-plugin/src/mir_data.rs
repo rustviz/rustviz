@@ -7,7 +7,7 @@
 //! you figure out when a copy occurs? You can't use the assignment operator - since a single HIR instr can be compiled down into
 //! multiple MIR instructions.
 
-use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_to_line, split_numbered_name}};
+use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_to_line, written_name}};
 use log::info;
 use rustc_middle::mir::{Location, Local, Operand, ProjectionElem, VarDebugInfoContents};
 use rustc_middle::mir::visit::Visitor;
@@ -138,7 +138,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let ident = vdi.name.as_str();
             let name = names.by_span.iter()
                 .find(|(sp, n)| span.contains(*sp)
-                    && split_numbered_name(n).map_or(n.as_str(), |(base, _)| base) == ident)
+                    && written_name(n) == ident)
                 .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
             // If two names share a Local (closure captures all live in
             // `_1`), the same one wins on every run (#211): the greatest,

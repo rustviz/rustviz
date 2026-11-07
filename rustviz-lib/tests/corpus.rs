@@ -971,11 +971,12 @@ const EXPECTED_OK: &[&str] = &[
     // A `?` in a branch drawn with columns keeps its dots (#430).
     "try_in_if_else_branch",
     // Same-named variables in separate scopes share a column only if
-    // they have the same type (#598); the first one used to panic.
+    // they are the same kind of value (#598); the first one used to panic.
     "ref_binding_name_reused",
     "ref_binding_name_reused_mut",
     "let_ref_then_owner_same_name",
     "match_macro_arm_name_reused",
+    "same_name_copy_kinds_share",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5371,17 +5372,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // used to read "Move from it to x" and "Return ... from x to it"
         // (#417). A collection by value (`for s in w`) still moves into
         // the loop variable's column. That `s` is a `String`, the first
-        // a `&String`: it has a column of its own, `s₂` (#598). Sharing
-        // the first's drew it as a reference ("the resource s points to
-        // is immutably borrowed by println!") and never dropped it.
+        // a `&String`: it has a column of its own, also labelled `s`
+        // (#598). Sharing the first's drew it as a reference ("the
+        // resource s points to is immutably borrowed by println!") and
+        // never dropped it.
         must_contain: &[
             // A slice iterator has nothing to drop: a value (#484).
             "it's value is moved",
             "x is bound to a mutable reference",
             "s is bound to an immutable reference",
-            "Move from w to s₂",
-            "s₂'s resource is immutably borrowed by println!; s₂ is read-only while the borrow is live",
-            "s₂ goes out of scope. Its resource is dropped.",
+            "Move from w to s",
+            "s's resource is immutably borrowed by println!; s is read-only while the borrow is live",
+            "s goes out of scope. Its resource is dropped.",
+            "s, immutable. A different variable from the s declared on line 13 (separate scopes, so only one exists at a time)",
+            "s, immutable. A different variable from the s declared on line 10 (separate scopes, so only one exists at a time)",
         ],
         must_not_contain: &[
             "it's resource is moved",
@@ -5389,7 +5393,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from x to it",
             "Move from it2 to s",
             "Return immutably borrowed resource from s to it2",
-            "=Move from w to s",
+            "s₂",
         ],
     },
     // ─── Tuples (#189) ────────────────────────────────────────────────
@@ -8956,22 +8960,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from s to *s",
             "Return immutably borrowed value from r to *r",
             "Return immutably borrowed value from s to *s",
+        ],
+    },
     // #598: two variables named `x` whose scopes don't overlap shared one
     // column, registered by the first: a `&mut String` here, so the
     // second `x`, a `String`, was looked up as a reference whose borrow
-    // had ended (a panic). Variables of different types now get columns
-    // of their own.
+    // had ended (a panic). A variable of another kind (reference, owner,
+    // Copy value) now gets a column of its own, labelled `x` too: it
+    // shadows nothing, so no subscript (#308); its header says it is a
+    // different variable. `same_name_kinds_get_separate_columns` checks
+    // there are two `x` columns.
     TooltipExpect {
         name: "ref_binding_name_reused",
         must_contain: &[
-            "x₂, immutable. x₂ is a different variable from x: it is another variable named x, declared on line 8. x and x₂ are in separate scopes, so only one of them exists at a time",
+            "x, immutable. A different variable from the x declared on line 8 (separate scopes, so only one exists at a time)",
+            "x, immutable. A different variable from the x declared on line 4 (separate scopes, so only one exists at a time)",
             "Partial Mutable borrow from t.0 to x",
-            "Partial move from r to x₂",
-            "x₂ acquires ownership of a resource",
-            "x₂ goes out of scope. Its resource is dropped.",
+            "Partial move from r to x",
+            "x acquires ownership of a resource",
+            "x goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "=Partial move from r to x",
+            "x₂",
         ],
     },
     // The second `x` is a `&mut String`, the first a `&String`: the
@@ -8981,12 +8991,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "ref_binding_name_reused_mut",
         must_contain: &[
             "Partial immutable borrow from t.0 to x",
-            "Partial Mutable borrow from t.0 to x₂",
-            "the resource x₂ points to is mutably borrowed by push_str through x₂; x₂ can't be used while the borrow is live",
+            "Partial Mutable borrow from t.0 to x",
+            "the resource x points to is mutably borrowed by push_str through x; x can't be used while the borrow is live",
+            "x, immutable. A different variable from the x declared on line 9 (separate scopes, so only one exists at a time)",
         ],
         must_not_contain: &[
             "=x is mutably borrowed by push_str; x can't be used while the borrow is live",
-            "=Partial Mutable borrow from t.0 to x",
+            "x₂",
         ],
     },
     // The same with two `let`s in sibling blocks: the `String` was drawn
@@ -8994,14 +9005,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "let_ref_then_owner_same_name",
         must_contain: &[
-            "x₂, immutable. x₂ is a different variable from x: it is another variable named x, declared on line 8. x and x₂ are in separate scopes, so only one of them exists at a time",
-            "Move from String::from to x₂",
-            "x₂ acquires ownership of a resource",
-            "x₂ goes out of scope. Its resource is dropped.",
+            "x, immutable. A different variable from the x declared on line 8 (separate scopes, so only one exists at a time)",
+            "x, immutable. A different variable from the x declared on line 4 (separate scopes, so only one exists at a time)",
+            "Move from String::from to x",
+            "x acquires ownership of a resource",
+            "x goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "x is bound to an immutable reference",
-            "=Move from String::from to x",
+            "x₂",
+        ],
+    },
+    // Sibling blocks with an `i32` and a `u8` `x`: both Copy values,
+    // one column (#598 review).
+    TooltipExpect {
+        name: "same_name_copy_kinds_share",
+        must_contain: &[
+            "x is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "A different variable from",
+            "x₂",
         ],
     },
     // A bare macro call as an arm's body (`Some(x) => println!(..)`) has
@@ -13988,5 +14012,35 @@ fn if_let_scrutinee_temporary_ends_at_its_else_drop() {
                 .collect();
             assert!(joins.is_empty(), "{}: the temporary column {} has a join dot: {:?}", name, hash, joins);
         }
+    }
+}
+
+/// Same-named variables in separate scopes that are different kinds of
+/// value (here a reference and a `String`) get a column each (#598), both
+/// labelled with the plain name: the later one shadows nothing, so it
+/// has no subscript (#308). Told apart by their hash. Same-kind ones
+/// (an `i32` and a `u8`) still share one.
+#[test]
+fn same_name_kinds_get_separate_columns() {
+    for (name, label, columns) in [
+        ("ref_binding_name_reused", "x", 2),
+        ("ref_binding_name_reused_mut", "x", 2),
+        ("let_ref_then_owner_same_name", "x", 2),
+        ("for_over_iterator_var", "s", 2),
+        ("same_name_copy_kinds_share", "x", 1),
+        ("match_macro_arm_name_reused", "x", 1),
+    ] {
+        let t = run_with_local_backend(name).timeline_panel_string();
+        let mut hashes: Vec<&str> = t.split("<text ").skip(1)
+            .filter_map(|x| x.split_once('>'))
+            .filter(|(tag, rest)| tag.contains("class=\"label") && rest.split('<').next() == Some(label))
+            .map(|(tag, _)| attr(tag, "data-hash").expect("a label has a data-hash"))
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        assert_eq!(hashes.len(), columns, "{}: columns labelled {:?}: {:?}", name, label, hashes);
+        let labels = header_labels(&t);
+        assert!(!labels.iter().any(|l| l.2.starts_with(label) && l.2[label.len()..].starts_with(|c: char| "₀₁₂₃₄₅₆₇₈₉".contains(c))),
+            "{}: a subscripted {:?} column: {:?}", name, label, labels);
     }
 }
