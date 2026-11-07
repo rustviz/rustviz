@@ -2379,9 +2379,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // `hold = other;`, #569), whose fields then hold that value's
         // borrows, not the old ones. A struct field of a struct
         // overwritten by a call (`hold.inner = make_inner(&t)`, #638)
-        // takes the call's borrows the same way, while its old loans
-        // last until hold's last use (#531; see
-        // `struct_field_borrow_ends`).
+        // or by another variable (`hold.inner = other`, #655) takes the
+        // new value's borrows the same way (a variable's go with it,
+        // `transfer_ref_fields`), while its old loans last until
+        // hold's last use (#531; see `struct_field_borrow_ends`).
         let struct_field_ends = match (&lhs_rty, expr.kind) {
           (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
             if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) => {
@@ -2394,8 +2395,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             ends
           }
           (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
-            if !lhs_is_union_field
-              && (!rap.is_member() || matches!(rhs_expr.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))) => {
+            if !lhs_is_union_field => {
             let rap = rap.clone();
             let ends = self.struct_field_borrow_ends(&rap, line_num);
             self.reassign_struct_field_lenders(&rap, rhs_expr, lhs_ty, line_num);
