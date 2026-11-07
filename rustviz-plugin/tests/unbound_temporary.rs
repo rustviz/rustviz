@@ -44,7 +44,8 @@ fn main() {
     };
     // Numbers have nothing to drop:
     let k = String::from("abc").len();
-    // A one-line match can't hold a column (#459): no temporary drawn.
+    // A one-line match's scrutinee is evaluated before its arms split: its
+    // temporary has a column too (#469; it used to panic, #459).
     match Some(make()) { Some(_) => {} None => {} }
     println!("{} {} {} {} {}", tail(), kept, bound, k, make());
 }
