@@ -4369,6 +4369,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `for` loop or the closure body.
   fn temporary_scope_end(&self, expr: &'tcx Expr<'tcx>) -> Option<(&'static str, usize, Option<HirId>)> {
     use rustc_hir::Node;
+    // `a && let Some(_) = b && c`: an `&&` with a `let` somewhere in it.
+    fn is_let_chain(e: &Expr) -> bool {
+      match e.kind {
+        ExprKind::Binary(op, l, r) if op.node == rustc_hir::BinOpKind::And => {
+          [l, r].iter().any(|o| matches!(o.kind, ExprKind::Let(_)) || is_let_chain(o))
+        }
+        _ => false,
+      }
+    }
     let mut cur = expr.hir_id;
     loop {
       let parent = self.tcx.parent_hir_node(cur);
@@ -4413,6 +4422,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
           }
+          // A let chain (`if a && let Some(_) = make() { .. }`, edition
+          // 2024): a `let`'s scrutinee lives like an `if let`'s, until the
+          // block the chain matched ends or the `else` runs (#604).
+          ExprKind::If(c, then, _) if c.hir_id == cur && is_let_chain(c) => {
+            if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) {
+              return Some(("at the end of each iteration of this `while let` loop", end(e.span), None));
+            }
+            return Some(("before the `else` block of this `if` runs, or when the block its let chain matched ends", end(then.span), None));
+          }
           // `if` / `while` conditions, and the operands of `&&` / `||`,
           // are scopes of their own.
           ExprKind::If(c, ..) if c.hir_id == cur => {
@@ -4423,7 +4441,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               && (l.hir_id == cur || r.hir_id == cur) =>
           {
             let operand = if l.hir_id == cur { l } else { r };
-            return Some(("at the end of this `&&` / `||` operand", end(operand.span), None));
+            // Except a `let` in a let chain, and the chain to its left:
+            // its temporaries outlive the operand (the `If` arm above).
+            let in_chain = matches!(operand.kind, ExprKind::Let(_))
+              || matches!(operand.kind, ExprKind::Binary(o, ..)
+                if matches!(o.node, rustc_hir::BinOpKind::And | rustc_hir::BinOpKind::Or));
+            if !in_chain {
+              return Some(("at the end of this `&&` / `||` operand", end(operand.span), None));
+            }
           }
           ExprKind::Closure(c) if self.tcx.hir_body(c.body).value.hir_id == cur => {
             return Some(("at the end of the closure body", end(self.tcx.hir_body(c.body).value.span), None));

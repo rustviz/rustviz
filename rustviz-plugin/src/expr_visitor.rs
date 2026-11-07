@@ -4901,7 +4901,9 @@ pub fn print_out_of_scope(&mut self){
     // owners were dropped or moved out (#515); a reference has no
     // such event, and keeps its scope end.
     let left_already = self.all_paths_exit && !rap.rap.is_copy() && !rap.rap.is_ref();
-    if !rap.rap.is_fn() && rap.is_global && !left_already {
+    // An unbound temporary is dropped by its own `TemporaryDrop`, which
+    // may sit in a branch (a let chain's later part, #604): no scope end.
+    if !rap.rap.is_fn() && rap.is_global && !left_already && !rap.rap.is_unbound_temporary() {
       let mut duplicate = false;
       for (_l, e) in self.preprocessed_events.iter() {
         match e.is_gos_ev() {

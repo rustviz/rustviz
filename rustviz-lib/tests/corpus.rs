@@ -771,6 +771,12 @@ const EXPECTED_OK: &[&str] = &[
     "field_mut_borrow_through_ref",
     // Copying out of an `if let` scrutinee doesn't branch it (#496).
     "if_let_copy_and_move_out_of_scrutinee",
+    // A let chain's scrutinee temporary lives until the matched block
+    // ends or the `else` runs (#604). Let chains need Rust 2024: Cargo
+    // compiles each tests/*.rs as an integration test in the plugin
+    // crate's edition (2021), but doesn't look in subdirectories. The
+    // plugin builds user code in edition 2024.
+    "edition2024/temporary_let_chain_scrutinee",
     // Or-pattern arms bind their names like a single pattern (#503).
     "or_pattern_arm",
     "or_pattern_arms",
@@ -10396,6 +10402,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     // ─── Temporaries of macros, literals, if-let / for heads (#469) ──
+    TooltipExpect {
+        name: "edition2024/temporary_let_chain_scrutinee",
+        // In a let chain (edition 2024) a `let`'s scrutinee temporary is
+        // not dropped at the end of its `&&` operand: it lives until the
+        // block the chain matched ends, or until the `else` runs if the
+        // chain fails, and in a `while` to the end of the iteration
+        // (checked with a Drop-printing program). A plain operand's
+        // temporary (`label()`) is dropped at the end of that operand.
+        // Once rebased onto main's let-chain drawing (#198), the later
+        // parts sit in the if-branch; the temporary must still get no
+        // second, function-end drop ("left early").
+        must_contain: &[
+            "Move from make to (temporary)",
+            "Move from label to (temporary 2)",
+            "Move from make to (temporary 3)",
+            "Move from make to (temporary 4)",
+            "This temporary Option<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of this `&&` / `||` operand: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "This temporary Option<String> is dropped at the end of this `&&` / `||` operand",
+            "is left early",
+            "(temporary 5)",
+        ],
+    },
     TooltipExpect {
         name: "temporary_drop_macros_literals",
         // `vec![..];`, `let _ = P { .. };`, `P { .. }.n`, `format!(..).len()`,
