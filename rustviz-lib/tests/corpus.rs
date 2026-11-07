@@ -392,6 +392,8 @@ const EXPECTED_OK: &[&str] = &[
     // A closure captures only the fields it uses (Rust 2021; #328).
     "closure_disjoint_field_capture",
     "closure_whole_struct_capture",
+    // Same for tuple elements (#634).
+    "closure_tuple_element_capture",
     // A Copy variable bound in every branch is "bound to a value" at
     // the merge, not "acquired ownership of a resource" (#316).
     "merge_bound_copy",
@@ -4494,6 +4496,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.nick goes out of scope. No resource is dropped.",
             "q's resource is captured (immutably borrowed) by closure g",
             "Closure g captures: q (immutably borrowed)",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_tuple_element_capture",
+        // Rust 2021 closures capture disjoint tuple elements: `move ||
+        // t.0.len()` moves only `t.0` into f; `t.1` stays with t, is
+        // printed afterwards, and is dropped at the end of main.
+        // `|| u.1.len()` borrows only `u.1`, so `u.0` can be moved out
+        // while g is alive.
+        must_contain: &[
+            "t.0's resource is captured (moved) by closure f",
+            "Closure f captures: t.0 (moved)",
+            "Closure capture (move) from t.0 to f",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "u.1's resource is captured (immutably borrowed) by closure g",
+            "Return immutably borrowed resource from g to u.1",
+            "Move from u.0 to r",
+        ],
+        must_not_contain: &[
+            "t's resource is captured (moved) by closure f",
+            "Closure f captures: t (moved)",
+            "t.1's resource is moved",
+            "t.1 goes out of scope. No resource is dropped.",
+            "u's resource is captured (immutably borrowed) by closure g",
+            "Closure g captures: u (immutably borrowed)",
         ],
     },
     TooltipExpect {
