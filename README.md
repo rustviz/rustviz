@@ -205,22 +205,16 @@ panic.
   `v`. (A reference or a value returned by a call *is* drawn as
   borrowing what the callee's signature ties it to: `first_word(&s)`,
   `longest(&a, &b)`, `let it = v.iter();`, `let third = v.get(2);`,
-  `it.next().unwrap()`, `Excerpt::new(&novel)`.)
-- A collection built by `collect()` (`let words: Vec<&str> =
-  s.split(' ').collect();`) or filled by `push(&s)` isn't drawn as
-  borrowing `s`: `collect`'s signature ties its result to its input
-  only through a trait bound, and `push` stores into its receiver,
-  neither of which RustViz reads. So `let w = words[0];` isn't linked
-  to `s` either. (`vec![&s]`, `[&a, &b]` and a reference copied out of
-  them, `refs[0]`, are.) Neither is a value whose borrow comes from a
-  reference parameter (`v.iter()` with `v: &Vec<i32>`).
   `it.next().unwrap()`, `Excerpt::new(&novel)`. Through a reference
   parameter `v: &Vec<i32>`, `v.iter()` is drawn as borrowing from `v`,
   whose column stands for the caller's data, as for `&v[0]`.)
-- A value built by `collect()` (`let words: Vec<&str> =
-  s.split(' ').collect();`) isn't drawn as borrowing `s`: `collect`'s
-  signature ties its result to its input only through a trait bound,
-  which RustViz doesn't read.
+- A collection filled with references by a method whose signature
+  ties the stored value to the collection only through a trait bound
+  (`refs.extend([&s])`), or by another function through a `&mut`
+  (`add(&mut refs, &s)`), isn't drawn as borrowing `s`. (`vec![&s]`,
+  `[&a, &b]`, `collect()` (`let words: Vec<&str> =
+  s.split(' ').collect();`), `refs.push(&s)` on a local `refs`, and a
+  reference copied out of them, `refs[0]`, are.)
 - A reference returned by a call in one branch of an `if` / `match`
   that initializes a variable (`let w = if c { first_word(&s) } else {
   "none" };`) isn't linked to `s`.

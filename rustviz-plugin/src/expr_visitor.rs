@@ -2266,6 +2266,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn register_holder(&mut self, name: &String, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
     let (mut lenders, is_mut) = self.holder_lenders(init, ty);
     if lenders.is_empty() {
+      // `let mut refs = Vec::new();` that a later `refs.push(&s)`
+      // fills with borrows (#392): a holder from the start, with no
+      // borrow yet; `record_receiver_store` adds each one.
+      if self.filled_with_borrows_later(init, ty) {
+        if let Some(rd) = self.raps.get_mut(name) {
+          if let ResourceAccessPoint::Owner(o) = &mut rd.rap {
+            o.holds_borrow = true;
+          }
+        }
+      }
       return;
     }
     if let Some(rd) = self.raps.get_mut(name) {
@@ -2298,6 +2308,97 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       borrow_span: None,
       co_lenders: lenders,
     });
+  }
+
+  /// `let mut refs = Vec::new();` (a type that can hold references)
+  /// whose variable is later the receiver of a `&mut self` method that
+  /// can store a borrow into it (`refs.push(&s)`; see
+  /// `call_stores_into_receiver`, #392).
+  fn filled_with_borrows_later(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> bool {
+    if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
+      return false;
+    }
+    let rustc_hir::Node::LetStmt(local) = self.tcx.parent_hir_node(init.hir_id) else { return false };
+    let PatKind::Binding(_, hir_id, _, None) = local.pat.kind else { return false };
+    struct StoreFinder<'v, 'a, 'tcx> {
+      ev: &'v ExprVisitor<'a, 'tcx>,
+      local: rustc_hir::HirId,
+      found: bool,
+    }
+    impl<'v, 'a, 'tcx> rustc_hir::intravisit::Visitor<'tcx> for StoreFinder<'v, 'a, 'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::MethodCall(_, rcvr, _, _) = e.kind {
+          if let ExprKind::Path(QPath::Resolved(None, path)) = rcvr.kind {
+            if path.res == Res::Local(self.local) && self.ev.call_stores_into_receiver(e) {
+              self.found = true;
+            }
+          }
+        }
+        rustc_hir::intravisit::walk_expr(self, e);
+      }
+    }
+    let mut finder = StoreFinder { ev: self, local: hir_id, found: false };
+    rustc_hir::intravisit::Visitor::visit_expr(&mut finder, self.hir_body.value);
+    finder.found
+  }
+
+  /// `refs.push(&s);` where `refs` holds borrows (#392): the call
+  /// stores `s`'s borrow in `refs`, which keeps `s` borrowed until
+  /// refs's last use. Record `s` as one of refs's lenders and draw the
+  /// borrow into `refs`.
+  pub fn record_receiver_store(&mut self, call: &'tcx Expr<'tcx>, rcvr: &ResourceAccessPoint, line: usize) {
+    if !rcvr.holds_borrow() {
+      return;
+    }
+    let ExprKind::MethodCall(seg, ..) = call.kind else { return };
+    let (lenders, is_mut) = self.receiver_store_lenders(call);
+    if lenders.is_empty() {
+      return;
+    }
+    let name = rcvr.name().to_owned();
+    match self.borrow_map.get_mut(&name) {
+      Some(rd) => {
+        for l in lenders.iter() {
+          if *l != rd.lender && !rd.co_lenders.contains(l) {
+            rd.co_lenders.push(l.clone());
+          }
+        }
+        rd.ref_mutability |= is_mut;
+      }
+      None => {
+        let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
+        self.borrow_map.insert(name, RefData {
+          lender: lenders[0].clone(),
+          assigned_at: line,
+          lifetime: line,
+          ref_mutability: is_mut,
+          aliasing,
+          static_lender: None,
+          borrow_span: None,
+          co_lenders: lenders[1..].to_vec(),
+        });
+      }
+    }
+    let via = BorrowVia {
+      func: seg.ident.as_str().to_owned(),
+      lenders: lenders.iter().map(|l| l.name()).collect(),
+      also_unnamed: false,
+      tie: ArgTie::default(),
+      carrier: ViaCarrier::StoredBy,
+    };
+    let to = ResourceTy::Value(rcvr.clone());
+    for lender in lenders.iter() {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      let ev = if is_mut {
+        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+      } else {
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+      };
+      self.add_external_event(line, ev);
+    }
+    // The call doesn't give the borrow back: `refs` keeps it.
+    self.mark_borrow_kept_by_result(call, &lenders);
   }
 
   /// Register `prefix.field` RAPs for every field of a struct type,

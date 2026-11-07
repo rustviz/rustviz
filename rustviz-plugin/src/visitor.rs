@@ -1166,6 +1166,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           self.visit_expr(&arg);
           self.match_arg(&arg, fn_name.clone());
         }
+        // `refs.push(&s)`: the receiver now holds s's borrow (#392).
+        if !matches!(rcvr.kind, ExprKind::MethodCall(..)) {
+          let rcvr_rap = expr_to_rap_name(rcvr, &self.tcx)
+            .and_then(|n| self.raps.get(&n))
+            .map(|rd| rd.rap.to_owned());
+          if let Some(rcvr_rap) = rcvr_rap {
+            self.record_receiver_store(expr, &rcvr_rap, line_num);
+          }
+        }
       }
       ExprKind::Binary(_, expra, exprb) => {
         self.visit_expr(expra);

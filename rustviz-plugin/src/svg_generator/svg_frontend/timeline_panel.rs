@@ -1279,7 +1279,7 @@ fn render_dot(
                             hover_messages::event_dot_temporary_go_out_of_scope(&name)
                         } else {
                             let mut title = event.print_message_with_name(&mut name);
-                            if ro.holds_borrow() {
+                            if ro.holds_borrow() && !holder_never_borrows(visualization_data, ro) {
                                 title.push_str(&hover_messages::event_dot_holder_drop_suffix());
                             } else {
                                 title.push_str(". Its resource is dropped.");
@@ -1735,6 +1735,34 @@ fn closure_move_capture_count(
         .count()
 }
 
+// A holder (#336) whose value was created without a borrow (`let mut
+// refs = Vec::new();`): on the line it gets its value, it neither
+// receives a borrow arrow nor takes over another holder's value. Its
+// borrows arrive later, through `refs.push(&s)` (#392).
+fn holder_starts_empty(visualization_data: &VisualizationData, rap: &ResourceAccessPoint) -> bool {
+    let Some(timeline) = visualization_data.timelines.get(rap.hash()) else { return false };
+    let Some((first, _)) = timeline.history.first() else { return false };
+    let mut created = false;
+    for (line, ev) in timeline.history.iter().take_while(|(l, _)| l == first) {
+        let _ = line;
+        match ev {
+            Event::StaticBorrow { .. } | Event::MutableBorrow { .. } => return false,
+            Event::Acquire { from: ResourceTy::Value(r), .. } if !r.is_fn() => return false,
+            Event::Acquire { .. } => created = true,
+            _ => {}
+        }
+    }
+    created
+}
+
+// A holder that never receives a borrow we can draw (`map.entry(word)`
+// where `word`'s lender has no column; #392): drawn as a plain owner.
+fn holder_never_borrows(visualization_data: &VisualizationData, rap: &ResourceAccessPoint) -> bool {
+    visualization_data.timelines.get(rap.hash()).is_none_or(|t| {
+        !t.history.iter().any(|(_, e)| matches!(e, Event::StaticBorrow { .. } | Event::MutableBorrow { .. }))
+    })
+}
+
 // Title for a vertical timeline segment. Routes around the generic
 // `state.print_message_with_name` for closure bindings so the
 // FullPrivilege segment reads as "f owns a closure (which owns a
@@ -1764,7 +1792,15 @@ fn timeline_segment_title(
     // its value, not the data it borrows.
     if rap.holds_borrow() {
         if let State::FullPrivilege { .. } = state {
-            return hover_messages::state_holder_full_privilege(rap.name());
+            // `let mut refs = Vec::new();` starts out holding no
+            // reference; `refs.push(&s)` stores one later (#392).
+            if holder_starts_empty(visualization_data, rap) {
+                if !holder_never_borrows(visualization_data, rap) {
+                    return hover_messages::state_holder_starts_empty(rap.name());
+                }
+            } else {
+                return hover_messages::state_holder_full_privilege(rap.name());
+            }
         }
     }
     // Copy-typed owners (i32 etc.) — "the owner of the resource"

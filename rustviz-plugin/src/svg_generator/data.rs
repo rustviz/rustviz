@@ -877,6 +877,9 @@ pub enum ViaCarrier {
     /// holds references (`let r = refs[0];`; #349). `func` names the
     /// collection.
     Element,
+    /// The borrower is the receiver a `&mut self` method stored the
+    /// borrow in (`refs.push(&s)`; #392). `func` names the method.
+    StoredBy,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
