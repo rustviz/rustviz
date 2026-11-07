@@ -866,6 +866,15 @@ const EXPECTED_OK: &[&str] = &[
     "shared_column_scope_ends",
     // A bare block nested in a branch ends its locals at its `}` (#591).
     "nested_block_in_branch_scope_end",
+    // A let-chain part that moves an outer variable before a part that
+    // can still be false (#281).
+    "edition2024/if_let_chain_else_move",
+    "edition2024/if_let_chain_no_else_move",
+    "edition2024/if_let_chain_call_move",
+    "edition2024/if_let_chain_irrefutable_move",
+    "edition2024/if_let_chain_else_reassign",
+    "edition2024/if_let_chain_field_move",
+    "edition2024/if_let_chain_closure_move",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9391,6 +9400,110 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    // ─── A let-chain that moves, then fails (#281) ─────────────────
+    // A part of the condition that moves an outer variable before a part
+    // that can still be false: the else branch (or the path that skips
+    // the body) starts with the variable maybe-moved. Before, the
+    // plugin refused these; main (before #198) drew no move and said
+    // `x`'s resource is dropped at the end.
+    TooltipExpect {
+        name: "edition2024/if_let_chain_else_move",
+        must_contain: &[
+            "Move from x to a",
+            "Move from a to consume",
+            "x may have been moved: when the condition moves x to a and then turns out false, the else branch runs after that move, so x can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
+            // main before #198: no move, unconditional drop.
+            "=x goes out of scope. Its resource is dropped.",
+            "=x goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "=x goes out of scope. No resource is dropped.",
+            "x isn't moved in any of the branches above",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_no_else_move",
+        must_contain: &[
+            "Move from x to a",
+            "x may have been moved: when the condition moves x to a and then turns out false, the body is skipped but the move has happened, so x can't be used after the if. When the condition fails after that move, a goes out of scope and its resource is dropped.",
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
+            "=x goes out of scope. Its resource is dropped.",
+            "=x goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "=x goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_call_move",
+        // `take` gets `s`; what it does with it is its own business, so
+        // nothing is said to be dropped on the way into the else.
+        must_contain: &[
+            "Move from s to take",
+            "s may have been moved: when the condition moves s to take and then turns out false, the else branch runs after that move, so s can't be used here",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
+            "=s goes out of scope. Its resource is dropped.",
+            "=s goes out of scope. No resource is dropped.",
+            "take goes out of scope",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_irrefutable_move",
+        // `(p, q)` always matches: the else branch always runs after the
+        // move, so it's "was moved", not "may have been".
+        must_contain: &[
+            "pair.0 was moved: the condition moves pair.0 to p before it can turn out false, so the else branch runs after that move, and pair.0 can't be used here. When the condition fails after that move, p goes out of scope and its resource is dropped.",
+            "pair.1 was moved: the condition moves pair.1 to q before it can turn out false, so the else branch runs after that move, and pair.1 can't be used here. When the condition fails after that move, q goes out of scope and its resource is dropped.",
+            "pair goes out of scope. pair.0 and pair.1 were moved out earlier, so no resource is dropped.",
+        ],
+        must_not_contain: &[
+            "pair.0 may have been moved",
+            "pair.1 may have been moved",
+            "pair.0 goes out of scope. Its resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_else_reassign",
+        // The old value is still in `x` only if the condition didn't move
+        // it, so its drop at the reassignment is decided by a drop flag.
+        must_contain: &[
+            "x goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The condition, not a branch, may have moved it (maintainer, #581).
+            "only if no branch above moved it",
+            "x acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    // The drop-flag wording where the condition may have moved a field /
+    // a closure (#581 review): "nothing above", not "no branch above".
+    TooltipExpect {
+        name: "edition2024/if_let_chain_field_move",
+        must_contain: &[
+            "p.name may have been moved: when the condition moves p.name to a and then turns out false, the else branch runs after that move, so p.name can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
+            "p goes out of scope. p.name may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag). p.id is dropped.",
+            "p.name goes out of scope. Its resource is dropped (including the String it holds, if any) here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &["only if no branch above moved it", "moved out in at least one branch above"],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_closure_move",
+        must_contain: &[
+            "f may have been moved: when the condition moves f to run and then turns out false, the else branch runs after that move, so f can't be used here",
+            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &["only if no branch above called it"],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -11511,52 +11624,27 @@ fn return_drops_what_the_branch_owns() {
     }
 }
 
-/// The `if` counterpart of `guard_that_moves_is_refused` (#198, #281):
-/// `let Some(a) = x` moves out of `x` as soon as it matches, so when
-/// `a.len() > 5` is then false the `else` branch runs with `x` already
-/// partially moved (rustc rejects using `x` there). The chain's events
-/// are drawn in the if branch only, so the plugin refuses instead of
-/// showing the else branch still owning `x`. (main used to render it
-/// with no move at all and "x goes out of scope. Its resource is
-/// dropped.")
+/// What a let-chain still can't draw (#281): a part that assigns to a
+/// variable declared outside the condition, followed by a part that can
+/// be false. The assignment lasts on the path into the `else`, which
+/// would need the variable's old and new values on one column.
 #[test]
-fn if_let_chain_that_moves_is_refused() {
+fn if_let_chain_that_assigns_is_refused() {
     env::set_var("RV_RUNNER", "local");
-    let src = "fn consume(_o: String) {}\n\
-               fn main() {\n\
-               \x20   let x = Some(String::from(\"a\"));\n\
-               \x20   if let Some(a) = x && a.len() > 5 {\n\
-               \x20       consume(a);\n\
+    let src = "fn main() {\n\
+               \x20   let y = Some(1);\n\
+               \x20   let mut z = 0;\n\
+               \x20   if let Some(a) = y && { z = a; z > 0 } {\n\
+               \x20       println!(\"{}\", z);\n\
                \x20   } else {\n\
-               \x20       println!(\"short\");\n\
+               \x20       println!(\"no\");\n\
                \x20   }\n\
                }\n";
-    let err = Rustviz::new(src).expect_err("a let-chain that moves, with an else, must not render");
+    let err = Rustviz::new(src).expect_err("a let-chain that assigns, with an else, must not render");
     let msg = err.to_string();
-    assert!(msg.contains("`if let` chains that move or assign a variable declared outside the condition (`x`"),
-        "expected the let-chain-move refusal, got:\n{}", msg);
-}
-
-/// Without an `else` too (#281): when `a.len() > 0` is false the body
-/// is skipped, but `x`'s String was already moved into `a` (and dropped
-/// with it). The move would be drawn in the if branch, with the empty
-/// path after the `if` still owning `x`'s String, and `x`'s scope end
-/// saying it's dropped there if the body didn't run: false.
-#[test]
-fn if_let_chain_without_else_that_moves_is_refused() {
-    env::set_var("RV_RUNNER", "local");
-    let src = "fn consume(_o: String) {}\n\
-               fn main() {\n\
-               \x20   let x = Some(String::from(\"a\"));\n\
-               \x20   if let Some(a) = x && a.len() > 0 {\n\
-               \x20       consume(a);\n\
-               \x20   }\n\
-               }\n";
-    let err = Rustviz::new(src).expect_err("a let-chain that moves, without an else, must not render");
-    let msg = err.to_string();
-    assert!(msg.contains("`if let` chains that move or assign a variable declared outside the condition (`x`, line 4)")
-        && msg.contains("the condition is false and the body is skipped"),
-        "expected the let-chain-move refusal, got:\n{}", msg);
+    assert!(msg.contains("`if let` chains that assign to a variable declared outside the condition (`z`, line 4)")
+        && msg.contains("the condition is false and the else branch runs"),
+        "expected the let-chain-assign refusal, got:\n{}", msg);
 }
 
 /// Column header labels in one row as (x, visible text), left to right.

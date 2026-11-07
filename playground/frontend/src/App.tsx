@@ -320,7 +320,8 @@ const Description: React.FC = () => (
         the first call is drawn on the variable (later calls work on temporary
         results); a match guard&apos;s events appear only in its own arm, and
         an <code>if let</code> chain&apos;s (after its first part) only in the{' '}
-        <code>if</code> branch;{' '}
+        <code>if</code> branch, apart from its moves, which the{' '}
+        <code>else</code> branch starts with as &quot;may have been moved&quot;;{' '}
         <code>async</code>/<code>await</code> aren&apos;t visualized.
       </li>
       <li>
