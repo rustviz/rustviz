@@ -1081,6 +1081,10 @@ const EXPECTED_OK: &[&str] = &[
     // back (#686), references `extend` stores (#682).
     "closure_kept_by_callee",
     "extend_stores_borrow",
+    // A one-line arm's borrow and return arrows (#710), and a holder's early
+    // borrow end in an `if let` arm (#712).
+    "arm_one_line_borrow_return_710",
+    "if_let_holder_end_row_712",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -15903,6 +15907,48 @@ fn a_break_value_in_a_branch_moves_where_the_loop_ends() {
             name, brk, row, want, dots
         );
     }
+}
+
+/// #710: in a one-line match arm, a pattern binding's borrow (`v` to `x`)
+/// and its return (`x` to `v`) were drawn on the same row, one shaft under
+/// the other, so only one could be hovered. The return dips half a row
+/// below the borrow instead (no row is added to the code panel).
+#[test]
+fn one_line_arm_borrow_and_return_arrows_are_separate() {
+    let rv = run_with_local_backend("arm_one_line_borrow_return_710");
+    let tl = rv.timeline_panel_string();
+    let code = rv.code_panel_string();
+    let borrow = arrow_points(&tl, "Immutable borrow from v to x: x is a reference copied out of the value get returned");
+    let ret = arrow_points(&tl, "Return immutably borrowed resource from x to v");
+    assert_eq!((borrow.len(), ret.len()), (1, 1), "{:?} {:?}", borrow, ret);
+    let row = code_row_y(&code, "Some(x) => println!(\"{}\", x),");
+    let ys = |p: &Vec<(f64, f64)>| p.iter().map(|&(_, y)| y).collect::<Vec<_>>();
+    let (bmin, bmax) = ys(&borrow[0]).into_iter().fold((f64::MAX, f64::MIN), |(a, b), y| (a.min(y), b.max(y)));
+    assert!((bmin - row).abs() < 1.0 && (bmax - row).abs() < 1.0, "the borrow isn't level on its row: {:?}", borrow);
+    // The return leaves the borrow's row: some of its shaft is below it,
+    // by half a row at most.
+    let lowest = ys(&ret[0]).into_iter().fold(f64::MIN, f64::max);
+    assert!(lowest > row + 5.0, "the return shares the borrow's row: {:?}", ret);
+    assert!(lowest <= row + 15.0 + 0.5, "the return dips more than half a row: {:?}", ret);
+    assert_eq!(unnumbered_code_rows(&code), 0, "a blank row was added for the dip");
+}
+
+/// #712: `o`'s borrow end (a holder moved out of by `if let`) used to be
+/// listed in the arm right after the move, ahead of line 5, so line 5's
+/// events were drawn on line 6's row and `x`'s borrow ended on `push`'s
+/// call dot. `x.push('a')` stays on its own row, `println!` on the next.
+#[test]
+fn early_holder_borrow_end_keeps_arm_rows() {
+    let rv = run_with_local_backend("if_let_holder_end_row_712");
+    let tl = rv.timeline_panel_string();
+    let code = rv.code_panel_string();
+    let push = code_row_y(&code, "x.push('a');");
+    let print = code_row_y(&code, "println!(\"{}\", x);");
+    let at = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    assert_eq!(at("the resource x points to is mutably borrowed by push through x; x can't be used while the borrow is live"), vec![push]);
+    assert_eq!(at("the resource x points to is immutably borrowed by println! through x; x is read-only while the borrow is live"), vec![print]);
+    // x's borrow ends on its last use, the println!, not on push's row.
+    assert_eq!(at("x's mutable borrow ends"), vec![print]);
 }
 
 /// A borrow a call leaves in a variable lasts until that variable's last
