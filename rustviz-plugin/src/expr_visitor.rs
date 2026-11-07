@@ -823,9 +823,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, stored_in: StoredIn::default() },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
+        stored_in: StoredIn::default(),
       },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None }
@@ -912,7 +913,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit,
+      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, stored_in: StoredIn::default(),
     });
     *self.unique_id += 1;
   }
@@ -921,7 +922,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_sref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
-      from: arg, to: func, id, implicit, refcell_borrow_mut,
+      from: arg, to: func, id, implicit, refcell_borrow_mut, stored_in: StoredIn::default(),
     });
     *self.unique_id += 1;
   }
@@ -1180,13 +1181,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         })
         .unwrap_or(ResourceTy::Anonymous),
       // A field with no column of its own (`h.r` through a reference):
-      // named by its source text. `Index` is the place-with-no-column
-      // borrower here too; borrows into it stay on the lender's column.
+      // named by its source text, or by the field it is when the
+      // reference is a local that borrows a struct (`hold.r` for
+      // `rh.r` after `let rh = &mut hold;`, #512). `Index` is the
+      // place-with-no-column borrower here too; borrows into it stay
+      // on the lender's column.
       ExprKind::Field(..) => named_root
         .and_then(|root| {
           let name = expr_to_rap_name(root, &self.tcx)?;
           let rap = self.raps.get(&name)?.rap.to_owned();
-          let label = self.plain_source_text(lhs)?;
+          let label = self.field_through_local_ref(root, &name, lhs)
+            .or_else(|| self.plain_source_text(lhs))?;
           (!rap.is_fn()).then(|| ResourceTy::Index(rap, label, PlaceWrite::Update))
         })
         .unwrap_or(ResourceTy::Anonymous),
@@ -1209,15 +1214,125 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => None,
     });
     let Some((line, lender, lender_name, die)) = borrow else { return };
-    // MIR names the borrowed local (`p` for `&p.x`).
-    let root = lender_name.split('.').next().unwrap_or(&lender_name).to_owned();
-    let kill_line = self.gather_borrow_data(self.bwf).iter().find_map(|b| {
-      (b.region.0 == line && b.borrowed_place.as_deref() == Some(root.as_str())).then_some(b.region.1)
-    });
-    if let Some(kill_line) = kill_line {
+    if let Some(kill_line) = self.loan_end_line(line, &lender_name) {
       // StaticDie/MutableDie { from: dest, to: lender }.
       self.add_ev(kill_line, die, lender, dest, false);
     }
+  }
+
+  /// `arg` is `&x` / `&mut x` passed to a call whose signature lets it
+  /// store that reference behind another argument (#513):
+  /// `point(&mut hold, &t)` with
+  /// `fn point<'a>(h: &mut H<'a>, t: &'a String)` may do `h.r = t`, so
+  /// the borrow checker keeps t borrowed while `hold` may still hold
+  /// the reference, not just until point returns. Returns the place it
+  /// may be stored in (an `Index` naming it, with no column of its own
+  /// in this event) and the line the loan ends on. None (the borrow
+  /// ends at the call, as before) unless x is a variable with a column
+  /// that owns its data, the place is a variable or field with a
+  /// column, and the loan outlives the call's line.
+  fn stored_borrow(&self, arg: &'tcx Expr<'tcx>, from_ro: &ResourceTy, line: usize) -> Option<(ResourceTy, usize)> {
+    let ExprKind::AddrOf(..) = arg.kind else { return None };
+    let ResourceTy::Value(lender) = from_ro else { return None };
+    if lender.is_ref() || lender.is_fn() {
+      return None;
+    }
+    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return None };
+    let target = self.arg_storable_behind(call, arg)?;
+    let place = self.mut_arg_place(target)?;
+    let end_line = self.loan_end_line(line, lender.name()).filter(|&end| end > line)?;
+    let label = place.name().to_owned();
+    Some((ResourceTy::Index(place, label, PlaceWrite::Update), end_line))
+  }
+
+  /// The argument of `call` that its signature lets it store the
+  /// reference `arg` behind: a `&mut` parameter whose pointee's type
+  /// mentions a lifetime of `arg`'s reference type
+  /// (`h: &mut H<'a>` for `t: &'a String`). Read from the signature
+  /// only, like the borrow checker; rustc has already filled in
+  /// elided lifetimes, and distinct ones never match.
+  fn arg_storable_behind(&self, call: &'tcx Expr<'tcx>, arg: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    use rustc_middle::ty;
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    let (def_id, args): (_, Vec<&'tcx Expr<'tcx>>) = match call.kind {
+      ExprKind::Call(callee, args) => match typeck.node_type_opt(callee.hir_id)?.kind() {
+        ty::FnDef(def_id, _) => (*def_id, args.iter().collect()),
+        _ => return None,
+      },
+      ExprKind::MethodCall(_, rcvr, args, _) =>
+        (typeck.type_dependent_def_id(call.hir_id)?, std::iter::once(rcvr).chain(args.iter()).collect()),
+      _ => return None,
+    };
+    let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
+    let sig = self.tcx.liberate_late_bound_regions(def_id, sig);
+    let inputs = sig.inputs();
+    if inputs.len() != args.len() {
+      return None;
+    }
+    let i = args.iter().position(|a| a.hir_id == arg.hir_id)?;
+    let ty::Ref(region, _, _) = inputs[i].kind() else { return None };
+    inputs.iter().zip(&args).enumerate().find_map(|(j, (input, other))| {
+      let ty::Ref(_, pointee, Mutability::Mut) = input.kind() else { return None };
+      (j != i && pointee.walk().any(|g| g.as_region() == Some(*region))).then_some(*other)
+    })
+  }
+
+  /// The variable or field a `&mut` argument points to, if it has a
+  /// column: `hold` for `&mut hold`, for a method receiver `hold`
+  /// (auto-referenced), and for a local reference `rh` that borrows
+  /// `hold`.
+  fn mut_arg_place(&self, target: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let place = match target.kind {
+      ExprKind::AddrOf(_, _, inner) => inner,
+      _ => target,
+    };
+    if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+      return None;
+    }
+    let name = expr_to_rap_name(place, &self.tcx)?;
+    let rap = self.raps.get(&name)?.rap.to_owned();
+    if rap.is_fn() {
+      return None;
+    }
+    if !rap.is_ref() {
+      return Some(rap);
+    }
+    // A reference variable passed as is (`point(rh, &t)`): the place
+    // is what it borrows.
+    if !std::ptr::eq(place, target) {
+      return None;
+    }
+    match &self.borrow_map.get(&name)?.lender {
+      ResourceTy::Value(lender) if !lender.is_ref() && !lender.is_fn() => Some(lender.to_owned()),
+      _ => None,
+    }
+  }
+
+  /// The last line of the MIR loan of `lender_name` (a variable or a
+  /// field of one) taken on `line`: where the borrow checker ends it.
+  fn loan_end_line(&self, line: usize, lender_name: &str) -> Option<usize> {
+    // MIR names the borrowed local (`p` for `&p.x`).
+    let root = lender_name.split('.').next().unwrap_or(lender_name);
+    self.gather_borrow_data(self.bwf).iter().find_map(|b| {
+      (b.region.0 == line && b.borrowed_place.as_deref() == Some(root)).then_some(b.region.1)
+    })
+  }
+
+  /// `rh.r` (or `(*rh).r`) where `rh` is a local reference that
+  /// borrows the struct `hold` (`let rh = &mut hold;`): the place is
+  /// `hold.r`, which has a column, so name it that way (#512). None if
+  /// `root` isn't such a reference, or the field has no column.
+  fn field_through_local_ref(&self, root: &'tcx Expr<'tcx>, root_name: &str, place: &'tcx Expr<'tcx>) -> Option<String> {
+    if self.is_ref_param(root) || !self.tcx.typeck(root.hir_id.owner).node_type(root.hir_id).is_ref() {
+      return None;
+    }
+    let ResourceTy::Value(lender) = &self.borrow_map.get(root_name)?.lender else { return None };
+    if lender.is_ref() || lender.is_fn() {
+      return None;
+    }
+    let rest = expr_to_rap_name(place, &self.tcx)?.strip_prefix(root_name)?.to_owned();
+    let name = format!("{}{}", lender.name(), rest);
+    self.raps.contains_key(&name).then_some(name)
   }
 
   /// The variable a place expression starts from: `h` for `h.r`,
@@ -1316,6 +1431,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     // type-check the arg and add event accordingly
     if arg_ty.is_ref() {
+      // `point(&mut hold, &t)` where point's signature lets it store
+      // `&t` in `hold`: t stays borrowed past the call (#513).
+      if let Some((place, end_line)) = self.stored_borrow(arg, &from_ro, line_num) {
+        let mutable = arg_ty.ref_mutability() == Some(Mutability::Mut);
+        let id = *self.unique_id;
+        let stored_in = StoredIn(Some(place.name().to_owned()));
+        self.add_external_event(line_num, if mutable {
+          ExternalEvent::PassByMutableReference {
+            from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
+            implicit: ImplicitRef::No, stored_in,
+          }
+        } else {
+          ExternalEvent::PassByStaticReference {
+            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, stored_in,
+          }
+        });
+        *self.unique_id += 1;
+        // StaticDie/MutableDie { from: place, to: lender }: drawn on
+        // the lender's column only, like a borrow stored in an element.
+        self.add_ev(end_line, if mutable { Evt::MDie } else { Evt::SDie }, from_ro, place, false);
+        return;
+      }
       match arg_ty.ref_mutability().unwrap() {
         Mutability::Not => self.add_ev(line_num, Evt::PassBySRef, to_ro, from_ro, false),
         Mutability::Mut => {

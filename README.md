@@ -273,10 +273,15 @@ rather than listed here.
   nothing), and a place not reached from a local variable. A value
   moved into such a place is still shown as moved, and a borrow stored
   in one (`v[i] = &s`, `h.r = &s`) is drawn on the lender's column
-  only, naming the place as the borrower ("borrowed by h.r"). It ends
-  where the borrow checker ends it; one stored behind a reference
-  parameter (`h: &mut Holder`) outlives the function, so no end is
-  drawn. Fields of a local
+  only, naming the place as the borrower ("borrowed by h.r"; "borrowed
+  by hold.r" for `rh.r = &s` after `let rh = &mut hold;`, though no
+  arrow goes into `hold.r`'s column). It ends where the borrow checker
+  ends it; one stored behind a reference parameter (`h: &mut Holder`)
+  outlives the function, so no end is drawn. The same holds for a
+  borrow passed to a function whose signature lets it store the
+  reference behind another argument (`point(&mut hold, &s)` with
+  `fn point<'a>(h: &mut H<'a>, t: &'a String)`): it lasts until
+  `hold`'s last use, drawn on `s`'s column only. Fields of a local
   struct, including chained ones (`o.inner.x = …`), have columns of
   their own.
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`

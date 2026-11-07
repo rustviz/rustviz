@@ -535,6 +535,10 @@ const EXPECTED_OK: &[&str] = &[
     "match_scrutinee_move",
     "match_on_temporary_one_line",
     "match_on_temporary_variants",
+    // A borrow stored in a field through a local `&mut` (#512), or by a
+    // call whose signature lets it store the reference (#513).
+    "borrow_stored_through_local_ref",
+    "borrow_stored_by_call",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5425,6 +5429,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d goes out of scope. Its resource is dropped.",
         ],
     },
+    // ─── A borrow stored in a field through a local `&mut` (#512) ────
+    TooltipExpect {
+        name: "borrow_stored_through_local_ref",
+        // `rh.r = &t` with `rh = &mut hold` stores `&t` in hold.r. It
+        // drew nothing (the borrow was lost because rh's own borrow of
+        // hold ends on that line). The borrow is named by the field it
+        // is stored in, which has a column. Where it ends (hold's last
+        // use, like s's) is checked in
+        // `borrows_stored_in_a_struct_end_at_its_last_use`.
+        must_contain: &[
+            "t's resource is immutably borrowed by hold.r; t is read-only while the borrow is live",
+            "t's resource is no longer immutably borrowed",
+            "s's resource is no longer immutably borrowed",
+            "b's resource is immutably borrowed by o.inner.r; b is read-only while the borrow is live",
+            "b's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // The place as written, when the field has a column.
+            "t's resource is immutably borrowed by rh.r; t is read-only while the borrow is live",
+            "b's resource is immutably borrowed by (*ri).r; b is read-only while the borrow is live",
+        ],
+    },
+    // ─── A borrow a call may store, per its signature (#513) ─────────
+    TooltipExpect {
+        name: "borrow_stored_by_call",
+        // `point(&mut hold, &t)` with `fn point<'a>(h: &mut H<'a>, t:
+        // &'a String)`: t stays borrowed while hold is in use. The call
+        // dot used to say "point reads from t" and, on the same dot,
+        // "t's resource is no longer immutably borrowed" (checked in
+        // `borrows_stored_in_a_struct_end_at_its_last_use`). `look`
+        // can't store its argument: u's borrow ends at that call.
+        must_contain: &[
+            "t's resource is immutably borrowed by point; t is read-only while the borrow is live",
+            "point reads from t; point's signature lets it store this reference in hold, so t stays borrowed while hold is in use",
+            "set reads from s; set's signature lets it store this reference in h2, so s stays borrowed while h2 is in use",
+            "put reads from/writes to b; put's signature lets it store this reference in m, so b stays borrowed while m is in use",
+            "look reads from u",
+            "t's resource is no longer immutably borrowed",
+            "b's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            // Main's call dots, which also ended the borrow there.
+            "point reads from t",
+            "set reads from s",
+            "put reads from/writes to b",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -6569,6 +6620,35 @@ fn compile_errors_are_reported_not_swallowed() {
 
 /// The initializing assignment of a `let s;` drops nothing; only the
 /// later reassignments do (#234). One drop each for s and t.
+/// #512 / #513: a borrow stored in a struct (through a local `&mut`,
+/// `rh.r = &t`, or by a call whose signature allows it, `point(&mut
+/// hold, &t)`) ends where the borrow checker ends it: at the struct's
+/// last use, on the same row as the end of s's borrow by `hold.r`. Not
+/// on the write's or the call's own dot.
+#[test]
+fn borrows_stored_in_a_struct_end_at_its_last_use() {
+    for (name, pairs) in [
+        ("borrow_stored_through_local_ref", &[("t", "s"), ("b", "a")][..]),
+        ("borrow_stored_by_call", &[("t", "s")][..]),
+    ] {
+        let svg = run_with_local_backend(name).timeline_panel_string();
+        for (stored, held) in pairs {
+            let end = |v: &str| dots_with_tooltip(&svg, &format!("{}'s resource is no longer immutably borrowed", v));
+            let (stored_end, held_end) = (end(stored), end(held));
+            assert_eq!(stored_end.len(), 1, "{}: {}'s borrow should end on a dot of its own, got {:?}", name, stored, stored_end);
+            assert!(held_end.iter().any(|(_, y)| *y == stored_end[0].1),
+                "{}: {}'s borrow should end on the row where {}'s does ({:?}), got {:?}", name, stored, held, held_end, stored_end);
+        }
+        // No call dot that may store a reference also ends its borrow.
+        for lines in tooltip_lines(&svg) {
+            if lines.iter().any(|l| l.contains("'s signature lets it store this reference")) {
+                assert!(!lines.iter().any(|l| l.contains("no longer")),
+                    "{}: a stored borrow ends at the call: {:?}", name, lines);
+            }
+        }
+    }
+}
+
 #[test]
 fn deferred_init_drops_only_at_reassignment() {
     let rv = run_with_local_backend("deferred_init_then_reassign");

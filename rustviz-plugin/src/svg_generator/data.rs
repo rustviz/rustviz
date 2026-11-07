@@ -690,6 +690,15 @@ pub enum ImplicitRef {
     Autoref,
 }
 
+/// Where a call may store the reference it is passed, per its
+/// signature: `point(&mut hold, &t)` with
+/// `fn point<'a>(h: &mut H<'a>, t: &'a String)` may store `&t` in
+/// `hold` (#513). The borrow then outlives the call, so the lender's
+/// borrow doesn't end at the call; a separate StaticDie / MutableDie
+/// ends it where the borrow checker does. Holds the place's name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredIn(pub Option<String>);
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -773,6 +782,8 @@ pub enum ExternalEvent {
         // DefId (not its name: a user type may define its own
         // `borrow_mut(&self)`). Selects the runtime-exclusivity wording.
         refcell_borrow_mut: bool,
+        // See `StoredIn`.
+        stored_in: StoredIn,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -787,6 +798,7 @@ pub enum ExternalEvent {
         is_reborrow: bool,
         result_has_lifetime: bool,
         implicit: ImplicitRef, // see PassByStaticReference
+        stored_in: StoredIn, // see PassByStaticReference
         id: usize
     },
     GoOutOfScope {
@@ -2352,20 +2364,28 @@ impl Visualizable for VisualizationData {
               _ => panic!("not possible")
           }
         },
-        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, ..} => {
+        // A reference the call may store (`StoredIn`) is given back
+        // later, by its own StaticDie / MutableDie.
+        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
           if to_o { 
             vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
             (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
+          }
+          else if stored_in.0.is_some() {
+            vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
           else { 
             vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id}),
             (line_num,  Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
         },
-        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, ..} => {
+        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
           if to_o { 
             vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
             (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})]
+          }
+          else if stored_in.0.is_some() {
+            vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})]
           }
           else { 
             vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id}),
@@ -2637,16 +2657,22 @@ impl Visualizable for VisualizationData {
 
             // Technically appending individual events for PassByRef events is not necessary since
             // they do not change the state of either variable - however - it's useful to have when 
-            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, ..} => {
+            // A reference the call may store (`StoredIn`, #513) is given
+            // back to `from` later, by its own StaticDie / MutableDie.
+            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
                 maybe_append_event(self, &from_ro.to_owned(), Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
+                if stored_in.0.is_none() {
+                    maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
+                }
                 maybe_append_event(self, &to_ro.clone(), Event::StaticDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, ..} => {
+            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, ..} => {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
+                if stored_in.0.is_none() {
+                    maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
+                }
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
