@@ -2253,7 +2253,7 @@ impl Event {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref())
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref(), holds_copy_value(from))
                 } else {
                     hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }
@@ -2262,7 +2262,7 @@ impl Event {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref())
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref(), holds_copy_value(from))
                 } else {
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }

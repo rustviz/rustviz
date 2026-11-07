@@ -1884,12 +1884,13 @@ pub fn state_holder_starts_empty(my_name: &String) -> String {
 // The holder's dot where its value starts borrowing `from`. When
 // `from` is itself a reference (a reference parameter `v: &Vec<i32>`
 // in `let it = v.iter();`; #393), the value borrows the data `from`
-// points to, not the reference.
-pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool) -> String {
+// points to, not the reference. "resource" only when the lender needs
+// drop; a Copy lender is a "value" (#484, #719).
+pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool, from_is_copy: bool) -> String {
     let what = if from_is_ref {
         format!("the data {} points to", fmt_style(from_name))
     } else {
-        format!("{}'s resource", fmt_style(from_name))
+        format!("{}'s {}", fmt_style(from_name), if from_is_copy { "value" } else { "resource" })
     };
     format!(
         "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",

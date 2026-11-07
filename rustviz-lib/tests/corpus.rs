@@ -892,6 +892,8 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_different_fields",
     "or_pattern_three_places",
     "or_pattern_tuple_scrutinee",
+    // A holder's borrow dot names a Copy lender's "value" (#719).
+    "holder_borrow_copy_lender",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9727,6 +9729,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // c's whole value is in the tuple whichever alternative
             // matched.
             "whatever of a's, b's and c's resources",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_borrow_copy_lender",
+        // `k` is an i32: nothing to drop, so the holder borrows its
+        // "value", not its "resource" (#484, #719). `s` is a String, so
+        // "resource" stays right for it.
+        must_contain: &[
+            "lens holds a value that immutably borrows k's value (lens isn't a reference itself)",
+        ],
+        must_not_contain: &[
+            "k's resource",
         ],
     },
 ];
