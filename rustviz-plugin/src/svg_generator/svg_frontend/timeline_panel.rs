@@ -2409,7 +2409,10 @@ fn render_arrow (
                 | (ResourceTy::Value(ResourceAccessPoint::Function(_)), ResourceTy::Value(ResourceAccessPoint::Function(_))) => return,
                 // A borrow stored in an element (`v[0] = &u`) and its
                 // end are drawn on the lender's column only (#282).
-                (ResourceTy::Index(..), _) => return,
+                // (A read through an element, `let n = *slots[0];`, is an
+                // arrow out of the collection's column: #438.)
+                (ResourceTy::Index(..), _)
+                    if matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) => return,
                 (_, ResourceTy::Index(..))
                     if matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => return,
                 _ => {}

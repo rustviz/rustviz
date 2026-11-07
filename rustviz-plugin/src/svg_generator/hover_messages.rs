@@ -458,6 +458,18 @@ pub fn event_dot_move_to_caller(my_name: &String, _target_name: &String) -> Stri
     )
 }
 
+/// `let n = *slots[0];`: `place` is `*slots[0]`; the resource copied is
+/// the one the reference stored in `slots[0]` points to, not slots's own.
+pub fn event_dot_copy_through_element(place: &String) -> String {
+    let elem = place.strip_prefix('*').unwrap_or(place).trim_start();
+    format!("the resource {0} points to is copied", fmt_style(&elem.to_owned()))
+}
+
+pub fn event_dot_move_through_element(place: &String) -> String {
+    let elem = place.strip_prefix('*').unwrap_or(place).trim_start();
+    format!("the resource {0} points to is moved", fmt_style(&elem.to_owned()))
+}
+
 pub fn event_dot_copy_to_caller(my_name: &String, _target_name: &String) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(

@@ -616,7 +616,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
        ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..), _) // maybe change later
       // `v[i] = s` / `v[i] = y`: an arrow into v's column.
       | (ResourceTy::Value(_), ResourceTy::Index(..), _)
-      | (ResourceTy::Deref(_), ResourceTy::Index(..), _) => {
+      | (ResourceTy::Deref(_), ResourceTy::Index(..), _)
+      // `let n = *slots[0];`: an arrow out of slots's column (#438).
+      | (ResourceTy::Index(..), ResourceTy::Value(_), _)
+      | (ResourceTy::Index(..), ResourceTy::Deref(_), _)
+      | (ResourceTy::Index(..), ResourceTy::Index(..), _) => {
         self.event_line_map.get_mut(&line_num).unwrap().push(event.clone());
       },
       _ => ()
@@ -1060,33 +1064,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // isn't known statically, so the event goes on the
         // collection's column, as an element write whose place starts
         // with `*` (see `ResourceTy::Index`).
-        if let Some(coll) = index_base(exp) {
-          let typeck = self.tcx.typeck(expr.hir_id.owner);
-          let pointee_ty = typeck.expr_ty(expr);
+        if index_base(exp).is_some() {
+          let pointee_ty = self.tcx.typeck(expr.hir_id.owner).expr_ty(expr);
           // `*refs[0] = &u` (the target is itself a reference): a
           // borrow we don't track, like `v[0] = &u`. Not drawn.
           if pointee_ty.is_ref() {
             return None;
           }
-          let name = expr_to_rap_name(coll, &self.tcx)?;
-          let rap = self.raps.get(&name)?.rap.to_owned();
-          if rap.is_fn() {
-            return None;
-          }
-          self.update_rap(&rap, line_num);
-          let place = match self.place_label(expr, &format!("*{}", name)) {
-            p if p.starts_with('*') => p,
-            _ => format!("*{}[…]", name),
-          };
-          let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
-          let write = if self.tcx.type_is_copy_modulo_regions(env, pointee_ty) {
-            PlaceWrite::AssignCopy
-          } else if pointee_ty.needs_drop(self.tcx, env) {
-            PlaceWrite::AssignDropsOld
-          } else {
-            PlaceWrite::AssignOwned
-          };
-          return Some(ResourceTy::Index(rap, place, write));
+          return self.deref_of_element(expr);
         }
         let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
         match rhs_rap {
@@ -1536,6 +1521,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     self.tcx.sess.source_map().span_to_snippet(expr.span).ok().filter(|text| text.chars().count() <= 24
       && !text.contains(|c: char| matches!(c, '<' | '>' | '&' | '"' | '\'' | '\n' | '\r')))
+  }
+
+  /// `*slots[0]`, `*boxes[0]`, `*hs[0].r`: a deref whose operand is
+  /// reached through an index. Both the write side (#396) and the read
+  /// side (#438) name the element, not the collection: the event goes
+  /// on the collection's column as `ResourceTy::Index` with a place
+  /// starting with `*`. None when the collection isn't a registered
+  /// variable.
+  fn deref_of_element(&mut self, expr: &'tcx Expr) -> Option<ResourceTy> {
+    let ExprKind::Unary(UnOp::Deref, exp) = expr.kind else { return None };
+    let coll = index_base(exp)?;
+    let name = expr_to_rap_name(coll, &self.tcx)?;
+    let rap = self.raps.get(&name)?.rap.to_owned();
+    if rap.is_fn() {
+      return None;
+    }
+    self.update_rap(&rap, expr_to_line(&exp, &self.tcx));
+    let place = match self.place_label(expr, &format!("*{}", name)) {
+      p if p.starts_with('*') => p,
+      _ => format!("*{}[…]", name),
+    };
+    // A plain `=` assigns to the place `*slots[0]` (the caller turns
+    // this into `Update` for `op=`; reads ignore it).
+    let pointee_ty = self.tcx.typeck(expr.hir_id.owner).expr_ty(expr);
+    let typing_env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+    let write = if self.tcx.type_is_copy_modulo_regions(typing_env, pointee_ty) {
+      PlaceWrite::AssignCopy
+    } else if pointee_ty.needs_drop(self.tcx, typing_env) {
+      PlaceWrite::AssignDropsOld
+    } else {
+      PlaceWrite::AssignOwned
+    };
+    Some(ResourceTy::Index(rap, place, write))
   }
 
   /// How an element place (`v[i]`) is named in tooltips: its source
@@ -2822,6 +2840,15 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       match option {
         rustc_hir::UnOp::Deref => {
           let line_num = expr_to_line(&expr, &self.tcx);
+          // `let n = *slots[0];` copies out of what the reference
+          // stored in slots[0] points to; slots is not a reference
+          // (#438). Name the element, as the write side does (#396).
+          if index_base(expr).is_some() {
+            if let Some(src) = self.deref_of_element(rhs) {
+              self.add_ev(line_num, evt, lhs, src, false);
+              return;
+            }
+          }
           let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
           let res = match rhs_rap {
             Some(x) => {

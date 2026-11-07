@@ -307,6 +307,9 @@ rather than listed here.
   (`*slots[0] += 10` with `slots: Vec<&mut i32>`) is drawn there too,
   as a modification of what `slots[0]` points to; the variable it
   points to isn't shown changing.
+  A read through one (`let n = *slots[0];`) is an arrow out of the
+  collection's column naming the element ("Copy from *slots[0] to n"),
+  again without showing which variable it comes from.
 - A write to a field through a reference (`self.n += 1` in a `&mut
   self` method, `c.n = …` where `c: &mut T`) is drawn on the
   reference's column, not on the column of the struct it borrows from.

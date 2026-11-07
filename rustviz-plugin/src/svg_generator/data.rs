@@ -1652,6 +1652,11 @@ impl Event {
             Event::Move{ to, is, into_closure: true, ..} => {
                 hover_messages::event_dot_move_into_closure_arg(&self.deref_name(my_name), &to.name(), is_plain(is))
             }
+            Event::Duplicate{ is: ResourceTy::Index(_, place, _), ..} if place.starts_with('*') => {
+                // `let n = *slots[0];`: what is read is the resource
+                // the reference in slots[0] points to (#438).
+                hover_messages::event_dot_copy_through_element(place)
+            }
             Event::Duplicate{ to, is, ..} => {
                 match to {
                     // A `move` closure capturing a Copy value copies it (#311).
@@ -1671,6 +1676,9 @@ impl Event {
             // Moving a `&mut` moves the reference, not its referent.
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), ..} if !to.is_closure() => {
                 hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller))
+            }
+            Event::Move{ is: ResourceTy::Index(_, place, _), ..} if place.starts_with('*') => {
+                hover_messages::event_dot_move_through_element(place)
             }
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
@@ -2051,7 +2059,7 @@ impl Visualizable for VisualizationData {
             (State::OutOfScope, Event::Copy{ from: ro, is: is_ro, ..}) => {
                 match ro {
                     ResourceTy::Anonymous => State::FullPrivilege {s: LineState::Full},
-                    ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _) => {
+                    ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _) | ResourceTy::Index(r, _, _) => {
                         // if we are copying a reference - then the State must be PartialPrivilege
                         // ex: 
                         // let a = &b; (ImmutableBorrow(b -> a))
@@ -2695,7 +2703,9 @@ impl Visualizable for VisualizationData {
                 // off v's column: #282.)
                 let to_elem = matches!(to, ResourceTy::Index(r, _, _) if r == rap)
                     && !matches!(event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
-                if *from == *is || through_rap(from) {
+                // ... and a read through an element (`*slots[0]`) leaves it.
+                let from_elem = matches!(from, ResourceTy::Index(r, _, _) if r == rap);
+                if *from == *is || through_rap(from) || from_elem {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, false));
                 }
                 else if *to == *is || through_rap(to) || to_elem {
