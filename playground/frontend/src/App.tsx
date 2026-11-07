@@ -447,7 +447,8 @@ const Description: React.FC = () => (
         that column. A <code>let</code>-
         <code>else</code> scrutinee, a struct update&apos;s base (
         <code>..make()</code>) and a temporary whose field is matched on (
-        <code>match make().name</code>) get one too, and so does a call&apos;s
+        <code>match make().name</code>) get one too, as does a let chain&apos;s
+        scrutinee, and so does a call&apos;s
         result that a <code>let</code> pattern takes apart (
         <code>let (a, _) = make();</code>). Not drawn or mentioned: what a
         destructuring assignment leaves in one (<code>(m, _) = make();</code>).

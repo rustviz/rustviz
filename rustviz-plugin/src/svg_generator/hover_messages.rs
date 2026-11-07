@@ -441,11 +441,11 @@ pub fn event_dot_unbound_temporary_part_acquire(_my_name: &String, from_name: &S
             "A temporary holds the value that {0}, for the `let` pattern to take its field {1} apart. The pattern moves parts of that field into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
             source, fmt_style(f)
         ),
-        TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) => format!(
+        TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) | TempPart::LetChain(None) => format!(
             "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
             source, let_kind(part)
         ),
-        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) => format!(
+        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) | TempPart::LetChain(Some(f)) => format!(
             "A temporary holds the value that {0}, for the {1} to match its field {2} against. If the pattern matches, it can move that field, or parts of it, into its bindings; what is left in the temporary (all of it, if the pattern doesn't match) is dropped with it",
             source, let_kind(part), fmt_style(f)
         ),
@@ -457,6 +457,7 @@ fn let_kind(part: &TempPart) -> &'static str {
     match part {
         TempPart::WhileLet(_) => "`while let`",
         TempPart::LetElse(_) => "`let`-`else`",
+        TempPart::LetChain(_) => "`let` in this let chain",
         _ => "`if let`",
     }
 }
@@ -559,11 +560,11 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
             "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2}",
             fmt_style(ty), when, fmt_style(f)
         ),
-        TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) => format!(
+        TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) | TempPart::LetChain(None) => format!(
             "This temporary {0} is dropped {1}, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             fmt_style(ty), when
         ),
-        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) => format!(
+        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) | TempPart::LetChain(Some(f)) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2} (all of it, if the pattern didn't match)",
             fmt_style(ty), when, fmt_style(f)
         ),

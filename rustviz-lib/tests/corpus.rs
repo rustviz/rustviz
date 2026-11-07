@@ -1167,6 +1167,8 @@ const EXPECTED_OK: &[&str] = &[
     // A let-else scrutinee, a struct update's base, a temporary whose
     // field is matched on: the rest is dropped with it (#605).
     "temporary_let_else_update_matched_field",
+    // A let chain's scrutinee that its pattern moves parts out of (#605).
+    "edition2024/temporary_let_chain_partly_moved",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13204,6 +13206,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // temporary).
             "its field pair, which was moved out of it",
             "'s field pair is moved to c",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/temporary_let_chain_partly_moved",
+        // #616 gave a let chain's `let` scrutinee no column while #571 said
+        // it was dropped "at the end of this `&&` / `||` operand" (#604,
+        // false). With #604 fixed, its leftover drop is stated like an `if
+        // let`'s: the refused `Err(String)`, the `_` String are dropped
+        // before the `else` runs or when the matched block ends; in a
+        // `while`, at the end of each iteration (checked with a
+        // Drop-printing program, edition 2024).
+        must_contain: &[
+            "Move from res to (temporary)",
+            "A temporary holds the value that res returns, for the `let` in this let chain to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
+            "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Move from pair to (temporary 2)",
+            "This temporary (String, String) is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Move from res to (temporary 3)",
+            "This temporary Result<String, String> is dropped at the end of each iteration of this `while let` loop, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+        ],
+        must_not_contain: &[
+            "at the end of this `&&` / `||` operand",
+            "nothing bound it to a variable or moved it on",
+            "(temporary 4)",
         ],
     },
 ];

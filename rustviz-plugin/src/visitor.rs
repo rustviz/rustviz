@@ -5208,18 +5208,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           (left || arms.iter().any(|a| self.pat_leaves_temp_drop(a.pat, sty, typeck, env))).then_some(TempPart::Match(path))
         }
         ExprKind::Let(l) if l.init.hir_id == top.hir_id => {
-          // Only the condition of an `if let` / `while let` itself: in a
-          // let chain (`if a && let Some(s) = make()`) the scrutinee isn't
-          // dropped where `temporary_scope_end` says (#604).
-          let Node::Expr(i) = self.tcx.parent_hir_node(p.hir_id) else { return None };
-          if !matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == p.hir_id) {
-            return None;
-          }
+          // The condition of an `if let` / `while let`, or a `let` in the
+          // let chain that is one (`if a && let Ok(s) = make()`, edition
+          // 2024): the scrutinee lives until the matched block ends or the
+          // `else` runs (`temporary_scope_end`, #604).
+          let mut cond = p;
+          let mut in_chain = false;
+          let i = loop {
+            match self.tcx.parent_hir_node(cond.hir_id) {
+              Node::Expr(b) if matches!(b.kind, ExprKind::Binary(op, ..) if op.node == rustc_hir::BinOpKind::And) => {
+                cond = b;
+                in_chain = true;
+              }
+              Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == cond.hir_id) => break i,
+              _ => return None,
+            }
+          };
           if !left && !self.pat_leaves_temp_drop(l.pat, sty, typeck, env) && !self.pat_rejects_drop(l.pat, sty, typeck, env) {
             return None;
           }
           let is_while = matches!(i.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop));
-          Some(if is_while { TempPart::WhileLet(path) } else { TempPart::IfLet(path) })
+          Some(if in_chain { TempPart::LetChain(path) } else if is_while { TempPart::WhileLet(path) } else { TempPart::IfLet(path) })
         }
         // `P { n: 1, ..make_p() }`: the literal moves the fields it
         // doesn't name out of the base (#605).
@@ -5399,8 +5408,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           rustc_middle::ty::TyKind::Array(e, _) | rustc_middle::ty::TyKind::Slice(e) => *e,
           _ => return true,
         };
-        before.iter().chain(after.iter()).any(|p| self.pat_leaves_drop(p, elem, typeck, env))
-          || mid.is_some_and(|m| self.pat_leaves_drop(m, typeck.node_type(m.hir_id), typeck, env))
+        before.iter().chain(after.iter()).any(|p| self.pat_leaves_temp_drop(p, elem, typeck, env))
+          || mid.is_some_and(|m| self.pat_leaves_temp_drop(m, typeck.node_type(m.hir_id), typeck, env))
       }
       PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..) => match self.pat_fields(pat, ty, typeck) {
         Some((subs, rest)) => rest.iter().any(|t| t.needs_drop(self.tcx, env))

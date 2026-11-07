@@ -252,6 +252,8 @@ pub enum TempPart {
     WhileLet(Option<String>),
     /// The same for a `let`-`else` (#605).
     LetElse(Option<String>),
+    /// The same for a `let` in a let chain (`if a && let Ok(s) = make()`).
+    LetChain(Option<String>),
     /// The same for a plain `let` whose pattern takes the value apart
     /// (`let (a, _) = pair();`, #623).
     Let(Option<String>),
