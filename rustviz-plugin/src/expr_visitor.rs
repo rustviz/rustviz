@@ -1919,7 +1919,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let field = place.strip_prefix(q.name().as_str()).filter(|f| f.starts_with('.'))?;
         self.owner_behind_ref_at(q, &format!("{}{}", field, suffix), depth + 1)
       }
-      ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Index(..) => None,
+      ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Index(..) | ResourceTy::Temporary { .. } => None,
     }
   }
 
