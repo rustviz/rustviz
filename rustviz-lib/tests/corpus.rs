@@ -9388,6 +9388,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m1's mutable reference is moved (not the resource it points to)",
             "q1's reference is copied (not the value it points to)",
             "u1's mutable reference is moved (not the value it points to)",
+        ],
+    },
     // A dashed arm segment says what the dashes mean (#626): the arm isn't
     // running on those lines, so nothing happens to the variable there.
     // Solid segments keep the ownership text. `c` has no arm columns.
