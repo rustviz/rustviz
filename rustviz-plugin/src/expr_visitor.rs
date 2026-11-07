@@ -422,41 +422,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// always a resource: they own an OS synchronization object, and the
   /// wording must not depend on the platform's std internals.
   pub fn ty_is_plain(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
-    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, owner);
-    !self.ty_is_copy(ty, owner)
-      && !ty.needs_drop(self.tcx, env)
-      && !self.ty_has_std_sync_primitive(ty)
-      && !ty.is_union()
-      && !ty.is_closure()
-      && !ty.ty_adt_def().map_or(false, |d| d.is_manually_drop())
-      && !ty.is_ref()
+    ty_is_plain(self.tcx, ty, owner)
   }
 
   /// True iff `ty` is, or contains (through generic arguments, tuples,
   /// arrays, or the fields of local ADTs), one of std's lock types.
   /// See `ty_is_plain` for why these are special-cased.
   fn ty_has_std_sync_primitive(&self, ty: Ty<'tcx>) -> bool {
-    fn go<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, depth: usize, seen: &mut HashSet<Ty<'tcx>>) -> bool {
-      if depth > 8 || !seen.insert(ty) { return false; }
-      match ty.kind() {
-        rustc_middle::ty::Adt(def, args) => {
-          let did = def.did();
-          if !did.is_local()
-            && matches!(tcx.crate_name(did.krate).as_str(), "std" | "alloc" | "core")
-            && matches!(tcx.item_name(did).as_str(), "Mutex" | "RwLock" | "Condvar" | "Barrier")
-          {
-            return true;
-          }
-          args.types().any(|t| go(tcx, t, depth + 1, seen))
-            || (did.is_local()
-                && def.all_fields().any(|f| go(tcx, f.ty(tcx, args), depth + 1, seen)))
-        }
-        rustc_middle::ty::Array(t, _) => go(tcx, *t, depth + 1, seen),
-        rustc_middle::ty::Tuple(ts) => ts.iter().any(|t| go(tcx, t, depth + 1, seen)),
-        _ => false,
-      }
-    }
-    go(self.tcx, ty, 0, &mut HashSet::new())
+    ty_has_std_sync_primitive(self.tcx, ty)
   }
 
   /// True iff a value of type `ty` can be mutated through a shared
@@ -5656,4 +5629,40 @@ fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, 
       _ => {}
     }
   }
+}
+
+/// See `ExprVisitor::ty_is_plain`.
+pub fn ty_is_plain<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
+  let env = rustc_middle::ty::TypingEnv::post_analysis(tcx, owner);
+  !tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(tcx, owner), ty)
+    && !ty.needs_drop(tcx, env)
+    && !ty_has_std_sync_primitive(tcx, ty)
+    && !ty.is_union()
+    && !ty.is_closure()
+    && !ty.ty_adt_def().map_or(false, |d| d.is_manually_drop())
+    && !ty.is_ref()
+}
+
+fn ty_has_std_sync_primitive<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+  fn go<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, depth: usize, seen: &mut HashSet<Ty<'tcx>>) -> bool {
+    if depth > 8 || !seen.insert(ty) { return false; }
+    match ty.kind() {
+      rustc_middle::ty::Adt(def, args) => {
+        let did = def.did();
+        if !did.is_local()
+          && matches!(tcx.crate_name(did.krate).as_str(), "std" | "alloc" | "core")
+          && matches!(tcx.item_name(did).as_str(), "Mutex" | "RwLock" | "Condvar" | "Barrier")
+        {
+          return true;
+        }
+        args.types().any(|t| go(tcx, t, depth + 1, seen))
+          || (did.is_local()
+              && def.all_fields().any(|f| go(tcx, f.ty(tcx, args), depth + 1, seen)))
+      }
+      rustc_middle::ty::Array(t, _) => go(tcx, *t, depth + 1, seen),
+      rustc_middle::ty::Tuple(ts) => ts.iter().any(|t| go(tcx, t, depth + 1, seen)),
+      _ => false,
+    }
+  }
+  go(tcx, ty, 0, &mut HashSet::new())
 }

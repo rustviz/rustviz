@@ -329,6 +329,10 @@ enum ColumnKind {
   Fields(String),
   /// A `Copy` value.
   Copy,
+  /// A non-`Copy` owner with nothing to drop (`ty_is_plain`): its
+  /// tooltips say "value", not "resource" (#484), so it can't share a
+  /// column with one that needs drop (#642).
+  Plain,
   /// Any other owner.
   Owner,
 }
@@ -348,6 +352,8 @@ impl ColumnKind {
       ColumnKind::Fields(ty.to_string())
     } else if tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(tcx, owner), ty) {
       ColumnKind::Copy
+    } else if crate::expr_visitor::ty_is_plain(tcx, ty, owner) {
+      ColumnKind::Plain
     } else {
       ColumnKind::Owner
     }
