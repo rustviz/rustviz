@@ -870,6 +870,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ManuallyDropByHand { ro, .. }
       | ExternalEvent::LoopExitMove { ro, .. }
       | ExternalEvent::TupleTempDrop { ro, .. }
+      | ExternalEvent::OrAltMove { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. } => {
@@ -5175,6 +5176,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // have moved it before (#281). It held the value before the
       // condition, which moved it.
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } if ro.name() == rap_name => {
+        return Some(Ownership::Maybe);
+      }
+      // Moved into a name an or-pattern binds, if its alternative
+      // matched (#533): moved on some paths.
+      ExternalEvent::OrAltMove { ro, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       ExternalEvent::Move { from, to, .. } => {

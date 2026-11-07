@@ -885,6 +885,12 @@ const EXPECTED_OK: &[&str] = &[
     "match_shared_ref_binding_last_use",
     // A write through a `&mut` on the line its borrow ends (#587).
     "deref_write_ends_borrow",
+    // Or-pattern arms that bind a name from different places (#533).
+    "or_pattern_different_places",
+    "or_pattern_different_values",
+    "or_pattern_different_places_copy",
+    "or_pattern_different_fields",
+    "or_pattern_three_places",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9594,6 +9600,83 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // test named above fails on main.
         must_not_contain: &[],
     },
+    // ─── Or-pattern arms that bind from different places (#533) ──────
+    TooltipExpect {
+        name: "or_pattern_different_places",
+        // `(x, _) | (_, x)` on `t`: `x` is `t.0` or `t.1` depending on
+        // which alternative matches. Each of them is maybe-moved, so
+        // each is dropped at scope end only if nothing moved it. (main
+        // refused the program; drawing a definite `Move from t.0 to x`
+        // would say `t.1` is still dropped when `x` came from it.)
+        must_contain: &[
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a resource",
+            "t.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. t.0 and t.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "Move from t.0 to x",
+            "Move from t.1 to x",
+            "=t.0 goes out of scope. No resource is dropped.",
+            "=t.0 goes out of scope. Its resource is dropped.",
+            "=t.1 goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_different_values",
+        // `(Some(x), _) | (_, Some(x))` on `(a, b)`.
+        must_contain: &[
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved into x here; otherwise a still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved into x here; otherwise b still owns it (Rust tracks this with a runtime drop flag).",
+            "a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from a to x",
+            "Move from b to x",
+            "=a goes out of scope. No resource is dropped.",
+            "=b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_different_places_copy",
+        // A copied `x` moves nothing: `t` and its parts stay whole.
+        must_contain: &[
+            "x is bound to a copyable value",
+            "t.0 goes out of scope",
+        ],
+        must_not_contain: &["moved into x", "drop flag", "Move from t.0 to x"],
+    },
+    TooltipExpect {
+        name: "or_pattern_different_fields",
+        // `P { a: x, .. } | P { b: x, .. }`: `p.a` or `p.b`.
+        must_contain: &[
+            "x is bound from p.a or p.b, whichever alternative of the pattern matches. If it's the alternative that binds x from p.a, p.a's resource is moved into x here; otherwise p.a still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from p.a or p.b, whichever alternative of the pattern matches. If it's the alternative that binds x from p.b, p.b's resource is moved into x here; otherwise p.b still owns it (Rust tracks this with a runtime drop flag).",
+            "p.a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "p.b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. p.a and p.b were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "Move from p.a to x",
+            "=p.a goes out of scope. No resource is dropped.",
+            "=p.b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_three_places",
+        // Three alternatives: all three places are listed.
+        must_contain: &[
+            "x is bound from t.0, t.1 or t.2, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.0, t.1 or t.2, whichever alternative of the pattern matches. If it's the alternative that binds x from t.2, t.2's resource is moved into x here; otherwise t.2 still owns it (Rust tracks this with a runtime drop flag).",
+            "t.2 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &["Move from t.0 to x", "=t.2 goes out of scope. Its resource is dropped."],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -11655,25 +11738,25 @@ fn guard_that_moves_is_refused() {
         "expected the guard-move refusal, got:\n{}", msg);
 }
 
-/// An or-pattern over a tuple of several matched values that binds `x`
-/// from `a` in one alternative and from `b` in the other (#503): which
-/// one `x` comes from is only known at run time, so the plugin refuses
-/// rather than draw `x` as taken from `a`.
+/// An or-pattern arm that binds a name from different places can't be
+/// drawn when the name is a reference (`ref x`, a borrow of one of the
+/// places) or a tuple / struct with columns of its own: refused with a
+/// message that says why, rather than drawn as taken from the first
+/// place (#533).
 #[test]
-fn or_pattern_binding_from_different_values_is_refused() {
+fn or_pattern_binding_a_reference_or_struct_from_different_places_is_refused() {
     env::set_var("RV_RUNNER", "local");
-    let src = "fn main() {\n\
-               \x20   let a: Option<String> = None;\n\
-               \x20   let b = Some(String::from(\"b\"));\n\
-               \x20   match (a, b) {\n\
-               \x20       (Some(x), _) | (_, Some(x)) => println!(\"{}\", x),\n\
-               \x20       _ => println!(\"none\"),\n\
-               \x20   }\n\
-               }\n";
-    let err = Rustviz::new(src).expect_err("an or-pattern binding from either value must not render");
-    let msg = err.to_string();
-    assert!(msg.contains("or-patterns that bind `x` from different places in the value being matched"),
-        "expected the or-pattern refusal, got:\n{}", msg);
+    for (src, what) in [
+        ("fn main() {\n    let t = (String::from(\"a\"), String::from(\"b\"));\n    match t {\n        (ref x, _) | (_, ref x) => println!(\"{}\", x),\n    }\n}\n",
+         "the reference `x`"),
+        ("struct P { n: String }\nfn main() {\n    let t = (P { n: String::from(\"a\") }, P { n: String::from(\"b\") });\n    match t {\n        (x, _) | (_, x) => println!(\"{}\", x.n),\n    }\n}\n",
+         "the struct or tuple `x`"),
+    ] {
+        let err = Rustviz::new(src).expect_err("an or-pattern binding of this kind must not render");
+        let msg = err.to_string();
+        assert!(msg.contains(&format!("or-patterns that bind {} from different places in the value being matched", what)),
+            "expected the or-pattern refusal, got:\n{}", msg);
+    }
 }
 
 /// A `return` inside a branch drops every value the function still owns
