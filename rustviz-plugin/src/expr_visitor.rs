@@ -364,6 +364,16 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // (`chain_binding_columns`, #583, #584); handed to the renderer's
   // `VisualizationData::binding_columns`.
   pub binding_columns: Vec<(u64, u64)>,
+
+  // `r?` with `r` a non-`Copy` place moves `r` (#652). Set while
+  // `match_rhs` draws that move into the variable `r?` is bound to;
+  // the Move events made meanwhile carry it.
+  pub try_move: Option<TryMove>,
+  // Each such `?` expression whose move is drawn: `Some(id)` if
+  // `note_try` drew it as a move into the `?` alone (event `id`), which
+  // `match_rhs` replaces with a move to the variable if `r?` is bound
+  // to one; `None` if `match_rhs` drew it first.
+  pub try_moves: HashMap<rustc_hir::HirId, Option<usize>>,
 }
 
 /// See `ExprVisitor::live_tuples`.
@@ -468,6 +478,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       rustc_middle::ty::TypingEnv::post_analysis(self.tcx, owner),
       ty,
     )
+  }
+
+  /// `try_expr` is `r?` (a `MatchSource::TryDesugar` match) with `r` a
+  /// variable, or a field of one, that has a column and isn't `Copy`:
+  /// `Try::branch(r)` takes it by value, so the `?` moves it (#652).
+  /// Its column, which `Try` type it is, and `r`.
+  pub fn try_moved_place(&self, try_expr: &'tcx Expr<'tcx>) -> Option<(ResourceAccessPoint, TryMove, &'tcx Expr<'tcx>)> {
+    fn is_place(e: &Expr) -> bool {
+      match e.kind {
+        ExprKind::Path(QPath::Resolved(None, p)) => matches!(p.res, Res::Local(_)),
+        ExprKind::Field(base, _) => is_place(base),
+        _ => false,
+      }
+    }
+    let ExprKind::Match(scrutinee, _, rustc_hir::MatchSource::TryDesugar(_)) = try_expr.kind else { return None };
+    let ExprKind::Call(_, [operand]) = scrutinee.kind else { return None };
+    if !is_place(operand) || operand.span.from_expansion() {
+      return None;
+    }
+    let typeck = self.tcx.typeck(operand.hir_id.owner);
+    if let ExprKind::Field(base, _) = operand.kind {
+      // A union is one opaque column.
+      if typeck.expr_ty(base).is_union() {
+        return None;
+      }
+    }
+    let ty = typeck.expr_ty(operand);
+    if self.ty_is_copy(ty, operand.hir_id.owner) {
+      return None;
+    }
+    let ResourceTy::Value(rap) = get_rap(operand, &self.tcx, &self.raps) else { return None };
+    if rap.is_fn() {
+      return None;
+    }
+    let kind = match ty.ty_adt_def() {
+      Some(adt) if self.tcx.is_diagnostic_item(rustc_span::sym::Result, adt.did()) => TryMove::Result,
+      Some(adt) if self.tcx.is_diagnostic_item(rustc_span::sym::Option, adt.did()) => TryMove::Option,
+      _ => TryMove::Other,
+    };
+    Some((rap, kind, operand))
   }
 
   /// True iff `ty` is not `Copy` but has nothing to drop (no drop glue):
@@ -1173,7 +1223,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false, via_try: None }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -1220,7 +1270,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_external_event(line_num, if is_copy {
         ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false }
       } else {
-        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false }
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_out: false, via_try: None }
       });
     }
   }
@@ -1257,6 +1307,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         into_closure: false,
         loop_head: LoopHead::No,
         break_out: false,
+        via_try: None,
       });
       self.move_struct_fields_away(line_num, &name);
     }
@@ -1382,7 +1433,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
       Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_out: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_out: false, via_try: self.try_move },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
@@ -4940,6 +4991,21 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       if let rustc_hir::MatchSource::TryDesugar(_) = source {
         match scrutinee.kind {
           ExprKind::Call(_, [operand]) => {
+            // `let n = r?;` with `r` a non-`Copy` place: the `?` moves
+            // `r`, and `n` gets the value inside it (#652). Drawn as a
+            // move from `r` to `n`, in place of the move into the `?`
+            // `note_try` drew if it got here first.
+            if matches!(lhs, ResourceTy::Value(_) | ResourceTy::Caller) {
+              if let Some((_, kind, _)) = self.try_moved_place(rhs) {
+                if let Some(Some(id)) = self.try_moves.insert(rhs.hir_id, None) {
+                  self.preprocessed_events.retain(|(_, e)| e.get_id() != id);
+                }
+                self.try_move = Some(kind);
+                self.match_rhs(lhs, operand, Evt::Move);
+                self.try_move = None;
+                return;
+              }
+            }
             self.match_rhs(lhs, operand, evt);
           }
           _ => {

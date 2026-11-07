@@ -1053,6 +1053,9 @@ pub enum TupleDropAt {
     MatchArmExit,
     /// Here, at the end of the match (a one-arm match, drawn inline).
     MatchHere,
+    /// Only if the `?` here, inside the arm or if branch, returns early
+    /// (#653).
+    TryReturns,
 }
 
 /// A variable whose value, or part of it (`rest`: the pattern moved
@@ -1127,6 +1130,22 @@ pub enum LoopHead {
     Iterator,
 }
 
+/// A move made by the `?` operator (#652). `r?` is
+/// `match Try::branch(r) { Continue(v) => v, Break(e) => return
+/// FromResidual::from_residual(e) }`: `Try::branch` takes `r` by value,
+/// so a non-`Copy` `r` is moved on both paths. On success the value
+/// inside goes on (to the variable bound to `r?`, if any); on failure
+/// the function returns early, handing the error (converted with
+/// `From`) or the `None` to the caller. Which success / failure the
+/// tooltips name depends on `r`'s type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum TryMove {
+    Result,
+    Option,
+    /// Another `Try` type (`ControlFlow`, `Poll<Result<..>>`).
+    Other,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExternalEvent {
     /* let binding, e.g.: let x = 1 */
@@ -1154,12 +1173,15 @@ pub enum ExternalEvent {
     // (`if c { break k; }`, #431). The move is drawn where the loop
     // ends, which is also where `from` goes out of scope on the
     // iterations that don't break, and those drop its resource.
+    // `via_try`: the move is made by the `?` operator (`let n = r?;`,
+    // #652); see TryMove.
     Move {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
         into_closure: bool,
         loop_head: LoopHead,
+        via_try: Option<TryMove>,
         id: usize,
         break_out: bool,
     },
@@ -1561,9 +1583,11 @@ pub enum Event {
     // y obtained its value from x, which means that the Acquire
     // Event's "from" variable is x.
     // TODO do we need mut/static_acquire for get_state?
+    // `via_try`: see ExternalEvent::Move.
     Acquire {
         from: ResourceTy,
         is: ResourceTy,
+        via_try: Option<TryMove>,
         id: usize
     },
     // this happens when a ResourceAccessPoint implements copy trait or
@@ -1602,6 +1626,7 @@ pub enum Event {
         is: ResourceTy,
         into_closure: bool,
         loop_head: LoopHead,
+        via_try: Option<TryMove>,
         id: usize,
         break_out: bool,
     },
@@ -2303,6 +2328,15 @@ impl Event {
                     _ => safe_message(hover_messages::event_dot_copy_to, &self.deref_name(my_name), to)
                 }
             }
+            // `let n = r?;` / `r?`: the `?` moves r (#652).
+            Event::Move{ to, is, via_try: Some(kind), ..} => {
+                let target = match to {
+                    ResourceTy::Value(r) => Some(r.name().to_owned()),
+                    ResourceTy::Caller => Some("the caller".to_owned()),
+                    _ => None,
+                };
+                hover_messages::event_dot_move_into_try(&self.deref_name(my_name), target.as_ref(), *kind, is_plain(is))
+            }
             // Moving a `&mut` moves the reference, not its referent; so
             // does moving a struct with a `&T` field (#637).
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::MutRef(r)), ..} if !to.is_closure() => {
@@ -2375,6 +2409,17 @@ impl Event {
                 safe_message(hover_messages::event_dot_mut_return, &self.deref_name(my_name), to)
             }
             // arrow going in
+            // `n` in `let n = r?;` (#652).
+            Event::Acquire{ from: ResourceTy::Value(from), is, via_try: Some(kind), ..} => {
+                let holds = match is.extract_rap() {
+                    Some(r) if r.is_mutref() => "is bound to the mutable reference",
+                    Some(r) if r.is_ref() => "is bound to the immutable reference",
+                    Some(r) if r.is_copy_owner() => "is initialized with the value",
+                    _ if is_plain(is) => "is bound to the value",
+                    _ => "acquires ownership of the resource",
+                };
+                hover_messages::event_dot_acquire_from_try(&self.deref_name(my_name), from.name(), *kind, holds)
+            }
             Event::Acquire{ from, is, ..} => {
                 if is.is_closure() && from.extract_rap().is_some() {
                     // `f` (closure) acquiring from a real source —
@@ -3369,16 +3414,16 @@ impl Visualizable for VisualizationData {
     fn event_of_exteranl_event(&self, line_num: usize, ext_ev: &ExternalEvent, to_o: bool) -> Vec<(usize, Event)> {
       match ext_ev {
         ExternalEvent::Bind { from, to, id } => {
-          if to_o { vec![(line_num,  Event::Acquire{from : from.to_owned(), is: to.clone(), id: *id})] }
+          if to_o { vec![(line_num,  Event::Acquire{from : from.to_owned(), is: to.clone(), via_try: None, id: *id})] }
           else { vec![(line_num, Event::Duplicate{to : to.to_owned(), is: from.clone(), into_closure: false, id: *id})] }
         },
         ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, ..} => {
           if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
           else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, id: *id})] }
         },
-        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_out, ..} => {
-          if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
-          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: *loop_head, id: *id, break_out: *break_out})] }
+        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_out, via_try, ..} => {
+          if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: *via_try, id: *id})] }
+          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: *loop_head, via_try: *via_try, id: *id, break_out: *break_out})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
@@ -3651,13 +3696,13 @@ impl Visualizable for VisualizationData {
 
         match event {
             // eg let ro_to = String::from("");
-            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_out, ..} => {
-                maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, id: id, break_out}, line_number);
+            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_out, via_try, ..} => {
+                maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try, id: id}, line_number);
+                maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_out}, line_number);
             },
             // eg: let ro_to = 5;
             ExternalEvent::Bind{from: from_ro, to: to_ro, id} => {
-                maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
+                maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: None, id: id}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, id: id}, line_number);
             },
             // eg: let x : i64 = y as i64;

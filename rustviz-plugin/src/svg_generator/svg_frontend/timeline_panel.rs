@@ -2241,7 +2241,7 @@ fn union_write_title(
     // value written is Copy (`PlaceWrite`); a literal's event is an
     // Acquire either way, so the event's kind can't tell.
     let (from, id, written) = match event {
-        Event::Acquire { from, is: ResourceTy::Value(w), id } => (from, *id, w),
+        Event::Acquire { from, is: ResourceTy::Value(w), id, .. } => (from, *id, w),
         Event::Copy { from, is: ResourceTy::Value(w), id } => (from, *id, w),
         _ => return None,
     };
