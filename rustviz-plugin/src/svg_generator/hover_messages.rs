@@ -1086,7 +1086,9 @@ pub fn event_dot_copyable_assign_copy(my_name: &String, from_name: &String) -> S
 // - `r = s;`, s: `&T`: the reference in s is copied; what it points
 //   to isn't (the counterpart of "s's reference is copied (not the
 //   resource it points to)" on s's column).
-// - `r = s;`, s: `&mut T`: the reference is moved out of s.
+// - `r = s;`, s: `&mut T`: the reference is moved out of s (the arrow
+//   says "Move from s to r"; like any place assignment, the dot reads
+//   like `r = s`, with no "(moved out of s)", #650).
 // - `r = first(..);`: the call's result. Not "the reference first
 //   returns": while shadowing bindings share a column (#173), the
 //   result can be a new binding's non-reference value
@@ -1101,7 +1103,7 @@ pub fn event_dot_ref_assign(my_name: &String, from: &ResourceAccessPoint, copied
     } else if from.is_ref() && copied {
         Some(format!("{0} is assigned a copy of {1}'s reference", r, f))
     } else if from.is_ref() {
-        Some(format!("{0} is assigned {1}'s {2} reference (moved out of {1})", r, f, kind))
+        Some(format!("{0} is assigned {1}'s {2} reference", r, f, kind))
     } else {
         None
     }

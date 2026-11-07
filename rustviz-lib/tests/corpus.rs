@@ -8007,11 +8007,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m1's mutable borrow ends",
             "Return mutably borrowed resource from m2 to u",
             "Return mutably borrowed resource from m1 to w",
+            // Reads like `m1 = m2` (#650); the arrow names the source.
+            "m1 is assigned m2's mutable reference",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from r1 to x",
             "Return immutably borrowed resource from t to a",
             "Return mutably borrowed resource from m1 to u",
+            "(moved out of m2)",
         ],
     },
     TooltipExpect {
@@ -10105,6 +10108,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from hold.r to t",
             "Return immutably borrowed resource from hold.r to a",
             "Return immutably borrowed resource from hold.r to b",
+            // `hold = other;` reads like a plain assignment.
+            "hold.r is assigned other.r's immutable reference",
             "other.r's mutable reference is moved (not the resource it points to)",
             "Return mutably borrowed resource from hold.r to u",
             "Move from o.inner.r to o2.inner.r",
@@ -10130,6 +10135,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // A reference doesn't own what it points to.
             "other.r's resource is moved",
             "o.inner.r's resource is moved",
+            // A place assignment has no "(moved out of …)" parenthetical;
+            // the arrow says where the reference came from.
+            "moved out of other.r",
         ],
     },
 ];
