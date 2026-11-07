@@ -2058,17 +2058,17 @@ pub fn state_uninitialized(my_name: &String) -> String {
 /// `label` is the arm's label (see `BranchType`): "If" / "Else" /
 /// `IF_LET_ARM` for an `if`, the arm's pattern for a `match`.
 pub fn state_inactive_arm(my_name: &String, label: &str) -> String {
-    let (arm, other) = match label {
-        "If" => (format!("the {} branch", fmt_style(&"if".to_owned())), "another branch"),
-        "Else" => (format!("the {} branch", fmt_style(&"else".to_owned())), "another branch"),
-        l if l == IF_LET_ARM => (format!("the {} branch", fmt_style(&"if let".to_owned())), "another branch"),
-        l => (format!("the {} arm", fmt_style(&l.to_owned())), "another arm"),
+    let name = match label {
+        "If" => "if".to_owned(),
+        "Else" => "else".to_owned(),
+        l if l == IF_LET_ARM => "if let".to_owned(),
+        l => l.to_owned(),
     };
+    let arm = format!("the {} branch", fmt_style(&name));
     format!(
-        "{0} on the path through {1}: {1} isn't running on these lines ({2}'s code is here), so nothing happens to {0} here",
+        "{0} on the path through {1}: {1} isn't running on these lines (another branch's code is here), so nothing happens to {0} here",
         fmt_style(my_name),
-        arm,
-        other
+        arm
     )
 }
 

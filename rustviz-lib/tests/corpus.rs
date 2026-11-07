@@ -9395,15 +9395,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "dashed_arm_hover",
         must_contain: &[
             "s on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to s here",
-            "t on the path through the _ arm: the _ arm isn't running on these lines (another arm's code is here), so nothing happens to t here",
+            "t on the path through the _ branch: the _ branch isn't running on these lines (another branch's code is here), so nothing happens to t here",
             "opt on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to opt here",
             "s is the owner of the resource",
             "t is the owner of the resource",
         ],
         must_not_contain: &[
             "nothing happens to c here",
-            "the if branch isn't running on these lines (another arm's",
-            "the _ arm isn't running on these lines (another branch's",
+            "another arm's code is here",
+            "the _ arm isn't running",
         ],
     },
     // ─── `let` patterns that ignore parts of a literal (#439) ───────
