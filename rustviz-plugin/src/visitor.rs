@@ -3396,23 +3396,41 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
               // add callback events - events that need to happen at the end of an arm block
               // ex: if a pattern binding borrows from a parent
+              let pat_end = span_end_line(&arm.pat.span, &self.tcx);
+              let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
               for (to, from, e) in callback_events {
                 let name = from.real_name();
                 self.borrow_map.remove(&name);
+                // The borrow ends where the borrow checker ends it, at
+                // the binding's last use (#599): the end of the region
+                // of the loan MIR issues for the binding on the pattern's
+                // lines. A binding that reborrows through a shared
+                // reference (`(x, _)` on `o: &(String, String)`) has no
+                // loan of its own; its borrow lasts as long as it is
+                // live.
+                let ends_at = mir_b_data.iter()
+                  .filter(|m| m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+                  .map(|m| m.region.1)
+                  .max()
+                  .or_else(|| self.last_live_line(&name, (pat_line, end)))
+                  .filter(|l| (pat_line..=end).contains(l))
+                  .unwrap_or(end);
                 // When the scrutinee is itself a reference (`match o`,
                 // `o: &Option<String>`), the binding reborrows through
                 // it, so `o`'s borrow lasts at least until here (#372).
                 if to.is_ref() {
-                  let floor = self.borrow_floor.entry(to.real_name()).or_insert(end);
-                  *floor = (*floor).max(end);
+                  let floor = self.borrow_floor.entry(to.real_name()).or_insert(ends_at);
+                  *floor = (*floor).max(ends_at);
                 }
                 let id = *self.unique_id;
                 *self.unique_id += 1;
                 let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
                 if inline {
-                  self.add_external_event(end, ext_ev);
+                  self.add_external_event(ends_at, ext_ev);
                 } else {
-                  branch_e_data.push((end, ext_ev));
+                  // After the arm's events up to that line.
+                  let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
+                  branch_e_data.insert(at, (ends_at, ext_ev));
                 }
               }
 
