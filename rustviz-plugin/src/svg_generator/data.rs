@@ -986,11 +986,15 @@ pub enum ExternalEvent {
         into_closure: bool,
         id: usize
     },
+    // `loop_iterator`: a `for` loop's head (`for s in v`, `for s in
+    // it`) moved into the loop's hidden iterator, which has drop glue
+    // (#482). Only the for-loop arm of the visitor sets it.
     Move {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
         into_closure: bool,
+        loop_iterator: bool,
         id: usize
     },
     // `is_reborrow`: the borrow was written `&*r` / `&mut *r` with
@@ -1299,6 +1303,7 @@ pub enum Event {
         to: ResourceTy,
         is: ResourceTy,
         into_closure: bool,
+        loop_iterator: bool,
         id: usize
     },
 
@@ -1854,6 +1859,9 @@ impl Event {
                     _ => to.name(),
                 };
                 hover_messages::event_dot_copy_through_deref_field(r.name(), place, &target, r.points_to_copy())
+            }
+            Event::Move{ loop_iterator: true, ..} => {
+                hover_messages::event_dot_move_into_loop_iterator(&self.deref_name(my_name))
             }
             Event::Duplicate{ to, is, ..} => {
                 match to {
@@ -2845,9 +2853,9 @@ impl Visualizable for VisualizationData {
           if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
           else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, id: *id})] }
         },
-        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, ..} => {
+        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_iterator, ..} => {
           if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
-          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, id: *id})] }
+          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_iterator: *loop_iterator, id: *id})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id})] }
@@ -3088,9 +3096,9 @@ impl Visualizable for VisualizationData {
 
         match event {
             // eg let ro_to = String::from("");
-            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, ..} => {
+            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_iterator, ..} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, id: id}, line_number);
+                maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_iterator, id: id}, line_number);
             },
             // eg: let ro_to = 5;
             ExternalEvent::Bind{from: from_ro, to: to_ro, id} => {
