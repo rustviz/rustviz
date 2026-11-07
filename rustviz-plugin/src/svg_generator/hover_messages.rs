@@ -353,7 +353,7 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String) -> String {
 
 /// Whether `acquire` is the plain "acquires ownership of a resource" line
 /// that `reassign` (`event_dot_owner_drop_at_reassign`) already says, for
-/// the same variable, with more (#506).
+/// the same variable, with more (#506, #519).
 pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
     const SUFFIX: &str = " acquires ownership of a new resource; its previous resource is dropped";
     // (an Rc / Arc / Weak's drop note may follow the suffix, #373)
