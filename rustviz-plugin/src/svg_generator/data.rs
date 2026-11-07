@@ -242,13 +242,19 @@ pub enum TempPart {
     /// is moved out.
     Field(String),
     /// The scrutinee of a `match` whose arms' patterns bind parts of it
-    /// by value.
-    Match,
+    /// by value. With a field path when the scrutinee is that field of
+    /// the temporary (`match make_p().name { .. }`, #605).
+    Match(Option<String>),
     /// The scrutinee of an `if let` whose pattern binds parts of it by
-    /// value.
-    IfLet,
+    /// value (or of that field of it).
+    IfLet(Option<String>),
     /// The same for a `while let`.
-    WhileLet,
+    WhileLet(Option<String>),
+    /// The same for a `let`-`else` (#605).
+    LetElse(Option<String>),
+    /// The base of a struct update (`P { n: 1, ..make_p() }`): these
+    /// fields, which the literal doesn't name, are moved out (#605).
+    UpdateBase(Vec<String>),
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std

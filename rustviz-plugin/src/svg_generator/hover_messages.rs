@@ -418,14 +418,47 @@ pub fn event_dot_unbound_temporary_part_acquire(_my_name: &String, from_name: &S
             "A temporary holds the value that {0}. Its field {1} is moved out of it; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
             source, fmt_style(f)
         ),
-        TempPart::Match => format!(
+        // `P { n: 1, ..make_p() }` (#605).
+        TempPart::UpdateBase(fs) => format!(
+            "A temporary holds the value that {0}. The struct update `..` moves {1} out of it, into the struct being built; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
+            source, its_fields(fs)
+        ),
+        TempPart::Match(None) => format!(
             "A temporary holds the value that {0}, for the match to inspect. The pattern of the arm that runs can move parts of it into its bindings; what is left in it is dropped with the temporary after the match",
             source
         ),
-        TempPart::IfLet | TempPart::WhileLet => format!(
-            "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
-            source, if matches!(part, TempPart::IfLet) { "`if let`" } else { "`while let`" }
+        // `match make_p().name { .. }` (#605).
+        TempPart::Match(Some(f)) => format!(
+            "A temporary holds the value that {0}, for the match to inspect its field {1}. The pattern of the arm that runs can move that field, or parts of it, into its bindings; what is left in the temporary is dropped with it after the match",
+            source, fmt_style(f)
         ),
+        TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) => format!(
+            "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
+            source, let_kind(part)
+        ),
+        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) => format!(
+            "A temporary holds the value that {0}, for the {1} to match its field {2} against. If the pattern matches, it can move that field, or parts of it, into its bindings; what is left in the temporary (all of it, if the pattern doesn't match) is dropped with it",
+            source, let_kind(part), fmt_style(f)
+        ),
+    }
+}
+
+// "`if let`", "`while let`", "`let`-`else`".
+fn let_kind(part: &TempPart) -> &'static str {
+    match part {
+        TempPart::WhileLet(_) => "`while let`",
+        TempPart::LetElse(_) => "`let`-`else`",
+        _ => "`if let`",
+    }
+}
+
+// "its field a", "its fields a and b", "its fields a, b and c".
+fn its_fields(fs: &[String]) -> String {
+    let names: Vec<String> = fs.iter().map(fmt_style).collect();
+    match names.as_slice() {
+        [one] => format!("its field {}", one),
+        [rest @ .., last] => format!("its fields {} and {}", rest.join(", "), last),
+        [] => "its fields".to_owned(),
     }
 }
 
@@ -433,6 +466,12 @@ pub fn event_dot_unbound_temporary_part_acquire(_my_name: &String, from_name: &S
 pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part: &TempPart) -> String {
     match part {
         TempPart::Field(f) => format!("{0}'s field {1} is moved to {2}", fmt_style(my_name), fmt_style(f), fmt_style(to_name)),
+        // `let q = P { n: 1, ..make_p() };`: a field of the base goes to
+        // the field of the same name (`q.name`, #605).
+        TempPart::UpdateBase(_) => {
+            let f = to_name.rsplit('.').next().unwrap_or(to_name).to_owned();
+            format!("The struct update `..` moves {0}'s field {1} to {2}", fmt_style(my_name), fmt_style(&f), fmt_style(to_name))
+        }
         _ => format!("The pattern moves {0}'s value, or part of it, into {1}", fmt_style(my_name), fmt_style(to_name)),
     }
 }
@@ -491,13 +530,25 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
             "This temporary {0} is dropped {1}, and with it everything in it but its field {2}, which was moved out of it",
             fmt_style(ty), when, fmt_style(f)
         ),
-        TempPart::Match => format!(
+        TempPart::UpdateBase(fs) => format!(
+            "This temporary {0} is dropped {1}, and with it everything in it but {2}, which the struct update moved out of it",
+            fmt_style(ty), when, its_fields(fs)
+        ),
+        TempPart::Match(None) => format!(
             "This temporary {0} is dropped {1}, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
             fmt_style(ty), when
         ),
-        TempPart::IfLet | TempPart::WhileLet => format!(
+        TempPart::Match(Some(f)) => format!(
+            "This temporary {0} is dropped {1}, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field {2}",
+            fmt_style(ty), when, fmt_style(f)
+        ),
+        TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) => format!(
             "This temporary {0} is dropped {1}, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             fmt_style(ty), when
+        ),
+        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) => format!(
+            "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2} (all of it, if the pattern didn't match)",
+            fmt_style(ty), when, fmt_style(f)
         ),
     }
 }

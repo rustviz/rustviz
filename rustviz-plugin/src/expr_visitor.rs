@@ -5334,6 +5334,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
               let e = if field_is_copy { Evt::Copy } else { Evt::Move };
               self.add_ev(base_line, e, dest, ResourceTy::Value(src_rap), false);
             }
+            // `..make_p()` whose temporary keeps fields that need
+            // dropping: the field is moved out of its column (#605).
+            None if !field_is_copy && matches!(dest, ResourceTy::Value(_)) && self.part_temp_of(base_expr).is_some() => {
+              let tmp = self.part_temp_of(base_expr).unwrap();
+              self.add_ev(base_line, Evt::Move, dest, ResourceTy::Value(tmp), true);
+            }
             // `..Default::default()` and other non-place bases: the
             // field gets its value from a temporary.
             None => {

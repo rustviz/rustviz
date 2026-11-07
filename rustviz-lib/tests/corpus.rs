@@ -1164,6 +1164,9 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_end_nll_loop",
     // `continue 'outer` drops the inner loops' iterators (#600).
     "for_iterator_continue_outer",
+    // A let-else scrutinee, a struct update's base, a temporary whose
+    // field is matched on: the rest is dropped with it (#605).
+    "temporary_let_else_update_matched_field",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13131,6 +13134,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Stated once, with #410's wording.
             "is left early, while this temporary is still alive",
             "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
+        ],
+    },
+    TooltipExpect {
+        name: "temporary_let_else_update_matched_field",
+        // Three more temporaries something is moved out of (#605); before,
+        // nothing about them was drawn, so the drops of the `Err(String)`
+        // that `Ok(s)` refuses, of the `_` String, of the `O`'s `tag`, of
+        // make_p()'s `name` (the literal names its own) and of the matched
+        // P's `tag` were stated nowhere. Timing checked with a
+        // Drop-printing program (edition 2024; let-else is the same in
+        // 2021): a let-else's temporary is dropped right after its pattern
+        // is matched, before the `else` block runs if it doesn't match; a
+        // struct update's base at the end of its `let`; a matched field's
+        // temporary when the match ends; an `if let`'s when its block ends.
+        // `R { n: 2, ..make_r() }` leaves only an i32 in the temporary: no
+        // column. `K { name: .., ..make_k() }` only copies `n` out of its
+        // base, which is dropped whole. `let (c, _) = make_w().pair;`
+        // leaves pair.1 in its temporary, whose drop is not stated (README
+        // Limitations); #469's column there was wrong (see below).
+        must_contain: &[
+            "Move from res to (temporary)",
+            "A temporary holds the value that res returns, for the `let`-`else` to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
+            "This temporary Result<String, String> is dropped as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match), and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Move from opt_pair to (temporary 2)",
+            "This temporary Option<(String, String)> is dropped as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match), and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Move from make_o to (temporary 3)",
+            "A temporary holds the value that make_o returns, for the `let`-`else` to match its field opt against. If the pattern matches, it can move that field, or parts of it, into its bindings; what is left in the temporary (all of it, if the pattern doesn't match) is dropped with it",
+            "This temporary O is dropped as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match), and with it everything in it but what the pattern moved out of its field opt (all of it, if the pattern didn't match)",
+            "Move from make_p to (temporary 4)",
+            "A temporary holds the value that make_p returns. The struct update `..` moves its field tag out of it, into the struct being built; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
+            "Partial move from (temporary 4) to q.tag",
+            "The struct update `..` moves (temporary 4)'s field tag to q.tag",
+            "This temporary P is dropped at the end of this statement, and with it everything in it but its field tag, which the struct update moved out of it",
+            "Move from make_k to (temporary 5)",
+            "This temporary K is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "Move from make_p to (temporary 6)",
+            "A temporary holds the value that make_p returns, for the match to inspect its field name. The pattern of the arm that runs can move that field, or parts of it, into its bindings; what is left in the temporary is dropped with it after the match",
+            "This temporary P is dropped when the match ends, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field name",
+            "Move from make_o to (temporary 7)",
+            "This temporary O is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it everything in it but what the pattern moved out of its field opt (all of it, if the pattern didn't match)",
+            "q.tag goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            // Nothing is left in make_r()'s temporary that needs dropping.
+            "Move from make_r to (temporary",
+            "(temporary 8)",
+            // #571's wording would deny the moves out of these temporaries.
+            "=This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary Result<String, String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary O is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            // A struct update's base keeps the fields the literal names:
+            // "which was moved out of it" for the whole base would be false.
+            "everything in it but its field name",
+            // `let (c, _) = make_w().pair;` moves only pair.0 out (#469's
+            // column said all of pair was; the `_` String stays in the
+            // temporary). Not drawn now.
+            "its field pair, which was moved out of it",
+            "'s field pair is moved to c",
         ],
     },
 ];
