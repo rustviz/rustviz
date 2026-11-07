@@ -1055,6 +1055,14 @@ const EXPECTED_OK: &[&str] = &[
     "exit_borrowed_owner_panic",
     "exit_borrowed_owner_mut_arm",
     "exit_arm_binding_nested_return",
+    // The value each branch of a returned `if` / `match` yields goes to
+    // the caller in that branch (#674).
+    "return_tail_if",
+    "return_tail_match",
+    "return_tail_if_nested",
+    "return_if_value",
+    "return_tail_if_refs",
+    "mutref_moved_in_branch",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11784,6 +11792,102 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["=a goes out of scope. No resource is dropped."],
+    },
+    // #674: `if b { s } else { String::new() }` as the last expression
+    // moves s to the caller only when b is true; otherwise s is still
+    // owned and dropped at the end of the function (a drop flag). Main
+    // drew no move and said s's resource is dropped, on every path.
+    TooltipExpect {
+        name: "return_tail_if",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            // A Copy value is copied to the caller and keeps its value.
+            "x's value is copied to the caller",
+            "x isn't moved in any of the branches above",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            // The join of the branch that copied x had no message.
+            "=",
+        ],
+    },
+    TooltipExpect {
+        name: "return_tail_match",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "t's resource is moved to the caller",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // u, declared in the branch that returns it, is always moved.
+    TooltipExpect {
+        name: "return_tail_if_nested",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "t's resource is moved to the caller",
+            "u's resource is moved to the caller",
+            "u goes out of scope. No resource is dropped.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // `return if b { s } else { t };`. In `early` the `return` is in a
+    // branch: on the path that falls through, p and q are still owned
+    // and dropped at the end.
+    TooltipExpect {
+        name: "return_if_value",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "t's resource is moved to the caller",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "p's resource is moved to the caller",
+            "q's resource is moved to the caller",
+            "p still owns its resource here: the branch that moved p returned before reaching this point",
+            "p goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // A shared reference is copied to the caller; a `&mut` one is moved
+    // on its path only, and owns nothing to drop on the others.
+    TooltipExpect {
+        name: "return_tail_if_refs",
+        must_contain: &[
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "a reference from y is returned to the caller; the data it points to is not copied",
+            "m's mutable reference is moved to the caller (not the resource it points to)",
+            "k's mutable reference is moved to the caller (not the resource it points to)",
+            "m was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+        ],
+        must_not_contain: &[
+            "its resource is dropped when m goes out of scope",
+            "its resource is dropped when k goes out of scope",
+        ],
+    },
+    // A `&mut` moved in one branch: main's join said "its resource is
+    // dropped when z goes out of scope"; z owns nothing.
+    TooltipExpect {
+        name: "mutref_moved_in_branch",
+        must_contain: &[
+            "z was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+        ],
+        must_not_contain: &[
+            "its resource is dropped when z goes out of scope",
+        ],
     },
 ];
 

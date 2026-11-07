@@ -400,6 +400,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `match_rhs` replaces with a move to the variable if `r?` is bound
   // to one; `None` if `match_rhs` drew it first.
   pub try_moves: HashMap<rustc_hir::HirId, Option<usize>>,
+
+  // The values a branch of the function's returned `if` / `match`
+  // yields (`if b { s } else { t }` as the tail or a `return`'s
+  // operand), by HirId: each goes to the caller when its branch runs,
+  // drawn where `visit_expr` visits it, inside its branch (#674).
+  pub tail_values: HashSet<rustc_hir::HirId>,
 }
 
 /// See `ExprVisitor::live_tuples`.

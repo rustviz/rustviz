@@ -1138,9 +1138,12 @@ fn render_dot(
                     let title = if reassigned_next {
                         hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name())
                     } else {
+                        // A `&mut` reference moved on some paths (`if b {
+                        // x } else { y }` returned, #674) owns nothing to
+                        // drop on the others.
                         hover_messages::event_dot_branch_merge_moved_with_drop(
                             &is.real_name(),
-                            is.extract_rap().map_or(false, |r| r.holds_value()),
+                            is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
                             &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
                         )
                     };
