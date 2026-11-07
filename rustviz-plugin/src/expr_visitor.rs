@@ -1120,7 +1120,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if let Some(alt) = &self.break_alt {
       if let ExternalEvent::Move { break_alt, .. } | ExternalEvent::Copy { break_alt, .. }
         | ExternalEvent::Bind { break_alt, .. } | ExternalEvent::StaticBorrow { break_alt, .. }
-        | ExternalEvent::MutableBorrow { break_alt, .. } = &mut event {
+        | ExternalEvent::MutableBorrow { break_alt, .. }
+        | ExternalEvent::PassByStaticReference { break_alt, .. }
+        | ExternalEvent::PassByMutableReference { break_alt, .. } = &mut event {
         *break_alt = Some(alt.clone());
       }
     }
@@ -1532,10 +1534,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
-        result_keeps_borrow: false, stored_in: StoredIn::default(),
+        result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
       },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() }
@@ -1701,7 +1703,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(),
+      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
     });
     *self.unique_id += 1;
   }
@@ -1710,7 +1712,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_sref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
-      from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(),
+      from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
     });
     *self.unique_id += 1;
   }
@@ -2682,11 +2684,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
-            implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in,
+            implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in, break_alt: None,
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in,
+            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in, break_alt: None,
           }
         });
         *self.unique_id += 1;

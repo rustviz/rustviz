@@ -1384,6 +1384,11 @@ pub enum ExternalEvent {
         // See `StoredIn`.
         stored_in: StoredIn,
         result_keeps_borrow: bool,
+        // The reference is one of several `break` values of a `loop`
+        // that is the call's argument (`take(loop { if c { break ra; }
+        // else { break rb; } })`, #662): passed only if that `break`
+        // ended the loop. See BreakAlt.
+        break_alt: Option<BreakAlt>,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -1400,6 +1405,7 @@ pub enum ExternalEvent {
         implicit: ImplicitRef, // see PassByStaticReference
         stored_in: StoredIn, // see PassByStaticReference
         result_keeps_borrow: bool,
+        break_alt: Option<BreakAlt>, // see PassByStaticReference
         id: usize
     },
     GoOutOfScope {
