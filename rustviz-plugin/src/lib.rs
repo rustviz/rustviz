@@ -137,6 +137,24 @@ fn want_full_panic_output() -> bool {
   set("RUSTVIZ_DEBUG") || set("RUST_BACKTRACE")
 }
 
+/// A short reason a student can read for a plugin panic. Our own
+/// `panic!("internal state: ...")` guards say what went wrong; the std
+/// messages from an `unwrap()` / `expect()` / index on a missing entry
+/// ("called `Option::unwrap()` on a `None` value") say nothing, so those
+/// are replaced by a generic reason (the file:line is kept for maintainers).
+fn friendly_reason(msg: &str) -> String {
+  if let Some(rest) = msg.strip_prefix("internal state: ") {
+    return rest.to_string();
+  }
+  if let Some(rest) = msg.strip_prefix("unsupported: ") {
+    return rest.to_string();
+  }
+  if msg.starts_with("called `Option::unwrap()`") || msg.starts_with("called `Result::unwrap()`") {
+    return "an internal lookup found nothing where RustViz expected something".to_string();
+  }
+  msg.to_string()
+}
+
 /// Run `f`, turning a panic into the one-line `rustviz: unsupported: ...`
 /// message. The panic hook is swapped only for the duration of `f`, so
 /// rustc's own handling of panics elsewhere is unchanged.
@@ -159,6 +177,7 @@ fn catch_plugin_panic(f: impl FnOnce()) -> Result<(), String> {
         .map_or_else(|| l.file().to_string(), |f| f.to_string_lossy().into_owned());
       format!("{}:{}", file, l.line())
     });
+    let msg = friendly_reason(&msg);
     let mut slot = LAST_PANIC.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot.is_none() {
       *slot = Some(match loc {

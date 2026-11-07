@@ -1905,7 +1905,7 @@ impl Event {
                 hover_messages::event_dot_mut_reacquire(&self.deref_name(my_name), &from_name, holds_copy_value(is))
             }
             Event::RefDie {..} => {
-              panic!("should never be calling this function with this event");
+              panic!("internal state: a RefDie event has no hover text of its own");
             },
             Event::Branch { .. } => {
               format!("{} is live in a conditional expression ", my_name)
@@ -2049,7 +2049,7 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         ExternalEvent::PassByStaticReference{ .. } => {
             String::from("Pass by immutable reference")
         },
-        _ => unreachable!(),
+        _ => panic!("internal state: external event has no pass-by-reference title"),
     }
 }
 
@@ -2144,7 +2144,7 @@ impl Visualizable for VisualizationData {
                         // let c = a; (Copy(a -> c)) even though c is technically borrowing from b at the end of the day
                         if r.is_ref() && is_ro.is_ref() {
                             if r.is_mutref() {
-                                panic!("Not possible, has to be a move");
+                                panic!("internal state: copying a `&mut` reference (it should have been a move)");
                             }
                             else {
                                 // we have to be copying an immutable reference, so the state must be partial
@@ -2155,7 +2155,7 @@ impl Visualizable for VisualizationData {
                             State::FullPrivilege {s: LineState::Full}
                         }
                     }
-                    _ => panic!("not possible")
+                    _ => panic!("internal state: a copy-initialization from a resource that is not a value, deref or anonymous")
                 }
             }
 
@@ -2172,7 +2172,7 @@ impl Visualizable for VisualizationData {
             (State::OutOfScope, Event::InitRefParam{ param: ro, .. })  => {
                 match ro {
                     ResourceAccessPoint::Function(..) => {
-                        panic!("Cannot initialize function as as valid parameter!")
+                        panic!("internal state: a function was initialized as a parameter")
                     },
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::MutRef(..) => {
                         State::FullPrivilege{s:LineState::Full}
@@ -2196,7 +2196,7 @@ impl Visualizable for VisualizationData {
                     State::FullPrivilege{ s: LineState::Full }
                 }
                 else { // immut variables cannot reacquire resource
-                    panic!("Immutable variable {} cannot reacquire resources!", self.get_name_from_hash(hash).unwrap());
+                    panic!("internal state: immutable variable `{}` re-acquires a resource after a move", self.get_name_from_hash(hash).unwrap_or_else(|| format!("#{}", hash)));
                 }
             },
 
@@ -2611,7 +2611,7 @@ impl Visualizable for VisualizationData {
                 );
             },
             _ => {
-                panic!("Timeline disappeared right after creation or when we could index it. This is impossible.");
+                panic!("internal state: timeline #{} vanished right after it was created", hash);
             }
         }
     }
@@ -2663,7 +2663,7 @@ impl Visualizable for VisualizationData {
                     else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }    
                   }
               }
-              _ => panic!("not possible")
+              _ => panic!("internal state: a RefDie event whose source is not a reference")
           }
         },
         // A reference the call may store (`StoredIn`) is given back
@@ -2707,7 +2707,7 @@ impl Visualizable for VisualizationData {
             },
             ResourceAccessPoint::Function(func) => {
               panic!(
-                  "Functions do not go out of scope! We do not expect to see \"{}\" here.",
+                  "internal state: function \"{}\" went out of scope, but functions never do",
                   func.name
               );
             }
@@ -2726,7 +2726,7 @@ impl Visualizable for VisualizationData {
           vec![(line_num, Event::LoopExitMove { definite: *definite, labeled_block: *labeled_block })]
         },
 
-        _ => panic!("should not be calling this on branches")
+        _ => panic!("internal state: a branch event reached the per-variable event expansion")
       }
     }
 
@@ -2973,7 +2973,7 @@ impl Visualizable for VisualizationData {
                             //maybe_append_event(self, &to_ro.clone(), Event::RefDie { from: from_ro, is: to_ro, num_curr_borrowers, id: id}, line_number);
                         }
                     }
-                    _ => panic!("not possible")
+                    _ => panic!("internal state: a RefDie event whose source is not a reference")
                 }
             },
 
@@ -3013,7 +3013,7 @@ impl Visualizable for VisualizationData {
                     },
                     ResourceAccessPoint::Function(func) => {
                         panic!(
-                            "Functions do not go out of scope! We do not expect to see \"{}\" here.",
+                            "internal state: function \"{}\" went out of scope, but functions never do",
                             func.name
                         );
                     }

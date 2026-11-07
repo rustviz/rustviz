@@ -399,7 +399,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
         } else {
             struct_name = match visualization_data.get_name_from_hash(&(hash as u64)) {
                 Some(_name) => _name,
-                None => panic!("no matching resource owner for hash {}", hash),
+                None => panic!("internal state: no variable has hash {}", hash),
             };
         }
         let timelinepanel_string = registry.render("timeline_panel_template", &timelinepanel).unwrap();
@@ -737,7 +737,7 @@ fn compute_column_layout<'a>(
             let timeline = &visualization_data.timelines[hash];
             let name = match visualization_data.get_name_from_hash(hash) {
                 Some(_name) => _name,
-                None => panic!("no matching resource owner for hash {}", hash),
+                None => panic!("internal state: no variable has hash {}", hash),
             };
             let mut x_space = cmp::max(70, (&(name.len() as i64) - 1) * 13);
             let (extent_left, extent_right) = *extent_map.get(hash).unwrap();
@@ -2033,7 +2033,7 @@ fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, 
 fn fetch_timeline<'a>(hash: &u64, vd: &'a VisualizationData, ro_layout: & 'a BTreeMap<u64, TimelineColumnData>, id: usize) -> & 'a TimelineColumnData {
     match traverse_timeline2(&ro_layout[hash], &vd.timelines[hash].history, id) {
         Some(t) => t,
-        None => panic!("Shouldn't be happening")
+        None => panic!("internal state: no layout column for the timeline of event {}", id)
     }
 }
 
@@ -2068,7 +2068,7 @@ fn fetch_line_map<'a>(
 ) -> & 'a BTreeMap<usize, Vec<ExternalEvent>> {
     match traverse_events2(&vd.external_events, &vd.event_line_map, id) {
         Some(t) => t,
-        None => panic!("Error getting a line map")
+        None => panic!("internal state: no line map for event {}", id)
     }
 }
 
@@ -2546,7 +2546,7 @@ fn render_arrow (
                     let title_fn = match external_event {
                         ExternalEvent::PassByStaticReference { .. } => " reads from ",
                         ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
-                        _ => unreachable!()
+                        _ => panic!("internal state: expected a pass-by-reference event here")
                     };
 
                     // Reborrow note for the call-dot tooltip. `f(r)`
@@ -4010,7 +4010,7 @@ mod tests {
     fn centers_of(events: &[(usize, Event)]) -> Vec<i64> {
         match &events[0].1 {
             Event::Branch { branch_history, .. } => branch_centers(branch_history),
-            _ => unreachable!(),
+            _ => panic!("internal state: expected a branch event here"),
         }
     }
 

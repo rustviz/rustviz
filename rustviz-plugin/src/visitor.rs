@@ -1522,7 +1522,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 r.aliasing.insert(deref_index + 1 + j, s.to_owned());
               }
             }
-            _ => panic!("not possible")
+            _ => panic!("internal state: a write through `*` whose target is neither a reference nor a plain dereference")
           }
         }
 
