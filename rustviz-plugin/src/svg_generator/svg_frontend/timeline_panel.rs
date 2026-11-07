@@ -2469,7 +2469,7 @@ fn render_arrow (
                 // is copied, not p's resource (#266).
                 ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } =>
                     hover_messages::event_dot_copy_through_deref_field(
-                        r.name(), place, &"the caller".to_string()),
+                        r.name(), place, &"the caller".to_string(), r.points_to_copy()),
                 _ => message(
                     &rap.name().to_string(),
                     &"the caller".to_string(),
