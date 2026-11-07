@@ -891,6 +891,7 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_different_places_copy",
     "or_pattern_different_fields",
     "or_pattern_three_places",
+    "or_pattern_tuple_scrutinee",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9627,18 +9628,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "or_pattern_different_values",
-        // `(Some(x), _) | (_, Some(x))` on `(a, b)`.
+        // `(Some(x), _) | (_, Some(x))` on `(a, b)`. Building the tuple
+        // moves a and b into it whatever arm runs (#327), so neither
+        // owns anything afterwards: x is bound from the tuple's copy of
+        // a's or b's value, and what x didn't take is dropped with the
+        // tuple after the arm (edition 2024). #566 first said a and b
+        // still owned it and were dropped at their scope end only if
+        // nothing moved them (a drop flag), which is false here.
         must_contain: &[
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved into x here; otherwise a still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved into x here; otherwise b still owns it (Rust tracks this with a runtime drop flag).",
-            "a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "a's resource is moved into the temporary tuple (a, b)",
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it whatever of a's and b's resources x didn't take",
+            // The `_` arm takes nothing out of the tuple.
+            "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it a's and b's resources",
+            "a was moved or dropped in every branch above",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
             "x goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "Move from a to x",
             "Move from b to x",
-            "=a goes out of scope. No resource is dropped.",
+            "otherwise a still owns it",
+            "otherwise b still owns it",
+            "drop flag",
+            "a was moved in at least one branch above",
+            "b was moved in at least one branch above",
+            "a goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "b goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "=a goes out of scope. Its resource is dropped.",
             "=b goes out of scope. Its resource is dropped.",
         ],
     },
@@ -9676,6 +9695,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t.2 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["Move from t.0 to x", "=t.2 goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        name: "or_pattern_tuple_scrutinee",
+        // `match (a, b)` / `match (a, b, c)` with an or-pattern arm that
+        // binds x from a or b: a, b and c are moved into the temporary
+        // tuple, x takes a's or b's value out of it, and the tuple's
+        // drop takes the rest (when the match ends: a one-arm match is
+        // drawn inline, so "here, at the end of the match"). Nothing is
+        // dropped at a's, b's or c's scope end, and no drop flag is
+        // involved (#566 first said there was).
+        must_contain: &[
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "The temporary tuple (a, b) is dropped here, at the end of the match, and with it whatever of a's and b's resources x didn't take",
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b, c) into x here; otherwise it stays in the tuple",
+            // c isn't bound by the arm: all of it goes with the tuple.
+            "The temporary tuple (a, b, c) is dropped after this arm, when the match ends, and with it c's resource and whatever of a's and b's resources x didn't take",
+            "The temporary tuple (a, b, c) is dropped after this arm, when the match ends, and with it a's, b's and c's resources",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "c goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "still owns it",
+            "drop flag",
+            "only if no branch above moved it",
+            "was moved in at least one branch above",
+            "=a goes out of scope. Its resource is dropped.",
+            "=b goes out of scope. Its resource is dropped.",
+            "=c goes out of scope. Its resource is dropped.",
+            // c's whole value is in the tuple whichever alternative
+            // matched.
+            "whatever of a's, b's and c's resources",
+        ],
     },
 ];
 

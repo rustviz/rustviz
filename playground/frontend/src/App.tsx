@@ -333,7 +333,9 @@ const Description: React.FC = () => (
       <li>
         An or-pattern arm that binds one name from different places (
         <code>(x, _) | (_, x)</code>) draws the name as a new value with no
-        arrow, and each place it may move from as maybe-moved. If the name is a
+        arrow, and each place it may move from as maybe-moved (in{' '}
+        <code>match (a, b)</code>, what the name didn't take is dropped with the
+        tuple). If the name is a
         reference (<code>ref x</code>) or a tuple or struct, the program is
         refused rather than drawn.
       </li>

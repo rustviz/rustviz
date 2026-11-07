@@ -648,19 +648,39 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
         tuple
     };
     // "p's resource", "p's and q's resources", "the rest of x's
-    // resource and y's resource".
-    let items = if with.len() > 1 && with.iter().all(|w| !w.rest && w.rc.is_none()) {
-        let names: Vec<String> = with.iter().map(|w| format!("{}'s", fmt_style(&w.name))).collect();
-        format!("{} resources", join_and(&names))
+    // resource and y's resource". An or-pattern arm whose alternatives
+    // take from different variables (`(Some(x), _) | (_, Some(x))`,
+    // #533): what's left of them depends on which alternative matched,
+    // so "whatever of a's and b's resources x didn't take", listed
+    // after the others ("c's resource and whatever of …").
+    let (plain, taken): (Vec<&TupleLeft>, Vec<&TupleLeft>) = with.iter().partition(|w| w.takers.is_empty());
+    let mut parts: Vec<String> = if plain.len() > 1 && plain.iter().all(|w| !w.rest && w.rc.is_none()) {
+        let names: Vec<String> = plain.iter().map(|w| format!("{}'s", fmt_style(&w.name))).collect();
+        vec![format!("{} resources", join_and(&names))]
     } else {
-        let items: Vec<String> = with.iter().map(|w| format!(
+        plain.iter().map(|w| format!(
             "{}{}'s resource{}",
             if w.rest { "the rest of " } else { "" },
             fmt_style(&w.name),
             rc_drop_note(w.rc),
-        )).collect();
-        join_and(&items)
+        )).collect()
     };
+    let mut groups: Vec<(&Vec<String>, Vec<&TupleLeft>)> = Vec::new();
+    for w in taken {
+        // (An Rc's note goes on its own item.)
+        match groups.iter_mut().find(|(t, ws)| **t == w.takers && w.rc.is_none() && ws.iter().all(|o| o.rc.is_none())) {
+            Some((_, ws)) => ws.push(w),
+            None => groups.push((&w.takers, vec![w])),
+        }
+    }
+    for (takers, ws) in groups {
+        let names: Vec<String> = ws.iter().map(|w| format!("{}'s", fmt_style(&w.name))).collect();
+        let notes: String = ws.iter().map(|w| rc_drop_note(w.rc)).collect();
+        let takers: Vec<String> = takers.iter().map(fmt_style).collect();
+        parts.push(format!("whatever of {} resource{}{} {} didn't take",
+            join_and(&names), if ws.len() > 1 { "s" } else { "" }, notes, join_and(&takers)));
+    }
+    let items = join_and(&parts);
     format!("{lead}{tuple} is dropped {when}, and with it {items}")
 }
 
@@ -2313,13 +2333,26 @@ pub fn event_dot_chain_fail_move(
 // alternative matches is decided at run time, so this place's resource
 // is moved into `into` only on some runs; the rest of the time it stays
 // here, and the drop flag decides whether it's dropped at scope end.
-pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]) -> String {
+// `tuple`: `my_name` is a variable a tuple-literal scrutinee (`match (a,
+// b)`) moved into its temporary tuple (#327). Then it's that value in
+// the tuple which may move into `into`, and what it doesn't take stays
+// in the tuple, which the tuple's own drop dot says is dropped: no drop
+// flag on `my_name`, which owns nothing either way.
+pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String], tuple: Option<&str>) -> String {
     let names: Vec<String> = sources.iter().map(|n| fmt_style(n)).collect();
     let list = match names.as_slice() {
         [] => String::new(),
         [one] => one.clone(),
         [init @ .., last] => format!("{} or {}", init.join(", "), last),
     };
+    if let Some(tuple) = tuple {
+        return format!(
+            "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
+             that binds {1} from {0}, {0}'s resource is moved out of {3} into {1} here; otherwise it stays \
+             in the tuple",
+            fmt_style(my_name), fmt_style(into), list, temporary_tuple(&tuple.to_owned())
+        );
+    }
     format!(
         "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
          that binds {1} from {0}, {0}'s resource is moved into {1} here; otherwise {0} still owns it \

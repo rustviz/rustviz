@@ -1032,6 +1032,11 @@ pub struct TupleLeft {
     pub name: String,
     pub rest: bool,
     pub rc: Option<RcDrop>,
+    /// An or-pattern arm whose alternatives take different parts of the
+    /// tuple (`(Some(x), _) | (_, Some(x))`, #533): the names that may
+    /// have taken some of this variable's value, depending on which
+    /// alternative matched at run time. Empty otherwise.
+    pub takers: Vec<String>,
 }
 
 /// Where an `ExternalEvent::LoopExitMove` happens.
@@ -1255,10 +1260,15 @@ pub enum ExternalEvent {
     // moves into `x` here; otherwise it stays in `ro`, so afterwards
     // `ro` is maybe-moved. Drawn as a dot on `ro`'s column only: `x`
     // gets a plain `Bind`, with no arrow to say where it came from.
+    // `tuple`: `ro` is a variable a tuple-literal scrutinee (`match (a,
+    // b)`) already moved into its temporary tuple (#327), so what may
+    // move into `x` is its value in that tuple, and `ro` itself owns
+    // nothing either way (the tuple's drop takes what `x` didn't).
     OrAltMove {
         ro: ResourceAccessPoint,
         into: String,
         from: Vec<String>,
+        tuple: Option<String>,
         id: usize
     },
     // only use this event to initialize fn parameters
@@ -1528,7 +1538,7 @@ pub enum Event {
     // See ExternalEvent::TupleTempDrop.
     TupleTempDrop { tuple: String, at: TupleDropAt, with: Vec<TupleLeft> },
     // See ExternalEvent::OrAltMove.
-    OrAltMove { into: String, sources: Vec<String> },
+    OrAltMove { into: String, sources: Vec<String>, tuple: Option<String> },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1948,8 +1958,8 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else)
             }
-            Event::OrAltMove { into, sources } => {
-                hover_messages::event_dot_or_alt_move(my_name, into, sources)
+            Event::OrAltMove { into, sources, tuple } => {
+                hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref())
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -2784,7 +2794,9 @@ impl Visualizable for VisualizationData {
                 State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
             // Moved into a name an or-pattern binds, if its alternative
             // matched: not usable afterwards, like after a conditional
-            // that moved it on some paths (#533).
+            // that moved it on some paths (#533). A variable already
+            // moved into a scrutinee tuple stays as it is.
+            (_, Event::OrAltMove { tuple: Some(_), .. }) => (*previous_state).clone(),
             (_, Event::OrAltMove { .. }) =>
                 State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
 
@@ -3180,8 +3192,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TupleTempDrop{ tuple, at, with, .. } => {
           vec![(line_num, Event::TupleTempDrop { tuple: tuple.clone(), at: *at, with: with.clone() })]
           },
-        ExternalEvent::OrAltMove{into, from, ..} => {
-          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone() })]
+        ExternalEvent::OrAltMove{into, from, tuple, ..} => {
+          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone() })]
         },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
@@ -3503,8 +3515,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TupleTempDrop{ro, tuple, at, with, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TupleTempDrop { tuple, at, with }, line_number);
             },
-            ExternalEvent::OrAltMove{ro, into, from, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from }, line_number);
+            ExternalEvent::OrAltMove{ro, into, from, tuple, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from, tuple }, line_number);
             },
         }
     }

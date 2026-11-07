@@ -1479,7 +1479,7 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
         match e {
             // After a loop that may have been left through a `break`
             // following a move, it may have been moved too.
-            Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { .. } | Event::ClosureCall { .. } => { moved = true; acquired = false; }
+            Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { tuple: None, .. } | Event::ClosureCall { .. } => { moved = true; acquired = false; }
             Event::Acquire { .. } => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
                 let mut nested_any_moved = false;
@@ -1573,7 +1573,9 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             Event::LoopExitMove { definite, .. } => maybe = !*definite,
             // Moved into a name an or-pattern binds, on the paths where
             // the alternative that binds from here matched (#533).
-            Event::OrAltMove { .. } => maybe = true,
+            // (Not a variable whose value was already moved into a
+            // scrutinee tuple: it owns nothing either way.)
+            Event::OrAltMove { tuple: None, .. } => maybe = true,
             Event::Acquire { is: ResourceTy::Value(_), .. }
             | Event::Copy { is: ResourceTy::Value(_), .. }
             | Event::Move { .. } | Event::ClosureCall { .. } => maybe = false,
@@ -1696,7 +1698,7 @@ fn moved_by_leavers(branch_history: &[BranchData], out: &mut Vec<Vec<BranchExit>
 // included.
 fn moves_somewhere(events: &[(usize, Event)]) -> bool {
     events.iter().any(|(_, e)| match e {
-        Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { .. } => true,
+        Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { tuple: None, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moves_somewhere(&b.e_data)),
         _ => false,
     })

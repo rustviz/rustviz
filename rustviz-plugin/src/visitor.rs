@@ -1410,8 +1410,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if is(to) => Own::Yes,
           ExternalEvent::Move { from, .. } if is(from) => Own::No,
           // Moved into an or-pattern's binding only if its alternative
-          // matched (#533).
-          ExternalEvent::OrAltMove { ro, .. } if *ro.hash() == hash && own == Own::Yes => Own::Maybe,
+          // matched (#533). (Out of a tuple scrutinee, `tuple`, the
+          // place was moved into the tuple already.)
+          ExternalEvent::OrAltMove { ro, tuple: None, .. } if *ro.hash() == hash && own == Own::Yes => Own::Maybe,
           ExternalEvent::InitRefParam { param, .. } if *param.hash() == hash => Own::Yes,
           // A branch that diverges doesn't reach this point.
           ExternalEvent::Branch { branches, .. } => {
@@ -3146,6 +3147,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // join the global timeline before `visit_expr` so they
               // appear in source order with the body).
               let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, pat_line, typeck_res);
+              // The OrAltMove dots of the names `or_conflicts` lists,
+              // added after the moves into the scrutinee tuple below
+              // (the tuple holds the values they may take).
+              let mut or_events: Vec<ExternalEvent> = Vec::new();
               match arm_pat.kind {
                 // (<pat>, <pat>, ..) => <expr>
                 // First need to annotate events that occur between parents (the variables being matched upon)
@@ -3186,13 +3191,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     for (r, e, from, _) in associated_ro.iter_mut() {
                       *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
                     }
-                    for ev in self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line) {
-                      if inline {
-                        self.add_external_event(pat_line, ev);
-                      } else {
-                        branch_e_data.push((pat_line, ev));
-                      }
-                    }
+                    or_events.extend(self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name));
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -3244,13 +3243,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     // `P { a, b } => …` on a struct variable: `a` / `b`
                     // come from `p.a` / `p.b` (#326).
                     self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
-                    for ev in self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line) {
-                      if inline {
-                        self.add_external_event(pat_line, ev);
-                      } else {
-                        branch_e_data.push((pat_line, ev));
-                      }
-                    }
+                    or_events.extend(self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name));
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
@@ -3305,6 +3298,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   self.add_external_event(pat_line, ext_ev);
                 } else {
                   branch_e_data.push((pat_line, ext_ev));
+                }
+              }
+              for ev in or_events {
+                if inline {
+                  self.add_external_event(pat_line, ev);
+                } else {
+                  branch_e_data.push((pat_line, ev));
                 }
               }
               // An arm that leaves early (`_ => return 0`) drops the tuple
@@ -4969,12 +4969,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// place it may come from, when the value moves (rather than is
   /// copied), gets an `OrAltMove`: its resource moves into the name if
   /// its alternative is the one that matched, so it's maybe-moved
-  /// afterwards.
+  /// afterwards. A place in `tuple_vars` (`match (a, b)`) was already
+  /// moved into the temporary tuple `tuple` (#327): it's the tuple's
+  /// copy of its value that may move, so it isn't maybe-moved.
   fn or_conflict_events(
     &mut self,
     conflicts: &[OrConflict],
     bound: &mut Vec<(ResourceAccessPoint, Evt, ResourceTy, Option<bool>)>,
     line: usize,
+    tuple_vars: &[ResourceAccessPoint],
+    tuple: &str,
   ) -> Vec<ExternalEvent> {
     let mut out = Vec::new();
     for entry in bound.iter_mut() {
@@ -4995,7 +4999,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let id = *self.unique_id;
           *self.unique_id += 1;
           out.push(ExternalEvent::OrAltMove {
-            ro: place.clone(), into: c.name.clone(), from: names.clone(), id,
+            ro: place.clone(), into: c.name.clone(), from: names.clone(),
+            tuple: tuple_vars.contains(place).then(|| tuple.to_owned()), id,
           });
         }
       }
@@ -5672,7 +5677,7 @@ fn moved_out_of_outer(
       }
       // Moved only if the or-pattern alternative that binds from it
       // matched (#533): not on every path.
-      ExternalEvent::OrAltMove { ro, .. } if outer(ro) => {
+      ExternalEvent::OrAltMove { ro, tuple: None, .. } if outer(ro) => {
         if !out.iter().any(|(r, _)| r == ro) {
           out.push((ro.clone(), false));
         }
