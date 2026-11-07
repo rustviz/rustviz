@@ -121,7 +121,11 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     // A let-chain's condition, not only a branch, may have moved one of
     // `maybe_moved` (#281): "nothing above" instead of "no branch above".
     by_cond: bool,
+    // A `Box` a field was moved out of (#602): Rust still frees the
+    // box's heap allocation, so the text says so.
+    boxed: bool,
 ) -> String {
+    const FREED: &str = " The Box's heap allocation is freed.";
     fn join(names: &[String]) -> (String, bool) {
         let fmt: Vec<String> = names.iter().map(fmt_style).collect();
         let s = match fmt.len() {
@@ -176,21 +180,23 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             let (dropped_s, dropped_plural) = join(dropped);
             out.push_str(&format!(" {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
         }
+        if boxed { out.push_str(FREED); }
         return out;
     }
     let (moved_s, moved_plural) = join(moved);
     let rest = if dropped.is_empty() {
-        String::from("no resource is dropped")
+        String::from(if boxed { "no field is dropped" } else { "no resource is dropped" })
     } else {
         let (dropped_s, dropped_plural) = join(dropped);
         format!("only {} {} dropped", dropped_s, if dropped_plural { "are" } else { "is" })
     };
     format!(
-        "{0} goes out of scope. {1} {2} moved out earlier, so {3}.",
+        "{0} goes out of scope. {1} {2} moved out earlier, so {3}.{4}",
         fmt_style(my_name),
         moved_s,
         if moved_plural { "were" } else { "was" },
-        rest
+        rest,
+        if boxed { FREED } else { "" }
     )
 }
 

@@ -385,7 +385,9 @@ const Description: React.FC = () => (
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)
-        and unions are drawn as a single owner; a write through{' '}
+        and unions are drawn as a single owner (except a <code>Box</code> of a
+        struct that a field is moved out of, as in <code>take(b.name)</code>,
+        which gets a column per field); a write through{' '}
         <code>*cell.borrow_mut()</code> shows only the call, not the write.
       </li>
       <li>

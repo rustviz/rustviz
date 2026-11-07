@@ -809,7 +809,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_copy,
       is_plain_value,
       interior_mut,
-      is_manually_drop: false, rc: None, rc_fields: None, rc_inside: None, holds: None }),
+      is_manually_drop: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false }),
       scope, is_global);
   }
 
@@ -2514,6 +2514,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
       self.mark_owner_type(&name, ty);
       self.register_struct_members(&name, ty, owner_hash, mutability, MemberSite {
+        owner_id: expr.hir_id.owner,
+        assigned_at: expr_to_line(&expr, &self.tcx),
+        scope: self.current_scope,
+        is_global: !self.inside_branch,
+        ref_lender: Some(ResourceTy::Anonymous),
+      });
+    }
+    // `let b = Box::new(P { .. });` with a field moved out through the
+    // box (`take(b.name)`, #602): drawn like the plain struct, with a
+    // column per field, so the move and what is left to drop show.
+    else if let Some(inner) = self.box_with_field_moved_out(&name, ty) {
+      let owner_hash = self.rap_hashes as u64;
+      self.add_struct(name.clone(), owner_hash, false, mutability, false, false, false, self.current_scope, !self.inside_branch);
+      if let Some(ResourceAccessPoint::Struct(s)) = self.raps.get_mut(&name).map(|rd| &mut rd.rap) {
+        s.is_box = true;
+      }
+      self.register_struct_members(&name, inner, owner_hash, mutability, MemberSite {
         owner_id: expr.hir_id.owner,
         assigned_at: expr_to_line(&expr, &self.tcx),
         scope: self.current_scope,

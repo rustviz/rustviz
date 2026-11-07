@@ -267,6 +267,11 @@ rather than listed here.
   `RefCell`'s runtime borrows aren't shown, and a write through one
   (`*cell.borrow_mut() += 1`) shows only the `borrow_mut` call (a shared
   borrow of `cell`), not the write itself.
+  The exception is a `Box` of a struct or tuple that a field is moved out
+  of (`take(b.name)`) in a `let` or a parameter: it gets a column per
+  field, like the struct. A `Box` bound by a pattern doesn't, and after
+  `take(*b)` the box's scope end says "No resource is dropped" though
+  its allocation is still freed ([#609](https://github.com/rustviz/rustviz/issues/609)).
 - Closures: captures are shown; events inside the closure body aren't.
   For a closure passed straight to a function (`thread::spawn(move ||
   …)`), what it captures by value is drawn as moved / copied into the

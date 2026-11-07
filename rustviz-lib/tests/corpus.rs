@@ -898,6 +898,10 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_pop_and_copy",
     "edition2024/while_let_chain_two_bindings",
     "edition2024/while_let_chain_two_sources",
+    "box_field_move",
+    "box_field_move_branch",
+    "box_field_move_all",
+    "box_field_move_param",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9787,6 +9791,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c is initialized with a copy of z",
         ],
         must_not_contain: &[],
+    },
+    // #602: a field moved out of a Box (`take(b.name)`) is drawn like a field
+    // moved out of a plain struct, and the Box is partially moved: its
+    // remaining fields and its heap allocation are still freed at scope end.
+    TooltipExpect {
+        name: "box_field_move",
+        must_contain: &[
+            "b.name's resource is moved",
+            "Move from b.name to take",
+            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "box_field_move_all",
+        must_contain: &[
+            "b.name's resource is moved",
+            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "b goes out of scope. Its resource is dropped.",
+            // The box allocation is freed, so "no resource" would be false.
+            "so no resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "box_field_move_branch",
+        must_contain: &[
+            "b.name's resource is moved",
+            "b goes out of scope. b.name was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). b.tag is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "box_field_move_param",
+        must_contain: &[
+            "b.name's resource is moved",
+            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "b goes out of scope. Its resource is dropped.",
+        ],
     },
 ];
 
