@@ -5405,8 +5405,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // A subscript means "shadows an earlier variable still in
         // scope". `s₂` shadows `s`; the two inner blocks each shadow `s₂`
         // and share the column `s₃`, whose header lists both lines. The
-        // arms of an `if` shadow nothing: one column `x`, no `x₂`.
+        // arms of an `if` shadow nothing: one column `x`, no `x₂`. The
+        // second block's `let s = 6;` initializes a new variable in the
+        // shared column; it isn't an assignment to the first block's.
         must_contain: &[
+            "s₃ is bound to a copyable value",
             "s₂, immutable. s₂ shadows s: it is a new variable named s, declared on line 9",
             "s₃, immutable. s₃ shadows s₂: it is a new variable named s, declared on lines 11 and 15 (in different branches or blocks, so only one exists at a time)",
             "x, immutable",
@@ -5415,6 +5418,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s₂, immutable. s₂ is a different variable from s: the 2nd variable named s in this function",
             "s₄, immutable",
             "x₂, immutable",
+            "s₃ is assigned a new value",
         ],
     },
     TooltipExpect {
