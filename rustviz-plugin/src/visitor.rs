@@ -116,6 +116,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for (_, ev) in &self.preprocessed_events[mark..] {
       let culprit = match ev {
         ExternalEvent::Move { from, .. } if is_outer(from) => from,
+        ExternalEvent::ClosureCall { closure, .. } if is_outer(closure) => closure,
         ExternalEvent::Bind { to, .. }
         | ExternalEvent::Copy { to, .. }
         | ExternalEvent::Move { to, .. }
@@ -1137,6 +1138,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.visit_expr(&arg);
               self.match_arg(&arg, fn_name.clone());
             }
+            // `f(..)` with `f` a local `FnOnce` closure: the call moves
+            // it, after the arguments are evaluated (#271).
+            self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
           }
         }
       }

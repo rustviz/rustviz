@@ -316,7 +316,9 @@ const Description: React.FC = () => (
         brace); closures show
         their captures but not their bodies (for a closure passed straight to
         a function, what it moves or copies in, and what it borrows only if
-        that borrow ends with the call); in a method chain only
+        that borrow ends with the call; calling a once-only closure says what
+        happens to what it captured, not the body&apos;s steps); in a method
+        chain only
         the first call is drawn on the variable (later calls work on temporary
         results); a match guard&apos;s events appear only in its own arm;{' '}
         <code>async</code>/<code>await</code> aren&apos;t visualized.

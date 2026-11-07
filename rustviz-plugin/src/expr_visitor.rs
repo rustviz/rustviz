@@ -601,6 +601,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExternalEvent::InitRefParam { param, .. } => {
         self.skip_raps.contains(param.name())
       }
+      ExternalEvent::ClosureCall { closure, .. } => touches_ty(closure),
       // Branch events bundle child events; we don't recurse into
       // them here. A skipped variable that only appears inside a
       // branch could still leak through — fix when the need arises.
@@ -1042,6 +1043,71 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(),
     });
     *self.unique_id += 1;
+  }
+
+  /// After a call `callee(args)`: if `callee` names a local closure
+  /// binding that rustc inferred to be `FnOnce` (`let f = || drop(s);
+  /// f();`), record that the call moves the closure and what happens
+  /// to what it captured by value (#271). `FnOnce::call_once` takes the
+  /// closure by value, so after the call `f` is gone and has nothing
+  /// left to drop at its scope end. `Fn` / `FnMut` closures are only
+  /// borrowed by their calls; nothing is recorded for them.
+  pub fn closure_call_events(&mut self, callee: &'tcx Expr<'tcx>, line_num: usize) {
+    let ExprKind::Path(QPath::Resolved(None, path)) = callee.kind else { return };
+    if !matches!(path.res, Res::Local(_)) {
+      return;
+    }
+    let typeck = self.tcx.typeck(callee.hir_id.owner);
+    let rustc_middle::ty::Closure(closure_def_id, closure_args) = typeck.expr_ty(callee).kind() else { return };
+    if closure_args.as_closure().kind() != rustc_middle::ty::ClosureKind::FnOnce {
+      return;
+    }
+    let Some(closure_local) = closure_def_id.as_local() else { return };
+    // The capture list names variables of the fn the closure was
+    // written in; only that fn's RAPs can stand for them.
+    if self.tcx.typeck_root_def_id(*closure_def_id) != callee.hir_id.owner.to_def_id() {
+      return;
+    }
+    let name = self.tcx.hir_name(path.segments[0].hir_id).as_str().to_owned();
+    let closure_rap = match self.raps.get(&name) {
+      Some(rd) if rd.rap.is_closure() => rd.rap.to_owned(),
+      _ => return,
+    };
+    // What the body does with each capture (all captures, to keep the
+    // field index of each), then the by-value, non-Copy ones named.
+    let closure_typeck = self.tcx.typeck(closure_local);
+    let captures: Vec<_> = closure_typeck.closure_min_captures_flattened(closure_local).collect();
+    let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(self.tcx, closure_local);
+    let ends = closure_capture_ends(self.tcx, &bwf.body, captures.len());
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, callee.hir_id.owner);
+    let mut fates = Vec::new();
+    for (capture, end) in captures.iter().zip(ends) {
+      let by_value = matches!(capture.info.capture_kind,
+        rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
+      // A Copy capture is copied into the closure; there's nothing of
+      // it to move or drop.
+      if !by_value || self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) {
+        continue;
+      }
+      let upvar_hir_id = match capture.place.base {
+        rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
+        _ => continue,
+      };
+      let upvar_name = self.tcx.hir_name(upvar_hir_id).as_str().to_owned();
+      let Some(rap) = self.capture_rap(&capture.place, &upvar_name) else { continue };
+      fates.push(CapturedFate {
+        name: rap.name().to_owned(),
+        end,
+        needs_drop: capture.place.ty().needs_drop(self.tcx, env),
+      });
+    }
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line_num, ExternalEvent::ClosureCall {
+      closure: ResourceTy::Value(closure_rap),
+      fates,
+      id,
+    });
   }
 
   // Return the ResourceTy that corresponds to the LHS of an assignment.
@@ -2982,7 +3048,19 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // `f` in place: the result comes from the call, so its source is
       // the call's Function RAP, not `f`'s column (#254, #299). An
       // `FnOnce` call does consume `f`, and keeps `f` as the source.
-      match local_callee_result_key(rhs, &self.tcx) {
+      let callee = match local_callee_result_key(rhs, &self.tcx) {
+        // A Copy result (`let n = f();` with `f: FnOnce() -> i32`)
+        // isn't a copy of anything `f` holds: it comes from the call
+        // (#271).
+        LocalCallee::Consumed if matches!(evt, Evt::Copy) => {
+          match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+            Some(n) => LocalCallee::Call(fn_key(&n)),
+            None => LocalCallee::Consumed,
+          }
+        }
+        other => other,
+      };
+      match callee {
         LocalCallee::Call(key) => {
           // Registered on the fly if visit_expr hasn't reached the call yet.
           if !self.raps.contains_key(&key) {

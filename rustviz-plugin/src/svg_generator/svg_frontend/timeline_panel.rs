@@ -1160,11 +1160,22 @@ fn render_dot(
                         // render a plain OOS dot like a Copy type
                         // with the standard "f goes out of scope"
                         // message.
+                        // ...and only if the closure still holds them: not
+                        // after an `FnOnce` call used it up or it was moved
+                        // away (`let g = f;`); then there's nothing left to
+                        // drop (#271).
                         let move_count = closure_move_capture_count(visualization_data, *hash);
-                        if move_count > 0 {
+                        let maybe_moved = move_count > 0 && !resource_hold && maybe_moved_at_end(history);
+                        if move_count > 0 && (resource_hold || maybe_moved) {
                             let cx = timeline_data.x_val;
                             let cy = event_y;
-                            let title = hover_messages::event_dot_closure_go_out_of_scope(&name, move_count);
+                            // Called (so moved) on some paths only: the drop
+                            // flag decides whether its captures are dropped.
+                            let title = if maybe_moved {
+                                hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name)
+                            } else {
+                                hover_messages::event_dot_closure_go_out_of_scope(&name, move_count)
+                            };
                             let drop_data = DropDotData {
                                 hash: *hash as u64,
                                 dot_x: cx,
@@ -1178,6 +1189,9 @@ fn render_dot(
                             continue;
                         }
                         data.title = event.print_message_with_name(&mut name);
+                        if move_count > 0 {
+                            data.title.push_str(". No resource is dropped.");
+                        }
                     } else if ro.is_manually_drop() && !is_copy
                         && visualization_data.timelines[hash].history.iter()
                             .any(|(_, e)| matches!(e, Event::ManuallyDropByHand)) {
@@ -1417,7 +1431,7 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
         match e {
             // After a loop that may have been left through a `break`
             // following a move, it may have been moved too.
-            Event::Move { .. } | Event::LoopExitMove { .. } => { moved = true; acquired = false; }
+            Event::Move { .. } | Event::LoopExitMove { .. } | Event::ClosureCall { .. } => { moved = true; acquired = false; }
             Event::Acquire { .. } => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
                 let mut nested_any_moved = false;
@@ -1511,7 +1525,7 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             Event::LoopExitMove { definite, .. } => maybe = !*definite,
             Event::Acquire { is: ResourceTy::Value(_), .. }
             | Event::Copy { is: ResourceTy::Value(_), .. }
-            | Event::Move { .. } => maybe = false,
+            | Event::Move { .. } | Event::ClosureCall { .. } => maybe = false,
             _ => {}
         }
     }
@@ -2000,7 +2014,7 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         | Event::StaticBorrow { is: ResourceTy::Value(_), .. }
         | Event::MutableBorrow { is: ResourceTy::Value(_), .. }
         | Event::InitRefParam { .. } => true,
-        Event::Move { .. } | Event::LoopExitMove { definite: true, .. } => false,
+        Event::Move { .. } | Event::LoopExitMove { definite: true, .. } | Event::ClosureCall { .. } => false,
         Event::Branch { branch_history, .. } => {
             held || branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| holds_value_after(false, e)))
         }
@@ -2214,7 +2228,7 @@ fn render_arrow (
                     // somewhat redundant but have to filter out external events here
                     match e {
                         ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..} | ExternalEvent::InitRefParam { .. }
-                        | ExternalEvent::RefDie {..} => {}
+                        | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
                         _ => {
                             render_arrow(l, e,  output, visualization_data, resource_owners_layout, dots, registry);
                         }
@@ -2868,7 +2882,7 @@ fn render_arrows_string_external_events_version(
         match external_event {
             // events that should be skipped (we don't render arrows for them)
             ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..}
-            | ExternalEvent::RefDie {..} => {}
+            | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
             // InitRefParam falls into render_arrow because owned-param
             // initializations get an L-shaped "ownership from caller"
             // arrow there. Ref params are filtered out inside

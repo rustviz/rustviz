@@ -679,6 +679,14 @@ const EXPECTED_OK: &[&str] = &[
     "destructure_assign_parts",
     // A reference read out through a reference stored in an element (#453).
     "read_ref_through_element_ref",
+    // Calling an `FnOnce` closure moves it (#271).
+    "fnonce_call_drops_capture",
+    "fnonce_call_returns_capture",
+    "fnonce_call_conditional",
+    "fnonce_call_captures",
+    "fnonce_call_copy_result",
+    "fnonce_closure_moved_to_binding",
+    "fnmut_call_unchanged",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6987,6 +6995,106 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from *rr to r",
             "*rr's resource is copied",
             "Copy from *rrr to q",
+        ],
+    },
+
+    // ─── Calling an `FnOnce` closure moves it (#271) ─────────────────
+    TooltipExpect {
+        name: "fnonce_call_drops_capture",
+        // `f()` is `FnOnce::call_once(f)`: f is moved into the call, the
+        // body drops `s`, and so f has nothing to drop at its scope end.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). \
+             s, which f captured, is dropped during the call",
+            "f goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "fnonce_call_returns_capture",
+        // The body returns `s`, so it leaves f as the call's result and
+        // `t` owns it: f drops nothing and the call doesn't drop it.
+        must_contain: &[
+            "Move from f to t",
+            "f is moved into the call (an FnOnce closure can only be called once). \
+             s, which f captured, is moved out of the closure as the call's result",
+            "f goes out of scope. No resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f is moved into the call (an FnOnce closure can only be called once). \
+             s, which f captured, is dropped during the call",
+        ],
+    },
+    TooltipExpect {
+        name: "fnonce_call_conditional",
+        // Called on one path only: f is maybe-moved, so a drop flag
+        // decides at scope end whether its capture is dropped.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). \
+             s, which f captured, is dropped during the call",
+            "f goes out of scope. Its captured resources are dropped here only if no branch above \
+             called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "fnonce_call_captures",
+        // Three captures, three fates: `a` is passed on (all we claim is
+        // that the call uses it up), `b` is only read so it's dropped
+        // with the closure's environment, and the Copy `n` isn't listed.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). \
+             a, which f captured, is moved on or dropped by the call. \
+             b, which f captured, is dropped during the call",
+            "f goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 2 captured resources are dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "fnonce_call_copy_result",
+        // The call's i32 result is a new value, not a copy out of `g`.
+        must_contain: &[
+            "g is moved into the call (an FnOnce closure can only be called once). \
+             v, which g captured, is dropped during the call",
+            "g goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "g's value is copied",
+            "g goes out of scope. Its 1 captured resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "fnonce_closure_moved_to_binding",
+        // `let g = f;` moves the closure; `g` is then moved into `drop`.
+        // Neither is left holding the captured String at its scope end.
+        must_contain: &[
+            "f goes out of scope. No resource is dropped.",
+            "g goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "g goes out of scope. Its 1 captured resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "fnmut_call_unchanged",
+        // An `FnMut` closure is only borrowed by its calls: still owned,
+        // and still dropping its capture, at the end of `main`.
+        must_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once)",
+            "f goes out of scope. No resource is dropped.",
         ],
     },
 ];

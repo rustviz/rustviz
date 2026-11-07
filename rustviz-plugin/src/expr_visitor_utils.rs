@@ -601,6 +601,10 @@ pub fn collect_event_live_vars(
                     out.insert(ro.clone());
                 }
             }
+            // A call of a closure inside the branch moves the closure.
+            ExternalEvent::ClosureCall { closure: ResourceTy::Value(rap), .. } => {
+                out.insert(rap.clone());
+            }
             _ => {
                 let (from, to) = ResourceAccessPoint_extract(ev);
                 for rty in [from, to] {
@@ -632,7 +636,9 @@ pub fn events_move_out_of_outer(
     decls: &HashSet<ResourceAccessPoint>,
 ) -> bool {
     events.iter().any(|(_, ev)| match ev {
-        ExternalEvent::Move { from: ResourceTy::Value(rap), .. } =>
+        ExternalEvent::Move { from: ResourceTy::Value(rap), .. }
+        // An `FnOnce` call moves the closure (#271).
+        | ExternalEvent::ClosureCall { closure: ResourceTy::Value(rap), .. } =>
             !rap.is_fn() && !decls.contains(rap),
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| {
             let inner: HashSet<ResourceAccessPoint> = decls | &b.decl_vars;
@@ -1263,4 +1269,145 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
     }
   _ => ResourceTy::Anonymous,
   }
+}
+/// Where each value an `FnOnce` closure captured by value ends up when
+/// the closure is called (#271), read from the closure body's MIR.
+/// `body` is the closure's own MIR, whose first argument (`_1`) is the
+/// closure value itself, passed by value because the closure is
+/// `FnOnce`; its fields are the captures, in the order of
+/// `closure_min_captures_flattened`. Entry `i` describes capture `i`:
+///
+/// * `Returned`: the body's only use of it is to return it.
+/// * `Dropped`: the body passes it to `mem::drop`, or never moves it
+///   out, so it is dropped with the rest of the closure's environment
+///   when the call ends.
+/// * `Moved`: it is moved somewhere else, or moved on only some paths
+///   (the body has a branch), so all that can be said is that the call
+///   uses it up.
+pub fn closure_capture_ends<'tcx>(
+  tcx: TyCtxt<'tcx>,
+  body: &rustc_middle::mir::Body<'tcx>,
+  n_captures: usize,
+) -> Vec<crate::svg_generator::data::CapturedEnd> {
+  use crate::svg_generator::data::CapturedEnd;
+  use rustc_middle::mir::{Local, Operand, Place, PlaceElem, Rvalue, StatementKind, TerminatorKind, RETURN_PLACE};
+
+  let all_moved = || vec![CapturedEnd::Moved; n_captures];
+  let env = Local::from_u32(1);
+  // Not an owned environment: not a by-value `FnOnce` body.
+  if body.arg_count < 1 || body.local_decls[env].ty.is_ref() {
+    return all_moved();
+  }
+  // The capture a whole-field place stands for.
+  fn field_of(place: &Place<'_>, env: Local) -> Option<(usize, bool)> {
+    if place.local != env {
+      return None;
+    }
+    match place.projection.first() {
+      Some(PlaceElem::Field(f, _)) => Some((f.index(), place.projection.len() == 1)),
+      _ => None,
+    }
+  }
+  // Locals holding a captured value moved out of the environment
+  // (`_3 = move (_1.0)`), and which capture, to a fixpoint.
+  let mut alias: HashMap<Local, usize> = HashMap::new();
+  loop {
+    let before = alias.len();
+    for bb in body.basic_blocks.iter() {
+      for st in &bb.statements {
+        if let StatementKind::Assign(asg) = &st.kind {
+          let (dest, rv) = &**asg;
+          if let Rvalue::Use(Operand::Move(src)) = rv {
+          if dest.projection.is_empty() && dest.local != RETURN_PLACE {
+            let i = match field_of(src, env) {
+              Some((i, true)) => Some(i),
+              _ if src.projection.is_empty() => alias.get(&src.local).copied(),
+              _ => None,
+            };
+            if let Some(i) = i {
+              alias.insert(dest.local, i);
+            }
+          }
+          }
+        }
+      }
+    }
+    if alias.len() == before {
+      break;
+    }
+  }
+  // Which capture a moved operand carries, and whether it moved only
+  // part of it.
+  let carried = |op: &Operand<'tcx>| -> Option<(usize, bool)> {
+    let Operand::Move(p) = op else { return None };
+    match field_of(p, env) {
+      Some(x) => Some(x),
+      None if p.projection.is_empty() => alias.get(&p.local).map(|i| (*i, true)),
+      None => alias.get(&p.local).map(|i| (*i, false)),
+    }
+  };
+  let mut ends: Vec<Option<CapturedEnd>> = vec![None; n_captures];
+  let mut mark = |i: usize, e: CapturedEnd| {
+    if let Some(slot) = ends.get_mut(i) {
+      *slot = Some(match slot { None => e, Some(old) if *old == e => e, Some(_) => CapturedEnd::Moved });
+    }
+  };
+  let mut has_branch = false;
+  for bb in body.basic_blocks.iter() {
+    for st in &bb.statements {
+      let StatementKind::Assign(asg) = &st.kind else { continue };
+      let (dest, rv) = &**asg;
+      if let Rvalue::Use(op) = rv {
+        if let Some((i, whole)) = carried(op) {
+          if dest.projection.is_empty() && dest.local != RETURN_PLACE {
+            continue; // an alias, followed above
+          }
+          if whole && dest.local == RETURN_PLACE && dest.projection.is_empty() {
+            mark(i, CapturedEnd::Returned);
+          } else {
+            mark(i, CapturedEnd::Moved);
+          }
+        }
+        continue;
+      }
+      let ops: Vec<&Operand<'tcx>> = match rv {
+        Rvalue::Repeat(o, _) | Rvalue::Cast(_, o, _) | Rvalue::UnaryOp(_, o) => vec![o],
+        Rvalue::BinaryOp(_, ab) => vec![&ab.0, &ab.1],
+        Rvalue::Aggregate(_, ops) => ops.iter().collect(),
+        _ => vec![],
+      };
+      for o in ops {
+        if let Some((i, _)) = carried(o) {
+          mark(i, CapturedEnd::Moved);
+        }
+      }
+    }
+    match &bb.terminator().kind {
+      TerminatorKind::Call { func, args, .. } => {
+        let is_mem_drop = func.const_fn_def()
+          .map_or(false, |(def_id, _)| tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def_id));
+        for a in args {
+          if let Some((i, whole)) = carried(&a.node) {
+            mark(i, if is_mem_drop && whole { CapturedEnd::Dropped } else { CapturedEnd::Moved });
+          }
+        }
+      }
+      TerminatorKind::TailCall { args, .. } => {
+        for a in args {
+          if let Some((i, _)) = carried(&a.node) {
+            mark(i, CapturedEnd::Moved);
+          }
+        }
+      }
+      TerminatorKind::SwitchInt { .. } => has_branch = true,
+      _ => {}
+    }
+  }
+  ends.into_iter()
+    .map(|e| match e {
+      None => CapturedEnd::Dropped,
+      Some(_) if has_branch => CapturedEnd::Moved,
+      Some(e) => e,
+    })
+    .collect()
 }
