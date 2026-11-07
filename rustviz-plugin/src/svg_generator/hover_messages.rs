@@ -1160,12 +1160,29 @@ pub fn arrow_static_lend_val_to_val(from_name: &String, to_name: &String) -> Str
 pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier) -> String {
     let func_fmt = fmt_style(func);
     let to_fmt = fmt_style(to_name);
+    if carrier == ViaCarrier::Element {
+        // `let r = refs[0];` (#349): `func` is the collection.
+        if lenders.len() <= 1 {
+            return format!(": {0} is a reference copied out of {1}", to_fmt, func_fmt);
+        }
+        let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+        let list = match names.len() {
+            2 => format!("{} and {}", names[0], names[1]),
+            n => format!("{}, and {}", names[..n - 1].join(", "), names[n - 1]),
+        };
+        let (either, kept) = if names.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
+        return format!(
+            ": {4} is a reference copied out of {0}, which holds references to {1}, so it may point into {2}, and {3} stay borrowed while {4} is in use",
+            func_fmt, list, either, kept, to_fmt
+        );
+    }
     // A value that isn't a reference (`let it = v.iter();`) or a
     // struct with a reference field can carry the borrow too (#336).
     let (noun, not_ref) = match carrier {
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
+        ViaCarrier::Element => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
