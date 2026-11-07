@@ -7637,7 +7637,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "ps goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "s goes out of scope. Its resource is dropped.",
+            // Whole-tooltip match (#518): "ps goes out of scope. Its resource is dropped." is correct.
+            "=s goes out of scope. Its resource is dropped.",
             "a goes out of scope. No resource is dropped.",
             "p.name goes out of scope. Its resource is dropped.",
         ],
