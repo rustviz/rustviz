@@ -249,6 +249,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // (#344), recorded when the branch is built; the loop turns them
   // into `LoopExitMove` events at its end.
   pub break_moves: Vec<BreakMove>,
+  // Set when a conditional directly in the function's body has every
+  // branch leaving the function (`return`, panic): the closing brace
+  // is unreachable, so it drops nothing (#515).
+  pub all_paths_exit: bool,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -3856,7 +3860,11 @@ pub fn print_out_of_scope(&mut self){
   for rap in raps.iter() {
     // need this to avoid duplicating out of scope events, this is due to the fact that RAPS is a map that lives over multiple fn ctxts
     // if a rap isn't global it means we annotated its GOS event inside its respective branch already
-    if !rap.rap.is_fn() && rap.is_global {
+    // Every path left the function at a `return` / panic above, where
+    // owners were dropped or moved out (#515); a reference has no
+    // such event, and keeps its scope end.
+    let left_already = self.all_paths_exit && !rap.rap.is_copy() && !rap.rap.is_ref();
+    if !rap.rap.is_fn() && rap.is_global && !left_already {
       let mut duplicate = false;
       for (_l, e) in self.preprocessed_events.iter() {
         match e.is_gos_ev() {

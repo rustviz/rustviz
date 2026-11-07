@@ -717,6 +717,10 @@ const EXPECTED_OK: &[&str] = &[
     "rc_inside",
     "rc_inside_flag",
     "rc_inside_tuple",
+    // An `if`/`else` or `match` whose branches all `return` ends the
+    // function there: no merge, no scope-end drops (#515).
+    "if_else_both_return",
+    "return_value_to_caller",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7579,6 +7583,37 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. Its resource is dropped.",
         ],
     },
+    // #515: `r` / `a` are dropped at each `return` (the drop count is in
+    // `both_branches_return_end_the_function`); `q` / `b` are moved to the
+    // caller on both paths, so nothing is dropped for them, and nothing
+    // is "not moved in any of the branches above": no path reaches the
+    // merge or the closing brace.
+    TooltipExpect {
+        name: "if_else_both_return",
+        must_contain: &[
+            "q's resource is moved to the caller",
+            "b's resource is moved to the caller",
+            "r goes out of scope. Its resource is dropped.",
+            "a goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "q isn't moved in any of the branches above",
+            "r isn't moved in any of the branches above",
+            "b isn't moved in any of the branches above",
+            "a isn't moved in any of the branches above",
+            "q goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #515: `return s;` moves `s` to the caller, `return n;` copies `n`.
+    TooltipExpect {
+        name: "return_value_to_caller",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "n's value is copied to the caller",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -9445,6 +9480,24 @@ fn user_macro_that_uses_a_variable_is_refused() {
         assert!(msg.contains("user-defined macros that use a variable (`z`, line 4) aren't supported yet"),
             "expected the user-macro refusal for:\n{}\ngot:\n{}", src, msg);
         assert!(msg.starts_with("RustViz can't visualize this program yet"), "{}", msg);
+    }
+}
+
+/// #515: when every branch of an `if` / `else` (or arm of a `match`)
+/// returns, nothing follows the conditional: `r` is dropped once at each
+/// `return`, and not again at the closing brace.
+#[test]
+fn both_branches_return_end_the_function() {
+    let rv = run_with_local_backend("if_else_both_return");
+    let tooltips = timeline_tooltips(&rv.timeline_panel_string());
+    for (var, count) in [("r", 2), ("a", 2), ("q", 0), ("b", 0)] {
+        let drop = format!("{} goes out of scope. Its resource is dropped.", var);
+        assert_eq!(
+            tooltips.iter().filter(|t| **t == drop).count(),
+            count,
+            "expected {:?} {} time(s), tooltips were:\n  {}",
+            drop, count, tooltips.join("\n  ")
+        );
     }
 }
 
