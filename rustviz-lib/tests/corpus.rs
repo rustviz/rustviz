@@ -12182,8 +12182,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // reference; `g` holds it, so `s` stays borrowed until `g`'s last
     // use (`borrow_kept_after_call_ends_at_holders_last_use` pins the
     // rows). Main drew nothing on `s`'s column and an arrow saying a
-    // closure capture came from `keep`. `k = keep(f)` holds the borrow
-    // `f`'s capture made.
+    // closure capture came from `keep`, and said `h` owned a captured
+    // resource (it only borrows `t`). `k = keep(f)` holds the borrow
+    // `f`'s capture made; `m`'s `move` closure owns `v`.
     TooltipExpect {
         name: "closure_kept_by_callee",
         must_contain: &[
@@ -12199,11 +12200,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from h to t",
             "Immutable borrow from u to k: k holds the closure keep returned, which borrows u, so u stays borrowed while k is in use",
             "Return immutably borrowed resource from k to u",
+            // h's closure only borrows t; m's closure owns v, which it
+            // took with `move`.
+            "h owns a closure",
+            "h goes out of scope",
+            "m owns a closure which owns 1 resource via capture",
+            "m goes out of scope. Its 1 captured resource is dropped.",
         ],
         must_not_contain: &[
             // Nothing is captured from the function: it returns the closure.
             "Closure capture (copy) from keep",
             "Closure capture (move) from keep_mut",
+            // Main counted the closure's move out of keep_mut as a
+            // capture that h owns.
+            "h owns a closure which owns",
+            "h goes out of scope. Its 1 captured resource is dropped.",
             // `g` didn't capture `s` itself; the closure literal did.
             "captured (immutably borrowed) by closure g",
             "captured (mutably borrowed) by closure h",

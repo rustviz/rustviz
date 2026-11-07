@@ -23,4 +23,7 @@ fn main() {
     let f = || u.len();
     let k = keep(f);
     println!("{}", k());
+    let v = String::from("v");
+    let m = keep(move || v.len());
+    println!("{}", m());
 }

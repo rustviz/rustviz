@@ -2074,11 +2074,22 @@ fn closure_move_capture_count(
     visualization_data: &VisualizationData,
     closure_hash: u64,
 ) -> usize {
-    visualization_data
-        .external_events
-        .iter()
-        .filter(|(_, ev)| matches!(ev, ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash)))
-        .count()
+    let evs = &visualization_data.external_events;
+    evs.iter()
+        .map(|(line, ev)| match ev {
+            // `let h = keep_mut(|| t.push('!'));` (#686): the closure a
+            // call returned is moved out of the call, which captures
+            // nothing. It owns what the closure literal passed to that
+            // call on the same line moved in (none here: `&mut t`).
+            ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } if f.is_fn() && matches_closure(to, closure_hash) =>
+                evs.iter()
+                    .filter(|(l, e)| l == line && matches!(e,
+                        ExternalEvent::Move { to: ResourceTy::Value(g), into_closure: true, .. } if g.hash() == f.hash()))
+                    .count(),
+            ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash) => 1,
+            _ => 0,
+        })
+        .sum()
 }
 
 // A holder (#336) whose value was created without a borrow (`let mut
