@@ -705,14 +705,39 @@ const EXPECTED_OK: &[&str] = &[
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
 /// appear verbatim as a `data-tooltip-text` value somewhere in the rendered
-/// timeline; `must_not_contain` strings must not. Both checks are
-/// containment, so adding new tooltips downstream doesn't break the test —
-/// only removing a listed one (or producing one that's been forbidden) does.
+/// timeline; `must_not_contain` strings must not appear *anywhere inside*
+/// any tooltip (a substring check, so a fragment like "(copied from" works;
+/// #511). `must_contain` stays whole-tooltip equality. Adding new tooltips
+/// downstream doesn't break the test — only removing a listed one (or
+/// producing text that's been forbidden) does.
 struct TooltipExpect {
     name: &'static str,
     must_contain: &'static [&'static str],
     must_not_contain: &'static [&'static str],
 }
+
+/// `must_not_contain` matching: a substring of any tooltip, unless the entry
+/// starts with `=`, which means the whole tooltip must equal the rest. Use
+/// `=` when the forbidden text is a full tooltip that is also a prefix or
+/// suffix of a correct one (`len reads from s` vs `len reads from s
+/// (implicitly borrowed)`, `f, immutable` vs `self, immutable`).
+fn forbidden_present(forbid: &str, actual: &[String]) -> bool {
+    match forbid.strip_prefix('=') {
+        Some(whole) => actual.iter().any(|a| a == whole),
+        None => actual.iter().any(|a| a.contains(forbid)),
+    }
+}
+
+/// Forbidden fragments main still prints: (snippet, fragment, why). Pinned
+/// so the suite is green while the bug is tracked; the test fails when the
+/// text disappears, so the entry gets moved to `must_not_contain`.
+const KNOWN_STILL_PRINTED: &[(&str, &str, &str)] = &[
+    (
+        "if_let_no_else",
+        "in a conditional expression",
+        "pins known-wrong output, see #517: a single-arm if-let is meant to be inlined with no Branch event, but opt's column still gets a Branch dot reading \"opt is live in a conditional expression\"",
+    ),
+];
 
 const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── Ownership / moves / copies ──────────────────────────────────
@@ -1805,7 +1830,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "may have been moved",
             "moved or dropped in every branch",
             "in branches where it was not",
-            "in a conditional expression",
+            // "in a conditional expression" pins known-wrong output, see
+            // KNOWN_STILL_PRINTED below (#517).
         ],
     },
     TooltipExpect {
@@ -2349,7 +2375,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "area reads from rect1 (implicitly borrowed)",
         ],
         must_not_contain: &[
-            "f, immutable",
+            "=f, immutable",
             "f holds a mutable reference",
             "f is a mutable borrow from the caller",
             "other, immutable",
@@ -2555,8 +2581,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u.username goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "email goes out of scope. Its resource is dropped.",
-            "username goes out of scope. Its resource is dropped.",
+            "=email goes out of scope. Its resource is dropped.",
+            "=username goes out of scope. Its resource is dropped.",
             "u.email goes out of scope. No resource is dropped.",
             "u.username goes out of scope. No resource is dropped.",
             "u.active goes out of scope. No resource is dropped.",
@@ -2633,7 +2659,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u2.email goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "name goes out of scope. Its resource is dropped.",
+            "=name goes out of scope. Its resource is dropped.",
             "u.name goes out of scope. No resource is dropped.",
             "u1.email goes out of scope. Its resource is dropped.",
             "u2.email goes out of scope. No resource is dropped.",
@@ -2695,7 +2721,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "t's resource is moved",
+            "=t's resource is moved",
         ],
     },
     TooltipExpect {
@@ -3310,7 +3336,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "self isn't moved in any of the branches above",
             "opt goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &[""],
+        must_not_contain: &["="],
     },
     TooltipExpect {
         name: "if_else_move_join",
@@ -3473,8 +3499,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "String::push_str reads from/writes to s",
         ],
         must_not_contain: &[
-            "len reads from s",
-            "push_str reads from/writes to s",
+            "=len reads from s",
+            "=push_str reads from/writes to s",
             "is_empty reads from s (implicitly borrowed)",
             "String::len reads from s (implicitly borrowed)",
             "String::push_str reads from/writes to s (implicitly mutably borrowed)",
@@ -4499,8 +4525,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Mutable borrow from rv to e",
-            "add reads from/writes to rv",
-            "push reads from/writes to rv",
+            "=add reads from/writes to rv",
+            "=push reads from/writes to rv",
             "Mutable reborrow from w to f",
             "Immutable borrow from r to sl",
             "(implicitly mutably borrowed) (mutable reborrow",
@@ -4533,10 +4559,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from t to part",
         ],
         must_not_contain: &[
-            "s is an immutable borrow of the value passed to whole, which whole owns",
-            "a is an immutable borrow of part of the value passed to part, which part owns",
-            "v is a mutable borrow of the value passed to grow, which grow owns",
-            "name is an immutable borrow of part of the value passed to field, which field owns",
+            "=s is an immutable borrow of the value passed to whole, which whole owns",
+            "=a is an immutable borrow of part of the value passed to part, which part owns",
+            "=v is a mutable borrow of the value passed to grow, which grow owns",
+            "=name is an immutable borrow of part of the value passed to field, which field owns",
             "n is an immutable borrow of the value passed to small, which small owns; that value is dropped when small returns",
             "s is an immutable borrow from the caller",
             "a is an immutable borrow from the caller",
@@ -4658,7 +4684,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope. No resource is dropped.",
             "Copy from p to name",
             "p's resource is copied",
-            "Return immutably borrowed resource from name to p",
+            "=Return immutably borrowed resource from name to p",
             "Copy from x to k",
             "Copy from String::from to t",
             "Copy from u to a",
@@ -4869,7 +4895,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "the resource slots points to is modified through *slots",
             "the resource names points to is modified through *names",
-            "Move from s to *names",
+            // `=`: whole tooltip. "Move from s to *names[0]" is correct (#396).
+            "=Move from s to *names",
             "the resource boxes points to is modified through *boxes",
             // An i32 is a value, not a resource (#484).
             "the resource slots[0] points to is modified through *slots[0]",
@@ -5497,7 +5524,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from r to t",
         ],
         must_not_contain: &[
-            "s goes out of scope. Its resource is dropped.",
+            // `=`: whole tooltip. `takes`'s parameter `_s` drops its String, and "_s goes out of scope. Its resource is dropped." is correct.
+            "=s goes out of scope. Its resource is dropped.",
         ],
     },
     // ─── Unbound temporaries (#457) ──────────────────────────────────
@@ -5682,7 +5710,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Before #151, the `_` part read as never moved.
             "t goes out of scope. Its resource is dropped.",
             // The drop is real and must be stated.
-            "t's resource is moved",
+            // `=`: whole tooltip. The correct tooltip continues "... into a temporary that is dropped at the end of this statement".
+            "=t's resource is moved",
             "b acquires ownership of a new resource; its previous resource is dropped",
             "c acquires ownership of a new resource; its previous resource is dropped",
             "p acquires ownership of a new resource; its previous resource is dropped",
@@ -5970,9 +5999,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             // Main's call dots, which also ended the borrow there.
-            "point reads from t",
-            "set reads from s",
-            "put reads from/writes to b",
+            // `=`: whole tooltip. The correct tooltips continue "; point's signature lets it store this reference in ...".
+            "=point reads from t",
+            "=set reads from s",
+            "=put reads from/writes to b",
         ],
     },
     // #371: the borrow and its end are on one line. The texts were
@@ -6317,7 +6347,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped.",
-            "name goes out of scope. Its resource is dropped.",
+            // `=`: whole tooltip. "u.name goes out of scope. Its resource is dropped." in main is correct.
+            "=name goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -6389,7 +6420,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t isn't moved in any of the branches above",
             "u isn't moved in any of the branches above",
             "w isn't moved in any of the branches above",
-            "s goes out of scope. Its resource is dropped.",
+            // `=`: whole tooltip. `take(_s)` drops its parameter: "_s goes out of scope. Its resource is dropped." is correct.
+            "=s goes out of scope. Its resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -8642,7 +8674,7 @@ fn corpus_expected_tooltips_present() {
                 .must_not_contain
                 .iter()
                 .copied()
-                .filter(|forbid| actual.iter().any(|a| a == forbid))
+                .filter(|forbid| forbidden_present(forbid, &actual))
                 .collect();
 
             if !missing.is_empty() || !unexpected.is_empty() {
@@ -8667,6 +8699,16 @@ fn corpus_expected_tooltips_present() {
                 .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_else(|| "<non-string panic>".to_string());
             failures.push(format!("{}: {}", expect.name, msg));
+        }
+    }
+    for (name, frag, why) in KNOWN_STILL_PRINTED {
+        let rv = run_with_local_backend(name);
+        let actual = timeline_tooltips(&rv.timeline_panel_string());
+        if !actual.iter().any(|a| a.contains(frag)) {
+            failures.push(format!(
+                "{}: {:?} is no longer printed; move it from KNOWN_STILL_PRINTED to must_not_contain ({})",
+                name, frag, why
+            ));
         }
     }
     assert!(

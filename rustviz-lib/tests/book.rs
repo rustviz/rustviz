@@ -305,8 +305,8 @@ const BOOK: &[Snippet] = &[
             "u.email goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "email goes out of scope. Its resource is dropped.",
-            "username goes out of scope. Its resource is dropped.",
+            "=email goes out of scope. Its resource is dropped.",
+            "=username goes out of scope. Its resource is dropped.",
             "u.username goes out of scope. No resource is dropped.",
             "u.email goes out of scope. No resource is dropped.",
         ],
@@ -1625,6 +1625,34 @@ fn tooltips(code_svg: &str, timeline_svg: &str) -> Vec<(String, String)> {
 
 /// Does a table string match a rendered tooltip? `"L13 text"` must match
 /// on line 13; plain text matches on any line.
+/// Like `present`, but `want` need only occur inside a tooltip (used for
+/// `must_not_contain`, so a forbidden fragment can't hide in a longer one; #511).
+fn present_substr(want: &str, actual: &[(String, String)]) -> bool {
+    // A leading `=` means whole-tooltip equality (as `present`), for text that
+    // is also a prefix/suffix of a correct tooltip.
+    if let Some(whole) = want.strip_prefix('=') {
+        return present(whole, actual);
+    }
+    let mut label = None;
+    let mut text = want;
+    if let Some(rest) = want.strip_prefix('L') {
+        let n = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+        if n > 0 {
+            let (digits, tail) = rest.split_at(n);
+            if let Some(t) = tail.strip_prefix("+ ") {
+                label = Some(format!("{}+", digits));
+                text = t;
+            } else if let Some(t) = tail.strip_prefix(' ') {
+                label = Some(digits.to_string());
+                text = t;
+            }
+        }
+    }
+    actual
+        .iter()
+        .any(|(l, t)| label.as_ref().map_or(true, |x| x == l) && t.contains(text))
+}
+
 fn present(want: &str, actual: &[(String, String)]) -> bool {
     if let Some(rest) = want.strip_prefix('L') {
         let label_len = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
@@ -1772,7 +1800,7 @@ fn check(s: &Snippet, outcome: &Outcome, failures: &mut Vec<String>, notes: &mut
     if !missing.is_empty() {
         failures.push(format!("{}: missing correct tooltip(s) {:?}", s.id, missing));
     }
-    let back: Vec<_> = s.must_not_contain.iter().filter(|w| present(w, &actual)).collect();
+    let back: Vec<_> = s.must_not_contain.iter().filter(|w| present_substr(w, &actual)).collect();
     if !back.is_empty() {
         failures.push(format!("{}: false tooltip(s) are back {:?}", s.id, back));
     }
