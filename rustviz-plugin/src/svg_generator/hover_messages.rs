@@ -344,6 +344,16 @@ pub fn event_dot_temporary_go_out_of_scope(my_name: &String) -> String {
     )
 }
 
+// The same temporary dropped where an early exit leaves its block
+// (`return`, `break`, `continue`, a panic: #553), so "at the end of
+// the block" would be false.
+pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> String {
+    format!(
+        "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. Its resource is dropped.",
+        fmt_style(my_name), when
+    )
+}
+
 pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool) -> String {
     if literal {
         // `let (x, _) = (m, n);`: m went into x, n stayed in the literal.

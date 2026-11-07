@@ -412,7 +412,8 @@ rather than listed here.
   gives its names no columns.
 - Temporaries: a temporary that a `let` borrows (`let r =
   &String::from("a");`) lives until the end of the block, so it gets
-  a column labelled `(temporary)` that is dropped there. A call's
+  a column labelled `(temporary)` that is dropped there (or at an early
+  `return`, `break`, `continue` or panic, where its drop dot says so). A call's
   result that nothing binds or moves on (`make();`, `let _ = make();`,
   `make().len()`, `f(&make())`, a `match` scrutinee) gets a short
   `(temporary)` column too (numbered in one sequence with the others:
