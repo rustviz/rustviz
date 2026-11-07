@@ -12766,8 +12766,8 @@ fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 /// join pass those lines; none of that may underline them. Each arm's
 /// `<g class="branch-group">` names the code panel rows of its first and
 /// last line in `data-arm-rows`. This returns every `<line>` and hover
-/// `<polygon>` in one that has no `data-underline-y` inside those rows
-/// and doesn't opt out of underlining (`data-underline="none"`), and
+/// `<polygon>` in one whose `data-underline-y` straddles those rows (it
+/// is on them or off them, #626) and doesn't opt out of underlining (`data-underline="none"`), and
 /// every diagonal that doesn't opt out.
 fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String> {
     // Row number -> y the timeline draws it at: the k-th
@@ -12790,12 +12790,15 @@ fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String
             .unwrap_or_default();
         let (Some(first), Some(last)) = (rows.first().and_then(y_of), rows.get(1).and_then(y_of)) else {
             // An arm with no lines of its own (an implicit `else`):
-            // everything in it must opt out.
+            // its column is dashed beside the other arms' code, which
+            // it may underline (#626); only its diagonals must opt out.
             for tag in group.split(|c| c == '<').skip(1) {
                 let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
-                if (tag.starts_with("line ") || tag.starts_with("polygon "))
-                    && tag_attr(tag, "data-underline") != Some("none")
-                {
+                let n = |a: &str| tag_attr(tag, a).and_then(|v| v.parse::<f64>().ok());
+                let diagonal = tag.starts_with("line ")
+                    && matches!((n("x1"), n("x2")), (Some(x1), Some(x2)) if (x1 - x2).abs() > 0.01
+                        && (n("y1") != n("y2")));
+                if diagonal && tag_attr(tag, "data-underline") != Some("none") {
                     out.push(format!("arm without own lines: <{}", tag));
                 }
             }
@@ -12811,8 +12814,16 @@ fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String
                 let diagonal = el == "line "
                     && matches!((n("x1"), n("x2")), (Some(x1), Some(x2)) if (x1 - x2).abs() > 0.01
                         && (n("y1") != n("y2")));
+                // A range is on the arm's own lines (its solid stretch) or
+                // entirely off them (a dashed stretch beside another
+                // arm's code, #626), never both.
                 let ok = match range[..] {
-                    [a, b] => !diagonal && *first - TOL <= a.min(b) && a.max(b) <= *last + 5.0 + TOL,
+                    [a, b] => {
+                        let (lo, hi) = (a.min(b), a.max(b));
+                        let within = *first - TOL <= lo && hi <= *last + 5.0 + TOL;
+                        let off = hi < *first - TOL || lo > *last + TOL;
+                        !diagonal && (within || off)
+                    }
                     _ => tag_attr(tag, "data-underline") == Some("none"),
                 };
                 if !ok {
@@ -16319,6 +16330,76 @@ fn a_break_value_in_a_branch_moves_where_the_loop_ends() {
             name, brk, row, want, dots
         );
     }
+}
+
+/// The row numbers (1-based) of the code panel's lines whose row lies in
+/// the `data-underline-y` range `ys`, as the hover script matches them.
+fn rows_in_underline_range(code_svg: &str, ys: (f64, f64)) -> Vec<usize> {
+    code_svg
+        .split("<text class=\"code\"")
+        .skip(1)
+        .filter_map(|chunk| tag_attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "y"))
+        .filter_map(|y| y.parse::<f64>().ok())
+        .enumerate()
+        .filter(|(_, y)| y - 5.0 >= ys.0 - 2.0 && y - 5.0 <= ys.1 + 2.0)
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// #626: hovering an arm's column underlines separate code. The dashed
+/// stretch underlines the other arms' lines it runs beside (which this
+/// path skips); the solid stretch underlines the arm's own lines, and
+/// neither underlines the other's. Pinned on `dashed_arm_hover`: the
+/// `else` arm of `if c` (lines 12-14; the `if` arm is lines 10-11) and
+/// the `_` arm of `match n` (lines 23-26; the `0` arm is lines 19-22).
+#[test]
+fn dashed_and_solid_arm_stretches_underline_separate_lines() {
+    let rv = run_with_local_backend("dashed_arm_hover");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let mut seen: Vec<((usize, usize), Vec<usize>, Vec<usize>)> = Vec::new();
+    let mut implicit_else: Vec<Vec<usize>> = Vec::new();
+    for group in timeline.split("<g class=\"branch-group\"").skip(1) {
+        let group = &group[..group.find("</g>").unwrap_or(group.len())];
+        let head = &group[..group.find('>').unwrap_or(group.len())];
+        let rows: Vec<usize> = tag_attr(head, "data-arm-rows")
+            .map(|r| r.split(' ').filter_map(|n| n.parse().ok()).collect())
+            .unwrap_or_default();
+        let [first, last] = rows[..] else {
+            // The implicit `else` of `if let Some(x) = opt { .. }`: its
+            // dashed column underlines the `if` arm's line 30, not the
+            // `if let` line it forks from.
+            let mut skipped = Vec::new();
+            for seg in group.split("<polygon ").skip(1) {
+                let tag = &seg[..seg.find('>').unwrap_or(seg.len())];
+                let Some(r) = tag_attr(tag, "data-underline-y") else { continue };
+                let ys: Vec<f64> = r.split(' ').filter_map(|v| v.parse().ok()).collect();
+                skipped.extend(rows_in_underline_range(&code, (ys[0], ys[1])));
+            }
+            implicit_else.push(skipped);
+            continue;
+        };
+        let (mut on_own, mut off_own) = (Vec::new(), Vec::new());
+        for seg in group.split("<polygon ").skip(1) {
+            let tag = &seg[..seg.find('>').unwrap_or(seg.len())];
+            let Some(r) = tag_attr(tag, "data-underline-y") else { continue };
+            let ys: Vec<f64> = r.split(' ').filter_map(|v| v.parse().ok()).collect();
+            for row in rows_in_underline_range(&code, (ys[0], ys[1])) {
+                let own = first <= row && row <= last;
+                let v = if own { &mut on_own } else { &mut off_own };
+                if !v.contains(&row) { v.push(row); }
+            }
+        }
+        seen.push(((first, last), on_own, off_own));
+    }
+    let find = |arm: (usize, usize)| seen.iter().find(|s| s.0 == arm)
+        .unwrap_or_else(|| panic!("no arm on rows {:?} in {:?}", arm, seen));
+    // `else` of `if c`: own lines 12-14, skipped lines are the `if` arm's.
+    assert_eq!(find((12, 14)).1, vec![12, 13, 14], "else arm's solid stretch: {:?}", seen);
+    assert_eq!(find((12, 14)).2, vec![10, 11], "else arm's dashed stretch: {:?}", seen);
+    // `_` arm of the match: own lines 23-26, skipped lines are the `0` arm's.
+    assert_eq!(find((23, 26)).1, vec![23, 24, 25, 26], "_ arm's solid stretch: {:?}", seen);
+    assert_eq!(find((23, 26)).2, vec![19, 20, 21, 22], "_ arm's dashed stretch: {:?}", seen);
+    assert!(implicit_else.contains(&vec![30]), "implicit else's dashed stretch: {:?}", implicit_else);
 }
 
 /// #710: in a one-line match arm, a pattern binding's borrow (`v` to `x`)
