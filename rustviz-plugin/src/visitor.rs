@@ -1632,6 +1632,27 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.borrow_map.get(p_rap.name())
                   .and_then(|rd| rd.lender.extract_rap().cloned())
               }
+              ResourceTy::DerefField(p_rap, _, _) => {
+                // `r.a = v` after `let r = &mut s;`: the field being
+                // overwritten is the lender's `s.a`, so that's where
+                // the old value is dropped (#152). Only when the lender
+                // is a local with per-field columns; a parameter's
+                // lender is the caller, which has no column here.
+                let lender = self.borrow_map.get(p_rap.name())
+                  .and_then(|rd| match &rd.lender {
+                    ResourceTy::Value(l) => Some(l.name().clone()),
+                    _ => None,
+                  });
+                let suffix = expr_to_rap_name(lhs_expr, &self.tcx)
+                  .and_then(|full| full.strip_prefix(p_rap.name().as_str()).map(str::to_owned))
+                  .filter(|sfx| sfx.starts_with('.'));
+                match (lender, suffix) {
+                  (Some(l), Some(sfx)) => self.raps.get(&format!("{}{}", l, sfx))
+                    .map(|rd| rd.rap.clone())
+                    .filter(|r| matches!(r, ResourceAccessPoint::Struct(_))),
+                  _ => None,
+                }
+              }
               _ => None,
             }
           } else {
@@ -1639,9 +1660,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           };
 
         // Overwriting a whole struct drops the resources its fields
-        // still own too (`d = c;` drops the old `d.data`).
+        // still own too (`d = c;` drops the old `d.data`), also when
+        // the struct is overwritten through a reference (`*r = S {..}`
+        // / `r.inner = I {..}` drop the lender's `s.a` / `s.inner.v`).
         let field_drop_targets: Vec<ResourceAccessPoint> = match (&drop_target, &lhs_rty) {
-          (Some(rap @ ResourceAccessPoint::Struct(_)), ResourceTy::Value(_)) => {
+          (Some(rap @ ResourceAccessPoint::Struct(_)),
+           ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) => {
             self.struct_fields_holding_resource(rap.name())
           }
           _ => Vec::new(),
