@@ -13153,8 +13153,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // base, which is dropped whole. A plain `let` pattern (#623):
         // `let (c, _) = make_w().pair;` leaves pair.1 and `other` in the
         // temporary, `let (d, _) = pair();` the `_` String; both are
-        // dropped at the end of the `let` (before the next statement).
-        // #469's column for the first was wrong (see below).
+        // dropped at the end of the `let` (before the next statement), as
+        // are `let [e, ..] = trio();`'s other two Strings. #469's column
+        // for the first was wrong (see below).
         must_contain: &[
             "Move from res to (temporary)",
             "A temporary holds the value that res returns, for the `let`-`else` to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
@@ -13183,11 +13184,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from pair to (temporary 9)",
             "A temporary holds the value that pair returns, for the `let` pattern to take apart. The pattern moves parts of it into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
             "This temporary (String, String) is dropped at the end of this statement, and with it whatever the pattern didn't move out of it",
+            "Move from trio to (temporary 10)",
+            "This temporary [String; 3] is dropped at the end of this statement, and with it whatever the pattern didn't move out of it",
         ],
         must_not_contain: &[
             // Nothing is left in make_r()'s temporary that needs dropping.
             "Move from make_r to (temporary",
-            "(temporary 10)",
+            // `let [f, g, h] = trio();` takes all of it.
+            "(temporary 11)",
             // #571's wording would deny the moves out of these temporaries.
             "=This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
             "=This temporary Result<String, String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",

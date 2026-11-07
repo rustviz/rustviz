@@ -57,6 +57,10 @@ fn pair() -> (String, String) {
     (String::from("a"), String::from("b"))
 }
 
+fn trio() -> [String; 3] {
+    [String::from("a"), String::from("b"), String::from("c")]
+}
+
 fn opt_pair() -> Option<(String, String)> {
     Some((String::from("a"), String::from("b")))
 }
@@ -82,5 +86,8 @@ fn main() {
     // leaves the `_` parts in the temporary (#623).
     let (c, _) = make_w().pair;
     let (d, _) = pair();
-    println!("{} {} {} {} {} {} {} {} {}", s, b, x, q.tag, r.n, k.name, k.n, c, d);
+    let [e, ..] = trio();
+    // Takes all of it: no column.
+    let [f, g, h] = trio();
+    println!("{} {} {} {} {} {} {} {} {} {} {} {} {}", s, b, x, q.tag, r.n, k.name, k.n, c, d, e, f, g, h);
 }

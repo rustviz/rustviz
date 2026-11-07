@@ -5261,10 +5261,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // takes the value (or the field) apart, and can leave parts of it
       // in the temporary, which is dropped at the end of the statement
       // (#623). A `ref` binding extends the temporary instead (#483); a
-      // destructuring assignment's `let` isn't the user's.
+      // destructuring assignment's `let` isn't the user's. A literal
+      // (`let (a, _) = (s, t);`) is #445's.
       Node::LetStmt(l) => {
         if l.span.from_expansion() || !matches!(l.source, rustc_hir::LocalSource::Normal)
-          || !l.init.is_some_and(|i| i.hir_id == top.hir_id) {
+          || !l.init.is_some_and(|i| i.hir_id == top.hir_id)
+          || matches!(expr.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
           return None;
         }
         let mut by_ref = false;
@@ -5390,6 +5392,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `None`, a unit variant: nothing in it. Literals and ranges
       // match values that need no drop.
       PatKind::Expr(_) | PatKind::Range(..) | PatKind::Never | PatKind::Err(_) => false,
+      // `[a, b]`, `[first, ..]`: the elements the pattern names, and
+      // what its `..` covers.
+      PatKind::Slice(before, mid, after) => {
+        let elem = match ty.kind() {
+          rustc_middle::ty::TyKind::Array(e, _) | rustc_middle::ty::TyKind::Slice(e) => *e,
+          _ => return true,
+        };
+        before.iter().chain(after.iter()).any(|p| self.pat_leaves_drop(p, elem, typeck, env))
+          || mid.is_some_and(|m| self.pat_leaves_drop(m, typeck.node_type(m.hir_id), typeck, env))
+      }
       PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..) => match self.pat_fields(pat, ty, typeck) {
         Some((subs, rest)) => rest.iter().any(|t| t.needs_drop(self.tcx, env))
           || subs.iter().any(|(p, t)| self.pat_leaves_temp_drop(p, *t, typeck, env)),
