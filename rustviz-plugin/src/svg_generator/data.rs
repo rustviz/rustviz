@@ -665,6 +665,25 @@ pub struct ExtBranchData {
     // point, so it contributes nothing to the state after the
     // conditional (#296).
     pub diverges: bool,
+
+    // How a diverging branch leaves (empty when it reaches the merge).
+    // Only used for the merge dot's wording.
+    pub exits: Vec<BranchExit>,
+}
+
+/// How a branch of type `!` leaves, for the merge dot's wording: it
+/// ends in a `return`, a `break` out of a loop, a `continue`, a panic
+/// (`panic!()`, `unreachable!()`, ...), or some other call that never
+/// returns (`std::process::exit`, a user `-> !` fn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BranchExit {
+    Return,
+    Break,
+    // A `break 'a` out of a labeled block (`'a: { … }`).
+    BreakBlock,
+    Continue,
+    Panic,
+    Other,
 }
 
 pub fn string_of_branch(b: &BranchType, index: usize) -> String {
@@ -920,6 +939,18 @@ pub enum ExternalEvent {
         when: String,
         id: usize
     },
+    // At the end of a loop: `ro` (declared outside the loop) was moved
+    // in a branch that then `break`s out of the loop, so after the
+    // loop it may have been moved (`definite`: it has been, because
+    // every way out of the loop is such a `break`).
+    // `labeled_block`: the `break` leaves a labeled block (`'a: { … }`),
+    // not a loop.
+    LoopExitMove {
+        ro: ResourceAccessPoint,
+        definite: bool,
+        labeled_block: bool,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -980,6 +1011,7 @@ impl ExternalEvent {
             &ExternalEvent::OwnerDropAtReassign { id, .. } |
             &ExternalEvent::ManuallyDropByHand { id, .. } |
             &ExternalEvent::TemporaryDrop { id, .. } |
+            &ExternalEvent::LoopExitMove { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. }=> id
@@ -998,6 +1030,8 @@ pub struct BranchData {
   pub states: Vec<(usize, usize, State)>,
   // See ExtBranchData::diverges.
   pub diverges: bool,
+  // See ExtBranchData::exits.
+  pub exits: Vec<BranchExit>,
 }
 
 
@@ -1135,6 +1169,8 @@ pub enum Event {
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
     TemporaryDrop { ty: String, when: String },
+    // See ExternalEvent::LoopExitMove.
+    LoopExitMove { definite: bool, labeled_block: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -1440,6 +1476,9 @@ impl Display for Event {
             Event::TemporaryDrop { ty, when } => {
                 write!(f, "Temporary {} is dropped {}", ty, when)
             },
+            Event::LoopExitMove { .. } => {
+                write!(f, "May have been moved when the loop ends")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -1517,6 +1556,9 @@ impl Event {
             }
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
+            }
+            Event::LoopExitMove { definite, labeled_block } => {
+                hover_messages::event_dot_loop_exit_move(my_name, *definite, *labeled_block)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -2165,6 +2207,13 @@ impl Visualizable for VisualizationData {
             (_, Event::ManuallyDropByHand) =>
                 State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: true },
 
+            // Moved before a `break` out of the loop that just ended:
+            // not usable after the loop, like after a conditional that
+            // moved it on some paths (the scope-end dot says whether a
+            // drop flag decides the drop).
+            (_, Event::LoopExitMove { .. }) =>
+                State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
+
 
             (_, _) => State::Invalid,
         }
@@ -2534,6 +2583,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TemporaryDrop{ ty, when, .. } => {
           vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone() })]
         },
+        ExternalEvent::LoopExitMove{definite, labeled_block, ..} => {
+          vec![(line_num, Event::LoopExitMove { definite: *definite, labeled_block: *labeled_block })]
+        },
 
         _ => panic!("should not be calling this on branches")
       }
@@ -2563,7 +2615,7 @@ impl Visualizable for VisualizationData {
                             is_struct_group: false,
                             is_member: false, 
                             owner: 0
-                          }, e_data: new_b_history, width: 0, states: Vec::new(), diverges: b.diverges });
+                          }, e_data: new_b_history, width: 0, states: Vec::new(), diverges: b.diverges, exits: b.exits.clone() });
                     }
 
                     b_history.push((line_number,  
@@ -2573,6 +2625,11 @@ impl Visualizable for VisualizationData {
                                         split_point: *split_point, 
                                         merge_point: *merge_point,
                                         id: *id}));
+                }
+            }
+            ExternalEvent::LoopExitMove { ro, .. } => {
+                if ro == rap {
+                    b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
             }
             _ => {
@@ -2691,7 +2748,7 @@ impl Visualizable for VisualizationData {
                             is_struct_group: false,
                             is_member: false, 
                             owner: 0
-                        }, e_data: b_history, width: 0, states: Vec::new(), diverges: branch.diverges });
+                        }, e_data: b_history, width: 0, states: Vec::new(), diverges: branch.diverges, exits: branch.exits.clone() });
                     }
                     maybe_append_event(self, &is.clone(), Event::Branch { 
                                         is: is, 
@@ -2819,6 +2876,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::TemporaryDrop{ro, ty, when, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when }, line_number);
+            },
+            ExternalEvent::LoopExitMove{ro, definite, labeled_block, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, labeled_block }, line_number);
             },
         }
     }

@@ -578,6 +578,9 @@ pub fn collect_event_live_vars(
             // conditional's liveness set.
             ExternalEvent::GoOutOfScope { .. }
             | ExternalEvent::InitRefParam { .. } => {}
+            ExternalEvent::LoopExitMove { ro, .. } => {
+                out.insert(ro.clone());
+            }
             _ => {
                 let (from, to) = ResourceAccessPoint_extract(ev);
                 for rty in [from, to] {

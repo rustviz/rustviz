@@ -1,4 +1,4 @@
-use crate::svg_generator::data::ResourceAccessPoint;
+use crate::svg_generator::data::{BranchExit, ResourceAccessPoint};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -1607,39 +1607,102 @@ pub fn event_dot_branch_merge_all_moved(my_name: &String, some_diverge: bool) ->
 /// variable (the `let s = if … { … } else { … };` shape, plus the
 /// match-as-rhs analog). After the conditional the variable owns a
 /// freshly bound resource regardless of which branch ran.
-/// `some_diverge`: an arm like `_ => unreachable!()` produces no
-/// value and never gets here; every arm that does bound a value (#296).
-pub fn event_dot_branch_merge_bound(my_name: &String, some_diverge: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+/// `diverged`: the branches of type `!` (`_ => unreachable!()`,
+/// `return`), which produce no value and never get here, as (name, how
+/// it leaves) pairs; every branch that does get here bound a value
+/// (#296).
+pub fn event_dot_branch_merge_bound(my_name: &String, diverged: &[(String, Vec<BranchExit>)]) -> String {
     format!(
-        "{0} acquired ownership of a resource (in all branches above{1})",
-        my_name_fmt,
-        if some_diverge { " that reach this point" } else { "" }
+        "{0} acquired ownership of a resource{1}",
+        fmt_style(my_name),
+        bound_in_branches(diverged)
     )
 }
 
 /// `event_dot_branch_merge_bound` for a reference variable: every
 /// branch bound it to a reference, which never owns its referent.
-pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool, some_diverge: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool, diverged: &[(String, Vec<BranchExit>)]) -> String {
     let kind = if is_mut { "a mutable" } else { "an immutable" };
     format!(
-        "{0} is bound to {1} reference (in all branches above{2})",
-        my_name_fmt, kind,
-        if some_diverge { " that reach this point" } else { "" }
+        "{0} is bound to {1} reference{2}",
+        fmt_style(my_name), kind,
+        bound_in_branches(diverged)
     )
 }
 
 /// `event_dot_branch_merge_bound` for a Copy variable (`let n = match x
 /// { 0 => 1, _ => 2 };`): an `i32` holds a value, not a resource it
 /// owns (#316). Matches the per-arm `event_dot_acquire_copyable`.
-pub fn event_dot_branch_merge_bound_copy(my_name: &String, some_diverge: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+pub fn event_dot_branch_merge_bound_copy(my_name: &String, diverged: &[(String, Vec<BranchExit>)]) -> String {
     format!(
-        "{0} is bound to a value (in all branches above{1})",
-        my_name_fmt,
-        if some_diverge { " that reach this point" } else { "" }
+        "{0} is bound to a value{1}",
+        fmt_style(my_name),
+        bound_in_branches(diverged)
     )
+}
+
+/// The "in which branches" tail of the bound-at-merge messages: " (in
+/// all branches above)", or, when some branches never get here, "in
+/// every branch that reaches this point (the _ arm panicked)".
+fn bound_in_branches(diverged: &[(String, Vec<BranchExit>)]) -> String {
+    if diverged.is_empty() {
+        return " (in all branches above)".to_owned();
+    }
+    format!(" in every branch that reaches this point ({})", how_branches_left(diverged))
+}
+
+/// "the _ arm panicked", "the if branch returned", "the 0 and 1 arms
+/// returned", "the 0 arm returned, the _ arm panicked". Branch names
+/// are "If" / "Else" for an `if`, an arm's pattern for a `match`.
+fn how_branches_left(diverged: &[(String, Vec<BranchExit>)]) -> String {
+    let noun = |name: &String| match name.as_str() {
+        "If" => "the if branch".to_owned(),
+        "Else" => "the else branch".to_owned(),
+        _ => format!("the {} arm", fmt_style(name)),
+    };
+    let same_way = diverged.iter().all(|(_, e)| *e == diverged[0].1);
+    if same_way && diverged.iter().all(|(n, _)| n != "If" && n != "Else") && diverged.len() > 1 {
+        let names: Vec<String> = diverged.iter().map(|(n, _)| fmt_style(n)).collect();
+        format!("the {} arms {}", join_and(&names), exits_verb(&diverged[0].1, true))
+    } else {
+        diverged.iter()
+            .map(|(n, e)| format!("{} {}", noun(n), exits_verb(e, false)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {}", init.join(", "), last),
+    }
+}
+
+/// How a branch of type `!` left, as a verb phrase: "returned", "broke
+/// out of the loop", "continued to the next iteration", "panicked";
+/// several ways: "left early (return, break)".
+fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
+    match exits {
+        [BranchExit::Return] => "returned".to_owned(),
+        [BranchExit::Break] => "broke out of the loop".to_owned(),
+        [BranchExit::BreakBlock] => "broke out of the labeled block".to_owned(),
+        [BranchExit::Continue] => "continued to the next iteration".to_owned(),
+        [BranchExit::Panic] => "panicked".to_owned(),
+        [BranchExit::Other] | [] => if plural { "never finish" } else { "never finishes" }.to_owned(),
+        _ => {
+            let mut words: Vec<&str> = exits.iter().map(|e| match e {
+                BranchExit::Return => "return",
+                BranchExit::Break | BranchExit::BreakBlock => "break",
+                BranchExit::Continue => "continue",
+                BranchExit::Panic => "panic",
+                BranchExit::Other => "a call that never returns",
+            }).collect();
+            words.dedup();
+            format!("left early ({})", words.join(", "))
+        }
+    }
 }
 
 /// Some-moved-some-alive case: at least one branch consumed the
@@ -1711,4 +1774,55 @@ pub fn event_dot_branch_merge_borrow_ended(my_name: &String) -> String {
 // reference declared before the conditional has ended in that arm.
 pub fn state_ref_borrow_ended(my_name: &String) -> String {
     format!("{0}'s borrow has ended on this path", fmt_style(my_name))
+}
+
+// Merge dot for a variable that was moved only in branches of type `!`
+// (`if n > 0 { return s; }`, #318): those never get here, so on every
+// path that does it still holds what it held before. `leavers`: how
+// each such branch left. A reference never owns anything, so it
+// "holds its reference" instead.
+pub fn event_dot_branch_merge_kept(my_name: &String, is_ref: Option<bool>, value: bool, leavers: &[Vec<BranchExit>]) -> String {
+    let name = fmt_style(my_name);
+    let holds = match is_ref {
+        Some(true) => format!("{} still holds its mutable reference here", name),
+        Some(false) => format!("{} still holds its reference here", name),
+        // A value with nothing to drop is a "value", not a "resource" (#484).
+        None if value => format!("{} still owns its value here", name),
+        None => format!("{} still owns its resource here", name),
+    };
+    let plural = leavers.len() > 1;
+    let mut all: Vec<BranchExit> = leavers.iter().flatten().copied().collect();
+    all.sort();
+    all.dedup();
+    let exits = if leavers.iter().all(|e| *e == leavers[0]) { leavers[0].clone() } else { all };
+    let subject = if plural { format!("the branches that moved {}", name) } else { format!("the branch that moved {}", name) };
+    match exits.as_slice() {
+        [BranchExit::Other] | [] => format!(
+            "{}: {} {}, so {} reach this point",
+            holds, subject, exits_verb(&exits, plural), if plural { "they don't" } else { "it doesn't" }
+        ),
+        _ => format!("{}: {} {} before reaching this point", holds, subject, exits_verb(&exits, plural)),
+    }
+}
+
+// At the end of a loop, for a variable declared outside it that a
+// branch inside moved before a `break` out of the loop. `definite`:
+// every way out of the loop is such a `break`.
+// `labeled_block`: the same at the end of a labeled block (`'a: { …
+// break 'a; … }`).
+pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block: bool) -> String {
+    let name = fmt_style(my_name);
+    let brk = fmt_style(&"break".to_owned());
+    let what = if labeled_block { "block" } else { "loop" };
+    if definite {
+        format!(
+            "{0} was moved before the {2} ended: the only way out of the {2} is a {1} that comes after {0} is moved, so {0} can't be used after the {2}",
+            name, brk, what
+        )
+    } else {
+        format!(
+            "{0} may have been moved: the {2} can end through a {1} that comes after {0} is moved, so {0} can't be used after the {2}",
+            name, brk, what
+        )
+    }
 }
