@@ -17,7 +17,7 @@
 //!     the listed ones are load-bearing.
 //!
 //!   * For features known to be unsupported (for-loops, conditional borrows,
-//!     smart pointers, etc. — see README "Limitations") snippets stay off
+//!     smart pointers, etc. — see the issues labelled `limitation`) snippets stay off
 //!     these lists; failures there aren't regressions until the feature is
 //!     implemented.
 //!
