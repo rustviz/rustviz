@@ -277,6 +277,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `break 'outer` out of the loops inside `'outer` (#592). Each is
   // paired with its loop's id (the desugared `loop` expression).
   pub loop_iterators: Vec<(rustc_hir::HirId, ResourceAccessPoint)>,
+  // The `(temporary N)` column of each unbound temporary that a field
+  // is moved out of (`make_q().a`), by the expression that makes it
+  // (#469).
+  pub temp_cols: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
   // State for the destructuring assignment being visited
   // (`(a, b) = (b, a);`, see `visit_destructuring_assign`). rustc
   // lowers it to `{ let (lhs, lhs) = (b, a); a = lhs; b = lhs; }`;
@@ -656,13 +660,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   /// `Some(kind)` iff `ty` is `Rc<T>`, `Arc<T>` or one of their
@@ -906,7 +910,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -2529,10 +2533,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// behind a reference (`match self.kind`, `if let Some(n) =
   /// &cur.next`).
   pub fn rap_or_field_through_ref(&self, expr: &'tcx Expr<'tcx>) -> ResourceTy {
+    if let Some(tmp) = self.part_temp_of(expr) {
+      return ResourceTy::Value(tmp);
+    }
     match get_rap(expr, &self.tcx, &self.raps) {
       ResourceTy::Anonymous => self.field_access_through_ref(expr).unwrap_or(ResourceTy::Anonymous),
       rty => rty,
     }
+  }
+
+  /// The `(temporary N)` column `expr` takes something out of, when
+  /// `expr` is a field of a temporary that it is moved out of
+  /// (`make_p().name`, #469).
+  pub fn part_temp_of(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let mut e = expr;
+    while let ExprKind::Field(base, _) = e.kind {
+      e = base;
+    }
+    self.temp_cols.get(&e.hir_id).cloned()
   }
 
   /// The resource read or borrowed by `expr` (`p.x`, `&p.name`,
@@ -5451,6 +5469,16 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           return;
         }
         self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
+      } else if let Some(tmp) = self.part_temp_of(rhs) {
+        // `let s = make_q().a;`: a field moved out of a temporary,
+        // which keeps the rest (#469).
+        let line_num = span_to_line(&inner.span, &self.tcx);
+        self.add_ev(line_num, evt, lhs, ResourceTy::Value(tmp), true);
+      } else if let (Evt::Move, Some(ResourceTy::Value(f))) = (&evt, field_call_root(rhs).map(|c| get_rap(c, &self.tcx, &self.raps))) {
+        // `let s = make_p().name;` where nothing that needs dropping is
+        // left in the temporary: the value comes from the call (#469).
+        let line_num = span_to_line(&inner.span, &self.tcx);
+        self.add_ev(line_num, evt, lhs, ResourceTy::Value(f), false);
       } else if let Some(rty) = self.field_access_through_ref(rhs) {
         // `let a = p.x;` / `self.n` as a tail expression, with p /
         // self a reference: a copy out of the resource p points to,

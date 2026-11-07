@@ -462,7 +462,13 @@ rather than listed here.
   variables are drawn moving in (`let (x, _) = (m, String::new());`
   doesn't show the `String::new()`, though it is dropped with the
   temporary), and a literal inside a one-line `if` / `match` is not
-  drawn (its drop is not stated). A `ref` binding of a value (`let ref
+  drawn (its drop is not stated). So does a temporary that something is
+  moved out of, when what is left in it may need dropping: a field (`let
+  s = make().name;`, drawn moving out of the column), or what the
+  pattern of a `match`, `if let` or `while let` binds by value (`match
+  make() { (a, _) => .. }`, `if let Ok(s) = make()`; the bindings are
+  drawn from the call, not from the column). Its drop says the rest goes
+  with it. A `ref` binding of a value (`let ref
   t = String::from("a");`, `let P { ref name, .. } = make_p();`)
   borrows a `(temporary)` column that lives to the end of the block,
   and a literal of only fresh values (`let (ref a, _) = (make(),
@@ -472,8 +478,10 @@ rather than listed here.
   (their drops are not stated): temporaries that aren't a call's result
   (`vec![..];`, `format!(..);`, a struct literal), the scrutinee of
   `if let` / `while let`, a `for` loop's head (`for x in make().iter()`),
-  a field moved out of a temporary (`make().name`), a `match`
-  scrutinee some arm binds by value, and a temporary nested inside a
+  what a `let`-`else` pattern refuses (`let Ok(s) = make() else { .. }`),
+  a temporary that is the base of a struct update (`P { name: s,
+  ..make() }`), a field of a temporary that is itself matched on
+  (`match make().name { .. }`), and a temporary nested inside a
   borrowed value (`let p = Wrapper { r: &String::new() };`).
   The exception is a tuple of variables matched by `if let` or `match`
   (`if let (Some(a), _) = (x, y)`): it gets no column, but a drop dot
