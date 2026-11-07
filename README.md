@@ -331,9 +331,12 @@ rather than listed here.
   their own. Overwriting a reference field of a local struct
   (`hold.r = &t` after `H { r: &s }`) keeps `s` borrowed until the
   struct's last use, as the borrow checker does (the struct's type has
-  one lifetime for the reference). Overwriting the whole struct
-  (`hold = H { r: &t }`) ends the old borrow at the write in rustc but
-  isn't drawn ending at all (#538).
+  one lifetime for the reference). Overwriting the whole struct with a
+  struct literal (`hold = H { r: &t }`) drops the old value, so the old
+  borrow ends at the write, as in rustc (or at the old value's last use,
+  if earlier). Overwriting it with something else
+  (`hold = make(&t)`, another variable) is not handled specially: the
+  old borrow may be drawn ending too late or not at all.
 - A write to an element (`v[i] = x`, `grid[r][c] += 1`, `r[i] = x`
   through `r: &mut Vec<_>`) is drawn on the collection's column; an
   assignment reads like a plain assignment with the element as the

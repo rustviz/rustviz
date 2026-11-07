@@ -815,6 +815,9 @@ const EXPECTED_OK: &[&str] = &[
     "try_drops_owned",
     "try_in_branch",
     "try_in_loop_two_on_a_line",
+    // A whole struct overwritten drops its old value: the borrows its
+    // reference fields held end at the write (#538).
+    "borrow_struct_overwrite_whole",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -8766,6 +8769,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to pair here.",
         ],
     },
+    // ─── A whole struct overwritten ends its old borrows (#538) ──────
+    TooltipExpect {
+        name: "borrow_struct_overwrite_whole",
+        // `hold = H { r: &t };` drops hold's old value, so s's borrow
+        // ends there (rustc accepts the `&mut s` right after; unlike
+        // `hold.r = &t`, #531). Main drew no end and no return arrow
+        // for s, x, y or u. `used_before` ends a's borrow at the
+        // println! that last uses it; see
+        // `whole_struct_overwrite_ends_old_borrow_at_the_write`.
+        must_contain: &[
+            "s's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from hold.r to s",
+            "a's resource is no longer immutably borrowed",
+            "x's resource is no longer immutably borrowed",
+            "y's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from p.a to x",
+            "Return immutably borrowed resource from p.b to y",
+            "u's resource is no longer mutably borrowed",
+            "Return mutably borrowed resource from h.r to u",
+            "s's resource is no longer mutably borrowed",
+        ],
+        // Main's bug was an omission (no end, no return arrow), so
+        // there is no false text to forbid; the must_contain entries
+        // above fail on main.
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -10551,6 +10580,23 @@ fn direct_field_overwrite_keeps_old_borrow_until_last_use() {
     let (x_end, y_end) = (end("x"), end("y"));
     assert_eq!((x_end.len(), y_end.len()), (1, 1));
     assert!(x_end[0].1 < y_end[0].1, "x's borrow ends at the reassignment, before y's: {:?} {:?}", x_end, y_end);
+}
+
+/// #538: `hold = H { r: &t };` drops the old struct, so s's borrow ends
+/// on the overwrite's row, the row where t's borrow starts, and before
+/// the later `&mut s`.
+#[test]
+fn whole_struct_overwrite_ends_old_borrow_at_the_write() {
+    let svg = run_with_local_backend("borrow_struct_overwrite_whole").timeline_panel_string();
+    let s_end = dots_with_tooltip(&svg, "s's resource is no longer immutably borrowed");
+    let s_mut_end = dots_with_tooltip(&svg, "s's resource is no longer mutably borrowed");
+    assert_eq!((s_end.len(), s_mut_end.len()), (1, 1), "{:?} {:?}", s_end, s_mut_end);
+    let mut write = dots_with_tooltip(&svg, "hold is assigned a new value");
+    write.sort_by(|a, b| a.1.total_cmp(&b.1));
+    assert!(!write.is_empty());
+    assert_eq!(s_end[0].1, write[0].1,
+        "s's borrow should end on the write's row, with t's start: {:?} vs {:?}", s_end, write);
+    assert!(s_end[0].1 < s_mut_end[0].1, "{:?} {:?}", s_end, s_mut_end);
 }
 
 #[test]

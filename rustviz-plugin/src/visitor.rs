@@ -2088,6 +2088,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.reassign_holder(&rap, rhs_expr, lhs_ty, line_num);
           }
         }
+        // `hold = H { r: &t };` overwrites a whole struct whose
+        // reference fields hold borrows (#538). The old value is
+        // dropped, so the borrow checker ends the loans it held at the
+        // write (a `&mut s` right after compiles), unlike a direct
+        // field write (#531), where `hold`'s single lifetime keeps
+        // them. The old loans are read before the literal's fields
+        // replace them and drawn after its Bind.
+        let struct_field_ends = match (&lhs_rty, expr.kind, &rhs_expr.kind) {
+          (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..), ExprKind::Struct(..)) if !lhs_is_union_field =>
+            self.struct_field_borrow_ends(rap, line_num),
+          _ => Vec::new(),
+        };
         if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
           // `v[i] += k`: k is an operand, not the element's new
           // value, so don't draw it as copied into v[i].
@@ -2099,6 +2111,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         } else {
           let n_events = self.preprocessed_events.len();
           self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+          self.draw_struct_field_borrow_ends(struct_field_ends);
           // `v[1] = v[2]`: match_rhs has nothing to say about some
           // RHS shapes (an index read, a field of a call, …), but the
           // element is still overwritten.
