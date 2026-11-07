@@ -621,6 +621,13 @@ const EXPECTED_OK: &[&str] = &[
     "field_compound_assign_through_ref",
     // — User macros: one that forwards to println! still renders (#342).
     "user_macro_forwards",
+    // — A reference returned by a call (or a borrow) in an `if` /
+    //   `match` branch initializer borrows from every branch's lender
+    //   (#337); tooltips pinned below.
+    "branch_call_ref_if",
+    "branch_call_ref_match",
+    "branch_call_ref_method",
+    "branch_ref_if_addr",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6038,6 +6045,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from c to r6: three's signature gives the reference it returns the same lifetime as all three arguments (one of them is a value with no column here), so it may point into any of them, and a and c stay borrowed while r6 is in use",
         ],
         must_not_contain: &[
+            ", through the reference pick returned",
+            ", through the reference pick_arg returned",
+            ", through the reference both returned",
+            ", through the reference three returned",
+            ", through the reference first_third returned",
             "Immutable borrow from o to r1",
             "Immutable borrow from b to r5",
             ", through the reference",
@@ -6346,6 +6358,73 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "println! reads from n through an implicit reference, so n isn't moved",
         ],
         must_not_contain: &[],
+    },
+    // ─── References chosen by an `if` / `match` (#337) ───────────────
+    TooltipExpect {
+        name: "branch_call_ref_if",
+        // #337's repro: `t` stays borrowed until x's last use (line 6),
+        // not just during the call (the `t.len()` in the condition is a
+        // separate, short borrow).
+        must_contain: &[
+            "Immutable borrow from t to x: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from x to t",
+        ],
+        must_not_contain: &[
+            ", through the reference first_word returned",
+            "x is initialized by copy from first_word",
+            "Copy from first_word to x",
+            "Return immutably borrowed resource from x to *x",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_call_ref_match",
+        // Each arm draws its own borrow. After the match, rustc treats
+        // `w` as possibly borrowing either, so both stay borrowed until
+        // w's last use.
+        must_contain: &[
+            "Immutable borrow from a to w: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from b to w: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from w to a",
+            "Return immutably borrowed resource from w to b",
+        ],
+        must_not_contain: &[
+            ", through the reference first_word returned",
+            "w is initialized by copy from first_word",
+            "Return immutably borrowed resource from w to *w",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_call_ref_method",
+        // Method chains in a branch (`v.first().unwrap()`, `s.as_str()`)
+        // next to a literal / promoted constant in the other branch.
+        must_contain: &[
+            "Immutable borrow from v to f: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return immutably borrowed resource from f to v",
+            "Return immutably borrowed resource from t to s",
+        ],
+        must_not_contain: &[
+            ", through the reference unwrap returned",
+            ", through the reference as_str returned",
+            "f is initialized by copy from Anonymous resource",
+            "t is initialized by copy from Anonymous resource",
+            "Return immutably borrowed resource from f to *f",
+            "Return immutably borrowed resource from t to *t",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_ref_if_addr",
+        // `if c { &a } else { &b }`: the borrows were drawn, but r's end
+        // gave nothing back.
+        must_contain: &[
+            "Immutable borrow from a to r",
+            "Immutable borrow from b to r",
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from r to b",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to *r",
+        ],
     },
 ];
 
@@ -8217,7 +8296,7 @@ fn reference_bracket_starts_below_the_branch_diamond() {
     // The bracket: `<path ... class="staticref ..." d="M x y ..."` for `x`.
     let bracket = t
         .lines()
-        .find(|l| l.contains("class=\"staticref") && l.contains("&gt;x&lt;/span&gt; holds a reference"))
+        .find(|l| l.contains("class=\"staticref") && l.contains("&gt;x&lt;/span&gt; holds a"))
         .expect("bracket for x");
     let d = &bracket[bracket.find("d=\"M ").unwrap() + 5..];
     let mut nums = d.split(|c: char| c == ' ' || c == '"');
@@ -8228,7 +8307,8 @@ fn reference_bracket_starts_below_the_branch_diamond() {
     // lowest arm dot's line plus half a row.
     let mut arm_ys = Vec::new();
     for c in t.lines().filter(|l| l.contains("<circle") && l.contains("data-hash=\"4\"")
-        && (l.contains("live in a conditional") || l.contains("initialized by"))) {
+        && (l.contains("live in a conditional") || l.contains("initialized by")
+            || l.contains("initialized with a copy of") || l.contains("immutably borrows a resource"))) {
         let cy = c.split("cy=\"").nth(1).unwrap().split('"').next().unwrap();
         arm_ys.push(cy.parse::<f64>().unwrap());
     }
