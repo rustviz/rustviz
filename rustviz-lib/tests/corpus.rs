@@ -12265,9 +12265,10 @@ fn chained_level_arrows(svg: &str) -> Vec<String> {
 }
 
 /// #577: a reborrow's end and its lender's end on one row (`s` gives back
-/// to `r`, `r` to `x`, both on the `}` of the arm) used to be drawn level,
-/// the second starting where the first ends, so they read as one long arrow
-/// through `r`'s dot. The second dips half a row instead.
+/// to `r`, `r` to `x`, both on `s`'s last use, the `println!`, since #599)
+/// used to be drawn level, the second starting where the first ends, so
+/// they read as one long arrow through `r`'s dot. The second dips half a
+/// row instead.
 #[test]
 fn chained_return_arrows_are_visibly_separate() {
     for name in [
@@ -12278,11 +12279,15 @@ fn chained_return_arrows_are_visibly_separate() {
         let tl = run_with_local_backend(name).timeline_panel_string();
         assert_eq!(chained_level_arrows(&tl), Vec::<String>::new(), "{}", name);
     }
-    let tl = run_with_local_backend("match_local_ref_reborrow").timeline_panel_string();
+    let rv = run_with_local_backend("match_local_ref_reborrow");
+    let tl = rv.timeline_panel_string();
+    let code = rv.code_panel_string();
     let first = arrow_points(&tl, "Return immutably borrowed resource from s to r");
     let second = arrow_points(&tl, "Return immutably borrowed resource from r to x");
     assert_eq!((first.len(), second.len()), (1, 2), "{:?} {:?}", first, second);
     let y = first[0][0].1;
+    // Both returns are on `s`'s last use (#599), so they still chain.
+    assert_eq!(y, code_row_y(&code, "println!(\"{}\", s);"), "s's return isn't on its last use: {:?}", first);
     // The arm's return from `r` to `x` (the other one is the `None` arm's, a
     // row lower) starts on `s`'s row and goes below it, not along it.
     let arm = second
@@ -12292,14 +12297,13 @@ fn chained_return_arrows_are_visibly_separate() {
     assert!(arm.len() > 2 && arm.iter().any(|&(_, py)| py > y + 5.0),
         "r's return should leave the row s's return ends on: {:?}", arm);
     // The dip is the only change: half a row at most below the line (not a
-    // full row), no row is added to the code panel for it, and the next
-    // line's arrow (the `None` arm's return) is still one row down.
+    // full row), no row is added to the code panel for it, and a later
+    // line's arrow (the `None` arm's return) is still on its own line.
     let lowest = arm.iter().map(|&(_, py)| py).fold(f64::MIN, f64::max);
     assert!(lowest <= y + 15.0 + 0.5, "r's return dips to y={}, more than half a row below y={}", lowest, y);
     let none_arm = second.iter().find(|p| p[0].1 > y + 20.0).expect("r's return in the None arm");
-    assert_eq!(none_arm[0].1, y + 30.0, "the next line moved: {:?}", none_arm);
-    let rv = run_with_local_backend("match_local_ref_reborrow");
-    assert_eq!(unnumbered_code_rows(&rv.code_panel_string()), 0, "a blank row was added for the dip");
+    assert_eq!(none_arm[0].1, code_row_y(&code, "None => {}"), "the None arm's line moved: {:?}", none_arm);
+    assert_eq!(unnumbered_code_rows(&code), 0, "a blank row was added for the dip");
 }
 
 /// A `ref` / `ref mut` binding in a match arm returns its borrow at its
