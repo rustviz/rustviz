@@ -3676,7 +3676,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // Only into a variable: an element-to-element copy (`v[2] = v[0]`)
     // or a write through a reference (`*r = v[0]`) stays undrawn, as
     // before.
-    ExprKind::Index(recv, _, _) if matches!(lhs, ResourceTy::Value(_)) => {
+    // (A reference copied out of a collection whose stored borrows are
+    // tracked, `let r = refs[0];`, is the arm below, #349.)
+    ExprKind::Index(recv, _, _) if matches!(lhs, ResourceTy::Value(_))
+      && !(lhs.is_ref() && !lhs.is_mutref() && self.stored_ref_lenders(rhs).is_some()) => {
       let line_num = span_to_line(&rhs.span, &self.tcx);
       let elem_ty = self.tcx.typeck(rhs.hir_id.owner).node_type(rhs.hir_id);
       let holder = expr_to_rap_name(recv, &self.tcx)
