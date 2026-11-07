@@ -853,6 +853,8 @@ const EXPECTED_OK: &[&str] = &[
     // Where the tuple a tuple-literal scrutinee builds is dropped, and
     // what of its variables' values goes with it (#327).
     "tuple_scrutinee_drops",
+    // A `ref` binding out of `(x, y)` borrows the tuple, not x (#580).
+    "tuple_scrutinee_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9274,6 +9276,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=f goes out of scope. Its resource is dropped.",
             // g took f's String: nothing of f's is left in the tuple.
             "the rest of e's resource and f's resource",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_ref",
+        // `(Some(ref a), _)` on `(x, y)`: x's value was moved into the
+        // temporary tuple, and `a` borrows the String in that tuple,
+        // not x. The String stays in the tuple and is dropped with it
+        // after the arm, so x never owns a value again (#580). Same
+        // for `ref mut s` in an `if let`: the tuple, holding p's
+        // value, is dropped at the end of the if branch.
+        must_contain: &[
+            "x's resource is moved into the temporary tuple (x, y)",
+            "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it x's and y's resources",
+            "x was moved or dropped in every branch above",
+            "x goes out of scope. No resource is dropped.",
+            "p's resource is moved into the temporary tuple (p, q)",
+            "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
+            "p was moved or dropped in every branch above",
+            "p goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from x to a",
+            "Return immutably borrowed resource from a to x",
+            "x's resource is immutably borrowed by a",
+            "Mutable borrow from p to s",
+            "Return mutably borrowed resource from s to p",
+            "x was moved in at least one branch above",
+            "p was moved in at least one branch above",
+            "x goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "p goes out of scope. Its resource is dropped here only if no branch above moved it",
         ],
     },
 ];

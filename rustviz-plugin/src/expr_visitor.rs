@@ -3271,9 +3271,10 @@ pub fn register_iflet_let_bindings(
         let mut sub = Vec::new();
         self.get_dec_of_pat_parts(sp, typeck_res, &sp_parent, sp_parent_ty, scope, &mut sub);
         let sp_ty = typeck_res.node_type(sp.hir_id);
-        decls.extend(sub.into_iter().map(|(r, e, from, partial)| {
-            (r, e, from, partial.unwrap_or(sp_parent_ty != sp_ty))
-        }));
+        for (r, e, from, partial) in sub {
+            let from = self.retarget_tuple_borrow(scrutinee, &r, &e, from);
+            decls.push((r, e, from, partial.unwrap_or(sp_parent_ty != sp_ty)));
+        }
     }
 
     let moved_into_scrutinee = self.tuple_scrutinee_moves(scrutinee);
@@ -3609,6 +3610,37 @@ pub fn tuple_scrutinee_moves(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<Resource
             _ => None,
         }
     }).collect()
+}
+
+/// A `ref` / `ref mut` binding out of a tuple-literal scrutinee's
+/// element (`(Some(ref a), _)` on `(x, y)`) borrows that element of the
+/// temporary tuple, not `x`, whose value was moved into the tuple
+/// (#580). Its lender is the tuple, which has no column: drawn like a
+/// borrow of any other temporary (`Anonymous`).
+pub fn tuple_elem_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: ResourceTy) -> ResourceTy {
+  if matches!(evt, Evt::SBorrow | Evt::MBorrow) {
+    if let ResourceTy::Value(r) = &from {
+      if self.tuple_scrutinee_moves(scrutinee).contains(r) {
+        return ResourceTy::Anonymous;
+      }
+    }
+  }
+  from
+}
+
+/// `tuple_elem_lender` for the binding `binding`, also pointing the
+/// borrow its `ref` registered (add_ref) at the tuple, so the borrow's
+/// end isn't drawn as giving x its value back (#580).
+pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: ResourceTy) -> ResourceTy {
+  let lender = self.tuple_elem_lender(scrutinee, evt, from.clone());
+  if lender != from {
+    if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
+      if rd.lender == from {
+        rd.lender = lender.clone();
+      }
+    }
+  }
+  lender
 }
 
 /// Where a tuple-literal scrutinee's variables go: the move into the

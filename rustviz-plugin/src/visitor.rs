@@ -2930,6 +2930,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     };
                     let mut associated_ro = Vec::new();
                     self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
+                    // A `ref` binding out of `(x, y)` borrows the tuple's
+                    // element, not x (#580).
+                    for (r, e, from, _) in associated_ro.iter_mut() {
+                      *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
+                    }
                     let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
                     let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
                     pat_decls.extend(temp2);
