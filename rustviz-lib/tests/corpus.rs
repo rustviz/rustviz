@@ -555,6 +555,10 @@ const EXPECTED_OK: &[&str] = &[
     "outer_ref_end_in_if_arm",
     "outer_mut_ref_end_in_if_arm",
     "outer_ref_end_in_nested_if",
+    // An arm written on the `if` / `match` line starts on that row (#508).
+    "if_arm_on_split_line",
+    "match_arm_on_split_line",
+    "if_arm_on_split_line_cond_event",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5608,6 +5612,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["r isn't moved in any of the branches above"],
     },
+    TooltipExpect {
+        name: "if_arm_on_split_line",
+        // #508: the move happens only in the `if` arm, so the `else`
+        // arm's use of `s` is a borrow, not a use after a move.
+        // Geometry: `an_arm_whose_first_event_is_on_the_split_line_starts_there`.
+        must_contain: &["Move from s to take", "s's resource is moved"],
+        must_not_contain: &["Copy from s to take", "s's value is copied"],
+    },
+    TooltipExpect {
+        name: "match_arm_on_split_line",
+        must_contain: &["Move from s to take", "s's resource is moved"],
+        must_not_contain: &["Copy from s to take", "s's value is copied"],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -6270,6 +6287,61 @@ fn arrow_points(svg: &str, text: &str) -> Vec<Vec<(f64, f64)>> {
     out
 }
 
+/// An arm whose first event is on the split line (a `Move`, `Copy` or
+/// borrow dot of `var`, with the arrow `arrow_text` leaving along that
+/// row) is drawn starting there: the split dot is within the half row above
+/// the row of `line`, the arm's diagonal ends at the event's dot, and the
+/// arm's column doesn't run above it (no Z), and no arrow hops over a dot.
+fn assert_arm_starts_on_split_line(name: &str, var: &str, line: &str, bind_text: &str, arrow_text: &str) {
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = code_row_y(&code, line);
+    let bind = dots_with_tooltip(&timeline, bind_text);
+    let arrow = arrow_points(&timeline, arrow_text);
+    let split = dots_with_tooltip(&timeline, &format!("{} is live in a conditional expression ", var));
+    assert_eq!((bind.len(), arrow.len(), split.len()), (1, 1, 1), "{} {}: dots / arrow", name, var);
+    let (bind, split) = (bind[0], split[0]);
+    // The binding is on its own source row, and its arrow runs level
+    // along it from the event dot.
+    assert_eq!(bind.1, row, "{} {}: event dot not on the split row", name, var);
+    assert!(arrow[0].len() == 2 && arrow[0].iter().all(|p| p.1 == row),
+        "{} {}: {:?} isn't a straight arrow along the split row y={}: {:?}", name, var, arrow_text, row, arrow[0]);
+    // The split dot is above that row, within the half row above it.
+    assert!(row - 30.0 < split.1 && split.1 < row,
+        "{} {}: split dot at y={} is not between the row above and the split row y={}", name, var, split.1, row);
+    // The arm's diagonal ends at the event dot, and the arm's
+    // column doesn't run above it.
+    let lines = svg_lines(&timeline);
+    let near = |a: f64, b: f64| (a - b).abs() <= 3.0;
+    let diagonals: Vec<_> = lines.iter()
+        .filter(|(x1, y1, x2, y2)| {
+            (near(*x1, split.0) && near(*y1, split.1) && near(*x2, bind.0))
+                || (near(*x2, split.0) && near(*y2, split.1) && near(*x1, bind.0))
+        })
+        .collect();
+    assert!(!diagonals.is_empty(), "{} {}: no diagonal from the split dot to the arm", name, var);
+    for &&(x1, y1, x2, y2) in &diagonals {
+        let end_y = if near(x1, bind.0) { y1 } else { y2 };
+        assert!(near(end_y, bind.1),
+            "{} {}: the arm's diagonal ends at y={}, not at the event dot y={}", name, var, end_y, bind.1);
+    }
+    for &(x1, y1, x2, y2) in &lines {
+        // (Vertical lines only: a double line's bevel joins the
+        // diagonal's offset ends to the column's.)
+        if near(x1, bind.0) && x1 == x2 {
+            assert!(y1.min(y2) >= bind.1 - 1e-6,
+                "{} {}: the arm's column runs above its event dot: ({}, {}) -> ({}, {})", name, var, x1, y1, x2, y2);
+        }
+    }
+    // Nothing to hop over: the event's arrow is straight.
+    assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
+    let hops: Vec<&str> = start_tags(&timeline, "path")
+        .into_iter()
+        .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+        .collect();
+    assert_eq!(hops, Vec::<&str>::new(), "{} {}: an arrow hops over a dot", name, var);
+}
+
 /// #382: an `if let` whose pattern borrows, copies or moves out of a
 /// variable used to draw that binding on the split row, beside the split
 /// dot: the `if` arm's diagonal reached its column a row lower, so the
@@ -6291,53 +6363,7 @@ fn if_let_binding_is_drawn_at_the_start_of_its_arm() {
         ("if_let_binding_move", "opt", "if let Some(s) = opt {", "opt's resource is moved", "Move from opt to s"),
     ];
     for (name, var, line, bind_text, arrow_text) in if_lets {
-        let rv = run_with_local_backend(name);
-        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-        let row = code_row_y(&code, line);
-        let bind = dots_with_tooltip(&timeline, bind_text);
-        let arrow = arrow_points(&timeline, arrow_text);
-        let split = dots_with_tooltip(&timeline, &format!("{} is live in a conditional expression ", var));
-        assert_eq!((bind.len(), arrow.len(), split.len()), (1, 1, 1), "{} {}: dots / arrow", name, var);
-        let (bind, split) = (bind[0], split[0]);
-        // The binding is on its own source row, and its arrow runs level
-        // along it from the binding dot.
-        assert_eq!(bind.1, row, "{} {}: binding dot not on the `if let` row", name, var);
-        assert!(arrow[0].len() == 2 && arrow[0].iter().all(|p| p.1 == row),
-            "{} {}: {:?} isn't a straight arrow along the `if let` row y={}: {:?}", name, var, arrow_text, row, arrow[0]);
-        // The split dot is above that row, within the half row above it.
-        assert!(row - 30.0 < split.1 && split.1 < row,
-            "{} {}: split dot at y={} is not between the row above and the `if let` row y={}", name, var, split.1, row);
-        // The arm's diagonal ends at the binding dot, and the arm's
-        // column doesn't run above it.
-        let lines = svg_lines(&timeline);
-        let near = |a: f64, b: f64| (a - b).abs() <= 3.0;
-        let diagonals: Vec<_> = lines.iter()
-            .filter(|(x1, y1, x2, y2)| {
-                (near(*x1, split.0) && near(*y1, split.1) && near(*x2, bind.0))
-                    || (near(*x2, split.0) && near(*y2, split.1) && near(*x1, bind.0))
-            })
-            .collect();
-        assert!(!diagonals.is_empty(), "{} {}: no diagonal from the split dot to the arm", name, var);
-        for &&(x1, y1, x2, y2) in &diagonals {
-            let end_y = if near(x1, bind.0) { y1 } else { y2 };
-            assert!(near(end_y, bind.1),
-                "{} {}: the arm's diagonal ends at y={}, not at the binding dot y={}", name, var, end_y, bind.1);
-        }
-        for &(x1, y1, x2, y2) in &lines {
-            // (Vertical lines only: a double line's bevel joins the
-            // diagonal's offset ends to the column's.)
-            if near(x1, bind.0) && x1 == x2 {
-                assert!(y1.min(y2) >= bind.1 - 1e-6,
-                    "{} {}: the arm's column runs above its binding dot: ({}, {}) -> ({}, {})", name, var, x1, y1, x2, y2);
-            }
-        }
-        // Nothing to hop over: the binding's arrow is straight.
-        assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
-        let hops: Vec<&str> = start_tags(&timeline, "path")
-            .into_iter()
-            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
-            .collect();
-        assert_eq!(hops, Vec::<&str>::new(), "{} {}: an arrow hops over a dot", name, var);
+        assert_arm_starts_on_split_line(name, var, line, bind_text, arrow_text);
     }
 
     let rv = run_with_local_backend("while_let_binding_kinds");
@@ -6391,6 +6417,29 @@ fn outer_borrow_end_is_drawn_in_each_arm() {
                 "{}: s gets its value back at ({}, {}), not between split {:?} and join {:?}", name, x, y, split, join);
         }
     }
+}
+
+/// #508: the same for a plain `if` or `match` whose first arm is written
+/// on the split line (`if c { take(s); } else {`): the arm's column used to
+/// start at the split row while the diagonal reached it a row lower, so it
+/// ran back up to the move's dot. A condition with an event of its own on
+/// that line (`if s.len() > 1 { take(s); } else {`) keeps its old drawing:
+/// no dot is raised half a row above the `if` row.
+#[test]
+fn an_arm_whose_first_event_is_on_the_split_line_starts_there() {
+    assert_arm_starts_on_split_line(
+        "if_arm_on_split_line", "s", "if c { take(s); } else {",
+        "s's resource is moved", "Move from s to take");
+    assert_arm_starts_on_split_line(
+        "match_arm_on_split_line", "s", "match n { 0 => take(s),",
+        "s's resource is moved", "Move from s to take");
+
+    // The condition reads `s` on the `if` line: no raised split dot.
+    let rv = run_with_local_backend("if_arm_on_split_line_cond_event");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = code_row_y(&code, "if s.len() > 1 { take(s); } else {");
+    let raised = format!("cy=\"{}\"", row - 15.0);
+    assert!(!timeline.contains(&raised), "a dot is half a row above the `if` row although the condition has an event there");
 }
 
 /// #355: the inner `if` of an `else if` belongs to the outer `else`
