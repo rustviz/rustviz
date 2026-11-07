@@ -376,12 +376,11 @@ const Description: React.FC = () => (
         reference&apos;s column.
       </li>
       <li>
-        A reference to a slice or <code>str</code> (<code>&amp;[i32]</code>) still
-        says &quot;resource&quot; where &quot;value&quot; would be exact.
-        column.
-        Overwriting a whole struct that holds a reference with something other
-        than a struct literal (<code>hold = make(&amp;t)</code>) may draw the old
-        borrow ending too late, or not at all (rustc ends it at the write).
+        A struct that holds a borrow and is moved to another variable (
+        <code>hold = other;</code>) keeps the borrow drawn on{' '}
+        <code>other</code>&apos;s field column. Overwriting a struct field of a
+        struct with a call&apos;s result (<code>o.inner = make_inner(&amp;t)</code>)
+        doesn&apos;t draw the new borrow.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)

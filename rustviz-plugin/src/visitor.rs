@@ -2363,10 +2363,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // write (a `&mut s` right after compiles), unlike a direct
         // field write (#531), where `hold`'s single lifetime keeps
         // them. The old loans are read before the literal's fields
-        // replace them and drawn after its Bind.
-        let struct_field_ends = match (&lhs_rty, expr.kind, &rhs_expr.kind) {
-          (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..), ExprKind::Struct(..)) if !lhs_is_union_field =>
+        // replace them and drawn after its Bind. The same holds for any
+        // other new value of a whole local (`hold = make(&t);`,
+        // `hold = other;`, #569), whose fields then hold that value's
+        // borrows, not the old ones. (A struct field of a struct,
+        // `hold.inner = make_inner(&t)`, still isn't handled: its new
+        // borrows aren't drawn either.)
+        let struct_field_ends = match (&lhs_rty, expr.kind) {
+          (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
+            if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) =>
             self.struct_field_borrow_ends(rap, line_num),
+          (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
+            if !lhs_is_union_field && !rap.is_member() => {
+            let rap = rap.clone();
+            let ends = self.struct_field_borrow_ends(&rap, line_num);
+            self.reassign_struct_field_lenders(&rap, rhs_expr, lhs_ty, line_num);
+            ends
+          }
           _ => Vec::new(),
         };
         if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {

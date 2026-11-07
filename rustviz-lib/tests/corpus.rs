@@ -902,6 +902,8 @@ const EXPECTED_OK: &[&str] = &[
     "box_field_move_branch",
     "box_field_move_all",
     "box_field_move_param",
+    // A whole struct overwritten by a call or a variable (#569).
+    "borrow_struct_overwrite_call",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9838,6 +9840,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. Its resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "borrow_struct_overwrite_call",
+        // `hold = make(&t);` and `hold = other;` drop hold's old value,
+        // so s's / a's borrow ends at the write, as for a struct literal
+        // (#538); rustc accepts the `&mut s` / `&mut a` right after. The
+        // field then borrows what the new value borrows. Main drew
+        // `make`'s (and `M::new`'s) result borrowing the old lender
+        // again, and never returned t, d or v. `o.inner = H { r: &f };`
+        // overwrites a field of `o`, which stays live, so e stays
+        // borrowed until o's last use (#531); #568 returned e's borrow
+        // at the write. See
+        // `struct_overwrite_by_call_or_variable_ends_old_borrow_at_the_write`.
+        must_contain: &[
+            "Return immutably borrowed resource from hold.r to s",
+            "Immutable borrow from t to hold.r: make's signature gives the struct it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from hold.r to t",
+            "Return immutably borrowed resource from hold.r to a",
+            "Immutable borrow from d to hold.r: make's signature gives the struct it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from hold.r to d",
+            "Return mutably borrowed resource from h.r to u",
+            "Mutable borrow from v to h.r: M::new's signature gives the struct it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from h.r to v",
+            "e's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // The new value's borrow drawn from the old lender.
+            "Immutable borrow from s to hold.r: make's signature",
+            "Immutable borrow from c to hold.r: make's signature",
+            "Mutable borrow from u to h.r: M::new's signature",
+            // A field of a struct handed its borrow back at the write.
+            "Return immutably borrowed resource from o.inner.r to e",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -11865,6 +11900,32 @@ fn whole_struct_overwrite_ends_old_borrow_at_the_write() {
     assert_eq!(s_end[0].1, write[0].1,
         "s's borrow should end on the write's row, with t's start: {:?} vs {:?}", s_end, write);
     assert!(s_end[0].1 < s_mut_end[0].1, "{:?} {:?}", s_end, s_mut_end);
+}
+
+/// #569: `hold = make(&t);` and `hold = other;` end the old borrow on the
+/// write's row, like a struct literal (#538), before the later `&mut`.
+/// `o.inner = H { r: &f };` overwrites a field of `o`, which stays live:
+/// e's borrow ends at o's last use, on the println!'s row (#531). When the
+/// new value borrows what the old one did (`hold = make(hold.r)`), x stays
+/// borrowed: its borrow ends once.
+#[test]
+fn struct_overwrite_by_call_or_variable_ends_old_borrow_at_the_write() {
+    let rv = run_with_local_backend("borrow_struct_overwrite_call");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let end = |v: &str| dots_with_tooltip(&svg, &format!("{}'s resource is no longer immutably borrowed", v));
+    for (v, line) in [
+        ("s", "hold = make(&t);"),
+        ("a", "hold = other;"),
+        ("e", "println!(\"{} {}\", o.inner.r, o.n);"),
+    ] {
+        let ends = end(v);
+        assert_eq!(ends.len(), 1, "{}: {:?}", v, ends);
+        assert_eq!(ends[0].1, code_row_y(&code, line), "{}'s borrow should end on the row of `{}`: {:?}", v, line, ends);
+    }
+    for (v, later) in [("s", "let m = &mut s;"), ("a", "let m = &mut a;")] {
+        assert!(end(v)[0].1 < code_row_y(&code, later), "{}'s borrow should end before `{}`", v, later);
+    }
+    assert_eq!(end("x").len(), 1, "{:?}", end("x"));
 }
 
 #[test]
