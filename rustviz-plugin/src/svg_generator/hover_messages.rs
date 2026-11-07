@@ -2242,7 +2242,9 @@ pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
 }
 // Extra text for a column label with a subscript (`s₂`): a variable
 // that shadows an earlier one of the same name (`let s` while the first
-// `s` is in scope, see `binding_name`). Empty for any other name.
+// `s` is in scope, see `binding_name`), or one of another type than an
+// earlier one whose scope it doesn't share (#598). Empty for any other
+// name.
 pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::data::ShadowNote>) -> String {
     let (Some((base, _)), Some(note)) = (crate::expr_visitor_utils::split_numbered_name(name), note) else {
         return String::new();
@@ -2259,11 +2261,16 @@ pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::dat
             )
         }
     };
-    let Some(shadowed) = &note.shadows else { return String::new() };
-    format!(
-        ". {0} shadows {1}: it is {2}",
-        fmt_style(name), fmt_style(shadowed), declared
-    )
+    match &note.shadows {
+        Some(shadowed) => format!(
+            ". {0} shadows {1}: it is {2}",
+            fmt_style(name), fmt_style(shadowed), declared
+        ),
+        None => format!(
+            ". {0} is a different variable from {1}: it is {2}. {1} and {0} are in separate scopes, so only one of them exists at a time",
+            fmt_style(name), fmt_style(&base), declared.replacen("a new variable", "another variable", 1)
+        ),
+    }
 }
 
 // Merge dot for a reference declared before the conditional whose

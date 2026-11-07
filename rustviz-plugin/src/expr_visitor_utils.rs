@@ -80,8 +80,11 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
 // that shadow the same number of variables share a column: they are
 // never in scope together (sibling blocks, different arms of a `match`,
 // the two blocks of an `if`, the two `if let`s of an `else if let`
-// chain), so at most one of them exists at a time. A subscript can't be
-// part of a Rust identifier, so these names never clash with a real
+// chain), so at most one of them exists at a time, unless their types
+// differ (see `retyped` below, e.g. `(ref x, _) => …` in one `match` and
+// `Ok(x) => …` in a later one): the later one then gets a subscript
+// although it shadows nothing, and its header says so. A subscript can't
+// be part of a Rust identifier, so these names never clash with a real
 // variable. (#173)
 
 /// Per-fn-body table built by `collect_binding_names`.
@@ -161,7 +164,9 @@ fn binding_scope(tcx: &TyCtxt, pat: HirId, body_span: Span) -> Option<(u32, u32)
           })
           .flatten();
       }
-      (Node::Arm(a), None) => return Some((a.pat.span.lo().0, a.body.span.hi().0)),
+      // (The arm's own span, not its body's: a bare macro call body
+      // `Some(x) => println!("{x}"),` has a span inside the macro.)
+      (Node::Arm(a), None) => return Some((a.pat.span.lo().0, a.span.hi().0)),
       (Node::Expr(e), None) if matches!(e.kind, ExprKind::Let(_)) => let_expr = Some(e.span),
       // `if let` / `while let` / a `let` guard: in scope after the
       // `let`, through the `if`'s then-branch (or the arm's body).
@@ -170,7 +175,7 @@ fn binding_scope(tcx: &TyCtxt, pat: HirId, body_span: Span) -> Option<(u32, u32)
           return Some((l.hi().0, then.span.hi().0));
         }
       }
-      (Node::Arm(a), Some(l)) => return Some((l.hi().0, a.body.span.hi().0)),
+      (Node::Arm(a), Some(l)) => return Some((l.hi().0, a.span.hi().0)),
       (_, Some(_)) => {}
       _ => return None,
     }
@@ -185,11 +190,14 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
     span: Span,
     hir_id: HirId,
     ident: String,
+    // Its type (if the fn's typeck results have it), as text.
+    ty: Option<String>,
     // Where the binding is in scope (`binding_scope`).
     scope: (u32, u32),
   }
   struct Collector<'a, 'tcx> {
     tcx: &'a TyCtxt<'tcx>,
+    typeck: Option<&'tcx TypeckResults<'tcx>>,
     body_span: Span,
     out: Vec<Binding>,
   }
@@ -206,7 +214,8 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
             // taken to stay in scope to the end of the fn.
             let scope = binding_scope(self.tcx, hir_id, self.body_span)
               .unwrap_or((ident.span.lo().0, self.body_span.hi().0));
-            self.out.push(Binding { span: ident.span, hir_id, ident: ident.to_string(), scope });
+            let ty = self.typeck.and_then(|t| t.node_type_opt(hir_id)).map(|t| t.to_string());
+            self.out.push(Binding { span: ident.span, hir_id, ident: ident.to_string(), ty, scope });
           }
           if let Some(sp) = sub {
             self.visit_pat(sp);
@@ -226,7 +235,8 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
 
   let mut names = BindingNames::default();
   let Some(body) = tcx.hir_maybe_body_owned_by(owner.def_id) else { return names };
-  let mut c = Collector { tcx, body_span: body.value.span, out: Vec::new() };
+  let typeck = tcx.has_typeck_results(owner.def_id).then(|| tcx.typeck(owner.def_id));
+  let mut c = Collector { tcx, typeck, body_span: body.value.span, out: Vec::new() };
   c.visit_body(body);
   c.out.sort_by_key(|b| (b.span.lo(), b.span.hi()));
 
@@ -235,14 +245,44 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
   // its column. Bindings that shadow the same number share a column.
   let n = c.out.len();
   let mut shadowed: Vec<Option<usize>> = vec![None; n];
-  let mut col_names: Vec<String> = Vec::with_capacity(n);
+  let mut depth = vec![0usize; n];
   for i in 0..n {
     let at = c.out[i].span.lo().0;
     let in_scope: Vec<usize> = (0..i)
       .filter(|&j| c.out[j].ident == c.out[i].ident && { let (lo, hi) = c.out[j].scope; lo <= at && at < hi })
       .collect();
     shadowed[i] = in_scope.last().copied();
-    col_names.push(numbered_name(&c.out[i].ident, in_scope.len() + 1));
+    depth[i] = in_scope.len();
+  }
+  // Bindings sharing a column share one RAP, which the first of them
+  // registers, so they must be variables of the same type: a reference
+  // `x` and a later `String` `x` sharing one drew the `String` as a
+  // reference, or panicked looking up its borrow (#598). A binding whose
+  // type differs from that of the first one of its name and depth gets
+  // a column of its own (shared with others of its name, depth and type),
+  // numbered after all the others so it can't take the name of a
+  // binding that shadows.
+  let first_at_depth = |i: usize| (0..i).find(|&j| c.out[j].ident == c.out[i].ident && depth[j] == depth[i]);
+  let retyped: Vec<bool> = (0..n).map(|i| first_at_depth(i).is_some_and(|j| c.out[j].ty != c.out[i].ty)).collect();
+  let mut next_free: HashMap<&str, usize> = HashMap::new();
+  for i in (0..n).filter(|&i| !retyped[i]) {
+    let m = next_free.entry(c.out[i].ident.as_str()).or_insert(0);
+    *m = (*m).max(depth[i] + 1);
+  }
+  let mut retyped_cols: HashMap<(&str, usize, &Option<String>), String> = HashMap::new();
+  let mut col_names: Vec<String> = Vec::with_capacity(n);
+  for i in 0..n {
+    let ident = c.out[i].ident.as_str();
+    if !retyped[i] {
+      col_names.push(numbered_name(ident, depth[i] + 1));
+      continue;
+    }
+    let name = retyped_cols.entry((ident, depth[i], &c.out[i].ty)).or_insert_with(|| {
+      let m = next_free.get_mut(ident).expect("the first binding of a name isn't retyped");
+      *m += 1;
+      numbered_name(ident, *m)
+    });
+    col_names.push(name.clone());
   }
   // Second pass: names and header notes.
   for i in 0..n {

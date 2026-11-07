@@ -970,6 +970,12 @@ const EXPECTED_OK: &[&str] = &[
     "exit_if_let_scrutinee_move_return",
     // A `?` in a branch drawn with columns keeps its dots (#430).
     "try_in_if_else_branch",
+    // Same-named variables in separate scopes share a column only if
+    // they have the same type (#598); the first one used to panic.
+    "ref_binding_name_reused",
+    "ref_binding_name_reused_mut",
+    "let_ref_then_owner_same_name",
+    "match_macro_arm_name_reused",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2993,10 +2999,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "check reads from s",
             "n is initialized with a copy of opt",
             "s goes out of scope. Its resource is dropped.",
+            "Partial copy from opt to n",
         ],
         must_not_contain: &[
             "s's resource is moved",
             "s goes out of scope. No resource is dropped.",
+            // The arms' `n`s are never in scope together (#598).
+            "n₂",
         ],
     },
     TooltipExpect {
@@ -5361,13 +5370,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // a reference `next()` hands out, not something `it` lends. It
         // used to read "Move from it to x" and "Return ... from x to it"
         // (#417). A collection by value (`for s in w`) still moves into
-        // the loop variable's column.
+        // the loop variable's column. That `s` is a `String`, the first
+        // a `&String`: it has a column of its own, `s₂` (#598). Sharing
+        // the first's drew it as a reference ("the resource s points to
+        // is immutably borrowed by println!") and never dropped it.
         must_contain: &[
             // A slice iterator has nothing to drop: a value (#484).
             "it's value is moved",
             "x is bound to a mutable reference",
             "s is bound to an immutable reference",
-            "Move from w to s",
+            "Move from w to s₂",
+            "s₂'s resource is immutably borrowed by println!; s₂ is read-only while the borrow is live",
+            "s₂ goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "it's resource is moved",
@@ -5375,6 +5389,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from x to it",
             "Move from it2 to s",
             "Return immutably borrowed resource from s to it2",
+            "=Move from w to s",
         ],
     },
     // ─── Tuples (#189) ────────────────────────────────────────────────
@@ -5619,15 +5634,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "shadow_match_arm",
         // The arms' `n` shadows the outer `n` (#173); the two
-        // `Some(n)` arms share the column `n₂`.
+        // `Some(n)` arms share the column `n₂`. The first arm's body is a
+        // bare `println!`, whose span is inside the macro: that put its
+        // `n` in scope to the end of the fn, so the second arm's `n` got
+        // `n₃`, "shadowing" it (#598).
         must_contain: &[
             "n is bound to a copyable value",
             "n₂ is initialized with a copy of opt",
             "Partial copy from opt to n₂",
+            "n₂, immutable. n₂ shadows n: it is a new variable named n, declared on lines 9 and 10 (in different branches or blocks, so only one exists at a time)",
         ],
         must_not_contain: &[
             "n is initialized with a copy of opt",
             "=Partial copy from opt to n",
+            "n₃",
         ],
     },
     TooltipExpect {
@@ -6581,8 +6601,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v goes out of scope. No resource is dropped.",
             "w's resource is moved",
             "w goes out of scope. No resource is dropped.",
+            "Partial move from next to s",
         ],
         must_not_contain: &[
+            // The two matches' `s`s are never in scope together (#598).
+            "s₂",
             "v is live in a conditional expression ",
             "w is live in a conditional expression ",
             "v goes out of scope. Its resource is dropped.",
@@ -8933,6 +8956,66 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from s to *s",
             "Return immutably borrowed value from r to *r",
             "Return immutably borrowed value from s to *s",
+    // #598: two variables named `x` whose scopes don't overlap shared one
+    // column, registered by the first: a `&mut String` here, so the
+    // second `x`, a `String`, was looked up as a reference whose borrow
+    // had ended (a panic). Variables of different types now get columns
+    // of their own.
+    TooltipExpect {
+        name: "ref_binding_name_reused",
+        must_contain: &[
+            "x₂, immutable. x₂ is a different variable from x: it is another variable named x, declared on line 8. x and x₂ are in separate scopes, so only one of them exists at a time",
+            "Partial Mutable borrow from t.0 to x",
+            "Partial move from r to x₂",
+            "x₂ acquires ownership of a resource",
+            "x₂ goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=Partial move from r to x",
+        ],
+    },
+    // The second `x` is a `&mut String`, the first a `&String`: the
+    // second was drawn in the first's column, as a `&T` that is itself
+    // borrowed by push_str.
+    TooltipExpect {
+        name: "ref_binding_name_reused_mut",
+        must_contain: &[
+            "Partial immutable borrow from t.0 to x",
+            "Partial Mutable borrow from t.0 to x₂",
+            "the resource x₂ points to is mutably borrowed by push_str through x₂; x₂ can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "=x is mutably borrowed by push_str; x can't be used while the borrow is live",
+            "=Partial Mutable borrow from t.0 to x",
+        ],
+    },
+    // The same with two `let`s in sibling blocks: the `String` was drawn
+    // as a reference.
+    TooltipExpect {
+        name: "let_ref_then_owner_same_name",
+        must_contain: &[
+            "x₂, immutable. x₂ is a different variable from x: it is another variable named x, declared on line 8. x and x₂ are in separate scopes, so only one of them exists at a time",
+            "Move from String::from to x₂",
+            "x₂ acquires ownership of a resource",
+            "x₂ goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "x is bound to an immutable reference",
+            "=Move from String::from to x",
+        ],
+    },
+    // A bare macro call as an arm's body (`Some(x) => println!(..)`) has
+    // a span inside the macro, which put `x` in scope to the end of the
+    // fn: the next match's `x` was said to shadow it.
+    TooltipExpect {
+        name: "match_macro_arm_name_reused",
+        must_contain: &[
+            "Partial move from a to x",
+            "Partial move from b to x",
+        ],
+        must_not_contain: &[
+            "x₂ shadows x",
+            "Partial move from b to x₂",
         ],
     },
     // ─── The `?` operator's early return (#430) ─────────────────────
