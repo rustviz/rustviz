@@ -3790,13 +3790,16 @@ const PATTERN_SPLIT_RISE: i64 = 15;
 ///
 /// Not when the column has a dot of its own on the split line (an
 /// event of the condition or scrutinee, as in `if s.len() > 1 { take(s); }`):
-/// it would be left between the arms.
+/// it would be left between the arms. A copy out of an `if let`
+/// scrutinee is no such event: it is recorded before the split and
+/// drawn on the raised split dot (`event_dot_y`).
 fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
     let Event::Branch { branch_history, split_point, merge_point, .. } = &history[i].1 else { return false };
     !branch_is_collapsed(*split_point, *merge_point)
         && branch_history.first().is_some_and(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
         && !history.iter().enumerate().any(|(j, (l, ev))| {
             j != i && l == split_point && !matches!(ev, Event::RefDie { .. })
+                && !(j < i && matches!(ev, Event::Duplicate { .. }))
         })
 }
 
@@ -3874,8 +3877,16 @@ fn event_dot_y(history: &[(usize, Event)], i: usize) -> i64 {
         .any(|(_, ev)| collapsed(ev, |split, _| split));
     let after_join = history[..i].iter().rev()
         .any(|(_, ev)| collapsed(ev, |_, merge| merge));
+    // A copy out of an `if let` scrutinee, on the split line before a
+    // raised split: it goes on the split dot (`binds_at_split`).
+    let before_raised_split = matches!(history[i].1, Event::Duplicate { .. }) && history[i + 1..].iter()
+        .take_while(|(l, _)| *l == line)
+        .any(|(_, ev)| matches!(ev, Event::Branch { split_point, .. } if *split_point == line))
+        && CollapsedApexes::of(history).raised_splits.contains(&line);
     get_y_axis_pos(line) + if before_split {
         -COLLAPSED_APEX
+    } else if before_raised_split {
+        -PATTERN_SPLIT_RISE
     } else if after_join {
         COLLAPSED_APEX
     } else {

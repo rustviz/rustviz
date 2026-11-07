@@ -8620,6 +8620,16 @@ fn branches_that_diverge_stop_short() {
 /// exactly `text` (plain circles, and drop dots: a tooltip `<g>`
 /// around a circle).
 fn dots_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
+    dots_where(svg, |lines| lines == [text])
+}
+
+/// Like `dots_with_tooltip`, for a dot that may share its event with
+/// others (`• event<br>• event`): any of its lines is `text`.
+fn dots_listing_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
+    dots_where(svg, |lines| lines.iter().any(|l| l == text))
+}
+
+fn dots_where(svg: &str, want: impl Fn(&[String]) -> bool) -> Vec<(f64, f64)> {
     let num = |tag: &str, name: &str| -> Option<f64> {
         let key = format!(" {}=\"", name);
         let start = tag.find(&key)? + key.len();
@@ -8640,7 +8650,7 @@ fn dots_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
             continue;
         };
         let tag = &circle[..circle.find('>').unwrap_or(circle.len())];
-        if timeline_tooltips(&svg[start..start + svg[start..].find('>').unwrap_or(0) + 1]) != [text] {
+        if !want(&timeline_tooltips(&svg[start..start + svg[start..].find('>').unwrap_or(0) + 1])) {
             continue;
         }
         if let (Some(x), Some(y)) = (num(tag, "cx"), num(tag, "cy")) {
@@ -8947,6 +8957,55 @@ fn an_arm_whose_first_event_is_on_the_split_line_starts_there() {
     let row = code_row_y(&code, "if s.len() > 1 { take(s); } else {");
     let raised = format!("cy=\"{}\"", row - 15.0);
     assert!(!timeline.contains(&raised), "a dot is half a row above the `if` row although the condition has an event there");
+}
+
+/// #557: `if let Msg::Pair(n, s) = msg` copies `n` out of `msg` before the
+/// split and moves `s` out of it as the `if` arm's first event, both on
+/// the `if let` row. `msg`'s `if` arm used to start at the split dot on
+/// that row, run its diagonal to the arm's column a row lower, and come
+/// back up to the move's dot: a zero-height, backwards stub (a V) at the
+/// split. The arm starts on the `if let` row with the move's dot, and the
+/// split dot (which also carries the copy, recorded before the split) is
+/// half a row above it. (The copy's arrow to `n` runs down from that dot
+/// to `n`'s, so it isn't level.)
+///
+/// This test pins the arm's geometry; it fails on the plugin before the fix.
+#[test]
+fn an_if_let_arm_that_moves_out_on_the_split_row_starts_there() {
+    let rv = run_with_local_backend("if_let_copy_and_move_out_of_scrutinee");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = code_row_y(&code, "if let Msg::Pair(n, s) = msg {");
+    let moved = dots_with_tooltip(&timeline, "msg's resource is moved");
+    let split = dots_listing_tooltip(&timeline, "msg is live in a conditional expression ");
+    let copied = dots_listing_tooltip(&timeline, "msg's value is copied");
+    assert_eq!((moved.len(), split.len(), copied.len()), (1, 1, 1), "dots: {:?} {:?} {:?}", moved, split, copied);
+    let (moved, split) = (moved[0], split[0]);
+    // The move is the arm's first event, on the `if let` row; the split
+    // dot is within the half row above it and holds the copy as well.
+    assert_eq!(moved.1, row, "the move's dot is not on the `if let` row");
+    assert!(row - 30.0 < split.1 && split.1 < row, "split dot at y={} is not just above the row y={}", split.1, row);
+    assert_eq!(copied[0], split, "the copy isn't on the split dot");
+    assert!(moved.0 != split.0, "the arm's dot is on the parent column");
+
+    let near = |a: f64, b: f64| (a - b).abs() <= 3.0;
+    let lines = svg_lines(&timeline);
+    // The arm's diagonal runs from the split dot to the move's dot.
+    assert!(lines.iter().any(|&(x1, y1, x2, y2)| near(x1, split.0) && near(y1, split.1) && near(x2, moved.0) && near(y2, moved.1)
+        || near(x2, split.0) && near(y2, split.1) && near(x1, moved.0) && near(y1, moved.1)),
+        "no diagonal from the split dot {:?} to the arm's dot {:?}", split, moved);
+    // Nothing else is drawn on the arm's column from the split: the arm
+    // has no event after the move, so its column has no vertical segment
+    // at all, in particular none of zero height or running back up.
+    let stubs: Vec<_> = lines.iter()
+        .filter(|&&(x1, y1, x2, _)| near(x1, moved.0) && near(x2, moved.0) && y1 >= row - 15.0 && y1 <= row + 30.0)
+        .collect();
+    assert!(stubs.is_empty(), "a column segment is drawn from the split on msg's `if` arm: {:?}", stubs);
+    // And nothing runs backwards or has no height on the whole column.
+    for &(x1, y1, x2, y2) in &lines {
+        if near(x1, moved.0) && near(x2, moved.0) && (x1 - x2).abs() < 1.0 {
+            assert!(y2 > y1, "a zero-height or backwards segment on the arm's column: ({}, {}) -> ({}, {})", x1, y1, x2, y2);
+        }
+    }
 }
 
 /// Rows of the code panel that carry no source line number: the blank
