@@ -6976,6 +6976,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "outer_mut_ref_end_in_if_arm",
+        // While `r = &mut s` is live s's column draws no line at the
+        // split: "s is live in a conditional expression" is on each arm's
+        // first dot, not a split dot of its own (#702, geometry in
+        // `no_split_or_join_dot_floats_off_its_column`).
         must_contain: &[
             "Return mutably borrowed resource from r to s",
             "s's resource is no longer mutably borrowed",
@@ -7132,6 +7136,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "reassign_after_nested_maybe_move",
+        // No line reaches the outer join (the inner `if` arm that kept s
+        // ends at the inner join): its text is on the reassignment's dot
+        // (#702, `no_split_or_join_dot_floats_off_its_column`).
         must_contain: &[
             "s acquires ownership of a new resource. Its previous resource is dropped here only if \
              no branch above moved it (Rust tracks this with a runtime drop flag).",
@@ -7371,6 +7378,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "join_after_early_exit",
+        // In `mixed`, no line reaches the join of `match *x` on v's or x's
+        // column: "v's borrow ended in each branch above" is on v's
+        // scope-end dot (#702, `no_split_or_join_dot_floats_off_its_column`).
         // The merge after branches that moved a value and then left
         // early says how they left: panicked, continued, returned
         // (two arms), return and break mixed; a `&mut` that was
@@ -13115,17 +13125,22 @@ fn outer_borrow_end_is_drawn_in_each_arm() {
         ("outer_ref_end_in_nested_if", "immutably", 3),
     ] {
         let timeline = run_with_local_backend(name).timeline_panel_string();
-        let mut splits = dots_with_tooltip(&timeline, "s is live in a conditional expression ");
+        // While `r = &mut s` is live, no line of s's column reaches the
+        // split, so s has no split dot there (#702): r's marks its row.
+        let split_of = if kind == "mutably" { "r" } else { "s" };
+        let mut splits = dots_with_tooltip(&timeline, &format!("{split_of} is live in a conditional expression "));
         splits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         let mut joins = dots_with_tooltip(&timeline, "s isn't moved in any of the branches above");
         joins.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         assert!(!splits.is_empty() && !joins.is_empty(),
             "{}: s has no column in the conditional (splits {:?}, joins {:?})", name, splits, joins);
         let (split, join) = (splits[0], joins[joins.len() - 1]);
-        let back = dots_with_tooltip(&timeline, &format!("s's resource is no longer {kind} borrowed"));
+        // The dot may list another event too (#702: the split's text).
+        let back = dots_listing_tooltip(&timeline, &format!("s's resource is no longer {kind} borrowed"));
         assert_eq!(back.len(), paths, "{}: s gets its value back {:?}, not once per path", name, back);
         for (x, y) in &back {
-            assert!(*x != split.0, "{}: s gets its value back on its parent column at ({}, {})", name, x, y);
+            // The join is on s's parent column.
+            assert!(*x != join.0, "{}: s gets its value back on its parent column at ({}, {})", name, x, y);
             assert!(split.1 < *y && *y < join.1,
                 "{}: s gets its value back at ({}, {}), not between split {:?} and join {:?}", name, x, y, split, join);
         }
@@ -15697,5 +15712,75 @@ fn no_join_dot_floats_after_every_branch_moves() {
     ] {
         let timeline = run_with_local_backend(name).timeline_panel_string();
         assert_eq!(unconnected_dots(&timeline, skip), Vec::<String>::new(), "{}: dots no line reaches", name);
+    }
+}
+
+/// #702: a dot sits on a line of its column. Where no line reaches a
+/// split or a join, it isn't drawn, and its text goes on the column's
+/// next dot (the scope end, or the next event). Three kinds floated:
+/// - the join of an outer `if` whose first arm is a nested `if` that
+///   moved s on one path: the arm that kept s ends at the inner join,
+///   and no line runs from there to the outer one ("s was moved in at
+///   least one branch above ...");
+/// - the split of a lender while `r = &mut s` is live across the
+///   conditional: its column draws no line there, and the arms start
+///   from nothing ("s is live in a conditional expression");
+/// - the join in a loop body after arms that `break` / `return`, where
+///   the reference's borrow ended in every arm ("v's borrow ended in
+///   each branch above", and an empty join dot on x's column).
+#[test]
+fn no_split_or_join_dot_floats_off_its_column() {
+    // Scope-end dots stand alone after a move, and a temporary's drop
+    // has a column of no lines.
+    let skip = |t: &str| {
+        t.split_once(" goes out of scope").is_some_and(|(who, _)| !who.contains(' '))
+            || t.contains("temporary")
+    };
+    for name in [
+        "reassign_after_nested_maybe_move",
+        "nested_if_move_join",
+        "deep_nested_if",
+        "else_if_chain",
+        "outer_mut_ref_end_in_if_arm",
+        "reassign_through_ref_in_branch",
+        "join_after_early_exit",
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        assert_eq!(unconnected_dots(&timeline, skip), Vec::<String>::new(), "{}: dots no line reaches", name);
+    }
+    // Each text that lost its dot is on the column's next one, before
+    // that dot's own events, as many times as there are such dots.
+    const MAYBE_MOVED: &str = "s was moved in at least one branch above, so it can't be used after the \
+        branches (until it's assigned again). If the branch that ran didn't move it, its resource is \
+        dropped when s goes out of scope.";
+    const DROP_FLAG: &str = "s goes out of scope. Its resource is dropped here only if no branch above \
+        moved it (Rust tracks this with a runtime drop flag).";
+    for (name, moved, onto, n) in [
+        (
+            "reassign_after_nested_maybe_move",
+            "s was moved in at least one branch above, so it can't be used after the branches until \
+             it's assigned again. If the branch that ran didn't move it, its resource is dropped when \
+             s is assigned again.",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+            1,
+        ),
+        ("nested_if_move_join", MAYBE_MOVED, DROP_FLAG, 1),
+        ("deep_nested_if", MAYBE_MOVED, DROP_FLAG, 1),
+        ("else_if_chain", MAYBE_MOVED, DROP_FLAG, 1),
+        // One for each arm.
+        ("outer_mut_ref_end_in_if_arm", "s is live in a conditional expression",
+            "s's resource is no longer mutably borrowed", 2),
+        ("reassign_through_ref_in_branch", "t is live in a conditional expression",
+            "t's resource is no longer mutably borrowed", 2),
+        ("join_after_early_exit", "v's borrow ended in each branch above", "v goes out of scope", 1),
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        let at = dots_where(&timeline, |lines| {
+            let pos = |t: &str| lines.iter().position(|l| l == t);
+            matches!((pos(moved), pos(onto)), (Some(a), Some(b)) if a < b)
+        });
+        assert_eq!(at.len(), n, "{}: {:?} is not on the dot of {:?} next on its column: {:?}",
+            name, moved, onto, tooltip_lines(&timeline));
     }
 }
