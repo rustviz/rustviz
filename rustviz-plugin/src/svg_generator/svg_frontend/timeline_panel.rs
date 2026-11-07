@@ -47,6 +47,10 @@ struct DotLayer {
     dots: Vec<PendingDot>,
     at: BTreeMap<(u64, i64, i64), usize>,
     positions: DotPositions,
+    /// Where a call icon (`f`) will be drawn on a dot, known before the
+    /// arrows are: an arrow ending on such a dot stops short of the icon,
+    /// which is wider than the dot (#578).
+    call_spots: DotPositions,
 }
 
 impl DotLayer {
@@ -2164,6 +2168,20 @@ fn fetch_line_map<'a>(
     }
 }
 
+/// How much farther than a plain dot an arrow's head stops from a dot that
+/// also carries a call icon: the `f` glyph pokes out of the dot's 5px radius
+/// to the right (its italic hook), so the tip of a head coming in from the
+/// right would touch it (#578). Heads coming in from the left clear the
+/// glyph's left edge already.
+const CALL_ICON_CLEARANCE: f64 = 3.0;
+
+/// Does an arrow head aimed at `target` land on a dot with a call icon?
+fn head_lands_on_call_icon(target: &(f64, f64), dots: &DotLayer) -> bool {
+    target.0.fract() == 0.0
+        && target.1.fract() == 0.0
+        && dots.call_spots.contains(&(target.0 as i64, target.1 as i64))
+}
+
 /// How far an arrow's tail starts from the centre of its source dot:
 /// the dot's 5px radius plus the hairline the caller-return L already
 /// leaves (`source_x = cx + 5.25`).
@@ -2202,6 +2220,7 @@ fn render_hopping_arrow(
     x1: i64, y: i64, x2: i64,
     title: &str,
     dot_positions: &DotPositions,
+    head_offset: f64,
 ) -> Option<String> {
     let (lo_x, hi_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
 
@@ -2222,7 +2241,6 @@ fn render_hopping_arrow(
     // dot center (matching the polyline path) so the tip lands on
     // the dot's near edge. Sign of `head_dir` tells the head
     // polygon which way to point.
-    let head_offset: f64 = 18.0;
     let r: f64 = 10.0; // hop radius — clears a 5px dot plus stroke comfortably
     let y_f = y as f64;
     let source_x = x2 as f64;
@@ -2617,9 +2635,18 @@ fn render_arrow (
                     // the dot's near edge. The historical `+ 3` was
                     // a hand-tuned partial fix for the same problem.
                     let x1 = to_timeline.x_val;
-                    let x2 = x1 + arrow_length;
                     let y1 = column_event_y(visualization_data, to_variable.hash(), external_event.get_id(), *line_number);
                     let y2 = y1;
+                    // The arrow is mostly its head; when the dot also
+                    // carries a call icon the head stops farther out (see
+                    // `head_lands_on_call_icon`), so the shaft and the
+                    // function's logo move out with it.
+                    let clearance = if head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) {
+                        CALL_ICON_CLEARANCE as i64
+                    } else {
+                        0
+                    };
+                    let x2 = x1 + arrow_length + clearance;
                     data.coordinates.push((x1 as f64, y1 as f64));
                     data.coordinates.push((x2 as f64, y2 as f64));
     
@@ -2837,6 +2864,7 @@ fn render_arrow (
                             x1, y1, x2,
                             &data.title,
                             &dots.positions,
+                            if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
                         )).flatten() {
                             // Inline render done; push to the right
                             // output bucket and bypass the post-match
@@ -2865,6 +2893,10 @@ fn render_arrow (
             // draw arrow only if data.x1 is not default value
             if !data.coordinates.is_empty() {
                 let last_index = data.coordinates.len() - 1;
+                if head_offset == 18.0 && data.coordinates[last_index].0 > data.coordinates[0].0
+                    && head_lands_on_call_icon(&data.coordinates[0], dots) {
+                    head_offset += CALL_ICON_CLEARANCE;
+                }
 
                 if data.coordinates.len() == 2 && data.coordinates[0].1 == data.coordinates[1].1 {
                     // [0]     [last index]
@@ -2964,6 +2996,21 @@ fn render_arrow (
     }
 }
 
+/// Every arrow event with the row it is drawn on, including those nested
+/// in branch arms.
+fn arrows_with_rows<'a>(events: &'a [(usize, ExternalEvent)], out: &mut Vec<(usize, &'a ExternalEvent)>) {
+    for (l, e) in events {
+        match e {
+            ExternalEvent::Branch { branches, .. } => {
+                for b in branches {
+                    arrows_with_rows(&b.e_data, out);
+                }
+            }
+            _ => out.push((*l, e)),
+        }
+    }
+}
+
 // render arrows that support function
 fn render_arrows_string_external_events_version(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
@@ -2972,6 +3019,20 @@ fn render_arrows_string_external_events_version(
     dots: &mut DotLayer,
     registry: &Handlebars
 ){
+    let mut all = Vec::new();
+    arrows_with_rows(&visualization_data.external_events, &mut all);
+    for (row, ev) in all {
+        // The arrows that draw a call icon (see `render_arrow`).
+        if let ExternalEvent::PassByStaticReference { from, to, .. } | ExternalEvent::PassByMutableReference { from, to, .. } = ev {
+            if let (Some(rap), ResourceTy::Value(ResourceAccessPoint::Function(_))) = (from.extract_rap(), to) {
+                if rap.is_fn() || !resource_owners_layout.contains_key(rap.hash()) {
+                    continue;
+                }
+                let x = fetch_timeline(rap.hash(), visualization_data, resource_owners_layout, ev.get_id()).x_val;
+                dots.call_spots.insert((x, column_event_y(visualization_data, rap.hash(), ev.get_id(), row)));
+            }
+        }
+    }
     for (line_number, external_event) in &visualization_data.external_events {
         match external_event {
             // events that should be skipped (we don't render arrows for them)

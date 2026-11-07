@@ -11698,3 +11698,28 @@ fn ref_borrow_outlasts_pattern_reborrow() {
             name, outer, ends_x, back_x, split_x);
     }
 }
+
+/// #578: on `if let Some(w) = wrap(s) && w.len() > 1` the dot where `w`
+/// is initialized by `wrap` also carries the icon of the `w.len()` call.
+/// The `f` glyph reaches about 6px right of the dot's centre, and the
+/// arrow coming in from `wrap` used to stop at the dot's own edge, 5.25px
+/// out, so its head's tip sat on the glyph. It now stops outside the icon.
+#[test]
+fn arrowhead_stops_before_a_call_icon_on_its_dot() {
+    let tl = run_with_local_backend("edition2024/if_let_chain_first_part").timeline_panel_string();
+    let arrows = arrow_points(&tl, "Move from wrap to w");
+    assert_eq!(arrows.len(), 1, "{:?}", arrows);
+    // The shaft is written source first and ends 12.75px short of the
+    // head's tip; the arrow runs left, into `w`.
+    let &(end_x, y) = arrows[0].last().unwrap();
+    let tip_x = end_x - 12.75;
+    let icons: Vec<f64> = start_tags(&tl, "use")
+        .into_iter()
+        .filter(|t| attr(t, "xlink:href") == Some("#functionDot") && num_attr(t, "y") == y)
+        .map(|t| num_attr(t, "x"))
+        .collect();
+    assert_eq!(icons.len(), 1, "one call icon on w's row: {:?}", icons);
+    assert!(tip_x - icons[0] >= 7.0,
+        "the head's tip is at x={}, {}px from the call icon's centre (the glyph reaches 6px)",
+        tip_x, tip_x - icons[0]);
+}
