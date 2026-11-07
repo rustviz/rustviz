@@ -1106,10 +1106,13 @@ pub enum ExternalEvent {
     // takes: `make();`, `let _ = make();`, `make().len()`,
     // `f(&make())`), is dropped (#457). Plays the part of GoOutOfScope
     // for that RAP. `ty` is the value's type as written in messages;
-    // `when` says when ("at the end of this statement").
+    // `when` says when ("at the end of this statement"). `ty` is None
+    // for a `let`-extended temporary (#400) that a `return` drops while
+    // it is still alive (#553): its type isn't recorded, and the
+    // tooltip says why it lived that long as well as when it drops.
     TemporaryDrop {
         ro: ResourceAccessPoint,
-        ty: String,
+        ty: Option<String>,
         when: String,
         id: usize
     },
@@ -1375,7 +1378,7 @@ pub enum Event {
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
-    TemporaryDrop { ty: String, when: String },
+    TemporaryDrop { ty: Option<String>, when: String },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, labeled_block: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
@@ -1689,7 +1692,7 @@ impl Display for Event {
                 write!(f, "Value is dropped by hand")
             },
             Event::TemporaryDrop { ty, when } => {
-                write!(f, "Temporary {} is dropped {}", ty, when)
+                write!(f, "Temporary {} is dropped {}", ty.as_deref().unwrap_or("(let-borrowed)"), when)
             },
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
@@ -1788,8 +1791,11 @@ impl Event {
             Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
                 hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
             }
-            Event::TemporaryDrop { ty, when } => {
+            Event::TemporaryDrop { ty: Some(ty), when } => {
                 hover_messages::event_dot_temporary_drop(ty, when)
+            }
+            Event::TemporaryDrop { ty: None, when } => {
+                hover_messages::event_dot_extended_temporary_drop(my_name, when)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
