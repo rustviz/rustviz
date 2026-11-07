@@ -309,13 +309,21 @@ rather than listed here.
   subject ("c.n is assigned a new value"); an update like `+=` says
   "the resource c points to is modified through c.n". When the
   assignment replaces a value that needs drop (a `String` field), the
-  tooltip says "its previous resource is dropped"; the field has no
-  column to draw that on.
+  tooltip says "its previous resource is dropped". When the
+  reference borrows a local struct (`let r = &mut s; r.a = …`), `s.a`
+  also shows its previous resource dropped on its own column, but not
+  inside an `if`/`match` arm or through a reborrow (`let r2 = &mut *r;`);
+  a parameter's struct belongs to the caller, so no column shows it.
 - `let first = v[0];` (copying out of an index) shows nothing; reading
   through `&v[i]` and slicing (`&v[..]`, `&s[..]`) work.
-- `async` / `await`, and user-defined macros (only standard-library
-  macros like `println!`, `vec!`, `assert!` are unwrapped; a user macro
-  shows only what it passes on to them).
+- `async` / `await` aren't visualized.
+- User-defined macros (`macro_rules!`) that use a variable are refused
+  with "can't visualize this program yet" rather than drawn, since
+  what the macro does to the variable (`take!(z)` expanding to
+  `drop(z)`) isn't modelled. Standard-library macros like `println!`,
+  `vec!`, `assert!` are unwrapped, and a user macro that only forwards
+  a variable to one of them (`show!(w)` → `println!`) is shown as that
+  read; a macro that uses no variable renders.
 - A `for` loop variable taken from a range or a call (`for i in 0..n`,
   `for c in s.chars()`) has no start or end on its timeline, only the
   reads in the body.

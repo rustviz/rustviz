@@ -619,6 +619,18 @@ const EXPECTED_OK: &[&str] = &[
     // `p.x += k` through a reference keeps "modified through", with no
     // "(copied from k)" (#260).
     "field_compound_assign_through_ref",
+    // — User macros: one that forwards to println! still renders (#342).
+    "user_macro_forwards",
+    // — A reference returned by a call (or a borrow) in an `if` /
+    //   `match` branch initializer borrows from every branch's lender
+    //   (#337); tooltips pinned below.
+    "branch_call_ref_if",
+    "branch_call_ref_match",
+    "branch_call_ref_method",
+    "branch_ref_if_addr",
+    // A write through a local `&mut` drops the old value on the
+    // lender's field column (`s.a`), also for `*w = S { .. }` (#152).
+    "field_write_through_local_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6036,6 +6048,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from c to r6: three's signature gives the reference it returns the same lifetime as all three arguments (one of them is a value with no column here), so it may point into any of them, and a and c stay borrowed while r6 is in use",
         ],
         must_not_contain: &[
+            ", through the reference pick returned",
+            ", through the reference pick_arg returned",
+            ", through the reference both returned",
+            ", through the reference three returned",
+            ", through the reference first_third returned",
             "Immutable borrow from o to r1",
             "Immutable borrow from b to r5",
             ", through the reference",
@@ -6330,6 +6347,118 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.x is assigned a copy of k",
             "r.x is assigned a copy of k",
             "p.name acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+
+    // ─── User macros (#342) ──────────────────────────────────────────
+    // A user macro that only forwards to a formatting macro still
+    // renders (#206); one that touches no variable is untouched.
+    TooltipExpect {
+        name: "user_macro_forwards",
+        must_contain: &[
+            "show! reads from w through an implicit reference, so w isn't moved",
+            "show_block! reads from v through an implicit reference, so v isn't moved",
+            "println! reads from n through an implicit reference, so n isn't moved",
+        ],
+        must_not_contain: &[],
+    },
+    // ─── References chosen by an `if` / `match` (#337) ───────────────
+    TooltipExpect {
+        name: "branch_call_ref_if",
+        // #337's repro: `t` stays borrowed until x's last use (line 6),
+        // not just during the call (the `t.len()` in the condition is a
+        // separate, short borrow).
+        must_contain: &[
+            "Immutable borrow from t to x: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from x to t",
+        ],
+        must_not_contain: &[
+            ", through the reference first_word returned",
+            "x is initialized by copy from first_word",
+            "Copy from first_word to x",
+            "Return immutably borrowed resource from x to *x",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_call_ref_match",
+        // Each arm draws its own borrow. After the match, rustc treats
+        // `w` as possibly borrowing either, so both stay borrowed until
+        // w's last use.
+        must_contain: &[
+            "Immutable borrow from a to w: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from b to w: first_word's signature gives the reference it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from w to a",
+            "Return immutably borrowed resource from w to b",
+        ],
+        must_not_contain: &[
+            ", through the reference first_word returned",
+            "w is initialized by copy from first_word",
+            "Return immutably borrowed resource from w to *w",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_call_ref_method",
+        // Method chains in a branch (`v.first().unwrap()`, `s.as_str()`)
+        // next to a literal / promoted constant in the other branch.
+        must_contain: &[
+            "Immutable borrow from v to f: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return immutably borrowed resource from f to v",
+            "Return immutably borrowed resource from t to s",
+        ],
+        must_not_contain: &[
+            ", through the reference unwrap returned",
+            ", through the reference as_str returned",
+            "f is initialized by copy from Anonymous resource",
+            "t is initialized by copy from Anonymous resource",
+            "Return immutably borrowed resource from f to *f",
+            "Return immutably borrowed resource from t to *t",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_ref_if_addr",
+        // `if c { &a } else { &b }`: the borrows were drawn, but r's end
+        // gave nothing back.
+        must_contain: &[
+            "Immutable borrow from a to r",
+            "Immutable borrow from b to r",
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from r to b",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to *r",
+        ],
+    },
+    TooltipExpect {
+        name: "field_write_through_local_ref",
+        // `r.a = …` after `let r = &mut s;` overwrites s's field: the
+        // old String is dropped on `s.a`'s column, not on a column of
+        // the reference's own (#152). Overwriting the whole struct
+        // through `*w` drops the fields' old values too (#268).
+        must_contain: &[
+            "Move from String::from to r.a",
+            "r.a acquires ownership of a new resource; its previous resource is dropped",
+            // (r.n: a Copy integer, nothing to drop.)
+            "r.n is assigned a new value",
+            "r.inner.v acquires ownership of a new resource; its previous resource is dropped",
+            "q.v acquires ownership of a new resource; its previous resource is dropped",
+            "s.a acquires ownership of a new resource; its previous resource is dropped",
+            "s.inner.v acquires ownership of a new resource; its previous resource is dropped",
+            "s.inner acquires ownership of a new resource; its previous resource is dropped",
+            "*w acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "r.a acquires ownership of a resource",
+            "r.a is the owner of the resource",
+            "r.n acquires ownership of a resource",
+            "the resource r points to is modified through r.a",
+            "the resource r points to is modified through r.n",
+            "the resource q points to is modified through q.v",
+            "the resource w points to is modified through *w",
+            "its previous value is dropped",
+            "(copied from",
+            "(moved from",
+            "s.n acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
 ];
@@ -8093,6 +8222,43 @@ fn struct_box_contains_long_member_labels() {
     }
 }
 
+/// #342: a user-defined macro whose body does something to a variable it
+/// was given (`drop($e)`, `$e.len()`, `let t = $e;`) used to draw nothing,
+/// so the variable was later said to drop a String it had given away.
+/// Such programs are refused. (A macro that only forwards to `println!`
+/// still renders: see the `user_macro_forwards` fixture.)
+#[test]
+fn user_macro_that_uses_a_variable_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    let cases = [
+        // the expansion is a call
+        "macro_rules! take { ($e:expr) => { drop($e) }; }\n\
+         fn main() {\n\
+         \x20   let z = String::from(\"f\");\n\
+         \x20   take!(z);\n\
+         }\n",
+        // the expansion is a method call
+        "macro_rules! len { ($e:expr) => { $e.len() }; }\n\
+         fn main() {\n\
+         \x20   let z = String::from(\"f\");\n\
+         \x20   let n = len!(z);\n\
+         }\n",
+        // the expansion is a statement list with a `let`
+        "macro_rules! mk { ($e:expr) => { let t = $e; drop(t); }; }\n\
+         fn main() {\n\
+         \x20   let z = String::from(\"f\");\n\
+         \x20   mk!(z);\n\
+         }\n",
+    ];
+    for src in cases {
+        let err = Rustviz::new(src).expect_err("a user macro that uses a variable must not render");
+        let msg = err.to_string();
+        assert!(msg.contains("user-defined macros that use a variable (`z`, line 4) aren't supported yet"),
+            "expected the user-macro refusal for:\n{}\ngot:\n{}", src, msg);
+        assert!(msg.starts_with("RustViz can't visualize this program yet"), "{}", msg);
+    }
+}
+
 /// #279: past the 12th hash, columns had no colour rule, so their state
 /// lines had no stroke and only their dots showed. The fixture has more
 /// hashes than the palette; every column's lines must get a stroke.
@@ -8165,7 +8331,7 @@ fn reference_bracket_starts_below_the_branch_diamond() {
     // The bracket: `<path ... class="staticref ..." d="M x y ..."` for `x`.
     let bracket = t
         .lines()
-        .find(|l| l.contains("class=\"staticref") && l.contains("&gt;x&lt;/span&gt; holds a reference"))
+        .find(|l| l.contains("class=\"staticref") && l.contains("&gt;x&lt;/span&gt; holds a"))
         .expect("bracket for x");
     let d = &bracket[bracket.find("d=\"M ").unwrap() + 5..];
     let mut nums = d.split(|c: char| c == ' ' || c == '"');
@@ -8176,7 +8342,8 @@ fn reference_bracket_starts_below_the_branch_diamond() {
     // lowest arm dot's line plus half a row.
     let mut arm_ys = Vec::new();
     for c in t.lines().filter(|l| l.contains("<circle") && l.contains("data-hash=\"4\"")
-        && (l.contains("live in a conditional") || l.contains("initialized by"))) {
+        && (l.contains("live in a conditional") || l.contains("initialized by")
+            || l.contains("initialized with a copy of") || l.contains("immutably borrows a resource"))) {
         let cy = c.split("cy=\"").nth(1).unwrap().split('"').next().unwrap();
         arm_ys.push(cy.parse::<f64>().unwrap());
     }

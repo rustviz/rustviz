@@ -316,8 +316,13 @@ const Description: React.FC = () => (
         a function, only what it moves or copies in); in a method chain only
         the first call is drawn on the variable (later calls work on temporary
         results); a match guard&apos;s events appear only in its own arm;{' '}
-        <code>async</code>/<code>await</code> and your own macros aren&apos;t
-        visualized.
+        <code>async</code>/<code>await</code> aren&apos;t visualized.
+      </li>
+      <li>
+        Your own <code>macro_rules!</code> macros that use a variable aren&apos;t
+        visualized yet: the program is refused rather than drawn wrongly. A
+        macro that only forwards a variable to <code>println!</code> and
+        friends is shown as that read.
       </li>
       <li>
         Values dropped when a function leaves early are drawn for a{' '}
@@ -329,7 +334,9 @@ const Description: React.FC = () => (
       <li>
         A write to a field through a reference (<code>self.n += 1</code> in a{' '}
         <code>&amp;mut self</code> method) is drawn on the reference&apos;s
-        column, not on the borrowed struct&apos;s. A write to a tuple
+        column. For a local <code>let r = &amp;mut s;</code> outside{' '}
+        <code>if</code>/<code>match</code>, the field value it replaces is also
+        shown dropped on <code>s</code>&apos;s own field column. A write to a tuple
         field (<code>t.0 = x</code>) or a method result&apos;s field is drawn on
         the column of the variable it is reached from; the old value&apos;s drop
         is stated in the tooltip only. A write to an
