@@ -304,11 +304,11 @@ pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String 
 // is drawn on top of the regular Acquire dot at the same position,
 // so this tooltip is the only one a user can hover; it has to
 // communicate both events.
-pub fn event_dot_owner_drop_at_reassign(my_name: &String, rc: Option<RcDrop>) -> String {
+pub fn event_dot_owner_drop_at_reassign(my_name: &String, note: &str) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
         "{0} acquires ownership of a new resource; its previous resource is dropped{1}",
-        my_name_fmt, rc_drop_note(rc)
+        my_name_fmt, note
     )
 }
 
@@ -436,12 +436,13 @@ pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String
 // `x?` returns from the function on `Err` / `None`; every value the
 // function still owns is dropped there (#430). The dot sits on the
 // owner's column, which goes on: on success nothing happens here.
-pub fn event_dot_owner_drop_if_try_returns(my_name: &String) -> String {
+// `note`: what else the drop drops, or an Rc's count note (#542).
+pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> String {
     let my_name_fmt = fmt_style(my_name);
     format!(
         "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
-         resource is dropped. If the `?` succeeds, nothing happens to {0} here.",
-        my_name_fmt
+         resource is dropped{1}. If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt, note
     )
 }
 
@@ -545,13 +546,13 @@ pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> Str
 }
 
 // `drop(s);`: the value is moved into `std::mem::drop`, which drops it.
-pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool, rc: Option<RcDrop>) -> String {
+pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool, note: &str) -> String {
     format!(
         "{0}'s {2} is moved into {1}, which drops it{3}",
         fmt_style(my_name),
         fmt_style(fn_name),
         held(value),
-        rc_drop_note(rc)
+        note
     )
 }
 
@@ -1999,7 +2000,7 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // keeps a runtime "drop flag" and, at the end of the variable's scope,
 // drops the value only if it wasn't moved (#179). The scope-end dot
 // says that (`event_dot_go_out_of_scope_maybe_moved`).
-pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, rc: Option<RcDrop>) -> String {
+pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, note: &str) -> String {
     let my_name_fmt = fmt_style(my_name);
     if value {
         return format!(
@@ -2012,7 +2013,7 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, rc:
         "{0} was moved in at least one branch above, so it can't be used after the branches \
          (until it's assigned again). If the branch that ran didn't move it, its resource is \
          dropped{1} when {0} goes out of scope.",
-        my_name_fmt, rc_drop_note(rc)
+        my_name_fmt, note
     )
 }
 
@@ -2031,11 +2032,11 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String 
 // Scope end of a variable that was moved on some paths of a conditional
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).
-pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, rc: Option<RcDrop>) -> String {
+pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str) -> String {
     format!(
         "{0} goes out of scope. Its resource is dropped{1} here only if no branch above moved it \
          (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), rc_drop_note(rc)
+        fmt_style(my_name), note
     )
 }
 

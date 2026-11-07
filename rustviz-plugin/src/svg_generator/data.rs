@@ -202,6 +202,9 @@ pub struct Owner {
     /// `Some(RcDrop::Inside { .. })` iff this owner's type only contains
     /// `Rc`s / `Arc`s / `Weak`s inside std containers (#373).
     pub rc_inside: Option<RcDrop>,
+    /// For a collection / `Option` / `Box` whose elements need drop: the
+    /// phrase a drop of it adds, e.g. `every String it holds` (#542).
+    pub holds: Option<String>,
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std
@@ -264,6 +267,8 @@ pub struct Struct {
     pub rc_fields: Option<RcKind>,
     /// Same as `Owner::rc_inside`.
     pub rc_inside: Option<RcDrop>,
+    /// Same as `Owner::holds`.
+    pub holds: Option<String>,
 }
 
 // a reference of type &mut T
@@ -494,6 +499,21 @@ impl ResourceAccessPoint {
             ResourceAccessPoint::Owner(Owner { rc_inside: Some(d), .. })
             | ResourceAccessPoint::Struct(Struct { rc_inside: Some(d), .. }) => Some(*d),
             _ => self.rc_kind().map(RcDrop::Own),
+        }
+    }
+
+    /// The parenthetical a drop of this RAP appends: the reference-count
+    /// note (#373) if it has one, else what its elements are (#542),
+    /// else empty.
+    pub fn drop_note(&self) -> String {
+        if let Some(rc) = self.rc_drop() {
+            return hover_messages::rc_drop_note(Some(rc));
+        }
+        match self {
+            ResourceAccessPoint::Owner(Owner { holds: Some(h), .. })
+            | ResourceAccessPoint::Struct(Struct { holds: Some(h), .. }) =>
+                format!(" (including {})", hover_messages::escape_tooltip_name(h)),
+            _ => String::new(),
         }
     }
 
@@ -1794,7 +1814,7 @@ impl Event {
                 hover_messages::event_dot_ref_go_out_out_scope(my_name)
             }
             Event::OwnerDropAtReassign { maybe_moved: false } => {
-                hover_messages::event_dot_owner_drop_at_reassign(my_name, None)
+                hover_messages::event_dot_owner_drop_at_reassign(my_name, "")
             }
             Event::OwnerDropAtReassign { maybe_moved: true } => {
                 hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name)
@@ -1815,7 +1835,7 @@ impl Event {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal)
             }
             Event::OwnerDropIfTryReturns => {
-                hover_messages::event_dot_owner_drop_if_try_returns(my_name)
+                hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -1911,7 +1931,7 @@ impl Event {
                     ResourceTy::Temporary { extended } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
-                            is.extract_rap().and_then(|r| r.rc_drop())),
+                            &is.extract_rap().map_or(String::new(), |r| r.drop_note())),
                     _ if to.is_closure() => safe_message(if v { hover_messages::event_dot_capture_move_to_closure_value } else { hover_messages::event_dot_capture_move_to_closure }, &self.deref_name(my_name), to),
                     _ => safe_message(if v { hover_messages::event_dot_move_to_value } else { hover_messages::event_dot_move_to }, &self.deref_name(my_name), to),
                 }
@@ -1972,7 +1992,7 @@ impl Event {
                     // the element in place.
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
-                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place, None),
+                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place, ""),
                         // The old element has nothing to drop (that's what makes
                         // it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
@@ -1995,7 +2015,7 @@ impl Event {
                     };
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
-                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name), None),
+                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name), ""),
                         // The old value has nothing to drop (that's what
                         // makes it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
