@@ -216,6 +216,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// loop variable of `for x in it`, #417): they get no lender, so no
   /// borrow is "returned" when they end.
   pub unlent_refs: HashSet<String>,
+  /// References a pattern copied (or moved) out of a value that holds
+  /// a borrow (`Some(n)` on `it.next()`, #391): their borrow is part of
+  /// that value's, and ends at their own last use (#575).
+  pub pattern_copies: HashSet<String>,
   // Temporaries given a column of their own in this fn body because a
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
@@ -1205,8 +1209,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
         result_keeps_borrow: false, stored_in: StoredIn::default(),
       },
-      Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None },
-      Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None }
+      Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() },
+      Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() }
     }
   }
 
@@ -1248,7 +1252,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// The end of reference `from`'s borrow (StaticDie / MutableDie),
   /// returning to `to`; `ref_data` is `from`'s loan, and names the
   /// 'static data it borrowed when the lender has no column.
-  pub fn add_borrow_end_ev(&mut self, line_num: usize, to: ResourceTy, from: ResourceTy, ref_data: &RefData) {
+  ///
+  /// `still_borrowed_by`: the values that go on holding the lender's
+  /// borrow after this reference's ends (see `print_lifetimes`, #575).
+  pub fn add_borrow_end_ev(&mut self, line_num: usize, to: ResourceTy, from: ResourceTy, ref_data: &RefData, still_borrowed_by: Vec<String>) {
     let id = *self.unique_id;
     *self.unique_id += 1;
     let static_lender = match ref_data.lender {
@@ -1256,9 +1263,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => None,
     };
     let ev = if ref_data.ref_mutability {
-      ExternalEvent::MutableDie { from, to, id, static_lender }
+      ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by }
     } else {
-      ExternalEvent::StaticDie { from, to, id, static_lender }
+      ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by }
     };
     self.add_external_event(line_num, ev);
   }
@@ -3415,6 +3422,7 @@ pub fn pattern_ref_copy_borrow(
     rd.lender = lender.clone();
     rd.aliasing = aliasing;
   }
+  self.pattern_copies.insert(name.clone());
   if from_call {
     // The call's result keeps the borrow past the call (#171).
     self.mark_borrow_kept_by_result(scrutinee, std::slice::from_ref(&lender));
@@ -4871,6 +4879,16 @@ pub fn print_out_of_scope(&mut self){
       }
       // if ref is not an ultimate ref then it dies without returning a resource
       if !ultimate_refs.contains(&(k.to_owned(), r_ty.real_name())) { 
+        // ... unless it is a reference a pattern copied out of a value
+        // that holds the borrow (`while let Some(n) = it.next()`), and
+        // only such values keep the lender borrowed past its last use:
+        // its borrow is given back there, and the lender stays
+        // borrowed by them (#575).
+        let holders = self.holders_still_borrowing(k, ref_data, &lender_to_refs, &handed_off);
+        if !holders.is_empty() {
+          self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data, holders);
+          continue;
+        }
         self.add_external_event(*lifetime, ExternalEvent::RefDie { 
           from: ResourceTy::Value(from_ro.clone()), to: to_ro, num_curr_borrowers: get_borrowers(from_ro.name(), &self.borrow_map).len() - 1, 
           id: *self.unique_id });
@@ -4878,11 +4896,51 @@ pub fn print_out_of_scope(&mut self){
       }
       else {
         // otherwise it does return a resource
-        self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data);
+        self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data, Vec::new());
       }
     }
     self.nest_borrow_ends_in_arms();
     self.end_outer_borrows_in_arms();
+  }
+
+  /// For a reference `k` that a pattern copied (or moved) out of a
+  /// value holding a borrow (`Some(n)` on `it.next()`, #391), and
+  /// that isn't the last borrower of its lender: the borrowers that
+  /// keep the lender borrowed after `k`'s last use, in declaration
+  /// order, if they are all such values (`it`). `k`'s borrow is part
+  /// of theirs: it ends at `k`'s last use, and theirs goes on (#575).
+  /// Empty otherwise, and for any other reference: a reference that
+  /// isn't the last to borrow its lender draws no return arrow.
+  fn holders_still_borrowing(
+    &self,
+    k: &String,
+    ref_data: &RefData,
+    lender_to_refs: &HashMap<String, HashSet<String>>,
+    handed_off: &HashSet<String>,
+  ) -> Vec<String> {
+    if !self.pattern_copies.contains(k) || !ref_data.co_lenders.is_empty()
+      || !matches!(ref_data.lender, ResourceTy::Value(_) | ResourceTy::Deref(_))
+    {
+      return Vec::new();
+    }
+    let Some(refs) = lender_to_refs.get(&ref_data.lender.real_name()) else { return Vec::new() };
+    let mut later: Vec<&RapData> = Vec::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "sorted by declaration order below")]
+    for r in refs.iter() {
+      if r == k || handed_off.contains(r) {
+        continue;
+      }
+      let Some(d) = self.borrow_map.get(r) else { continue };
+      // Still borrowing after k's last use, and already before it.
+      if d.lifetime > ref_data.lifetime && d.assigned_at <= ref_data.lifetime {
+        match self.raps.get(r) {
+          Some(rap) if rap.rap.holds_borrow() => later.push(rap),
+          _ => return Vec::new(),
+        }
+      }
+    }
+    later.sort_by(|a, b| a.rap.hash().cmp(b.rap.hash()).then_with(|| a.rap.name().cmp(b.rap.name())));
+    later.into_iter().map(|r| r.rap.name().to_owned()).collect()
   }
 
   /// A reference declared before an `if` / `match` whose last use is
