@@ -870,6 +870,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ManuallyDropByHand { ro, .. }
       | ExternalEvent::LoopExitMove { ro, .. }
       | ExternalEvent::TupleTempDrop { ro, .. }
+      | ExternalEvent::OrAltMove { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. } => {
@@ -3737,7 +3738,11 @@ pub fn tuple_scrutinee_left(&self, scrutinee: &'tcx Expr<'tcx>, pat: Option<&'tc
       Some(p) => self.tuple_elem_left(p, i, elems.len(), typeck, env),
     };
     if let Some(rest) = left {
-      out.push((rap.clone(), TupleLeft { name: rap.name().clone(), rest, rc: rap.rc_drop() }));
+      let takers = match pat {
+        Some(p) => self.tuple_elem_takers(p, i, elems.len(), typeck),
+        None => Vec::new(),
+      };
+      out.push((rap.clone(), TupleLeft { name: rap.name().clone(), rest, rc: rap.rc_drop(), takers }));
     }
   }
   out
@@ -3768,6 +3773,42 @@ fn tuple_elem_left(&self, pat: &'tcx Pat<'tcx>, i: usize, n: usize,
     // `t => …` takes the whole tuple; `_`, `ref t` leave it.
     _ => self.pat_leaves(pat, typeck, env),
   }
+}
+
+/// For an or-pattern whose alternatives leave different amounts of
+/// element `i` of a tuple literal of `n` elements in the tuple (`(Some(x),
+/// _) | (_, Some(x))`, #533): the names that move some of it out in the
+/// alternatives that do, in order. What's left in the tuple then
+/// depends on which alternative matched at run time. Empty otherwise.
+fn tuple_elem_takers(&self, pat: &'tcx Pat<'tcx>, i: usize, n: usize,
+  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> Vec<String> {
+  let PatKind::Or(alts) = pat.kind else { return Vec::new() };
+  let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, pat.hir_id.owner);
+  let each: Vec<Option<bool>> = alts.iter().map(|a| self.tuple_elem_left(a, i, n, typeck, env)).collect();
+  if each.iter().all(|l| *l == each[0]) {
+    return Vec::new();
+  }
+  let mut out: Vec<String> = Vec::new();
+  for alt in alts {
+    let PatKind::Tuple(subs, dd) = alt.kind else { continue };
+    let gap = n.saturating_sub(subs.len());
+    let k = match dd.as_opt_usize() {
+      Some(d) if i >= d && i < d + gap => continue,
+      Some(d) if i >= d + gap => i - gap,
+      _ => i,
+    };
+    let Some(sub) = subs.get(k) else { continue };
+    sub.walk_always(|p| {
+      if let PatKind::Binding(_, _, ident, _) = p.kind {
+        let by_ref = matches!(typeck.pat_binding_modes().get(p.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
+        let name = ident.to_string();
+        if !by_ref && !self.ty_is_copy(typeck.node_type(p.hir_id), p.hir_id.owner) && !out.contains(&name) {
+          out.push(name);
+        }
+      }
+    });
+  }
+  out
 }
 
 /// What matching `pat` against an owned value leaves of it: all of it
@@ -5175,6 +5216,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // have moved it before (#281). It held the value before the
       // condition, which moved it.
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } if ro.name() == rap_name => {
+        return Some(Ownership::Maybe);
+      }
+      // Moved into a name an or-pattern binds, if its alternative
+      // matched (#533): moved on some paths.
+      ExternalEvent::OrAltMove { ro, tuple: None, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       ExternalEvent::Move { from, to, .. } => {

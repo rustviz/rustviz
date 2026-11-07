@@ -820,7 +820,7 @@ pub fn collect_event_live_vars(
             // conditional's liveness set.
             ExternalEvent::GoOutOfScope { .. }
             | ExternalEvent::InitRefParam { .. } => {}
-            ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } => {
+            ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } => {
                 out.insert(ro.clone());
             }
             // A reassignment in a branch drops the old value of `ro`:
