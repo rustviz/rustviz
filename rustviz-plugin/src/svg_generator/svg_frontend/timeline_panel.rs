@@ -1260,7 +1260,11 @@ fn render_dot(
                             hover_messages::event_dot_temporary_go_out_of_scope(&name)
                         } else {
                             let mut title = event.print_message_with_name(&mut name);
-                            title.push_str(". Its resource is dropped.");
+                            if ro.holds_borrow() {
+                                title.push_str(&hover_messages::event_dot_holder_drop_suffix());
+                            } else {
+                                title.push_str(". Its resource is dropped.");
+                            }
                             title
                         };
                         let drop_data = DropDotData {
@@ -1735,6 +1739,13 @@ fn timeline_segment_title(
                 return hover_messages::state_closure_full_privilege_with_resource(&name, count);
             }
             return hover_messages::state_closure_full_privilege_no_resource(&name);
+        }
+    }
+    // A value that holds a borrow (`let it = v.iter();`, #336) owns
+    // its value, not the data it borrows.
+    if rap.holds_borrow() {
+        if let State::FullPrivilege { .. } = state {
+            return hover_messages::state_holder_full_privilege(rap.name());
         }
     }
     // Copy-typed owners (i32 etc.) — "the owner of the resource"
@@ -2446,7 +2457,7 @@ fn render_arrow (
             }
             if let ExternalEvent::StaticBorrow { via: Some(via), .. }
                  | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
-                title.push_str(&hover_messages::arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie));
+                title.push_str(&hover_messages::arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier));
             }
 
             // order of points is to -> from

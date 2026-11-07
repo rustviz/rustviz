@@ -387,13 +387,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default()}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, write: Default::default()}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false}), scope, is_global);
   }
 
   // Marks the owner (or struct field) just registered as `name` as a
@@ -418,7 +418,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default()}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: false, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, write: Default::default(), holds_borrow: false}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -432,9 +432,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_static_ref_member(name.clone(), lhs_mut, scope, is_global, None, pointee_copy);
       }
     }
+    // A reference that shadows a borrow holder of the same name
+    // (`let third = v.get(2); match third { Some(third) => .. }`)
+    // shares its column (#253). Keep the holder's borrow: the inner
+    // binding copies the reference it holds, so its uses keep that
+    // borrow alive, and overwriting it would lose the end of v's
+    // borrow (#336).
+    if self.holder_shadowed(&name) {
+      return;
+    }
     self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, co_lenders: Vec::new() });
   }
-  
+  /// `name`'s column is a borrow holder (#336) whose borrow is
+  /// recorded; a reference binding of the same name shadows it.
+  pub fn holder_shadowed(&self, name: &String) -> bool {
+    self.borrow_map.contains_key(name)
+      && self.raps.get(name).is_some_and(|rd| rd.rap.holds_borrow())
+  }
+
   /// True iff `ref_ty` is `&T` / `&mut T` with `T: Copy` (`&i32`) or `T`
   /// a struct / enum that's non-Copy with nothing to drop (`ty_is_plain`).
   /// Such a reference points to a "value", not a "resource" (#312, #484).
@@ -528,7 +543,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   pub fn update_rap(&mut self, r: &ResourceAccessPoint, line_num: usize) {
-    if r.is_ref() {
+    // A value holding a borrow keeps it until its last use, like a
+    // reference (#336).
+    if r.is_ref() || (r.holds_borrow() && self.borrow_map.contains_key(r.name())) {
       self.update_lifetime(r.name(), line_num);
     }
   }
@@ -1946,10 +1963,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       lender,
       aliasing,
       self.current_scope, !self.inside_branch, pointee_copy);
-      if let Some(rd) = self.borrow_map.get_mut(&name) {
-        rd.static_lender = static_lender;
-        rd.borrow_span = borrow_span_of(expr);
-        rd.co_lenders = co_lenders;
+      if !self.holder_shadowed(&name) {
+        if let Some(rd) = self.borrow_map.get_mut(&name) {
+          rd.static_lender = static_lender;
+          rd.borrow_span = borrow_span_of(expr);
+          rd.co_lenders = co_lenders;
+        }
       }
     }
     else if matches!(ty.kind(), TyKind::Tuple(_)) && self.has_member_columns(ty) {
@@ -1986,6 +2005,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
               ref_lender: Some(ResourceTy::Anonymous),
             },
           );
+          self.register_struct_field_lenders(&name, expr, ty);
         },
         // Unions and enums both render as opaque single-owner columns:
         // there's no statically-known discriminant we can attribute
@@ -1997,10 +2017,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
           let interior_mut = self.ty_has_interior_mut(ty, expr.hir_id.owner);
           if ty.is_union() {
-            self.add_union_owner(name, mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+            self.add_union_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
           } else {
-            self.add_owner(name, mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+            self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
           }
+          self.register_holder(&name, expr, ty);
         }
       }
     }
@@ -2020,6 +2041,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
       self.mark_if_manually_drop(&name, ty);
+      self.register_holder(&name, expr, ty);
     }
   }
 
@@ -2049,6 +2071,120 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// columns (see `member_fields`).
   pub fn has_member_columns(&self, ty: Ty<'tcx>) -> bool {
     !self.member_fields(ty).is_empty()
+  }
+
+  /// `let ex = Excerpt::new(&novel);`: the reference fields of a
+  /// struct a call returns borrow what the callee's signature ties
+  /// each field's lifetime to (#336). `register_struct_members` gave
+  /// them an Anonymous lender; fill in the real ones.
+  fn register_struct_field_lenders(&mut self, name: &str, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
+    if !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+      return;
+    }
+    let Some(adt) = ty.ty_adt_def() else { return };
+    for field in adt.all_fields() {
+      let fname = format!("{}.{}", name, field.name.as_str());
+      if !self.borrow_map.contains_key(&fname) {
+        continue;
+      }
+      let (mut lenders, _, _) = self.call_field_lenders(init, field.name.as_str());
+      if lenders.is_empty() {
+        continue;
+      }
+      let lender = lenders.remove(0);
+      let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+      if let Some(rd) = self.borrow_map.get_mut(&fname) {
+        rd.lender = lender;
+        rd.co_lenders = lenders;
+        rd.aliasing = aliasing;
+      }
+    }
+  }
+
+  /// `h = rhs;` where `h` holds a borrow (#336): the borrow its old
+  /// value held ends (at the old value's last use, if MIR says so),
+  /// and `h` now holds whatever `rhs` borrows. `match_rhs` then draws
+  /// the new borrow from the updated `borrow_map` entry.
+  pub fn reassign_holder(&mut self, h: &ResourceAccessPoint, rhs: &'tcx Expr<'tcx>, ty: Ty<'tcx>, line: usize) {
+    let name = h.name().to_owned();
+    if let Some(old) = self.borrow_map.get(&name).cloned() {
+      let mir_b_data = self.gather_borrow_data(self.bwf);
+      let end = mir_b_data.iter()
+        .find_map(|m| ExprVisitor::borrow_match(&old, m))
+        .map_or(line, |kill| kill.min(line).max(old.assigned_at));
+      let holder = ResourceTy::Value(h.clone());
+      if get_borrowers(&name, &self.borrow_map).len() > 1 {
+        let to = old.lender.clone();
+        self.add_external_event(end, ExternalEvent::RefDie { from: holder.clone(), to, num_curr_borrowers: 1, id: *self.unique_id });
+        *self.unique_id += 1;
+      } else {
+        for l in old.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
+          let evt = if old.ref_mutability { Evt::MDie } else { Evt::SDie };
+          self.add_ev(end, evt, l, holder.clone(), false);
+        }
+      }
+      self.borrow_map.remove(&name);
+    }
+    let (mut lenders, is_mut) = self.holder_lenders(rhs, ty);
+    if lenders.is_empty() {
+      return;
+    }
+    let lender = lenders.remove(0);
+    let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+    self.borrow_map.insert(name, RefData {
+      lender,
+      assigned_at: line,
+      lifetime: line,
+      ref_mutability: is_mut,
+      aliasing,
+      static_lender: None,
+      borrow_span: None,
+      co_lenders: lenders,
+    });
+  }
+
+  /// `name` was just registered as an owner bound to `init`. If its
+  /// value holds a borrow of variables we draw (`let it = v.iter();`,
+  /// `let third = v.get(2);`; see `holder_lenders`), mark it as a
+  /// holder and record that borrow in `borrow_map` like a reference's,
+  /// so it lasts until the holder's last use (MIR refines it in
+  /// `print_lifetimes`), and a reference later taken out of it
+  /// (`it.next().unwrap()`) finds `v` as its lender (#336).
+  fn register_holder(&mut self, name: &String, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
+    let (mut lenders, is_mut) = self.holder_lenders(init, ty);
+    if lenders.is_empty() {
+      return;
+    }
+    if let Some(rd) = self.raps.get_mut(name) {
+      if let ResourceAccessPoint::Owner(o) = &mut rd.rap {
+        o.holds_borrow = true;
+      } else {
+        return;
+      }
+    }
+    // `let it2 = it;` moves the value, and the borrow with it: `it`
+    // no longer holds it (a Copy holder like an `Option<&T>` is
+    // copied, and both hold it).
+    if let ExprKind::Path(..) = init.kind {
+      if !self.ty_is_copy(ty, init.hir_id.owner) {
+        if let Some(src) = expr_to_rap_name(init, &self.tcx) {
+          self.borrow_map.remove(&src);
+        }
+      }
+    }
+    let line = expr_to_line(&init, &self.tcx);
+    let lender = lenders.remove(0);
+    let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+    self.borrow_map.insert(name.clone(), RefData {
+      lender,
+      assigned_at: line,
+      lifetime: line,
+      ref_mutability: is_mut,
+      aliasing,
+      static_lender: None,
+      borrow_span: None,
+      co_lenders: lenders,
+    });
   }
 
   /// Register `prefix.field` RAPs for every field of a struct type,
@@ -2504,17 +2640,20 @@ pub fn register_iflet_let_bindings(
 /// when the call returns. Returns false (emitting nothing) otherwise.
 pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'tcx>, func: String, line_num: usize) -> bool {
   let ResourceTy::Value(lhs_rap) = lhs else { return false };
-  if !lhs_rap.is_ref() {
+  // A reference, or a value that holds a borrow (`let it = v.iter();`,
+  // registered by `register_holder`; #336).
+  if !lhs_rap.is_ref() && !lhs_rap.holds_borrow() {
     return false;
   }
   // Draw only this call's own lenders: when the call is one branch of
   // an `if` / `match` initializer, `borrow_map` holds the union over
   // all branches (#337).
   let own = self.call_lenders(call);
-  let lenders: Vec<ResourceTy> = match self.borrow_map.get(lhs_rap.name()) {
-    Some(rd) => rd.all_lenders().into_iter()
+  let (lenders, is_mut): (Vec<ResourceTy>, bool) = match self.borrow_map.get(lhs_rap.name()) {
+    Some(rd) => (rd.all_lenders().into_iter()
       .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && own.contains(l))
       .collect(),
+      if lhs_rap.is_ref() { lhs_rap.is_mutref() } else { rd.ref_mutability }),
     None => return false,
   };
   if lenders.is_empty() {
@@ -2524,11 +2663,12 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
     func,
     lenders: lenders.iter().map(|l| l.name()).collect(),
     also_unnamed: self.call_lenders_full(call).1,
-    tie: self.call_arg_tie(call),
+    tie: self.call_arg_tie(call, None),
+    carrier: if lhs_rap.is_ref() { ViaCarrier::Reference } else { ViaCarrier::Value },
   };
   for lender in lenders.iter() {
     let id = *self.unique_id;
-    let ev = if lhs_rap.is_mutref() {
+    let ev = if is_mut {
       ExternalEvent::MutableBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
     } else {
       ExternalEvent::StaticBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
@@ -2538,6 +2678,55 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   }
   self.mark_borrow_kept_by_result(call, &lenders);
   true
+}
+
+/// `lhs` is a struct bound to `call`'s result whose reference fields
+/// `register_struct_field_lenders` linked to the caller's variables:
+/// draw a borrow from each lender into each such field, and keep the
+/// lenders borrowed past the call (#336).
+pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'tcx>, func: String, line_num: usize) {
+  let ResourceTy::Value(ResourceAccessPoint::Struct(st)) = lhs else { return };
+  if st.is_member {
+    return;
+  }
+  let ty = self.tcx.typeck(call.hir_id.owner).expr_ty(call);
+  let Some(adt) = ty.ty_adt_def() else { return };
+  let mut all: Vec<ResourceTy> = Vec::new();
+  for field in adt.all_fields() {
+    let fname = format!("{}.{}", st.name, field.name.as_str());
+    let (Some(rd), Some(frap)) = (self.borrow_map.get(&fname), self.raps.get(&fname)) else { continue };
+    let frap = frap.rap.to_owned();
+    let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
+      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+      .collect();
+    if lenders.is_empty() || !frap.is_ref() {
+      continue;
+    }
+    let via = BorrowVia {
+      func: func.clone(),
+      lenders: lenders.iter().map(|l| l.name()).collect(),
+      also_unnamed: self.call_field_lenders(call, field.name.as_str()).1,
+      tie: self.call_arg_tie(call, Some(field.name.as_str())),
+      carrier: ViaCarrier::StructField,
+    };
+    let to = ResourceTy::Value(frap.clone());
+    for lender in lenders.iter() {
+      let id = *self.unique_id;
+      let ev = if frap.is_mutref() {
+        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+      } else {
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, via: Some(via.clone()), id }
+      };
+      self.add_external_event(line_num, ev);
+      *self.unique_id += 1;
+      if !all.contains(lender) {
+        all.push(lender.clone());
+      }
+    }
+  }
+  if !all.is_empty() {
+    self.mark_borrow_kept_by_result(call, &all);
+  }
 }
 
 /// Set `result_keeps_borrow` on the pass-by-reference events that
@@ -2781,7 +2970,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         }
         None => ResourceTy::Anonymous,
       };
-      self.add_ev(line_num, evt, lhs, from, false);
+      self.add_ev(line_num, evt, lhs.clone(), from, false);
+      if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+        self.emit_struct_field_borrows(&lhs, rhs, func, line_num);
+      }
     },
     
     ExprKind::Lit(_) | ExprKind::Binary(..) | // Any type of literal on RHS implies a bind
@@ -2881,7 +3073,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       let from = hirid_to_var_name(name_and_generic_args.hir_id, &self.tcx)
         .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned()))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value);
-      self.add_ev(line_num, evt, lhs, from, false);
+      self.add_ev(line_num, evt, lhs.clone(), from, false);
+      self.emit_struct_field_borrows(&lhs, rhs, name_and_generic_args.ident.as_str().to_owned(), line_num);
     }
     // Struct intializer list:
     // ex struct = {a: <expr>, b: <expr>, c: <expr>}

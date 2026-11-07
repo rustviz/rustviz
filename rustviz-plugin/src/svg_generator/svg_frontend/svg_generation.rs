@@ -506,8 +506,8 @@ pub fn render_svg(
             // stand in for the whole line: the map's events were
             // appended (again, if already done) and the arrow itself
             // was dropped. That lost e.g. `Move from String::from to
-            // s.b` next to `Move from t to s.c`. A Move/Copy out of a
-            // function call, to the caller, or into a place with no
+            // s.b` next to `Move from t to s.c`. A Move/Copy out of or
+            // into a function call, to the caller, or into a place with no
             // column (`self.name = s`, `r.name = s`: `to` is
             // Anonymous; otherwise s would later be shown dropping a
             // resource it gave away) now gets appended on its own, as
@@ -533,6 +533,11 @@ pub fn render_svg(
                 let (from, to) = ResourceAccessPoint_extract(&event);
                 let is_transfer = matches!(event, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. });
                 let from_fn = from.extract_rap().map_or(false, |rap| rap.is_fn());
+                // A value moved / copied into a call (`take(b)`,
+                // `it.sum()`): dropping it left `b` shown as still
+                // owning (and later dropping) what it gave away.
+                let into_fn = to.extract_rap().map_or(false, |rap| rap.is_fn())
+                    && !from_fn;
                 let into_unmodelled_place = matches!(to, ResourceTy::Anonymous)
                     && !matches!(from, ResourceTy::Anonymous);
                 let is_borrow = matches!(event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
@@ -554,7 +559,7 @@ pub fn render_svg(
                 let place_borrow = (is_borrow && matches!(to, ResourceTy::Index(..)))
                     || (matches!(event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
                         && matches!(from, ResourceTy::Index(..)));
-                if (is_transfer && (from_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
+                if (is_transfer && (from_fn || into_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
                     || borrow_of_temporary
                     || ref_param_ends
                     || place_borrow {

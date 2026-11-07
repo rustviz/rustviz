@@ -635,6 +635,19 @@ const EXPECTED_OK: &[&str] = &[
     // Thick `let mut` branch columns bend at splits and joins (#487).
     "mut_branch_kinks",
     "mut_branch_kinks_plain",
+    // — A variable that holds a borrow without being a reference
+    //   (`let it = v.iter();`, `let third = v.get(2);`, a struct with a
+    //   lifetime returned by a call; #336); tooltips pinned below.
+    "holder_iter_get",
+    "holder_iter_mut",
+    "holder_moved",
+    "holder_consumed",
+    "holder_reassign",
+    "holder_struct_from_call",
+    "holder_closure_capture",
+    "holder_closure_ref",
+    // A value moved into a call on a line with another arrow (#379).
+    "move_into_call_shared_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5215,8 +5228,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "no_drop_iter",
         must_contain: &[
-            "it2 is bound to a value",
-            "it2 holds a value",
+            // it2 holds an `Iter`, a value that borrows `w` (#336): its
+            // column says so instead of the plain-value wording.
+            "it2 holds a value that immutably borrows w's resource (it2 isn't a reference itself)",
+            "it2 holds a value that contains a reference (it2 isn't a reference itself)",
             "it2 goes out of scope",
             "it2's value is immutably borrowed by len; it2 is read-only while the borrow is live",
             "w acquires ownership of a resource",
@@ -5612,13 +5627,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "fn_ret_ref_iter_next",
         // `x` borrows `v` (through the iterator), not the iterator
-        // `it`. What a non-reference variable holds isn't tracked, so
-        // x's lender is left out (an honest omission) rather than
-        // drawn as `it`, which is what this used to say.
+        // `it`. `it` holds the borrow of `v` (#336), so x's lender is
+        // `v`.
         must_contain: &[
-            "x is initialized with a copy of unwrap",
+            "Immutable borrow from v to x: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return immutably borrowed resource from x to v",
         ],
         must_not_contain: &[
+            ", through the reference unwrap returned",
+            "x is initialized by copy from unwrap",
             "Immutable borrow from it to x",
             "it's resource is immutably borrowed by x; it is read-only while the borrow is live",
             "Return immutably borrowed resource from x to it",
@@ -6488,6 +6505,155 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s's resource is immutably borrowed by the closure passed to keep; s is read-only while the borrow is live",
             "k's resource is moved",
             "count's resource is moved",
+        ],
+    },
+    // ─── Values that hold a borrow (#336) ────────────────────────────
+    TooltipExpect {
+        name: "holder_iter_get",
+        // `it` (an Iter) and `third` (an Option<&i32>) aren't
+        // references, but each holds a borrow of `v` until its last use
+        // (rustc rejects `v.push(4)` before line 6). `x` is a copy of a
+        // reference `it` hands out, so it borrows `v` too.
+        must_contain: &[
+            "Immutable borrow from v to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
+            "Immutable borrow from v to x: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "it holds a value that immutably borrows v's resource (it isn't a reference itself)",
+            "it holds a value that contains a reference (it isn't a reference itself)",
+            "Return immutably borrowed resource from it to v",
+            "Return immutably borrowed resource from third to v",
+            "Return immutably borrowed resource from x to v",
+            // An `Iter` needs no drop, so nothing is claimed dropped (#484).
+            "it goes out of scope",
+        ],
+        must_not_contain: &[
+            "it goes out of scope. Its value is dropped, but not the data it borrowed.",
+            ", through the value iter returned",
+            ", through the value get returned",
+            ", through the reference unwrap returned",
+            "Move from iter to it",
+            "Copy from get to third",
+            "x is initialized by copy from unwrap",
+            "Return immutably borrowed resource from x to *x",
+            "it is the owner of the resource",
+            "it goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_iter_mut",
+        // iter_mut takes `&mut v`: `it` holds a mutable borrow, and so
+        // does `first`, until line 5.
+        must_contain: &[
+            "Mutable borrow from v to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Mutable borrow from v to first: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return mutably borrowed resource from it to v",
+            "Return mutably borrowed resource from first to v",
+        ],
+        must_not_contain: &[
+            ", through the value iter_mut returned",
+            ", through the reference unwrap returned",
+            "Move from iter_mut to it",
+            "Return mutably borrowed resource from first to *first",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_moved",
+        // Moving a holder moves the borrow with it; it ends when it2 is
+        // moved into `consume`.
+        must_contain: &[
+            "it2 takes over it's value, and the borrow it holds",
+            "Move from it2 to consume",
+            "Return immutably borrowed resource from it2 to v",
+            "it2 goes out of scope",
+        ],
+        must_not_contain: &[
+            "it2 goes out of scope. No resource is dropped.",
+            "Return immutably borrowed resource from it to v",
+            "it2 goes out of scope. Its value is dropped, but not the data it borrowed.",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_consumed",
+        // `it.sum()` takes the iterator by value: it is moved on the
+        // line its borrow ends.
+        must_contain: &[
+            "Immutable borrow from v to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Move from it to sum",
+            "Return immutably borrowed resource from it to v",
+            "it goes out of scope",
+        ],
+        must_not_contain: &[
+            "it goes out of scope. No resource is dropped.",
+            ", through the value iter returned",
+            "Move from iter to it",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_reassign",
+        // `it = b.iter();` ends the borrow of `a` and starts one of `b`.
+        must_contain: &[
+            "Immutable borrow from a to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from it to a",
+            "Immutable borrow from b to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from it to b",
+        ],
+        must_not_contain: &[
+            ", through the value iter returned",
+            "Move from iter to it",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_struct_from_call",
+        // `Excerpt::new(&novel)` returns an `Excerpt<'a>` whose `part`
+        // field borrows `novel` (the signature ties both to `'a`).
+        must_contain: &[
+            "Immutable borrow from novel to ex.part: Excerpt::new's signature gives the struct it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from ex.part to novel",
+        ],
+        must_not_contain: &[
+            ", through the struct Excerpt::new returned",
+            "Return immutably borrowed resource from ex.part to *ex.part",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_closure_capture",
+        // `map` stores the closure, which captures `k` by reference, so
+        // `lens` holds borrows of both `s` and `k`.
+        must_contain: &[
+            "Immutable borrow from s to c: chars's signature gives the value it returns the same lifetime as the value it was called on; c isn't a reference, but its value holds one",
+            "Immutable borrow from k to lens: map's signature gives the value it returns the same lifetime as the value it was called on and its argument, so it may borrow from either, and both stay borrowed while lens is in use; lens isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from lens to s",
+            "Return immutably borrowed value from lens to k",
+            "Move from lens to sum",
+        ],
+        must_not_contain: &[
+            ", through the value chars returned",
+            ", through the value map returned",
+            "Move from map to lens",
+            "other data that has no column here",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_closure_ref",
+        must_contain: &[
+            "Immutable borrow from extra to it: map's signature gives the value it returns the same lifetime as the value it was called on and its argument, so it may borrow from either, and both stay borrowed while it is in use; it isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from it to extra",
+        ],
+        must_not_contain: &[
+            ", through the value map returned",
+            "Move from map to it",
+        ],
+    },
+    TooltipExpect {
+        name: "move_into_call_shared_line",
+        // `take(b)` shares line 5 with `let c = a;` (#379).
+        must_contain: &[
+            "Move from b to take",
+            "b's resource is moved",
+            "b goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "b goes out of scope. Its resource is dropped.",
         ],
     },
 ];

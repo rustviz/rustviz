@@ -24,10 +24,11 @@
 //!   holds ("content flow"): `opt.unwrap()` with `opt = v.get(0)`
 //!   carries `v.get(0)`'s borrow of `v`.
 //!
-//! What a *local* non-reference value holds (an `Option<&T>` or an
-//! iterator stored in a variable) isn't tracked, so content flow out of
-//! such a variable yields no lender: an honest "unknown" rather than a
-//! guess.
+//! A *local* non-reference value that holds a borrow (`let it =
+//! v.iter();`, `let third = v.get(2);`) is recorded in `borrow_map`
+//! like a reference (see `holder_lenders`; #336), so content flow out
+//! of it (`it.next().unwrap()`) reaches `v`. Any other non-reference
+//! local yields no lender: an honest "unknown" rather than a guess.
 
 use rustc_hir::{Expr, ExprKind, QPath, UnOp};
 use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Ty};
@@ -42,6 +43,9 @@ struct ArgFlow<'tcx> {
   arg: &'tcx Expr<'tcx>,
   place: bool,
   content: bool,
+  /// The place flow goes through a `&mut` parameter, so the loan the
+  /// result keeps is a mutable one (`v.iter_mut()`, `v.get_mut(0)`).
+  place_mut: bool,
 }
 
 /// What an adjusted argument refers to, after rustc's auto-deref steps.
@@ -94,7 +98,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// For each argument of `call`, whether the call's result can borrow
   /// what that argument refers to or holds.
   fn call_arg_flows(&self, call: &'tcx Expr<'tcx>) -> Option<Vec<ArgFlow<'tcx>>> {
+    self.call_arg_flows_into(call, None)
+  }
+
+  /// `call_arg_flows`, for the whole result (`field = None`) or for
+  /// one field of a struct result (`Excerpt::new(&novel)` returns an
+  /// `Excerpt<'a>` whose `part: &'a str` borrows `novel`).
+  fn call_arg_flows_into(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> Option<Vec<ArgFlow<'tcx>>> {
     let (sig, gargs, args) = self.callee_sig(call)?;
+    let output = match field {
+      None => sig.output(),
+      Some(f) => match sig.output().kind() {
+        ty::Adt(def, fargs) if def.is_struct() =>
+          def.all_fields().find(|fd| fd.name.as_str() == f)?.ty(self.tcx, fargs),
+        _ => return None,
+      },
+    };
     // A type parameter matters only if this call instantiates it with
     // something that holds a reference (`T = &i32` in `unwrap`).
     let carries_ref = |index: u32| -> bool {
@@ -103,7 +122,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         None => true,
       }
     };
-    let output = sig.output();
     let mut regions: Vec<ty::Region<'tcx>> = Vec::new();
     let mut params: Vec<u32> = Vec::new();
     for g in output.walk() {
@@ -131,12 +149,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let mut flows = Vec::new();
     for (index, (input, arg)) in sig.inputs().iter().zip(args).enumerate() {
-      let (place, content) = match input.kind() {
-        ty::Ref(r, inner, _) => (regions.contains(r), shares(*inner)),
-        _ => (false, shares(*input)),
+      let (place, content, place_mut) = match input.kind() {
+        ty::Ref(r, inner, m) => (regions.contains(r), shares(*inner), m.is_mut()),
+        _ => (false, shares(*input), false),
       };
       if place || content {
-        flows.push(ArgFlow { index, arg, place, content });
+        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut });
       }
     }
     Some(flows)
@@ -156,11 +174,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// parameter's caller-side data, a value we don't track): the
   /// result may point there instead of into the returned lenders.
   pub fn call_lenders_full(&self, call: &'tcx Expr<'tcx>) -> (Vec<ResourceTy>, bool) {
+    self.lenders_of_flows(self.call_arg_flows(call).unwrap_or_default())
+  }
+
+  /// `call_lenders_full` for the reference stored in field `field` of
+  /// the struct `call` returns, and whether that borrow is mutable.
+  pub fn call_field_lenders(&self, call: &'tcx Expr<'tcx>, field: &str) -> (Vec<ResourceTy>, bool, bool) {
+    let flows = self.call_arg_flows_into(call, Some(field)).unwrap_or_default();
+    let is_mut = flows.iter().any(|f| f.place_mut || (f.content && self.value_borrow_is_mut(f.arg)));
+    let (ls, unnamed) = self.lenders_of_flows(flows);
+    (ls, unnamed, is_mut)
+  }
+
+  fn lenders_of_flows(&self, flows: Vec<ArgFlow<'tcx>>) -> (Vec<ResourceTy>, bool) {
     let mut out: Vec<ResourceTy> = Vec::new();
     let mut unnamed = false;
-    for flow in self.call_arg_flows(call).unwrap_or_default() {
+    for flow in flows {
       let ls = self.arg_lenders(flow.arg, flow.place, flow.content);
-      if ls.is_empty() {
+      // A closure passed by value (`.map(|p| p.len())`) holds only
+      // what it captures by reference; one that captures nothing that
+      // way holds no borrow at all.
+      if ls.is_empty() && !matches!(flow.arg.kind, ExprKind::Closure(..)) {
         unnamed = true;
       }
       for l in ls {
@@ -176,22 +210,77 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// Which of `call`'s arguments its signature ties the result to,
   /// and how many of those have no column (see `ArgTie`).
-  pub fn call_arg_tie(&self, call: &'tcx Expr<'tcx>) -> ArgTie {
+  pub fn call_arg_tie(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> ArgTie {
     let Some((_, _, args)) = self.callee_sig(call) else { return ArgTie::default() };
     let mut tie = ArgTie {
       receiver: matches!(call.kind, ExprKind::MethodCall(..)),
       total: args.len(),
       ..ArgTie::default()
     };
-    for flow in self.call_arg_flows(call).unwrap_or_default() {
+    for flow in self.call_arg_flows_into(call, field).unwrap_or_default() {
       let named = self.arg_lenders(flow.arg, flow.place, flow.content).iter()
         .any(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
       tie.tied.push(flow.index);
-      if !named {
+      // A closure that captures nothing by reference holds no borrow:
+      // it isn't "data with no column" (see `lenders_of_flows`).
+      if !named && !matches!(flow.arg.kind, ExprKind::Closure(..)) {
         tie.unnamed += 1;
       }
     }
     tie
+  }
+
+  /// Whether the borrow `call`'s result keeps is a mutable one: some
+  /// argument tied to the result is passed as `&mut` (`v.iter_mut()`),
+  /// or the result carries a mutable borrow an argument already held
+  /// (`it.next()` with `it = v.iter_mut()`). rustc keeps that `&mut`
+  /// loan alive for as long as the result is used, even when the
+  /// result itself only hands out shared references.
+  pub fn call_borrow_is_mut(&self, call: &'tcx Expr<'tcx>) -> bool {
+    self.call_arg_flows(call).unwrap_or_default().iter().any(|flow| {
+      flow.place_mut || (flow.content && self.value_borrow_is_mut(flow.arg))
+    })
+  }
+
+  /// Whether the borrow held by the value of `e` is a mutable one.
+  fn value_borrow_is_mut(&self, e: &'tcx Expr<'tcx>) -> bool {
+    match e.kind {
+      ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
+        expr_to_rap_name(e, &self.tcx)
+          .and_then(|n| self.borrow_map.get(&n))
+          .is_some_and(|rd| rd.ref_mutability)
+      }
+      ExprKind::AddrOf(_, m, _) => m.is_mut(),
+      ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_borrow_is_mut(e),
+      ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).iter().any(|(_, m)| *m),
+      ExprKind::Block(b, _) => b.expr.is_some_and(|x| self.value_borrow_is_mut(x)),
+      ExprKind::DropTemps(inner) => self.value_borrow_is_mut(inner),
+      _ => false,
+    }
+  }
+
+  /// The variables a non-reference value bound by `let h = init;`
+  /// borrows from, when its type can hold a borrow at all (it
+  /// mentions a lifetime: `Iter<'_, i32>`, `Option<&i32>`), and
+  /// whether that borrow is mutable. Empty when `init` isn't a call
+  /// or nothing it borrows has a column (#336).
+  pub fn holder_lenders(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> (Vec<ResourceTy>, bool) {
+    if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
+      return (Vec::new(), false);
+    }
+    match init.kind {
+      ExprKind::Call(..) | ExprKind::MethodCall(..) => (self.call_lenders(init), self.call_borrow_is_mut(init)),
+      // `let it2 = it;` / `let t2 = third;`: the new variable holds
+      // the same borrow.
+      ExprKind::Path(QPath::Resolved(..)) => match expr_to_rap_name(init, &self.tcx)
+        .filter(|n| self.raps.get(n).is_some_and(|rd| rd.rap.holds_borrow()))
+        .and_then(|n| self.borrow_map.get(&n))
+      {
+        Some(rd) => (rd.all_lenders(), rd.ref_mutability),
+        None => (Vec::new(), false),
+      },
+      _ => (Vec::new(), false),
+    }
   }
 
   /// Lenders reachable through one argument, after rustc's adjustments
@@ -254,8 +343,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
         match expr_to_rap_name(e, &self.tcx).and_then(|n| self.borrow_map.get(&n)) {
           Some(rd) => rd.all_lenders(),
-          // A non-reference variable (`opt: Option<&T>`, an iterator):
-          // what it borrows isn't tracked.
+          // A non-reference variable (`opt: Option<&T>`, an iterator)
+          // whose borrow we don't track (holders are in borrow_map).
           None => Vec::new(),
         }
       }
@@ -263,8 +352,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_lenders(e),
       ExprKind::Block(b, _) => b.expr.map(|x| self.value_lenders(x)).unwrap_or_default(),
       ExprKind::DropTemps(inner) => self.value_lenders(inner),
+      // A closure value holds a borrow of each variable it captures
+      // by reference (the `match_rhs` closure arm draws the same).
+      ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).into_iter().map(|(l, _)| l).collect(),
       _ => Vec::new(),
     }
+  }
+
+  /// The variables a closure captures by reference, and whether
+  /// mutably.
+  fn closure_ref_captures(&self, def_id: rustc_span::def_id::LocalDefId) -> Vec<(ResourceTy, bool)> {
+    let typeck = self.tcx.typeck(def_id);
+    let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+    for capture in typeck.closure_min_captures_flattened(def_id) {
+      let ty::UpvarCapture::ByRef(kind) = capture.info.capture_kind else { continue };
+      let rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) = capture.place.base else { continue };
+      let name = self.tcx.hir_name(upvar_id.var_path.hir_id).as_str().to_owned();
+      if let Some(rd) = self.raps.get(&name) {
+        let l = ResourceTy::Value(rd.rap.to_owned());
+        if !out.iter().any(|(x, _)| *x == l) {
+          out.push((l, matches!(kind, ty::BorrowKind::Mutable)));
+        }
+      }
+    }
+    out
   }
 
   /// Who is borrowed when the place `p` is borrowed (`&p`).
@@ -313,7 +424,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     match p.kind {
       ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Block(..) => self.value_lenders(p),
       _ if typeck.expr_ty(p).is_ref() => self.value_lenders(p),
-      // A local `Option<&T>` / iterator / struct: not tracked.
+      // A local `Option<&T>` / iterator that holds a borrow we track
+      // (#336): `value_lenders` finds it in `borrow_map`.
+      ExprKind::Path(QPath::Resolved(..)) if expr_to_rap_name(p, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .is_some_and(|rd| rd.rap.holds_borrow()) => self.value_lenders(p),
+      // Any other local `Option<&T>` / iterator / struct: not tracked.
       _ => Vec::new(),
     }
   }

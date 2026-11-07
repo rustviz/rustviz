@@ -569,14 +569,18 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_03_vec_get_match",
         status: Wrong,
-        note: "third: Option<&i32> borrows v until L5, but v's borrow ends at L3 (#171, #336)",
+        note: "the `Some(third)` binding shares the outer `third`'s column, so L5 draws a self-arrow `Partial copy from third to third` (#304, #253)",
         must_contain: &[
             "get reads from v (implicitly borrowed)",
-            "L5 third's immutable borrow ends (what it borrows from isn't shown)",
+            "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
+            "L5 Return immutably borrowed resource from third to v",
             "v goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["Return immutably borrowed resource from third to third"],
-        known_wrong: &["L3 v's resource is no longer immutably borrowed"],
+        must_not_contain: &[
+            "Return immutably borrowed resource from third to third",
+            "L3 v's resource is no longer immutably borrowed",
+        ],
+        known_wrong: &["L5 Partial copy from third to third"],
         ..E
     },
     Snippet {
@@ -987,10 +991,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_10_iter_next",
-        status: Wrong,
-        note: "v1_iter borrows v1 through L5, but v1's borrow ends at L3 (#171)",
-        must_contain: &["iter reads from v1 (implicitly borrowed)", "next reads from/writes to v1_iter (implicitly mutably borrowed)"],
-        known_wrong: &["L3 v1's resource is no longer immutably borrowed"],
+        must_contain: &[
+            "iter reads from v1 (implicitly borrowed)",
+            "next reads from/writes to v1_iter (implicitly mutably borrowed)",
+            "L3 Immutable borrow from v1 to v1_iter: iter's signature gives the value it returns the same lifetime as the value it was called on; v1_iter isn't a reference, but its value holds one",
+            "L5 Return immutably borrowed resource from v1_iter to v1",
+        ],
+        must_not_contain: &["L3 v1's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {

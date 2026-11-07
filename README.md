@@ -200,14 +200,17 @@ panic.
 
 **Renders, but some of what's shown is wrong:**
 
-- A variable that holds a borrow without being a reference (`let
-  third = v.get(2);` holding an `Option<&i32>`, `let it = v.iter();`)
-  isn't drawn as borrowing `v`: `v`'s borrow is shown ending on that
-  line. A reference later taken out of it (`it.next().unwrap()`, or
-  `Some(x)` in a `match` on `third`) isn't linked to `v` either.
-  (A reference returned by a call *is* drawn as borrowing what the
-  callee's signature ties it to: `first_word(&s)`, `longest(&a, &b)`,
-  `v.first().unwrap()`.)
+- A reference bound by a pattern out of a value that holds a borrow
+  (`Some(x)` in a `match` on `let third = v.get(2);`) isn't linked to
+  `v`. (A reference or a value returned by a call *is* drawn as
+  borrowing what the callee's signature ties it to: `first_word(&s)`,
+  `longest(&a, &b)`, `let it = v.iter();`, `let third = v.get(2);`,
+  `it.next().unwrap()`, `Excerpt::new(&novel)`.)
+- A value built by `collect()` (`let words: Vec<&str> =
+  s.split(' ').collect();`) isn't drawn as borrowing `s`: `collect`'s
+  signature ties its result to its input only through a trait bound,
+  which RustViz doesn't read. Neither is a value whose borrow comes
+  from a reference parameter (`v.iter()` with `v: &Vec<i32>`).
 - A reference returned by a call in one branch of an `if` / `match`
   that initializes a variable (`let w = if c { first_word(&s) } else {
   "none" };`) isn't linked to `s`.
