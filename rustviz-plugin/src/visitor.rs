@@ -819,7 +819,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let id = *self.unique_id;
       *self.unique_id += 1;
       self.exit_drops.insert(id);
-      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id });
+      // A `let`-extended temporary is dropped here, at the `return`, not
+      // at the end of the block its `let` is in (#553).
+      let extended_temp = rap.is_temporary()
+        && !matches!(&rap, ResourceAccessPoint::Owner(o) if o.unbound_temp);
+      if extended_temp {
+        self.add_external_event(line, ExternalEvent::TemporaryDrop {
+          ro: rap, ty: None, when: "here, where `return` leaves early".to_owned(), id });
+      } else {
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id });
+      }
     }
   }
 
@@ -2977,7 +2986,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
     let ty = strip_module_paths(&ty.to_string());
     let id = *self.unique_id;
-    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty, when: when.to_owned(), id });
+    self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: when.to_owned(), id });
     *self.unique_id += 1;
   }
 
