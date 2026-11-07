@@ -2149,12 +2149,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "if_else_move_both",
         // Both arms consume → merge is all-moved (no may-have-been
         // hedge, no drop dot since there's no didn't-move branch
-        // to insert an implicit drop into).
+        // to insert an implicit drop into). The column ends with the
+        // arms; the scope-end dot says why nothing is dropped (#694).
         must_contain: &[
             "Move from s to consume",
-            "s was moved or dropped in every branch above",
+            "s goes out of scope. No resource is dropped: s was moved or dropped in every branch above.",
         ],
         must_not_contain: &[
+            // #694: no join dot when every branch moved or dropped it.
+            "=s was moved or dropped in every branch above",
             "may have been moved",
             "in branches where it was not",
         ],
@@ -2334,9 +2337,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Closure capture (move) from s to f",
             "Move from s to consume",
-            "s was moved or dropped in every branch above",
         ],
         must_not_contain: &[
+            // #694: no join dot when every branch moved or dropped it.
+            "=s was moved or dropped in every branch above",
             "may have been moved",
             "in branches where it was not",
         ],
@@ -4320,10 +4324,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "if_no_else_nested_move",
-        // Both arms of the inner `if` move `s` (its merge says so),
-        // but the outer `if` has no `else`: maybe-moved after it.
+        // Both arms of the inner `if` move `s` (its column ends with
+        // them, no join dot: #694), but the outer `if` has no `else`:
+        // maybe-moved after it.
         must_contain: &[
-            "s was moved or dropped in every branch above",
             "s was moved in at least one branch above, so it can't be used after the branches \
              (until it's assigned again). If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
@@ -4331,6 +4335,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // #694: no join dot when every branch moved or dropped it.
+            "=s was moved or dropped in every branch above",
             "s goes out of scope. No resource is dropped.",
         ],
     },
@@ -5173,11 +5179,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // "moved in some branches, dropped in the others" case.
         must_contain: &[
             "s acquired ownership of a resource in every branch that reaches this point (the _ arm panicked)",
-            "t was moved or dropped in every branch above that reaches this point",
-            "t goes out of scope. No resource is dropped.",
+            "t goes out of scope. No resource is dropped: t was moved or dropped in every branch above that reaches this point.",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            // #694: no join dot when every branch moved or dropped it.
+            "=t was moved or dropped in every branch above that reaches this point",
             "s acquired ownership of a resource (in all branches above)",
             "s acquired ownership of a resource (in all branches above that reach this point)",
             "t was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
@@ -7823,10 +7830,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "else_if_chain_diverges",
         must_contain: &[
-            "s was moved or dropped in every branch above that reaches this point",
-            "s goes out of scope. No resource is dropped.",
+            "s goes out of scope. No resource is dropped: s was moved or dropped in every branch above that reaches this point.",
         ],
         must_not_contain: &[
+            // #694: no join dot when every branch moved or dropped it.
+            "=s was moved or dropped in every branch above that reaches this point",
             "Its resource is dropped here only if no branch above moved it",
             "s was moved in at least one branch above, so it can't be used after the branches",
         ],
@@ -9640,12 +9648,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from x to a",
             "Move from y to b",
-            "x goes out of scope. No resource is dropped.",
-            "y goes out of scope. No resource is dropped.",
+            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
+            "y goes out of scope. No resource is dropped: y was moved or dropped in every branch above.",
             "Move from q to r",
-            "p was moved or dropped in every branch above",
-            "q was moved or dropped in every branch above",
-            "p goes out of scope. No resource is dropped.",
+            "p goes out of scope. No resource is dropped: p was moved or dropped in every branch above.",
             "Move from entry to key",
             "Copy from entry to n",
             "key goes out of scope. Its resource is dropped.",
@@ -9662,6 +9668,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The pattern didn't match, so the temporary tuple (x, y) is dropped here, and with it x's and y's resources",
         ],
         must_not_contain: &[
+            // #694: no join dot when every branch moved or dropped it.
+            "=p was moved or dropped in every branch above",
+            "=q was moved or dropped in every branch above",
             "=x goes out of scope. Its resource is dropped.",
             "=y goes out of scope. Its resource is dropped.",
             "=p goes out of scope. Its resource is dropped.",
@@ -9680,8 +9689,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // every name from its own element.
         must_contain: &[
             "Move from x to a",
-            "x was moved or dropped in every branch above",
-            "y was moved or dropped in every branch above",
+            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
+            "y goes out of scope. No resource is dropped: y was moved or dropped in every branch above.",
             "Move from t.0 to first",
             "Copy from t.1.0 to n",
             "Move from t.1.1 to second",
@@ -9692,6 +9701,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it x's and y's resources",
         ],
         must_not_contain: &[
+            // #694: no join dot when every branch moved or dropped it.
+            "=x was moved or dropped in every branch above",
+            "=y was moved or dropped in every branch above",
             "x was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "y was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "Partial move from t to first",
@@ -9713,7 +9725,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
             // `_ => return 0` drops the tuple as it returns.
             "The temporary tuple (x, y) is dropped when this arm leaves the match early, and with it x's and y's resources",
-            "x goes out of scope. No resource is dropped.",
+            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above that reaches this point.",
             // `early_if`: p's value goes when the branch returns.
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it p's resource",
             "The pattern didn't match, so the temporary tuple (p, q) is dropped here, and with it p's and q's resources",
@@ -9748,12 +9760,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x's resource is moved into the temporary tuple (x, y)",
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it x's and y's resources",
-            "x was moved or dropped in every branch above",
-            "x goes out of scope. No resource is dropped.",
+            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
             "p's resource is moved into the temporary tuple (p, q)",
             "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
-            "p was moved or dropped in every branch above",
-            "p goes out of scope. No resource is dropped.",
+            "p goes out of scope. No resource is dropped: p was moved or dropped in every branch above.",
+            "q goes out of scope. No resource is dropped: q was moved or dropped in every branch above.",
             // The `ref mut s` end dot keeps its text (#658); the arrow
             // that used to carry the "(what it borrows from isn't
             // shown)" text is gone (see `ref_mut_out_of_temporary_tuple_ends_without_arrow`).
@@ -9761,6 +9772,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "(what it borrows from isn't shown)",
+            // #694: no join dot when every branch moved or dropped it.
+            "=x was moved or dropped in every branch above",
+            "=p was moved or dropped in every branch above",
+            "=q was moved or dropped in every branch above",
             "Immutable borrow from x to a",
             "Return immutably borrowed resource from a to x",
             "x's resource is immutably borrowed by a",
@@ -9788,8 +9803,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it p's resource",
             "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
             "m's resource is moved into the temporary tuple (m, n)",
+            // #694: the join dots are gone; the scope-end dots say it.
+            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
+            "s goes out of scope. No resource is dropped: s was moved or dropped in every branch above that reaches this point.",
         ],
         must_not_contain: &[
+            "=x was moved or dropped in every branch above",
+            "=x was moved or dropped in every branch above that reaches this point",
+            "=s was moved or dropped in every branch above that reaches this point",
             // `_ => std::process::exit(1)`: the process ends without
             // dropping anything.
             "The temporary tuple (m, n) is dropped when this arm leaves the match early",
@@ -15488,5 +15509,74 @@ fn a_break_value_in_a_branch_moves_where_the_loop_ends() {
             "{}: `{}` is at y={}; the move out of the loop should be at y={} (where the loop ends), found {:?}",
             name, brk, row, want, dots
         );
+    }
+}
+
+/// Dots in a timeline panel that no column line reaches: no `<line>`
+/// ends within a few pixels of the dot's centre or runs through it.
+/// A scope-end dot after a move legitimately stands alone, as does a
+/// drop stated on an arm whose column has no line there (a temporary
+/// tuple's, #399), so `skip` filters those out by their tooltip.
+fn unconnected_dots(svg: &str, skip: impl Fn(&str) -> bool) -> Vec<String> {
+    let lines = svg_lines(svg);
+    let touches = |cx: f64, cy: f64| {
+        lines.iter().any(|&(x1, y1, x2, y2)| {
+            let end = |x: f64, y: f64| (x - cx).abs() <= 6.0 && (y - cy).abs() <= 6.0;
+            let through = (x1 - x2).abs() < 0.01
+                && (x1 - cx).abs() <= 3.0
+                && y1.min(y2) - 1.0 <= cy
+                && cy <= y1.max(y2) + 1.0;
+            end(x1, y1) || end(x2, y2) || through
+        })
+    };
+    let mut out = Vec::new();
+    for tips in tooltip_lines(svg) {
+        if tips.iter().any(|t| skip(t)) {
+            continue;
+        }
+        for (x, y) in dots_where(svg, |l| l == tips.as_slice()) {
+            if !touches(x, y) {
+                out.push(format!("({}, {}) {:?}", x, y, tips));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// #694: when every branch of a conditional moved or dropped a
+/// variable, a join dot ("s was moved or dropped in every branch
+/// above") was drawn on its column at the end of the conditional,
+/// with no arm's line running into it: it floated between the arms
+/// (beside them when they end on that row, as the temporary tuple's
+/// drops do). The column now ends with the arms, like a column after
+/// a plain move, and the scope-end dot says why nothing is dropped.
+#[test]
+fn no_join_dot_floats_after_every_branch_moves() {
+    let skip = |t: &str| t.contains("goes out of scope") || t.contains(" is dropped");
+    // Every snippet main drew such a dot in. tuple_scrutinee_exit_drops
+    // also had the split of an `if` nested in an arm on x's column after
+    // x was moved into the tuple: x isn't live there and no line leaves
+    // that split either.
+    for name in [
+        "if_else_move_both",
+        "cond_with_move_closure",
+        "if_no_else_nested_move",
+        "reassign_after_maybe_move_match",
+        "partial_move_if_branches",
+        "basic_match2",
+        "diverging_branch_stops",
+        "exit_path_dependent_drops",
+        "match_diverging_arm",
+        "else_if_chain_diverges",
+        "iflet_tuple_pattern",
+        "match_tuple_literal_moves",
+        "tuple_scrutinee_ref",
+        "tuple_scrutinee_drops",
+        "tuple_scrutinee_exit_drops",
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        assert_eq!(unconnected_dots(&timeline, skip), Vec::<String>::new(), "{}: dots no line reaches", name);
     }
 }

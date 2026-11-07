@@ -2190,18 +2190,17 @@ pub fn branch_never_reaches_merge() -> String {
         .to_string()
 }
 
-/// Every branch above ended without the resource — either by a
-/// direct move/consume or because a nested merge already ended in
-/// an implicit-drop state. Distinct from the "may have been moved"
-/// wording: there's no maybe here, the variable definitely doesn't
-/// own anything after the conditional.
+/// Suffix of the scope-end message of a variable that a conditional
+/// moved or dropped in every branch: the conditional's join has no dot
+/// of its own (no arm carries a line into it, #694), so the reason
+/// nothing is dropped is stated here. It's definite: no "maybe", the
+/// variable owns nothing after the conditional.
 /// `some_diverge`: a branch has type `!` (`return`, `panic!()`) and
 /// never gets here; the claim is about the branches that do (#296).
-pub fn event_dot_branch_merge_all_moved(my_name: &String, some_diverge: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+pub fn event_dot_go_out_of_scope_all_moved_suffix(my_name: &String, some_diverge: bool) -> String {
     format!(
-        "{0} was moved or dropped in every branch above{1}",
-        my_name_fmt,
+        ". No resource is dropped: {0} was moved or dropped in every branch above{1}.",
+        fmt_style(my_name),
         if some_diverge { " that reaches this point" } else { "" }
     )
 }
