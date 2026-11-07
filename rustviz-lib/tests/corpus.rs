@@ -6614,6 +6614,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "match_arm_on_split_line",
         must_contain: &["Move from s to take", "s's resource is moved"],
         must_not_contain: &["Copy from s to take", "s's value is copied"],
+    },
     // ─── `if let` / `while let` chains (#198, #280) ────────────────
     // Before the fix the chain's bindings weren't registered: no
     // columns for them, and their uses in the body were skipped.
@@ -10352,6 +10353,8 @@ fn return_drops_what_the_branch_owns() {
             );
         }
     }
+}
+
 /// The `if` counterpart of `guard_that_moves_is_refused` (#198, #281):
 /// `let Some(a) = x` moves out of `x` as soon as it matches, so when
 /// `a.len() > 5` is then false the `else` branch runs with `x` already
