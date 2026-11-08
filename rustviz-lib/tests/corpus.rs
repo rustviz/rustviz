@@ -9129,7 +9129,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource is dropped (including every String it holds). If the `?` succeeds, nothing \
+             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
              happens to v here.",
         ],
         must_not_contain: &[
