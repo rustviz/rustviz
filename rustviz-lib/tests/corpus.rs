@@ -1016,6 +1016,8 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_end_nll",
     "try_moves_operand",
     "try_in_tuple_scrutinee_arm",
+    // The same, for a loan made by a call or a value written through `*w` (#664).
+    "borrow_end_nll_call_deref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11461,6 +11463,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "nothing happens to w here",
         ],
     },
+    TooltipExpect {
+        name: "borrow_end_nll_call_deref",
+        // #664: h, which copied o, gives the lender back where rustc ends
+        // the loan (o's last use), also when o's loan was made by a call
+        // (`id(&p)`, `a.as_str()`) or o got its new value through `*w`.
+        // The rows are pinned by `loan_through_call_or_deref_write_ends_where_rustc_ends_it`.
+        // `*w = &y;` doesn't give the lender back: o is still live (w
+        // borrows it), so rustc keeps the old loan until o's last use.
+        must_contain: &[
+            "Return immutably borrowed resource from h to p",
+            "Return immutably borrowed resource from h to a",
+            "Return immutably borrowed resource from h to c",
+            "Return immutably borrowed resource from h to x",
+            "h's immutable borrow ends",
+            "s's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // The variable that got a new value doesn't hold the old loan.
+            "Return immutably borrowed resource from o to p",
+            "Return immutably borrowed resource from o to a",
+            // The write through w doesn't end the old loan.
+            "Return immutably borrowed resource from *w to c",
+            "Return immutably borrowed resource from *w to x",
+            "Return immutably borrowed resource from *w to s",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -14528,6 +14556,30 @@ fn ref_borrow_outlasts_pattern_reborrow() {
         assert!(ends_x == back_x && ends_x != split_x,
             "{}: {}'s borrow-end dot is at x={}; the arm's column is x={}, the match diamond's x={}",
             name, outer, ends_x, back_x, split_x);
+    }
+}
+
+/// #664: a reference that copied `o` takes `o`'s loan over when `o` gets
+/// a new value, also when `o`'s loan was made by a call (`id(&p)`,
+/// `a.as_str()`, found by line and lender, not by the `&` span) and when
+/// the new value is written through `w = &mut o`. A write through `w`
+/// leaves `o` live, so rustc keeps the old loan until `o`'s last use,
+/// with or without a copy. Before, the lender was drawn free at h's last
+/// use or at the write, where rustc rejects using it.
+#[test]
+fn loan_through_call_or_deref_write_ends_where_rustc_ends_it() {
+    let rv = run_with_local_backend("borrow_end_nll_call_deref");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (v, line) in [
+        ("p", "println!(\"call {}\", o);"),
+        ("a", "println!(\"method {}\", o);"),
+        ("c", "println!(\"write call {}\", o);"),
+        ("x", "println!(\"write borrow {}\", o);"),
+        ("s", "println!(\"write only {}\", o);"),
+    ] {
+        let ends = dots_with_tooltip(&svg, &format!("{}'s resource is no longer immutably borrowed", v));
+        assert_eq!(ends.len(), 1, "{}: {:?}", v, ends);
+        assert_eq!(ends[0].1, code_row_y(&code, line), "{}'s borrow should end on the row of `{}`: {:?}", v, line, ends);
     }
 }
 

@@ -2484,6 +2484,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               r.lender = new_lender;
               r.static_lender = new_static_lender;
               r.borrow_span = borrow_span_of(rhs_expr);
+              r.loan_line = call_loan_line(rhs_expr, line_num);
               r.co_lenders = new_co_lenders;
               if taken_over_now {
                 self.note_ref_carrier(lhs_rap.name(), None);
@@ -2501,29 +2502,53 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             ResourceTy::Deref(_) => {
               let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
               let deref_index = num_derefs(&lhs_expr) - 1;
-              let modified_ref_name = ref_data.aliasing.get(deref_index).unwrap();
-              let modified_ref_data = self.borrow_map.get(modified_ref_name).unwrap().clone();
-              let to_ro =  self.borrow_map.get(modified_ref_name).unwrap().lender.to_owned();
-              
+              let modified_ref_name = ref_data.aliasing.get(deref_index).unwrap().clone();
+              let modified_ref_data = self.borrow_map.get(&modified_ref_name).unwrap().clone();
+              let to_ro = modified_ref_data.lender.clone();
+              // References that copied the old value of the modified
+              // reference (`let h = o;` before `w = &mut o; *w = &q;`)
+              // keep its loan, as for `o = &q` (#664).
+              self.hand_loan_to_carriers(&modified_ref_name, &modified_ref_data);
+
               // add event
-              let borrowers = get_borrowers(&lhs_rty.real_name(), &self.borrow_map);
-              if borrowers.len() > 1 { // there is another active reference at this point, the resource cannot be returned
-                self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
-                *self.unique_id += 1;
+              // (Other references with the same lender, a carrier among
+              // them, keep the lender borrowed.)
+              let borrowers = get_borrowers(&modified_ref_name, &self.borrow_map);
+              // `o` stays live across the write (w borrows it), so
+              // unlike `o = &q`, which ends the old loan because `o` is
+              // dead until then, the borrow checker keeps the old loan
+              // live while `o` is: until the loan's end, past the write
+              // (#664). `o` no longer points to the lender, so like a
+              // field write (#531) the end is drawn on the lender's
+              // column only.
+              let old_end = self.loan_end(&modified_ref_data).filter(|&end| end > line_num)
+                .zip(self.raps.get(&modified_ref_name).map(|r| r.rap.clone()));
+              if borrowers.len() > 1 {
+                // Another reference keeps the lender borrowed and gives
+                // it back. (A RefDie from `*w` would be drawn on w's
+                // column with w's mutability, not the old value's.)
+              }
+              else if let (Some((end_line, o_rap)), ResourceTy::Value(_)) = (old_end, &to_ro) {
+                let place = ResourceTy::Index(o_rap, modified_ref_name.clone(), PlaceWrite::Update);
+                let die = if modified_ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
+                self.add_ev(end_line, die, to_ro, place, false);
               }
               else {
                 self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &modified_ref_data, Vec::new());
               }
 
               // update modified (derefed) reference's lender and aliasing data
+              let src_loan = self.source_ref_loan(rhs_expr);
               let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = self.get_ref_data_full(&rhs_expr);
-              let r = self.borrow_map.get_mut(modified_ref_name).unwrap();
+              let r = self.borrow_map.get_mut(&modified_ref_name).unwrap();
               r.assigned_at = line_num;
               r.aliasing = new_aliasing.clone();
               r.lender = new_lender;
               r.static_lender = new_static_lender;
               r.borrow_span = borrow_span_of(rhs_expr);
+              r.loan_line = call_loan_line(rhs_expr, line_num);
               r.co_lenders = new_co_lenders;
+              self.note_ref_carrier(&modified_ref_name, src_loan);
 
               let old_aliasing_data = self.borrow_map.get(&lhs_rty.real_name()).unwrap().aliasing.clone();
               // update other aliases' aliasing data 
@@ -4987,7 +5012,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     // A reference destination's new lender, before anything moves.
     let mut ref_data: HashMap<HirId, (ResourceTy, VecDeque<String>, Option<StaticLender>, Vec<ResourceTy>)> = HashMap::new();
-    let mut ref_src: HashMap<HirId, (String, rustc_span::Span, bool)> = HashMap::new();
+    let mut ref_src: HashMap<HirId, (String, LoanId, bool)> = HashMap::new();
     for (_, place, hid) in &assigns {
       let ty = self.tcx.typeck(place.hir_id.owner).node_type(place.hir_id);
       if ty.is_ref() {

@@ -359,7 +359,9 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Helper function to help refine loan regions that we compute in HIR
     pub fn borrow_match(r: &RefData, b: &MIRBorrowData) -> Option<usize> {
         let mir_place = b.borrowed_place.as_ref()?;
-        if b.region.0 != r.assigned_at {
+        // A reference that took over a call's loan (#664) holds the
+        // one issued on that call's line, not on its own.
+        if b.region.0 != r.loan_line.unwrap_or(r.assigned_at) {
             return None;
         }
         let lender_name = r.lender.real_name();
