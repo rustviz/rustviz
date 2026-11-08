@@ -10269,18 +10269,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "or_pattern_shadowed_name",
-        // The second and third `x` are columns `x₂` and `x₃`; they are
-        // still the names bound from different places. (#566 drew x₂
-        // as a definite `Move from u.0 to x₂`.)
+        // The three `x`s are in separate match arms: none shadows
+        // another, so all are labelled plain `x` (#598). The first two
+        // share a column; the `ref mut x` is a reference, so it has a
+        // column of its own, still named `x`. Each is bound from a
+        // different place per alternative. (#566 drew the second as a
+        // definite `Move from u.0 to x₂`; #619's first rebase lost the
+        // or-pattern borrow of the `ref mut x`, drawing it as a definite
+        // borrow of w.0.)
         must_contain: &[
-            "x₂ is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x₂ from u.1, u.1's resource is moved into x₂ here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
-            "x₃ mutably borrows w.0 or w.1, whichever alternative of the pattern matches",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved into x here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "x mutably borrows w.0 or w.1, whichever alternative of the pattern matches",
             "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
-            "Move from u.0 to x₂",
-            "Partial Mutable borrow from w.0 to x₃",
+            "Move from u.0 to x",
+            "Partial Mutable borrow from w.0 to x",
+            "=w.0's resource is mutably borrowed by x; w.0 can't be used while the borrow is live",
+            "=x mutably borrows a resource",
             "=u.1 goes out of scope. Its resource is dropped.",
+            "x₂",
+            "x₃",
         ],
     },
     TooltipExpect {
