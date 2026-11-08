@@ -4718,6 +4718,20 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // emit this for them.
                 let body_end = self.tcx.sess.source_map()
                   .lookup_char_pos(body_expr.span.hi()).line;
+                // `for x in it`: the loop owns the iterator `it` holds a
+                // borrow in, until the loop ends, so the lender is
+                // borrowed through the whole body and its borrow ends
+                // where the loop does, not at the last use of `x`
+                // (#722). (A `break` that leaves the loop early ends it
+                // in its own branch.)
+                if head_is_iterator && arms.first().is_some_and(|a| breaks_out_of(a.body) <= 1) {
+                  if let Some(name) = expr_to_rap_name(head_arg, &self.tcx) {
+                    if self.borrow_map.contains_key(&name) {
+                      let floor = self.borrow_floor.entry(name).or_insert(body_end);
+                      *floor = (*floor).max(body_end);
+                    }
+                  }
+                }
                 let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
                 collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut loop_decls);
                 // Not where every path breaks or continues first (#631).
