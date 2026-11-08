@@ -981,6 +981,8 @@ const EXPECTED_OK: &[&str] = &[
     // the wording ("resource" / "value") follows the type (#642).
     "same_name_drop_kinds_split",
     "same_name_plain_owners_share",
+    // A variable moved into a macro's or literal's temporary (#570).
+    "temporary_moves_variable",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9247,6 +9249,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            // A `let`'s literal isn't one that nothing binds (#570's wording).
+            "This temporary takes the value of",
             "(temporary) goes out of scope. No resource is dropped.",
             "(temporary 2) goes out of scope. No resource is dropped.",
             "(temporary 3) goes out of scope. No resource is dropped.",
@@ -10950,6 +10954,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t isn't moved in any of the branches above",
         ],
         must_not_contain: &["v goes out of scope. Its resource is dropped"],
+    },
+    TooltipExpect {
+        name: "temporary_moves_variable",
+        // `vec![s];`, `let _ = P { name: t, n: 1 };`, `(u, 1).1` and
+        // `[a, b].len()` move their variables into the temporary the
+        // macro or literal builds (rustc: a later use is "borrow of moved
+        // value"); the temporary, not the variable, drops the Strings at
+        // the end of the statement. Before (#570) nothing was drawn and
+        // each variable "went out of scope. Its resource is dropped."
+        must_contain: &[
+            "Move from s to (temporary)",
+            "Move from t to (temporary 2)",
+            "Move from u to (temporary 3)",
+            "Move from a to (temporary 4)",
+            "Move from b to (temporary 4)",
+            "s's resource is moved into a temporary that is dropped at the end of this statement",
+            "t's resource is moved into a temporary that is dropped at the end of this statement",
+            "u's resource is moved into a temporary that is dropped at the end of this statement",
+            "a's resource is moved into a temporary that is dropped at the end of this statement",
+            "s goes out of scope. No resource is dropped.",
+            "u goes out of scope. No resource is dropped.",
+            "This temporary takes the value of s, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+            "This temporary Vec<String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary (String, i32) is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary [String; 2] is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. Its resource is dropped.",
+            "=a goes out of scope. Its resource is dropped.",
+            "=b goes out of scope. Its resource is dropped.",
+            "the value that s returns",
+            // These temporaries are no `let`'s literal (#439's wording).
+            "The temporary that the literal on the right of this let builds",
+        ],
     },
 ];
 

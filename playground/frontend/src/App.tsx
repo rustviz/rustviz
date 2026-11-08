@@ -438,13 +438,16 @@ const Description: React.FC = () => (
         <code>let ref t = String::from(&quot;a&quot;);</code>) borrows one, and
         so does a literal of only fresh values (
         <code>let (ref a, _) = (make(), make());</code>).
-        Not drawn or mentioned: a field moved out of a temporary
+        A variable moved into a <code>vec![..]</code> or literal that nothing
+        binds (<code>vec![s];</code>) is drawn moving into the temporary. Not
+        drawn or mentioned: a field moved out of a temporary
         (<code>make().name</code>), a scrutinee that a pattern binds by value, and
-        a macro or literal that nothing binds and that moves a variable into the
-        temporary (<code>vec![s];</code>), except a tuple of variables matched by{' '}
-        <code>if let</code> or <code>match</code> (<code>(x, y)</code>):
-        where it&apos;s dropped is stated on <code>x</code>&apos;s and{' '}
-        <code>y</code>&apos;s columns (not when a <code>?</code> leaves early).
+        a literal that takes a variable by struct update (
+        <code>P {'{'} n: 1, ..p {'}'};</code>).
+        Where a tuple of variables matched by <code>if let</code> or{' '}
+        <code>match</code> (<code>(x, y)</code>) is dropped is stated on{' '}
+        <code>x</code>&apos;s and <code>y</code>&apos;s columns (not when a{' '}
+        <code>?</code> leaves early).
       </li>
     </ul>
     <p>
