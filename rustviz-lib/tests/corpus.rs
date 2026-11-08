@@ -1085,6 +1085,13 @@ const EXPECTED_OK: &[&str] = &[
     // borrow end in an `if let` arm (#712).
     "arm_one_line_borrow_return_710",
     "if_let_holder_end_row_712",
+    // A let-chain part that lends an outer variable before a part that
+    // can still be false: the else branch says so (#688).
+    "edition2024/if_let_chain_else_borrows",
+    "edition2024/if_let_chain_else_reads",
+    "edition2024/if_let_chain_else_write_through",
+    "edition2024/if_let_chain_no_else_borrow",
+    "edition2024/if_let_chain_inline_read",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12241,6 +12248,63 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Main's text wasn't false, only missing the borrow: the
         // `must_contain` lines and the row test fail on main.
         must_not_contain: &[],
+    },
+    // ─── A let-chain that lends, then fails (#688) ─────────────────
+    // Parts after the first that borrow an outer variable run on the way
+    // into the else branch too (the first part is drawn before the
+    // split). Before, the else column started with the variable
+    // untouched: nothing said that `take` may have emptied `y`.
+    TooltipExpect {
+        name: "edition2024/if_let_chain_else_borrows",
+        must_contain: &[
+            "x may have been immutably borrowed: when the condition lends x to a and then turns out false, a goes out of scope, so the else branch runs after that borrow has ended",
+            "y may have been mutably borrowed: when the condition lends y to take and then turns out false, the else branch runs after that borrow has ended. By then, y may have been changed by take.",
+        ],
+        must_not_contain: &[
+            // Borrowed, not moved or assigned.
+            "x may have been moved",
+            "y may have been moved",
+            "y may have been assigned",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_else_reads",
+        must_contain: &[
+            "s may have been immutably borrowed: when the condition lends s to len and contains and then turns out false, the else branch runs after those borrows have ended",
+            "the resource r points to may have been immutably borrowed: when the condition lends it to len and then turns out false, the else branch runs after that borrow has ended",
+        ],
+        must_not_contain: &[
+            // An immutable borrow changes nothing; `r` itself isn't borrowed.
+            "may have been changed",
+            "r may have been immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_else_write_through",
+        must_contain: &[
+            "x may have been mutably borrowed: when the condition lends x to a and then turns out false, a goes out of scope, so the else branch runs after that borrow has ended. By then, x may have been changed through a.",
+            // Nothing writes through `b` before `n > 0`.
+            "y may have been mutably borrowed: when the condition lends y to b and then turns out false, b goes out of scope, so the else branch runs after that borrow has ended",
+        ],
+        must_not_contain: &["y may have been changed"],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_no_else_borrow",
+        must_contain: &[
+            "t may have been immutably borrowed: when the condition lends t to len and then turns out false, the body is skipped after that borrow has ended",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &["the else branch runs"],
+    },
+    // Drawn inline: the borrow is on t's one column, no second path.
+    TooltipExpect {
+        name: "edition2024/if_let_chain_inline_read",
+        must_contain: &["t goes out of scope. Its resource is dropped."],
+        must_not_contain: &[
+            "t may have been immutably borrowed",
+            "t is live in a conditional expression",
+            "t isn't moved in any of the branches above",
+        ],
     },
 ];
 

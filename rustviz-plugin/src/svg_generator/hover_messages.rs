@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint};
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainUse, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -2730,6 +2730,78 @@ pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, is_copy
             me, x, held(is_copy)
         )
     }
+}
+
+// At the start of the `else` branch (`no_else`: the path that skips the
+// body) of an `if` whose let-chain condition lends the variable in a part
+// before one that can still be false (#688): `if let Some(a) = &x && let
+// Some(b) = y.take()` lends `y` to `take`, and `x` to `a`. The borrows
+// have ended by the time the else branch runs: a call's when it returns,
+// a binding's when the failed condition ends its scope. `definite`: as
+// for event_dot_chain_fail_move. `is_ref`: the variable is a reference,
+// and it's the resource it points to that is lent.
+pub fn event_dot_chain_fail_use(
+    my_name: &String,
+    uses: &[ChainUse],
+    definite: bool,
+    no_else: bool,
+    is_ref: bool,
+) -> String {
+    fn join(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        match fmt.len() {
+            0 | 1 => fmt.concat(),
+            n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+        }
+    }
+    let name = fmt_style(my_name);
+    let (what, obj) = if is_ref {
+        (format!("the resource {} points to", name), "it".to_owned())
+    } else {
+        (name.clone(), name.clone())
+    };
+    let kind = if uses.iter().all(|u| u.mutable) {
+        "mutably "
+    } else if uses.iter().all(|u| !u.mutable) {
+        "immutably "
+    } else {
+        ""
+    };
+    let named: Vec<String> = uses.iter().filter(|u| !u.to.is_empty()).map(|u| u.to.clone()).collect();
+    let lends = if named.is_empty() {
+        format!("the condition borrows {}", obj)
+    } else {
+        format!("the condition lends {} to {}", obj, join(&named))
+    };
+    let bound: Vec<String> = uses.iter().filter(|u| u.binding && !u.to.is_empty()).map(|u| u.to.clone()).collect();
+    let gos = match bound.len() {
+        0 => String::new(),
+        1 => format!("{} goes out of scope, so ", join(&bound)),
+        _ => format!("{} go out of scope, so ", join(&bound)),
+    };
+    let ended = if uses.len() > 1 { "those borrows have ended" } else { "that borrow has ended" };
+    let then = if no_else {
+        format!("the body is skipped after {}", ended)
+    } else {
+        format!("the else branch runs after {}", ended)
+    };
+    let mut out = if definite {
+        format!("{} was {}borrowed: {} before it can turn out false; when it does, {}{}",
+            what, kind, lends, gos, then)
+    } else {
+        format!("{} may have been {}borrowed: when {} and then turns out false, {}{}",
+            what, kind, lends, gos, then)
+    };
+    // A mutable borrow can have changed it on the way.
+    let by: Vec<String> = uses.iter().filter(|u| u.changes && !u.binding && !u.to.is_empty())
+        .map(|u| format!("by {}", fmt_style(&u.to))).collect();
+    let through: Vec<String> = uses.iter().filter(|u| u.changes && u.binding && !u.to.is_empty())
+        .map(|u| format!("through {}", fmt_style(&u.to))).collect();
+    let agents: Vec<String> = by.into_iter().chain(through).collect();
+    if !agents.is_empty() {
+        out.push_str(&format!(". By then, {} may have been changed {}.", what, agents.join(" or ")));
+    }
+    out
 }
 
 // At the start of the `else` branch of an `if` whose let-chain
