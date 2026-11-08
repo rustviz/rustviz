@@ -2765,6 +2765,25 @@ fn returns_chain_on_row(vd: &VisualizationData, row: usize, ev: &ExternalEvent) 
     })
 }
 
+/// Is `ev` a return (a borrow's end) that runs back along the shaft of a
+/// borrow on the same row, drawn level with it: `x`'s borrow from `v` and
+/// its return to `v` on one line (`Some(x) => println!("{}", x)`; #710)?
+/// Both would share one straight shaft, and only one could be hovered.
+fn return_overlaps_borrow_on_row(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> bool {
+    let (ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. }) = ev else { return false };
+    let (Some(src), Some(dst)) = (from.extract_rap(), to.extract_rap()) else { return false };
+    let mut all = Vec::new();
+    arrows_with_rows(&vd.external_events, &mut all);
+    all.into_iter().any(|(l, other)| {
+        let (ExternalEvent::StaticBorrow { from: of, to: ot, .. } | ExternalEvent::MutableBorrow { from: of, to: ot, .. }) = other else { return false };
+        let (Some(of_rap), Some(ot_rap)) = (of.extract_rap(), ot.extract_rap()) else { return false };
+        l == row
+            && of_rap.hash() == dst.hash()
+            && ot_rap.hash() == src.hash()
+            && arrow_dip_of(vd, l, other) == 0
+    })
+}
+
 // render arrow
 fn render_arrow (
     line_number : &usize,
@@ -3291,8 +3310,11 @@ fn render_arrow (
                     // drawn level with it and read as one long arrow
                     // through `r`'s dot (#577). It dips half a row instead.
                     let dip = arrow_dip_of(visualization_data, *line_number, external_event);
+                    // The same goes for a return that retraces a borrow on its
+                    // row (#710).
                     let chained = dip == 0 && y1 == y2
-                        && returns_chain_on_row(visualization_data, *line_number, external_event);
+                        && (returns_chain_on_row(visualization_data, *line_number, external_event)
+                            || return_overlaps_borrow_on_row(visualization_data, *line_number, external_event));
                     let row_drop = if chained { LINE_SPACE / 2 } else { dip };
                     let y_row = if chained { y1 + row_drop } else { get_y_axis_pos(*line_number) + row_drop };
                     if row_drop > 0 && x2 <= x1{ // trapezoid

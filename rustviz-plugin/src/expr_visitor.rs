@@ -5919,10 +5919,13 @@ fn end_borrow_in_arms(
     // Right after r's last use on or before its line, ahead of other
     // events on that line: in `Some(x) => ..` on `third`, third's
     // borrow ends once x is copied out of it, before x borrows v.
-    let at = events.iter()
-      .rposition(|(l, e)| *l <= ev.0 && touches(e, r))
-      .or_else(|| events.iter().rposition(|(l, _)| *l < ev.0))
-      .map_or(0, |i| i + 1);
+    // Never ahead of an event on an earlier line: an arm's rows are laid
+    // out in event order, so an end listed right after the move into
+    // the arm's pattern, with the `r`-using lines still to come, pushed
+    // those lines a row down (#712).
+    let after_touch = events.iter().rposition(|(l, e)| *l <= ev.0 && touches(e, r));
+    let after_earlier = events.iter().rposition(|(l, _)| *l < ev.0);
+    let at = after_touch.max(after_earlier).map_or(0, |i| i + 1);
     events.insert(at, ev);
     return;
   };
