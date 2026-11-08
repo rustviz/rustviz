@@ -599,6 +599,21 @@ pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> Stri
     )
 }
 
+// `let n = a? + b?;`: b's dot holds both a's `?` (b is dropped if it
+// returns early) and b's own `?` (moves b). "If the `?` succeeds, nothing
+// happens to b here" is about a's `?` only, but read next to the move it
+// looks contradictory (#668). When the move is on the same dot, say which
+// `?` each line is about, in evaluation order.
+pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
+    let (lead, tail) = ("Only if the `?` here returns early", ". If the `?` succeeds, nothing happens to ");
+    let rest = drop_text.strip_prefix(lead)?;
+    let (head, owner) = rest.split_once(tail)?;
+    let owner = owner.strip_suffix(" here.")?;
+    Some(format!(
+        "Only if an earlier `?` on this line returns early{head}. If it succeeds, {owner} is not dropped there; {owner}'s own `?` below moves it"
+    ))
+}
+
 // A variable moved (or copied) into the temporary that a tuple / struct
 // / array literal on the right of a `let` builds, where the pattern
 // doesn't bind it by value (`_`, `..`, a `ref` binding): #439. The
