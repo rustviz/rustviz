@@ -362,7 +362,10 @@ pub enum ExitFrame {
   // the length `preprocessed_events` had when they happened. See
   // `owns_value_here`.
   Branch { len: usize, hide: Vec<std::ops::Range<usize>>, binds: Vec<(usize, ExternalEvent)>, binds_at: usize },
-  Loop { id: rustc_hir::HirId, len: usize },
+  // `head_from`: for a `for` loop, where in `in_scope` the temporaries
+  // its head made begin (they're dropped where the loop is left, but
+  // declared before `len`); `len` for any other loop.
+  Loop { id: rustc_hir::HirId, len: usize, head_from: usize },
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{

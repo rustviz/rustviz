@@ -1308,7 +1308,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// its match / `if let` (#327). It has no column, and its drop
   /// doesn't end one, so it is stated even where the locals' drops
   /// aren't drawn (the exit is in an `if` without `else`).
-  fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, how: &str) {
+  fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, labeled: bool, how: &str) {
     let Some(branch_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
     let ExitFrame::Branch { len: branch_len, .. } = self.exit_frames[branch_at] else { return };
@@ -1321,7 +1321,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // The branch is inside the loop: drop what the iteration
         // declared before the branch.
         Some(i) if i < branch_at => match &self.exit_frames[i] {
-          ExitFrame::Loop { len, .. } => (*len, i + 1),
+          // A labeled `break` leaves the target `for` loop with its
+          // iterator, which its head's temporaries hold (#596).
+          ExitFrame::Loop { len, head_from, .. } => (if labeled { *head_from } else { *len }, i + 1),
           ExitFrame::Branch { .. } => return,
         },
         // A labelled block, or a loop inside the branch (no branch
@@ -1476,11 +1478,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// the iterator variables the loops inside the target took (`for s in
   /// it`) are dropped at the `break`, on their own columns, where
   /// `drop_locals_on_exit` draws the exit's other drops (in a branch
-  /// inside the target loop). The target loop's own iterator is dropped
-  /// where that loop ends. An iterator a loop built from its head (`for
+  /// inside the target loop). A labeled `break` leaves the target `for`
+  /// loop too, so its own iterator variable is dropped here as well
+  /// (`labeled`; #596). An iterator a loop built from its head (`for
   /// s in row`) is a `(temporary N)` column declared inside the target
   /// loop, which `drop_locals_on_exit` drops itself (#410).
-  fn drop_inner_loop_iterators(&mut self, line: usize, target: HirId, left: LoopLeft) {
+  fn drop_inner_loop_iterators(&mut self, line: usize, target: HirId, labeled: bool, left: LoopLeft) {
     let Some(branch_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
     let loop_at = self.exit_frames.iter()
@@ -1489,8 +1492,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let inner: Vec<ResourceAccessPoint> = self.loop_iterators.iter()
-      .filter(|(lp, _)| *lp != target
-        && self.tcx.hir_parent_iter(*lp).any(|(id, _)| id == target))
+      .filter(|(lp, _)| (labeled && *lp == target)
+        || (*lp != target
+        && self.tcx.hir_parent_iter(*lp).any(|(id, _)| id == target)))
       .map(|(_, ro)| ro.clone())
       .collect();
     for ro in inner {
@@ -1599,7 +1603,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `drop_locals_on_exit` for a panic call inside a branch.
   fn note_panic(&mut self, call: &'tcx Expr<'tcx>) {
     if let Some(line) = self.panic_line(call) {
-      self.drop_locals_on_exit(line, None, None, "panic");
+      self.drop_locals_on_exit(line, None, None, false, "panic");
     }
   }
 
@@ -2641,7 +2645,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // (#363), except what `ret` moves to the caller (#410). Inside
         // a branch, those drops are drawn on the branch's columns, at
         // the `return`.
-        self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, "return");
+        self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, false, "return");
         if !self.in_closure(expr) {
           self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
         }
@@ -3253,7 +3257,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // ForLoopDesugar arm.
         let entry_len = self.in_scope.len();
         if !matches!(loop_ty, rustc_hir::LoopSource::ForLoop) {
-          self.exit_frames.push(ExitFrame::Loop { id: expr.hir_id, len: entry_len });
+          self.exit_frames.push(ExitFrame::Loop { id: expr.hir_id, len: entry_len, head_from: entry_len });
         }
         match loop_ty {
           rustc_hir::LoopSource::While => {
@@ -3981,6 +3985,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   _ => None,
                 })
               {
+                let head_from = self.in_scope.len();
                 self.note_for_head_temporary(head_arg, guard_expr, expr);
                 // Iterand event: shape of head_arg dictates the arrow.
                 //   &v       ⇒ SBorrow from v
@@ -4068,7 +4073,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // target, and drops the loop variable too (#410).
                 let entry_len = self.in_scope.len();
                 if let Some(outer_arm) = arms.first() {
-                  self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len });
+                  self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len, head_from });
                 }
                 // The variable moved into the loop as its iterator, whose
                 // drop is stated on its column (#482).
@@ -4234,13 +4239,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       ExprKind::Break(dest, value) => {
         intravisit::walk_expr(self, expr);
         if let Ok(target) = dest.target_id {
-          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), "break");
-          self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, LoopLeft::Break);
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), dest.label.is_some(), "break");
+          self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, dest.label.is_some(), LoopLeft::Break);
         }
       }
       ExprKind::Continue(dest) => {
         if let Ok(target) = dest.target_id {
-          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), None, Some(target), "continue");
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), None, Some(target), false, "continue");
         }
       }
       // `P { .. }`, `(a, b)`, `[a, b]` written by the user: a value

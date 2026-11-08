@@ -11198,6 +11198,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
             "it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+            // #596: `break 'outer` leaves the target loop too, so its own
+            // iterator is dropped there as well: the `(temporary)` of
+            // `for row in rows` (still holding `vec!["b"]`), and the
+            // variable `outer_it` of the third function.
+            "This temporary IntoIter<Vec<String>> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "outer_it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
         ],
         must_not_contain: &[
             "the function returns from inside the loop",
@@ -12138,6 +12144,13 @@ fn write_through_ref_comes_before_its_borrow_end() {
 /// (compared with whitespace collapsed). A line's text sits 5px below its
 /// timeline row.
 fn code_row_y(code_svg: &str, src: &str) -> f64 {
+    let rows = code_rows_y(code_svg, src);
+    assert_eq!(rows.len(), 1, "code rows showing {:?}: {:?}", src, rows);
+    rows[0]
+}
+
+/// `code_row_y` for a line that appears more than once, in file order.
+fn code_rows_y(code_svg: &str, src: &str) -> Vec<f64> {
     let want = src.split_whitespace().collect::<Vec<_>>().join(" ");
     let rows: Vec<f64> = start_tags(code_svg, "text")
         .into_iter()
@@ -12161,8 +12174,7 @@ fn code_row_y(code_svg: &str, src: &str) -> f64 {
             (words.len() > 1 && words[1..].join(" ") == want).then(|| attr(tag, "y")?.parse::<f64>().ok())?
         })
         .collect();
-    assert_eq!(rows.len(), 1, "code rows showing {:?}: {:?}", src, rows);
-    rows[0] - 5.0
+    rows.into_iter().map(|y| y - 5.0).collect()
 }
 
 /// The points of the gray arrow shaft whose tooltip is exactly `text`.
@@ -13984,13 +13996,27 @@ fn loop_iterator_drop_dots_sit_where_the_loop_is_left() {
 fn break_outer_iterator_drops_sit_on_the_break() {
     let rv = run_with_local_backend("for_iterator_break_outer");
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let rows: Vec<f64> = code_rows_y(&code, "break 'outer;");
+    assert_eq!(rows.len(), 2, "two `break 'outer;` rows: {:?}", rows);
     for (text, row) in [
-        ("This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", "break 'outer;"),
-        ("it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", "break 'scan;"),
+        ("This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", rows[0]),
+        ("it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", code_row_y(&code, "break 'scan;")),
     ] {
         let ys = dots_with_tooltip(&timeline, text);
         assert_eq!(ys.len(), 1, "one dot {:?}: {:?}", text, ys);
-        assert_eq!(ys[0].1, code_row_y(&code, row), "{:?} isn't on the `{}` row", text, row);
+        assert_eq!(ys[0].1, row, "{:?} isn't on its `break` row", text);
+    }
+    // #596: the target loop's own iterator is dropped on the `break 'outer`
+    // row too (the first one in the file, the second function's is the
+    // variable `outer_it`'s), and its column ends there on the break path:
+    // the end-of-loop drop stays for the paths that don't break.
+    for (text, row) in [
+        ("This temporary IntoIter<Vec<String>> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", rows[0]),
+        ("outer_it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", rows[1]),
+    ] {
+        let ys = dots_with_tooltip(&timeline, text);
+        assert_eq!(ys.len(), 1, "one dot {:?}: {:?}", text, ys);
+        assert_eq!(ys[0].1, row, "{:?} isn't on its `break 'outer;` row", text);
     }
 }
 

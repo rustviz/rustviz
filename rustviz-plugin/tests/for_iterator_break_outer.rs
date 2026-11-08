@@ -26,3 +26,18 @@ fn first_x() {
     }
     println!("done");
 }
+
+// The target loop's own iterator is a variable (#596).
+fn outer_iter_var() {
+    let outer_it = vec![vec![1], vec![2]].into_iter();
+    'outer: for row in outer_it {
+        for n in row {
+            if n == 1 {
+                break 'outer;
+            } else {
+                println!("{}", n);
+            }
+        }
+    }
+    println!("done");
+}
