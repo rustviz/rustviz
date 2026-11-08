@@ -1421,8 +1421,11 @@ pub enum ExternalEvent {
     // z > 0 }`. `ro` held a value before, so it holds the old or the new
     // one there; nothing about ownership changes. `drops_old`: the
     // assignment drops the old value.
+    // `place`: the assignment is to a place reached through `ro` (`*r`,
+    // `v[i]`, `r.f`; #603), written as in the source.
     ChainFailAssign {
         ro: ResourceAccessPoint,
+        place: Option<String>,
         drops_old: bool,
         no_else: bool,
         id: usize
@@ -1733,7 +1736,7 @@ pub enum Event {
     OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool },
     // See ExternalEvent::ChainFailAssign. `rc`: the variable's
     // `rc_drop()`, for what dropping the old value does.
-    ChainFailAssign { drops_old: bool, rc: Option<RcDrop>, no_else: bool },
+    ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, no_else: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -2196,8 +2199,8 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else, how } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else, how)
             }
-            Event::ChainFailAssign { drops_old, rc, no_else } => {
-                hover_messages::event_dot_chain_fail_assign(my_name, *drops_old, *rc, *no_else)
+            Event::ChainFailAssign { place, drops_old, rc, no_else } => {
+                hover_messages::event_dot_chain_fail_assign(place.as_ref().unwrap_or(my_name), *drops_old, *rc, *no_else)
             }
             Event::OrAltMove { into, sources, tuple, part_of, value, .. } => {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
@@ -3530,8 +3533,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, ..} => {
           vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value(), in_let: *in_let })]
         },
-        ExternalEvent::ChainFailAssign{ro, drops_old, no_else, ..} => {
-          vec![(line_num, Event::ChainFailAssign { drops_old: *drops_old, rc: ro.rc_drop(), no_else: *no_else })]
+        ExternalEvent::ChainFailAssign{ro, place, drops_old, no_else, ..} => {
+          let rc = if place.is_some() { None } else { ro.rc_drop() };
+          vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, no_else: *no_else })]
         },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
@@ -3884,9 +3888,9 @@ impl Visualizable for VisualizationData {
                     maybe_append_event(self, &ResourceTy::Value(into.clone()), b, line_number);
                 }
             },
-            ExternalEvent::ChainFailAssign{ro, drops_old, no_else, ..} => {
-                let rc = ro.rc_drop();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { drops_old, rc, no_else }, line_number);
+            ExternalEvent::ChainFailAssign{ro, place, drops_old, no_else, ..} => {
+                let rc = if place.is_some() { None } else { ro.rc_drop() };
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { place, drops_old, rc, no_else }, line_number);
             },
         }
     }

@@ -1018,6 +1018,12 @@ const EXPECTED_OK: &[&str] = &[
     "try_in_tuple_scrutinee_arm",
     // The same, for a loan made by a call or a value written through `*w` (#664).
     "borrow_end_nll_call_deref",
+    // A let-chain part that writes through a reference, into an element
+    // or a Box, before a part that can still be false (#603).
+    "edition2024/if_let_chain_deref_write",
+    "edition2024/if_let_chain_elem_write",
+    "edition2024/if_let_chain_box_write",
+    "edition2024/if_let_chain_field_write",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11489,6 +11495,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from *w to s",
         ],
     },
+    // ─── A let-chain that writes through a place, then fails (#603) ───
+    // Were refused. The write lasts on the path into the else branch,
+    // drawn on the column of the variable the place is reached through,
+    // like the write itself; nothing is moved.
+    TooltipExpect {
+        name: "edition2024/if_let_chain_deref_write",
+        must_contain: &[
+            "*r acquires ownership of a new resource; its previous resource is dropped",
+            "*r may have been assigned a new resource: when the condition assigns to *r and then turns out false, the else branch runs after that assignment, so here *r holds either its previous resource or the new one. When the assignment runs, it drops *r's previous resource.",
+            // n holds a String either way.
+            "n goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["*r may have been moved", "r may have been assigned a new reference", "n may have been", "n goes out of scope. Its resource is dropped here only if"],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_elem_write",
+        must_contain: &[
+            "v[0] may have been assigned a new value: when the condition assigns to v[0] and then turns out false, the body is skipped but the assignment has happened, so after the if v[0] holds either its previous value or the new one.",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        // v itself isn't assigned, and the element is an i32 (a value).
+        must_not_contain: &["v may have been", "v[0] holds either its previous resource"],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_box_write",
+        must_contain: &[
+            "*b may have been assigned a new resource: when the condition assigns to *b and then turns out false, the else branch runs after that assignment, so here *b holds either its previous resource or the new one. When the assignment runs, it drops *b's previous resource.",
+            "b goes out of scope. Its resource is dropped (including the String it holds).",
+        ],
+        must_not_contain: &["*b may have been moved", "b goes out of scope. Its resource is dropped here only if", "b goes out of scope. Its resource is dropped (including the String it holds) here only if"],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_field_write",
+        must_contain: &[
+            "r.name may have been assigned a new resource: when the condition assigns to r.name and then turns out false, the else branch runs after that assignment, so here r.name holds either its previous resource or the new one. When the assignment runs, it drops r.name's previous resource.",
+        ],
+        must_not_contain: &["r.name may have been moved", "p.name may have been"],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13953,11 +13997,12 @@ fn return_drops_what_the_branch_owns() {
     }
 }
 
-/// What a let-chain still can't draw (#579): a part that assigns a new
-/// reference to, writes through, or gives a first value to a variable
-/// declared outside the condition, followed by a part that can be false.
-/// Each lasts on the path into the `else`, where RustViz can't show
-/// which borrow is live, or that the variable may hold no value.
+/// What a let-chain still can't draw (#579, #603): a part that assigns a
+/// new reference to, or a value to a moved-out, variable declared
+/// outside the condition, or both assigns and moves one, followed by a
+/// part that can be false. Each lasts on the path into the `else`, where
+/// RustViz can't show which borrow is live, or that the variable may
+/// hold no value.
 #[test]
 fn if_let_chain_lasting_effects_still_refused() {
     env::set_var("RV_RUNNER", "local");
@@ -13975,16 +14020,6 @@ fn if_let_chain_lasting_effects_still_refused() {
           }\n",
          "`if let` chains that assign a new reference to a variable declared outside the condition (`r`, line 6)"),
         ("fn main() {\n\
-          \x20   let y = Some(5);\n\
-          \x20   let mut n = 0;\n\
-          \x20   let r = &mut n;\n\
-          \x20   if let Some(a) = y && { *r = a; a > 3 } {\n\
-          \x20       println!(\"big\");\n\
-          \x20   }\n\
-          \x20   println!(\"{}\", r);\n\
-          }\n",
-         "`if let` chains that assign to a place reached through a variable declared outside the condition (`*r`, line 5)"),
-        ("fn main() {\n\
           \x20   let y = Some(String::from(\"a\"));\n\
           \x20   let mut z = String::from(\"z\");\n\
           \x20   drop(z);\n\
@@ -13993,11 +14028,42 @@ fn if_let_chain_lasting_effects_still_refused() {
           \x20   }\n\
           }\n",
          "`if let` chains that assign to a variable declared outside the condition that may hold no value before (`z`, line 5)"),
+        ("fn take(s: String) -> bool { s.len() > 0 }\n\
+          fn main() {\n\
+          \x20   let y = Some(String::from(\"a\"));\n\
+          \x20   let mut z = String::from(\"z\");\n\
+          \x20   if let Some(a) = y && { z = a; true } && take(z) {\n\
+          \x20       println!(\"yes\");\n\
+          \x20   }\n\
+          }\n",
+         "`if let` chains that both move and assign a variable declared outside the condition (`z`)"),
+        // A write through a place, then a move of the variable it goes
+        // through: on the path that ran the write the Box / Vec moved
+        // on and was dropped, so `*b` / `v[0]` holds nothing in the
+        // else branch (a drawn "holds either ... or the new one" is
+        // false; see the `must_not_contain` below).
+        ("fn main() {\n\
+          \x20   let y = Some(String::from(\"a\"));\n\
+          \x20   let mut b = Box::new(String::from(\"o\"));\n\
+          \x20   if let Some(a) = y && { *b = a; let c = b; c.len() > 3 } {\n\
+          \x20   } else {\n\
+          \x20   }\n\
+          }\n",
+         "`if let` chains that both move and assign a variable declared outside the condition (`b`)"),
+        ("fn main() {\n\
+          \x20   let y = Some(String::from(\"a\"));\n\
+          \x20   let mut v = vec![String::from(\"o\")];\n\
+          \x20   if let Some(a) = y && { v[0] = a; let w = v; w.len() > 3 } {\n\
+          \x20   } else {\n\
+          \x20   }\n\
+          }\n",
+         "`if let` chains that both move and assign a variable declared outside the condition (`v`)"),
     ];
     for (src, want) in cases {
         let err = Rustviz::new(src).expect_err("a let-chain with this lasting effect must not render");
         let msg = err.to_string();
         assert!(msg.contains(want), "expected {:?}, got:\n{}", want, msg);
+        assert!(!msg.contains("holds either its previous resource or the new one"), "{}", msg);
     }
 }
 
