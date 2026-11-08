@@ -53,3 +53,94 @@ fn bin_crate_renders_like_lib_crate() {
         );
     }
 }
+
+/// A bin crate with `mod shapes;`: `main.rs` and `shapes.rs` each have a
+/// function with a distinctive local.
+fn run_module_crate(dir: &Path, extra: &[&str]) -> std::process::Output {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"user-code\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let toolchain = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rust-toolchain.toml");
+    fs::copy(toolchain, dir.join("rust-toolchain.toml")).unwrap();
+    fs::write(
+        dir.join("src/main.rs"),
+        "mod shapes;\n\nfn main() {\n    let in_main = String::from(\"m\");\n    let moved_main = in_main;\n    shapes::area();\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shapes.rs"),
+        "pub fn area() {\n    let in_shapes = String::from(\"s\");\n    let moved_shapes = in_shapes;\n}\n",
+    )
+    .unwrap();
+    Command::new("cargo")
+        .arg("rv-plugin")
+        .args(extra)
+        .env("CARGO_TERM_COLOR", "never")
+        .current_dir(dir)
+        .output()
+        .expect("run cargo rv-plugin")
+}
+
+#[test]
+fn file_flag_picks_a_module_file() {
+    let dir = tempdir().unwrap();
+    let out = run_module_crate(dir.path(), &["--file", "src/shapes.rs"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("moved_shapes"), "shapes.rs's fn is drawn");
+    assert!(stdout.contains("in_shapes"));
+    assert!(!stdout.contains("moved_main"), "main.rs's fn is not drawn");
+    assert!(!stdout.contains("in_main"));
+}
+
+#[test]
+fn no_flag_draws_the_crate_root_only() {
+    let dir = tempdir().unwrap();
+    let out = run_module_crate(dir.path(), &[]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("moved_main"));
+    assert!(!stdout.contains("moved_shapes"), "module file's fn is not drawn by default");
+}
+
+#[test]
+fn file_flag_rejects_a_file_the_crate_does_not_compile() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    // Exists on disk but no `mod nope;` declares it.
+    let out = {
+        let o = run_module_crate(dir.path(), &["--file", "src/nope.rs"]);
+        fs::write(dir.path().join("src/nope.rs"), "fn x() {}\n").unwrap();
+        let o2 = Command::new("cargo")
+            .args(["rv-plugin", "--file", "src/nope.rs"])
+            .env("CARGO_TERM_COLOR", "never")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        (o, o2)
+    };
+    for o in [out.0, out.1] {
+        assert!(!o.status.success(), "must exit non-zero");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains("src/nope.rs isn't compiled as part of this crate (check its `mod` declaration)"),
+            "stderr was: {err}"
+        );
+        assert!(!err.contains("panicked"));
+    }
+}
+
+#[test]
+fn changing_the_file_flag_re_renders_in_the_same_crate_dir() {
+    // Cargo caches the check; a different `--file` must still re-run the plugin.
+    let dir = tempdir().unwrap();
+    let root = run_module_crate(dir.path(), &[]);
+    assert!(String::from_utf8_lossy(&root.stdout).contains("moved_main"));
+    let shapes = run_module_crate(dir.path(), &["--file", "src/shapes.rs"]);
+    let stdout = String::from_utf8_lossy(&shapes.stdout);
+    assert!(stdout.contains("moved_shapes"), "stale cached run: {stdout}");
+    assert!(!stdout.contains("moved_main"));
+}

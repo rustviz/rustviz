@@ -61,6 +61,27 @@ fn is_generated_item(item: &rustc_hir::Item<'_>) -> bool {
   item.span.from_expansion()
 }
 
+/// The local path of the file `span` is in, if it's a real file.
+fn file_path_of(tcx: TyCtxt, span: rustc_span::Span) -> Option<std::path::PathBuf> {
+  match tcx.sess.source_map().span_to_filename(span) {
+    rustc_span::FileName::Real(f) => f.local_path().map(|p| p.to_path_buf()),
+    _ => None,
+  }
+}
+
+/// The path rustc uses for the crate source file `wanted` (relative to
+/// the crate directory), or `None` if the crate doesn't compile it.
+fn find_compiled_file(tcx: TyCtxt, wanted: &str) -> Option<std::path::PathBuf> {
+  let want = std::fs::canonicalize(wanted).ok()?;
+  tcx.sess.source_map().files().iter().find_map(|f| match &f.name {
+    rustc_span::FileName::Real(r) => {
+      let p = r.local_path()?;
+      (std::fs::canonicalize(p).ok()? == want).then(|| p.to_path_buf())
+    }
+    _ => None,
+  })
+}
+
 // "The main function"
 pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
 
@@ -91,10 +112,29 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let mut testing_helper: RV1Helper = RV1Helper::new();
   let mut line_map: BTreeMap<usize, String> = BTreeMap::new();
   let mut line_map2: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
-  // The crate root rustc is compiling: `src/lib.rs` or `src/main.rs`.
-  let root_file = match tcx.sess.source_map().span_to_filename(tcx.def_span(rustc_hir::def_id::CRATE_DEF_ID)) {
-    rustc_span::FileName::Real(f) => f.local_path().map(|p| p.to_path_buf()),
-    _ => None,
+  // The file to visualize: `--file`, or else the crate root rustc is
+  // compiling (`src/lib.rs` or `src/main.rs`).
+  let root_file = match &args.file {
+    None => file_path_of(tcx, tcx.def_span(rustc_hir::def_id::CRATE_DEF_ID)),
+    Some(wanted) => match find_compiled_file(tcx, wanted) {
+      Some(p) => Some(p),
+      None => {
+        eprintln!("{wanted} isn't compiled as part of this crate (check its `mod` declaration)");
+        std::process::exit(1);
+      }
+    },
+  };
+  let target_file = root_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+  // True when `span` lies in the file being visualized; items from
+  // other files of the crate (`mod` files) are skipped, since their
+  // line numbers index a different file.
+  let in_target = |span: rustc_span::Span| -> bool {
+    match &target_file {
+      Some(t) => file_path_of(tcx, span)
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .is_some_and(|p| &p == t),
+      None => true,
+    }
   };
   match testing_helper.initialize_line_map(root_file) {
     Ok(l) => {
@@ -146,7 +186,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
     // `Debug::fmt`) on the attribute's line for code the student
     // never wrote. Calls to these impls from user code still go
     // through the normal call-site handling.
-    if is_generated_item(item) {
+    if is_generated_item(item) || !in_target(item.span) {
       continue;
     }
     match &item.kind {
@@ -394,7 +434,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // annotate items after visiting all function bodies since we can assign hashes to top-level structures in fn bodies
   for id in tcx.hir_free_items() {
     let item = tcx.hir_item(id);
-    if is_generated_item(item) {
+    if is_generated_item(item) || !in_target(item.span) {
       continue;
     }
     match &item.kind {

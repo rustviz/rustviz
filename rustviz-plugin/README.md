@@ -38,6 +38,24 @@ rustup toolchain install nightly-2026-05-01 \
 cargo install --path . --locked
 ```
 
+## Usage
+
+Run `cargo rv-plugin` in a crate directory (a lib crate with `src/lib.rs`,
+or a bin crate with `src/main.rs`). By default it visualizes the crate
+root, the file rustc compiles as `src/lib.rs` or `src/main.rs`.
+
+To visualize another file of the crate, name it with `--file`, relative to
+the crate directory:
+
+```sh
+cargo rv-plugin --file src/shapes.rs
+```
+
+The file must be one the crate compiles, e.g. `src/shapes.rs` declared with
+`mod shapes;`. Only the functions in that file are drawn, and the code panel
+shows that file. Otherwise the plugin exits 1 with
+`src/foo.rs isn't compiled as part of this crate (check its `mod` declaration)`.
+
 ## When the plugin crashes
 
 A panic inside the visitor is reported as a single rustc error line,
