@@ -3841,6 +3841,46 @@ struct BranchSeg {
     title: String,
 }
 
+/// A column never draws two segments over the same rows: a dashed
+/// vertical segment gives way to a solid one on the rows they share.
+/// A dashed state can reach down over rows where the arm's own first
+/// event already starts it (an `if let` binding's dot sits above the
+/// arm's body rows, so the leading dashes cover rows the arm owns),
+/// and drawing both made two hover regions with different tooltips on
+/// the same rows (#626).
+fn trim_dashes_under_solid(segs: Vec<BranchSeg>) -> Vec<BranchSeg> {
+    let vertical = |s: &BranchSeg| (s.p1.0 - s.p2.0).abs() < 1e-6 && (s.p1.1 - s.p2.1).abs() > 1e-6;
+    // (x, top, bottom) of each solid vertical segment.
+    let solid: Vec<(f64, f64, f64)> = segs.iter()
+        .filter(|s| vertical(s) && !state_is_dashed(&s.state))
+        .map(|s| (s.p1.0, s.p1.1.min(s.p2.1), s.p1.1.max(s.p2.1)))
+        .collect();
+    let mut out = Vec::with_capacity(segs.len());
+    for seg in segs {
+        if !vertical(&seg) || !state_is_dashed(&seg.state) { out.push(seg); continue; }
+        let down = seg.p1.1 < seg.p2.1;
+        let (top, bot) = (seg.p1.1.min(seg.p2.1), seg.p1.1.max(seg.p2.1));
+        // Pieces of [top, bot] not covered by a solid segment.
+        let mut pieces = vec![(top, bot)];
+        for &(x, st, sb) in &solid {
+            if (x - seg.p1.0).abs() > 1e-6 { continue; }
+            pieces = pieces.into_iter().flat_map(|(a, b)| {
+                if sb <= a || st >= b { return vec![(a, b)]; }
+                let mut v = Vec::new();
+                if st > a { v.push((a, st)); }
+                if sb < b { v.push((sb, b)); }
+                v
+            }).collect();
+        }
+        if !down { pieces.reverse(); }
+        for (a, b) in pieces {
+            let (p1y, p2y) = if down { (a, b) } else { (b, a) };
+            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone() });
+        }
+    }
+    out
+}
+
 /// Unit-length perpendicular to `p1 → p2`. Used to offset the two
 /// sides of a hollow strip by `±BRANCH_HALF_W` perpendicular to the
 /// segment direction so the visual gap between sides is constant
@@ -4050,6 +4090,7 @@ fn render_branches(
                 }
             }
 
+            let segs = trim_dashes_under_solid(segs);
             let runs = split_centerline_runs(&segs);
 
             // The arm's own source lines, as the y-range that hovering
