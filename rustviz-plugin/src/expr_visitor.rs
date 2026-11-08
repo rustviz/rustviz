@@ -3656,9 +3656,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return None;
     }
     let fields = self.member_fields(parent_ty);
-    let part = |i: Option<usize>| -> Option<(ResourceTy, Ty<'tcx>)> {
+    let part = |i: Option<usize>, sub: &Pat<'tcx>| -> Option<(ResourceTy, Ty<'tcx>)> {
       let (field, field_ty) = fields.get(i?)?;
-      if field_ty.is_ref() {
+      // A reference part has a column too, but only a plain by-value
+      // binding of it (`P { part: r }`) copies / moves the reference
+      // out of that part (#709); `ref r`, `&x`, `_` and the like
+      // are matched against the whole parent as before.
+      if field_ty.is_ref() && !is_by_value_binding(sub) {
         return None;
       }
       let rd = self.raps.get(&format!("{}.{}", parent_rap.name(), field))?;
@@ -3674,12 +3678,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             Some(d) if k >= d => k + gap,
             _ => k,
           };
-          (sp, part(Some(i)))
+          (sp, part(Some(i), sp))
         }).collect()
       }
       PatKind::Struct(_, pat_fields, _) => pat_fields.iter().map(|pf| {
         let i = fields.iter().position(|(f, _)| f.as_str() == pf.ident.name.as_str());
-        (pf.pat, part(i))
+        (pf.pat, part(i, pf.pat))
       }).collect(),
       _ => return None,
     };
@@ -3710,6 +3714,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             Some((part_rty, part_ty)) => {
               let mut sub = Vec::new();
               self.get_dec_of_pat_parts(sp, ty_results, &part_rty, part_ty, scope, &mut sub);
+              // `P { part: r }` with `part: &T` copies the reference
+              // out of `p.part`: `r` borrows what `p.part` borrows (#709).
+              if part_ty.is_ref() {
+                for (r, _, from, _) in sub.iter() {
+                  self.adopt_part_borrow(r.name(), &from.name());
+                }
+              }
               let sp_ty = ty_results.node_type(sp.hir_id);
               res.extend(sub.into_iter().map(|(r, e, from, partial)| {
                 (r, e, from, Some(partial.unwrap_or(part_ty != sp_ty)))
@@ -3730,6 +3741,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.get_dec_of_pat2(pat, ty_results, parent, &parent_ty, scope, &mut sub);
         res.extend(sub.into_iter().map(|(r, e, _)| (r, e, parent.clone(), None)));
       }
+    }
+  }
+
+  /// The reference `name` was just bound by copying (or, for `&mut`,
+  /// moving) the reference stored in the part `part` (`p.part`): it
+  /// borrows what `part` borrows, not the struct `part` is in (#709).
+  pub fn adopt_part_borrow(&mut self, name: &str, part: &str) {
+    let Some(src) = self.borrow_map.get(part).cloned() else { return };
+    let aliasing = get_aliasing_data(&src.lender, &self.borrow_map);
+    if let Some(rd) = self.borrow_map.get_mut(name) {
+      rd.lender = src.lender;
+      rd.aliasing = aliasing;
+      rd.static_lender = src.static_lender;
+      rd.co_lenders = src.co_lenders;
+      rd.borrow_span = src.borrow_span;
     }
   }
 
@@ -3785,7 +3811,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                     ty_results.pat_binding_modes().get(id).map(|m| m.0),
                     Some(rustc_hir::ByRef::Yes(..))
                 );
-                let lender = if by_ref || parent_ty.is_ref() { parent.clone() } else { ResourceTy::Anonymous };
+                // A by-value binding of the parent's own reference type
+                // is a copy of that reference, not a borrow through it
+                // (`P { part: r }` on `p.part: &T`, #709).
+                let through_parent = parent_ty.is_ref() && *parent_ty != ty;
+                let lender = if by_ref || through_parent { parent.clone() } else { ResourceTy::Anonymous };
                 let pointee_copy = self.ref_pointee_is_copy(ty, id.owner);
                 self.add_ref(name.clone(), ref_mutability, muta, line_num, lender, VecDeque::new(), scope, false, pointee_copy);
             } else if matches!(ty.kind(), TyKind::Tuple(_)) && self.has_member_columns(ty) {
@@ -3884,7 +3914,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             };
             let evt = if let Some(mutbl) = binding_ref {
                 if bool_of_mut(mutbl) { Evt::MBorrow } else { Evt::SBorrow }
-            } else if parent_ty.is_ref() {
+            } else if parent_ty.is_ref() && *parent_ty != ty {
                 if bool_of_mut(parent_ty.ref_mutability().unwrap()) { Evt::MBorrow }
                 else { Evt::SBorrow }
             } else {
@@ -6504,4 +6534,10 @@ fn ty_has_std_sync_primitive<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
     }
   }
   go(tcx, ty, 0, &mut HashSet::new())
+}
+
+/// `pat` is a plain by-value binding (`r`, `mut r`): not `ref r`, not
+/// `r @ pat`.
+fn is_by_value_binding(pat: &Pat<'_>) -> bool {
+  matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No))
 }

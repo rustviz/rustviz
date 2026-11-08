@@ -3483,7 +3483,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // (#410).
             let exit_branch = self.expr_diverges(if_expr)
               && body_ev.iter().any(|(_, e)| self.exit_drops.contains(&e.get_id()));
-            let drawn_as_branch = events_move_out_of_outer(&body_ev, &if_scope) || exit_branch;
+            // An `if let` whose pattern matches every value always runs
+            // its body: there's no implicit empty `else` path, so what
+            // the body does to outer variables is drawn inline, not as
+            // a branch.
+            let always_runs = matches!(guard_expr.kind, ExprKind::Let(l)
+              if pat_is_irrefutable(l.pat, self.tcx.typeck(l.pat.hir_id.owner)));
+            let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch;
             // A tuple scrutinee's variables are moved whether or not the
             // body runs (#327), so that's a second path as well.
             if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {
@@ -5889,13 +5895,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       PatKind::Wild => {}
       // A by-value binding of a non-reference part.
       PatKind::Binding(annotation, hirid, _, None)
-        if matches!(annotation.0, rustc_hir::ByRef::No) && !member_ty.is_ref()
-          && self.raps.contains_key(member) =>
+        if matches!(annotation.0, rustc_hir::ByRef::No) && self.raps.contains_key(member) =>
       {
         let name = binding_name(&self.tcx, hirid);
         let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
-        let evt = if self.ty_is_copy(lhs_ty, hirid.owner) { Evt::Copy } else { Evt::Move };
+        let evt = self.bind_evt(lhs_ty, hirid);
         self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+        // `let P { part: r } = p;` with `part: &T` copies the
+        // reference in `p.part`: `r` borrows what that borrows (#709).
+        if member_ty.is_ref() {
+          self.adopt_part_borrow(&name, member);
+        }
         if is_skipped {
           self.skip_raps.insert(name);
           return;
