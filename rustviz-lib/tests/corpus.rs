@@ -977,6 +977,10 @@ const EXPECTED_OK: &[&str] = &[
     "let_ref_then_owner_same_name",
     "match_macro_arm_name_reused",
     "same_name_copy_kinds_share",
+    // An owner that needs drop and one that doesn't can't share a column:
+    // the wording ("resource" / "value") follows the type (#642).
+    "same_name_drop_kinds_split",
+    "same_name_plain_owners_share",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -9028,6 +9032,40 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x₂",
         ],
     },
+    // #642: a `String` `x` and a later `Light` `x` (no drop glue) shared a
+    // column, registered by the first, so the enum was called a
+    // "resource". Now each has its own column.
+    TooltipExpect {
+        name: "same_name_drop_kinds_split",
+        must_contain: &[
+            "x acquires ownership of a resource",
+            "x goes out of scope. Its resource is dropped.",
+            "x holds a value",
+            "x is bound to a value",
+            "x's value is moved",
+            "x, immutable. A different variable from the x declared on line 9 (separate scopes, so only one exists at a time)",
+            "x, immutable. A different variable from the x declared on line 5 (separate scopes, so only one exists at a time)",
+        ],
+        must_not_contain: &[
+            // The enum (no drop glue) is not a resource; #619's plugin
+            // said this of its `x`, which shared the `String`'s column.
+            "x's resource is moved",
+            "x₂",
+        ],
+    },
+    // Two non-Copy owners without drop glue still share one column.
+    TooltipExpect {
+        name: "same_name_plain_owners_share",
+        must_contain: &[
+            "x is bound to a value",
+            "x's value is moved",
+        ],
+        must_not_contain: &[
+            "A different variable from",
+            "x₂",
+            "resource",
+        ],
+    },
     // A bare macro call as an arm's body (`Some(x) => println!(..)`) has
     // a span inside the macro, which put `x` in scope to the end of the
     // fn: the next match's `x` was said to shadow it.
@@ -14037,6 +14075,8 @@ fn same_name_kinds_get_separate_columns() {
         ("let_ref_then_owner_same_name", "x", 2),
         ("for_over_iterator_var", "s", 2),
         ("same_name_copy_kinds_share", "x", 1),
+        ("same_name_drop_kinds_split", "x", 2),
+        ("same_name_plain_owners_share", "x", 1),
         ("match_macro_arm_name_reused", "x", 1),
     ] {
         let t = run_with_local_backend(name).timeline_panel_string();
