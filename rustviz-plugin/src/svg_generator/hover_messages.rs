@@ -614,6 +614,48 @@ pub fn event_dot_move_to(my_name: &String, _target_name: &String) -> String {
     )
 }
 
+// Source dot for the head of a `for` loop that is moved into the
+// iterator `IntoIterator::into_iter` builds from it (`for s in v`, `v:
+// Vec<String>`), when that iterator has drop glue (#482). Its drop is
+// stated where the loop ends, on the iterator's `(temporary N)` column
+// (#469).
+pub fn event_dot_move_into_loop_iterator(my_name: &String) -> String {
+    format!(
+        "{0}'s resource is moved into the `for` loop's iterator",
+        fmt_style(my_name)
+    )
+}
+
+// Source dot for a `for` loop's head that is an iterator already (`for
+// s in it`, `it: vec::IntoIter<String>`): `into_iter` hands it back
+// unchanged, so it becomes the loop's iterator, and the loop drops it
+// (`event_dot_loop_iterator_drop`) (#482).
+pub fn event_dot_move_iterator_into_loop(my_name: &String) -> String {
+    format!(
+        "{0}'s resource is moved into the `for` loop, which uses it as its iterator",
+        fmt_style(my_name)
+    )
+}
+
+// The drop of the iterator a `for` loop took from a variable (`for s in
+// it`), on that variable's column: where the loop ends (also when a
+// `break` leaves it), or at a `return` from inside the loop (`early`)
+// (#482). What the iterator still owns goes with it: the elements it
+// hasn't handed out, a `vec::IntoIter`'s buffer.
+pub fn event_dot_loop_iterator_drop(my_name: &String, early: bool) -> String {
+    if early {
+        format!(
+            "{0}'s former resource, the `for` loop's iterator, is dropped here: the function returns from inside the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+            fmt_style(my_name)
+        )
+    } else {
+        format!(
+            "{0}'s former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
+            fmt_style(my_name)
+        )
+    }
+}
+
 // Source dot for a by-value capture of a closure literal passed to a
 // call (`thread::spawn(move || ..v..)`). The resource goes into the
 // closure, and is dropped when the closure is, not when the call returns.

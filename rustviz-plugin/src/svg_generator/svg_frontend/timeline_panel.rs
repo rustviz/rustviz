@@ -986,6 +986,16 @@ fn render_dot(
             Event::RefDie { .. } => {
                 continue;
             }
+            Event::Branch { branch_history, .. } if only_loop_iterator_drops(branch_history) => {
+                // The column was moved into a `for` loop as its iterator
+                // before the conditional, and only that iterator's drop
+                // at a `return` is in it (#482): the variable itself
+                // takes no part, so no split or join dot.
+                for branch in branch_history.iter() {
+                    render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, false, dots, false);
+                }
+                continue;
+            }
             Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => {
                 // Top-of-branch dot on the parent column. Tooltip
                 // explains the variable's role ("X is live in a
@@ -1376,7 +1386,7 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
-                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } => {
+                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
@@ -2026,6 +2036,27 @@ fn matches_closure(rty: &ResourceTy, closure_hash: u64) -> bool {
 
 fn upvar_name(rty: &ResourceTy) -> Option<String> {
     rty.extract_rap().map(|r| r.name().to_owned())
+}
+
+/// Whether every event in these branches (and in the conditionals
+/// nested in them) is the drop of a `for` loop's iterator at a
+/// `return` (`Event::LoopIteratorDrop`, #482), and there is one.
+fn only_loop_iterator_drops(branches: &[BranchData]) -> bool {
+    fn all_drops(branches: &[BranchData]) -> bool {
+        branches.iter().all(|b| b.e_data.iter().all(|(_, e)| match e {
+            Event::LoopIteratorDrop { .. } => true,
+            Event::Branch { branch_history, .. } => all_drops(branch_history),
+            _ => false,
+        }))
+    }
+    fn any_drop(branches: &[BranchData]) -> bool {
+        branches.iter().any(|b| b.e_data.iter().any(|(_, e)| match e {
+            Event::LoopIteratorDrop { .. } => true,
+            Event::Branch { branch_history, .. } => any_drop(branch_history),
+            _ => false,
+        }))
+    }
+    all_drops(branches) && any_drop(branches)
 }
 
 // Like `append_dot`, but the dot is drawn as a drop dot (circle +

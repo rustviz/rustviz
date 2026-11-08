@@ -925,6 +925,12 @@ pub fn collect_event_live_vars(
             | ExternalEvent::OrAltBorrow { ro, .. } => {
                 out.insert(ro.clone());
             }
+            // The drop of the iterator `ro` was moved into, at a
+            // `return` from inside its `for` loop (#482): drawn on ro's
+            // column in the branch.
+            ExternalEvent::LoopIteratorDrop { ro, .. } => {
+                out.insert(ro.clone());
+            }
             // A reassignment in a branch drops the old value of `ro`:
             // for `*r = …` that's r's lender, which no other event in
             // the branch may mention (#267).

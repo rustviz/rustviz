@@ -243,6 +243,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // that drop, and a drop at an early exit inside the matched block is
   // a dot on it (see `take_branch_events`).
   pub unbranched_temps: HashSet<ResourceAccessPoint>,
+  // The variables moved into the `for` loops being visited as their
+  // iterators (`for s in it`, `LoopHead::Iterator`), innermost last: a
+  // `return` inside drops each loop's iterator (#482).
+  pub loop_iterators: Vec<ResourceAccessPoint>,
   // State for the destructuring assignment being visited
   // (`(a, b) = (b, a);`, see `visit_destructuring_assign`). rustc
   // lowers it to `{ let (lhs, lhs) = (b, a); a = lhs; b = lhs; }`;
@@ -871,7 +875,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::OrAltMove { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
-      | ExternalEvent::TemporaryDrop { ro, .. } => {
+      | ExternalEvent::TemporaryDrop { ro, .. }
+      | ExternalEvent::LoopIteratorDrop { ro, .. } => {
         self.skip_raps.contains(ro.name())
       }
       ExternalEvent::InitRefParam { param, .. } => {
@@ -1071,7 +1076,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -1118,7 +1123,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_external_event(line_num, if is_copy {
         ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false }
       } else {
-        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false }
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No }
       });
     }
   }
@@ -1153,6 +1158,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         id: ev_id,
         is_partial: false,
         into_closure: false,
+        loop_head: LoopHead::No,
       });
       self.move_struct_fields_away(line_num, &name);
     }
@@ -1273,7 +1279,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id },
       Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false },
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
@@ -1326,6 +1332,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   pub fn add_ev(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, is_partial: bool) {
     self.add_external_event(line_num, self.ext_ev_of_evt(evt, lhs, rhs, *self.unique_id, is_partial));
+    *self.unique_id += 1;
+  }
+
+  /// A `for` loop's head `from` moved into the loop, whose iterator
+  /// has drop glue (#482), with the arrow's target `to`.
+  pub fn add_loop_head_move_ev(&mut self, line_num: usize, to: ResourceTy, from: ResourceTy, head: LoopHead) {
+    let mut ev = self.ext_ev_of_evt(Evt::Move, to, from, *self.unique_id, false);
+    if let ExternalEvent::Move { loop_head, .. } = &mut ev {
+      *loop_head = head;
+    }
+    self.add_external_event(line_num, ev);
     *self.unique_id += 1;
   }
 
