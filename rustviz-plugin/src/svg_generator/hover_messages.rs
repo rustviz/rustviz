@@ -2867,6 +2867,24 @@ pub fn break_alt_if_suffix(brk: &Option<String>) -> String {
     format!(", if the loop ended with {}", quoted_break(brk))
 }
 
+/// The lender's dot when a `break` borrows from it for the receiver
+/// (`break &e`, or `break rb` reborrowing a `&mut`, #657): the borrow
+/// was made only if this `break` ended the loop. The qualifier goes on
+/// the borrow, before what it means for the lender ("; rb can't be
+/// used while the borrow is live"): rustc rejects that use while the
+/// receiver is live whichever `break` ran.
+pub fn with_break_alt_lend(title: &str, brk: &Option<String>) -> String {
+    let suffix = break_alt_if_suffix(brk);
+    // The clauses' "; ", not the end of an escaped entity (`&gt; `)
+    // in a styled name.
+    let is_entity = |i: usize| title[..i].rfind('&')
+        .is_some_and(|a| title[a + 1..i].chars().all(|c| c.is_ascii_alphanumeric() || c == '#'));
+    match title.match_indices("; ").map(|(i, _)| i).find(|&i| !is_entity(i)) {
+        Some(i) => format!("{}{suffix}{}", &title[..i], &title[i..]),
+        None => format!("{title}{suffix}"),
+    }
+}
+
 /// The source's dot when a `break` moves it into the receiver (see
 /// BreakAlt for `alt`). `what`: "resource", "value", or "reference" (a
 /// `&mut` moved), what moves out of it. A variable declared inside the

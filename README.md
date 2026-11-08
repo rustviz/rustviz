@@ -300,8 +300,14 @@ rather than listed here.
   { … }`, a tuple pattern, a call argument) the value of its `break`.
   A `break` value in a branch (`if c { break s; }`) moves to the
   receiver where the loop ends. So do several (`if c { break a; } else
-  { break b; }`): each arrow says it happened only if its `break` ended
-  the loop, and `a` and `b` are each shown as maybe moved.
+  { break b; }`): each arrow (a move, a copy, or a borrow such as
+  `break &a` or the reborrow rustc makes of a second `&mut`) says it
+  happened only if its `break` ended the loop, and `a` and `b` are each
+  shown as maybe moved. When that loop is a call argument (`take(loop {
+  if c { break ra; } else { break rb; } })`), the lenders' borrows are
+  drawn ending a row before the call, and the call's tooltips don't say
+  which `break` ran
+  ([#662](https://github.com/rustviz/rustviz/issues/662)).
 - Leaving early drops what is left behind, right there: a `return` or
   a panic (`panic!()`, `unreachable!()`, `todo!()`, which unwind) drops
   every value the function still owns, a `break` / `continue` the

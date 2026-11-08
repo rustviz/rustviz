@@ -1244,11 +1244,15 @@ pub enum ExternalEvent {
     // `match_rhs`; every other producer passes `false`.
     // `via`: the borrow reaches `to` through the reference a call
     // returned (`let w = first_word(&s);`, #171); see `BorrowVia`.
+    // `break_alt`: the borrow is one of several `break` values
+    // reaching a loop's receiver (`if c { break ra; } else { break rb;
+    // }` reborrows `rb`, #657); see BreakAlt.
     StaticBorrow {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
         is_reborrow: bool,
+        break_alt: Option<BreakAlt>,
         via: Option<BorrowVia>,
         id: usize
     },
@@ -1257,6 +1261,7 @@ pub enum ExternalEvent {
         to: ResourceTy,
         is_partial: bool,
         is_reborrow: bool,
+        break_alt: Option<BreakAlt>,
         via: Option<BorrowVia>,
         id: usize
     },
