@@ -956,7 +956,7 @@ pub fn collect_event_live_vars(
                 out.insert(rap.clone());
             }
             // The owner whose drop the `?` may cause is live there.
-            ExternalEvent::OwnerDropIfTryReturns { ro, .. } => {
+            ExternalEvent::OwnerDropIfTryReturns { ro, .. } | ExternalEvent::OwnerDropUnlessReturned { ro, .. } => {
                 out.insert(ro.clone());
             }
             _ => {

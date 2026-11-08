@@ -1523,12 +1523,12 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
-                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
+                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns) {
+                    let note = if matches!(event, Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
                     let title = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false })
@@ -1538,6 +1538,9 @@ fn render_dot(
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, true)
                     } else if let Event::OwnerDropAtReassign { maybe_moved: true, by_cond } = event {
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
+                    } else if matches!(event, Event::OwnerDropUnlessReturned) {
+                        let value = visualization_data.timelines[hash].resource_access_point.holds_value();
+                        hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note)
                     } else if note.is_empty() {
                         event.print_message_with_name(&mut name)
                     } else if matches!(event, Event::OwnerDropIfTryReturns) {

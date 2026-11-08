@@ -1492,6 +1492,14 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    // `return if b { p } else { q };` in a branch: `p`, which only some
+    // of the returned `if`'s branches move to the caller, is dropped
+    // here on the paths through the others (#697). A dot on its
+    // column, which goes on.
+    OwnerDropUnlessReturned {
+        ro: ResourceAccessPoint,
+        id: usize
+    },
     // The tuple an `if let` / `match` scrutinee `(x, y)` builds is
     // dropped (#327), and with it what's left in it of `ro`'s value
     // (and of the other variables in `with`). The tuple has no column,
@@ -1687,6 +1695,7 @@ impl ExternalEvent {
             &ExternalEvent::LoopIteratorDrop { id, .. } |
             &ExternalEvent::LoopExitMove { id, .. } |
             &ExternalEvent::OwnerDropIfTryReturns { id, .. } |
+            &ExternalEvent::OwnerDropUnlessReturned { id, .. } |
             &ExternalEvent::TupleTempDrop { id, .. } |
             &ExternalEvent::OrAltMove { id, .. } |
             &ExternalEvent::OrAltBorrow { id, .. } |
@@ -1879,6 +1888,8 @@ pub enum Event {
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
     OwnerDropIfTryReturns,
+    // See ExternalEvent::OwnerDropUnlessReturned.
+    OwnerDropUnlessReturned,
     // See ExternalEvent::TupleTempDrop.
     TupleTempDrop { tuple: String, at: TupleDropAt, with: Vec<TupleLeft> },
     // See ExternalEvent::OrAltMove. `value`: the place holds a value
@@ -2341,6 +2352,9 @@ impl Display for Event {
             Event::OwnerDropIfTryReturns => {
                 write!(f, "Resource is dropped if the `?` returns early")
             },
+            Event::OwnerDropUnlessReturned => {
+                write!(f, "Resource is dropped unless the `return` hands it to the caller")
+            },
             Event::TupleTempDrop { tuple, .. } => {
                 write!(f, "Temporary tuple {} is dropped", tuple)
             },
@@ -2523,6 +2537,9 @@ impl Event {
             }
             Event::OwnerDropIfTryReturns => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
+            }
+            Event::OwnerDropUnlessReturned => {
+                hover_messages::event_dot_owner_drop_unless_returned(my_name, false, "")
             }
             Event::TemporaryDrop { ty: None, when, .. } => {
                 hover_messages::event_dot_extended_temporary_drop(my_name, when)
@@ -3439,6 +3456,7 @@ impl Visualizable for VisualizationData {
             // Dropped only on the path that returns; the code after the
             // `?` runs on the other one.
             (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
+            (_, Event::OwnerDropUnlessReturned) => (*previous_state).clone(),
             // A dot on a column whose value already went into the tuple:
             // no change.
             (_, Event::TupleTempDrop { .. }) => (*previous_state).clone(),
@@ -3912,6 +3930,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::OwnerDropIfTryReturns{..} => {
           vec![(line_num, Event::OwnerDropIfTryReturns)]
         },
+        ExternalEvent::OwnerDropUnlessReturned{..} => {
+          vec![(line_num, Event::OwnerDropUnlessReturned)]
+        },
         ExternalEvent::TupleTempDrop{ tuple, at, with, .. } => {
           vec![(line_num, Event::TupleTempDrop { tuple: tuple.clone(), at: *at, with: with.clone() })]
           },
@@ -4028,7 +4049,7 @@ impl Visualizable for VisualizationData {
                 }
                 // Likewise the drop a `?` in the branch causes if it
                 // returns early (#430, #636).
-                else if let ExternalEvent::OwnerDropIfTryReturns { ro, .. } = event {
+                else if let ExternalEvent::OwnerDropIfTryReturns { ro, .. } | ExternalEvent::OwnerDropUnlessReturned { ro, .. } = event {
                     if ro.hash() == rap.hash() {
                         b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                     }
@@ -4261,6 +4282,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
+            },
+            ExternalEvent::OwnerDropUnlessReturned{ro, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropUnlessReturned, line_number);
             },
             ExternalEvent::TupleTempDrop{ro, tuple, at, with, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TupleTempDrop { tuple, at, with }, line_number);
