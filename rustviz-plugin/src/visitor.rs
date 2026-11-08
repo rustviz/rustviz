@@ -3675,10 +3675,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         };
         // A branch of type `!` (`return`, `panic!()`) never reaches
         // the merge (#296).
-        let (if_diverges, if_exits) = self.branch_divergence(if_expr, &if_ev, &if_decl);
-        let (else_diverges, else_exits) = match else_expr {
+        let (if_diverges, if_exits, if_carries) = self.branch_divergence(if_expr, &if_ev, &if_decl);
+        let (else_diverges, else_exits, else_carries) = match else_expr {
           Some(e) => self.branch_divergence(e, &else_ev, &else_decl),
-          None => (false, Vec::new()),
+          None => (false, Vec::new(), Vec::new()),
         };
         let (b_labels, b_slices, b_branches) = match else_expr {
           Some(_) => {
@@ -3687,8 +3687,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               vec!["If".to_owned(), "Else".to_owned()],
               vec![if_slice, else_slice],
               vec![
-                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits   },
-                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits },
+                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits, break_carries: if_carries   },
+                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits, break_carries: else_carries },
               ],
             )
           }
@@ -3703,8 +3703,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               vec!["If".to_owned(), "Else".to_owned()],
               vec![if_slice, else_slice],
               vec![
-                ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits },
-                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new() },
+                ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits, break_carries: if_carries },
+                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new(), break_carries: Vec::new() },
               ],
             )
           }
@@ -4402,8 +4402,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let branch_line_map = create_line_map(&branch_e_data);
                 // An arm of type `!` (`_ => unreachable!()`) never
                 // reaches the merge (#296).
-                let (diverges, exits) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
-                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits });
+                let (diverges, exits, break_carries) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
+                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
               }
             }
             self.join_uninit_locals(uninit_ends);
@@ -7091,6 +7091,27 @@ struct BranchLeaves {
   loop_breaks: Vec<(HirId, HirId)>,
   /// Its only way out is one `break`, the branch's last expression.
   ends_in_its_only_break: bool,
+  /// The variables its `break value`s out of an enclosing loop
+  /// mention, sorted: what the break carries out of the loop.
+  break_carries: Vec<String>,
+}
+
+/// The local variables `e` mentions, pushed onto `out`.
+fn mentioned_locals<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
+  struct Locals<'a>(&'a mut Vec<String>);
+  impl<'tcx> Visitor<'tcx> for Locals<'_> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Path(rustc_hir::QPath::Resolved(None, path)) = &e.kind {
+        if let Res::Local(_) = path.res {
+          if let Some(seg) = path.segments.last() {
+            self.0.push(seg.ident.to_string());
+          }
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  Locals(out).visit_expr(e);
 }
 
 fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tcx>) -> BranchLeaves {
@@ -7101,6 +7122,7 @@ fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tc
     inner: HashSet<HirId>,
     control: Vec<BranchExit>,
     loop_breaks: Vec<(HirId, HirId)>,
+    break_carries: Vec<String>,
     panics: bool,
   }
   impl<'tcx> Visitor<'tcx> for Finder<'tcx> {
@@ -7112,8 +7134,11 @@ fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tc
         ExprKind::Block(b, Some(_)) => { self.inner.insert(e.hir_id); self.inner.insert(b.hir_id); }
         // `?`'s desugaring returns too, but only on the error path.
         ExprKind::Ret(_) if !e.span.from_expansion() => self.control.push(BranchExit::Return),
-        ExprKind::Break(dest, _) => if let Ok(t) = dest.target_id {
+        ExprKind::Break(dest, value) => if let Ok(t) = dest.target_id {
           if !self.inner.contains(&t) {
+            if let (Some(v), true) = (value, matches!(self.tcx.hir_node(t), rustc_hir::Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))) {
+              mentioned_locals(v, &mut self.break_carries);
+            }
             let is_loop = matches!(self.tcx.hir_node(t), rustc_hir::Node::Expr(Expr { kind: ExprKind::Loop(..), .. }));
             self.control.push(if is_loop { BranchExit::Break } else { BranchExit::BreakBlock });
             self.loop_breaks.push((e.hir_id, t));
@@ -7144,7 +7169,7 @@ fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tc
     }
   }
   let mut f = Finder {
-    tcx, inner: HashSet::new(), control: Vec::new(), loop_breaks: Vec::new(), panics: false,
+    tcx, inner: HashSet::new(), control: Vec::new(), loop_breaks: Vec::new(), break_carries: Vec::new(), panics: false,
   };
   f.visit_expr(body);
   let last = match body.kind {
@@ -7164,7 +7189,10 @@ fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tc
   if exits.is_empty() {
     exits.push(if f.panics { BranchExit::Panic } else { BranchExit::Other });
   }
-  BranchLeaves { exits, loop_breaks: f.loop_breaks, ends_in_its_only_break }
+  let mut break_carries = f.break_carries;
+  break_carries.sort();
+  break_carries.dedup();
+  BranchLeaves { exits, loop_breaks: f.loop_breaks, ends_in_its_only_break, break_carries }
 }
 
 /// The variables declared outside a branch (not in `decls`) that its
@@ -7243,9 +7271,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     body: &'tcx Expr<'tcx>,
     events: &[(usize, ExternalEvent)],
     decls: &HashSet<ResourceAccessPoint>,
-  ) -> (bool, Vec<BranchExit>) {
+  ) -> (bool, Vec<BranchExit>, Vec<String>) {
     if !self.expr_diverges(body) {
-      return (false, Vec::new());
+      return (false, Vec::new(), Vec::new());
     }
     let leaves = branch_leaves(self.tcx, body);
     let moved = moved_out_of_outer(events, decls);
@@ -7259,7 +7287,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         });
       }
     }
-    (true, leaves.exits)
+    (true, leaves.exits, leaves.break_carries)
   }
 
   /// The names of the variables registered so far.

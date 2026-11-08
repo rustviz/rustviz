@@ -6338,9 +6338,15 @@ fn end_borrows_at_exits_in(
       // function; a `break` the loop, so only a borrow not used after
       // the loop; a `continue` the iteration, so only a borrow also
       // made in it.
-      let leaves = |line: usize, made: usize| arm.exits.iter().all(|x| match x {
+      let leaves = |line: usize, made: usize, carries_r: bool| arm.exits.iter().all(|x| match x {
         BranchExit::Return | BranchExit::Panic | BranchExit::Other => true,
-        BranchExit::Break => scope.loop_lines.is_some_and(|(_, hi)| line <= hi),
+        // A `break` whose value mentions `r` carries the borrow out of
+        // the loop, to whatever uses the value: it doesn't end here
+        // (#662). In `take(loop { if c { break ra; } else { break rb; } })`
+        // `a` stays borrowed until `take` returns on the loop's last line,
+        // but on the path through `break rb` `ra` is dead and its borrow
+        // of `a` ended before the arm.
+        BranchExit::Break => !carries_r && scope.loop_lines.is_some_and(|(_, hi)| line <= hi),
         BranchExit::Continue => scope.loop_lines.is_some_and(|(lo, hi)| lo <= made && line <= hi),
         BranchExit::BreakBlock => false,
       });
@@ -6356,7 +6362,7 @@ fn end_borrows_at_exits_in(
         // An end on the conditional's own lines that wasn't put into
         // its arms (`end_outer_borrows_in_arms`) can't be told apart
         // from the conditional; leave it.
-        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made)
+        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made, arm.break_carries.iter().any(|n| n == r.name()))
           || to.extract_rap().is_some_and(|l| l.is_fn())
           || ends_on_every_path(&arm.e_data, r, to)
         {
