@@ -54,4 +54,20 @@ fn main() {
     shared_loop();
     reassigned();
     through_deref();
+    live_at_write();
+}
+
+fn pick<'a>(_old: &i32, new: &'a i32) -> &'a i32 {
+    new
+}
+
+// The write reads w's old value, so p's loan is live up to the write and
+// ends there, on the row where q's loan starts (`p = 5;` just before it
+// would be E0506).
+fn live_at_write() {
+    let p = 1;
+    let q = 2;
+    let mut w = &p;
+    w = pick(w, &q);
+    println!("{}", w);
 }
