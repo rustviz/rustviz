@@ -2340,6 +2340,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // a = &c (where c is &&i32)
             ResourceTy::Value(_) => {
               let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
+              self.hand_loan_to_carriers(lhs_rap.name(), &ref_data);
               let to_ro = match ref_data.lender {
                 ResourceTy::Anonymous => ResourceTy::Deref(lhs_rap.clone()),
                 _ => ref_data.lender.clone()
@@ -2405,6 +2406,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // its parts was drawn: in `(r1, r2) = (r2, r1)`, r1's
               // lender has changed by the time r2 is assigned)
               let precomputed = destructure_hid.and_then(|h| self.destructure_ref_data.remove(&h));
+              // The reference whose loan the new value is (#644): in a
+              // destructuring assignment, as found before any part was
+              // drawn. One the same statement reassigns (`(m1, m2) =
+              // (m2, m1)`) hands its loan over right away.
+              let (src_loan, taken_over_now) = match destructure_hid {
+                Some(h) => match self.destructure_ref_src.remove(&h) {
+                  Some((n, sp, now)) => (Some((n, sp)), now),
+                  None => (None, false),
+                },
+                None => (self.source_ref_loan(rhs_expr), false),
+              };
               let (mut new_lender, new_aliasing, new_static_lender, new_co_lenders) = match precomputed {
                 Some(d) => d,
                 None => self.get_ref_data_full(&rhs_expr),
@@ -2423,6 +2435,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               r.static_lender = new_static_lender;
               r.borrow_span = borrow_span_of(rhs_expr);
               r.co_lenders = new_co_lenders;
+              if taken_over_now {
+                self.note_ref_carrier(lhs_rap.name(), None);
+                if let Some((_, sp)) = src_loan {
+                  self.take_over_loan(lhs_rap.name(), sp);
+                }
+              } else {
+                self.note_ref_carrier(lhs_rap.name(), src_loan);
+              }
             }
 
             // ex:
@@ -4916,11 +4936,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     // A reference destination's new lender, before anything moves.
     let mut ref_data: HashMap<HirId, (ResourceTy, VecDeque<String>, Option<StaticLender>, Vec<ResourceTy>)> = HashMap::new();
+    let mut ref_src: HashMap<HirId, (String, rustc_span::Span, bool)> = HashMap::new();
     for (_, place, hid) in &assigns {
       let ty = self.tcx.typeck(place.hir_id.owner).node_type(place.hir_id);
       if ty.is_ref() {
         if let Some(src) = src_of.get(hid) {
           ref_data.insert(*hid, self.get_ref_data_full(src));
+          if let Some((n, sp)) = self.source_ref_loan(src) {
+            let now = dest_name.contains(&Some(n.clone()));
+            ref_src.insert(*hid, (n, sp, now));
+          }
         }
       }
     }
@@ -4937,6 +4962,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.destructure_srcs = src_of;
     self.destructure_moved = moved;
     self.destructure_ref_data = ref_data;
+    self.destructure_ref_src = ref_src;
     // Parts nothing is assigned to (`(a, _) = (s, t)`) are moved
     // into the temporary and dropped with it, at the end of the
     // statement. The temporary has no column, so the move's tooltip
@@ -4973,6 +4999,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.destructure_srcs.clear();
     self.destructure_moved.clear();
     self.destructure_ref_data.clear();
+    self.destructure_ref_src.clear();
     true
   }
 
