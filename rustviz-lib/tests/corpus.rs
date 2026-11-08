@@ -10743,8 +10743,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x acquires ownership of a resource",
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
-            "t.0 goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "t.1 goes out of scope. Its resource is dropped (including the String it holds, if any) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t.0 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "Move from t.0 to x",
