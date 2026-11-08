@@ -1460,10 +1460,58 @@ pub fn rc_call_of_expr(call: &Expr, tcx: &TyCtxt) -> Option<RcCall> {
 /// The function RAP for `call`'s result, with `Rc` clone / downgrade
 /// calls marked as such.
 pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> ResourceAccessPoint {
-  match rc_call_of_expr(call, tcx) {
+  let rap = match rc_call_of_expr(call, tcx) {
     Some(rc_call) => rap.with_rc_call(rc_call),
     None => rap,
+  };
+  // `Some(m) = f()`, `match f() { Ok(x) => .. }`, `f()?`: the variable
+  // gets the value inside what `f()` returns (#733).
+  let typeck = tcx.typeck(call.hir_id.owner);
+  let wrapper_of = || match typeck.expr_ty_opt(call).and_then(|t| t.ty_adt_def()).map(|d| tcx.item_name(d.did()).to_string()) {
+    Some(n) if n == "Option" => ("Option", "Some"),
+    Some(n) if n == "Result" => ("Result", "Ok"),
+    _ => ("", ""),
+  };
+  let is_binding = |p: &rustc_hir::Pat| matches!(p.kind, rustc_hir::PatKind::Binding(_, _, _, None));
+  let mut destructured = false;
+  let mut via_try = false;
+  match tcx.parent_hir_node(call.hir_id) {
+    rustc_hir::Node::Expr(parent) => match parent.kind {
+      ExprKind::Let(l) if l.init.hir_id == call.hir_id => destructured = !is_binding(l.pat),
+      ExprKind::Match(s, arms, _) if s.hir_id == call.hir_id => {
+        destructured = arms.first().map_or(false, |a| !is_binding(a.pat));
+      }
+      ExprKind::Call(_, [arg]) if arg.hir_id == call.hir_id => {
+        if let rustc_hir::Node::Expr(gp) = tcx.parent_hir_node(parent.hir_id) {
+          if let ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) = gp.kind {
+            via_try = true;
+          }
+        }
+      }
+      _ => {}
+    },
+    rustc_hir::Node::LetStmt(l) if l.init.map_or(false, |i| i.hir_id == call.hir_id) => {
+      destructured = !is_binding(l.pat);
+    }
+    _ => {}
   }
+  if via_try {
+    return rap.with_inside(wrapper_of().1.to_string());
+  }
+  if destructured {
+    return rap.with_inside(wrapper_of().0.to_string());
+  }
+  // `v.len() as i32`: the variable gets the result, converted (#733).
+  if let rustc_hir::Node::Expr(parent) = tcx.parent_hir_node(call.hir_id) {
+    if let ExprKind::Cast(inner, _) = parent.kind {
+      if inner.hir_id == call.hir_id && typeck.expr_ty_opt(call) != typeck.expr_ty_opt(parent) {
+        if let Some(ty) = typeck.expr_ty_opt(parent) {
+          return rap.with_cast_to(ty.to_string());
+        }
+      }
+    }
+  }
+  rap
 }
 
 pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> ResourceTy {

@@ -2472,10 +2472,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // value" Binds on line 2 with no arrow from `parse`.
         must_contain: &[
             "Copy from parse to n",
-            "n is initialized with a copy of parse",
+            "n is initialized with the value inside the Ok that parse() returns",
             "Copy from n to Ok",
         ],
         must_not_contain: &[
+            "n is initialized with the value parse() returns",
             "n is bound to a copyable value",
         ],
     },
@@ -2486,9 +2487,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // chain (`map`).
         must_contain: &[
             "Copy from map to n",
-            "n is initialized with a copy of map",
+            "n is initialized with the value inside the Ok that map() returns",
         ],
         must_not_contain: &[
+            "n is initialized with the value map() returns",
             "n is bound to a copyable value",
         ],
     },
@@ -2907,7 +2909,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "into_iter reads from r",
             "len reads from v (implicitly borrowed)",
             "v goes out of scope. Its resource is dropped.",
-            "n is initialized with a copy of count",
+            "n is initialized with the value count() returns",
             "Copy from count to n",
         ],
         must_not_contain: &[
@@ -3167,12 +3169,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the arm. Its uses used to be skipped (unregistered local).
         must_contain: &[
             "Copy from checked_mul to m",
-            "m is initialized with a copy of checked_mul",
+            "m is initialized with the value inside the Option checked_mul() returns",
             "m goes out of scope",
             "describe reads from s",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            "m is initialized with the value checked_mul() returns",
             "s's resource is moved",
         ],
     },
@@ -3433,7 +3436,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // and gets the fn's return value.
         must_contain: &[
             "area holds a copyable value",
-            "area is initialized with a copy of area",
+            "area is initialized with the value area() returns",
             "area goes out of scope",
         ],
         must_not_contain: &[],
@@ -3456,7 +3459,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "len holds a copyable value",
             "len reads from s (implicitly borrowed)",
-            "n is initialized with a copy of len",
+            "n is initialized with the value len() returns",
         ],
         must_not_contain: &[
             "Pass by immutable reference from s to len",
@@ -3488,9 +3491,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow ended on the same line, leaving no creation event and
         // "No resource is dropped." (the moved-out owner wording).
         must_contain: &[
-            "n is initialized with a copy of count",
-            "k is initialized with a copy of sum",
-            "w is initialized with a copy of count",
+            "n is initialized with the value count() returns",
+            "k is initialized with the value sum() returns",
+            "w is initialized with the value count() returns",
             "Copy from sum to k",
             "Copy from count to w",
             "k goes out of scope",
@@ -4208,11 +4211,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // certainly not the function `get`.
         must_contain: &[
             "x is initialized with a copy of head",
-            "y is initialized with a copy of get",
+            "y is initialized with the value inside the Option get() returns",
             "Return immutably borrowed resource from x to v",
             "Return immutably borrowed resource from y to v",
         ],
         must_not_contain: &[
+            "y is initialized with the value get() returns",
             "Return immutably borrowed resource from x to *x",
             "Return immutably borrowed resource from y to *y",
             "Return immutably borrowed resource from x to head",
@@ -4937,7 +4941,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "closure_call_result",
         must_contain: &[
             "Closure add_one is bound",
-            "y is initialized with a copy of add_one",
+            "y is initialized with the value add_one() returns",
             "Copy from add_one to y",
         ],
         must_not_contain: &[
@@ -5770,7 +5774,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // inner block's `x` ends at the block's `}` (#173).
         must_contain: &[
             "len reads from spaces",
-            "spaces₂ is initialized with a copy of len",
+            "spaces₂ is initialized with the value len() returns",
             "Copy from len to spaces₂",
             "x₂ is bound to a copyable value",
             "x₂ goes out of scope",
@@ -6197,7 +6201,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from x₂ to y",
             "y is initialized with a copy of x₂",
             // type_change
-            "w₂ is initialized with a copy of len",
+            "w₂ is initialized with the value len() returns",
             // move_into_new
             "Move from m to m₂",
             "m goes out of scope. No resource is dropped.",
@@ -6262,7 +6266,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // binding, `return r;` dropped r₂ there and not r.
         must_contain: &[
             // block_then_outer
-            "a₂ is initialized with a copy of len",
+            "a₂ is initialized with the value len() returns",
             "a₂ goes out of scope",
             "Move from a to t",
             "a goes out of scope. No resource is dropped.",
@@ -6307,7 +6311,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // match_same_name
             "Partial move from o to o₂",
             // while_let_outer
-            "x₂ is initialized with a copy of next",
+            "x₂ is initialized with the value inside the Option next() returns",
             "x is bound to a copyable value",
             // for_outer
             "Move from ys to y₂",
@@ -6330,6 +6334,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w₂ is initialized with a copy of b",
         ],
         must_not_contain: &[
+            "x₂ is initialized with the value next() returns",
             "z₂",
             "z is assigned a copy of b",
             // Not "a different variable": the earlier one is still in scope.
@@ -8713,11 +8718,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // in the loop body. It's an i32: no drop text at its end (its
         // end used to be ordered before its use in the body).
         must_contain: &[
-            "x is initialized with a copy of pop",
+            "x is initialized with the value inside the Option pop() returns",
             "x goes out of scope",
             "v is live in a conditional expression ",
         ],
         must_not_contain: &[
+            "x is initialized with the value pop() returns",
             "x is live in a conditional expression ",
             "x has no value yet",
             "x goes out of scope. No resource is dropped.",
@@ -12533,14 +12539,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "cast_let_binding",
         must_contain: &[
-            "n is initialized with a copy of len",
-            "m is initialized with a copy of len",
+            "n is initialized with the value len() returns, converted to i32",
+            "m is initialized with the value len() returns",
             "n holds a copyable value",
             "b is initialized with a copy of a",
             "c is bound to a copyable value",
             "e is initialized with a copy of *d",
         ],
-        must_not_contain: &[],
+        // `len` is a method: nothing is "a copy of len" (#733).
+        must_not_contain: &[
+            "n is initialized with a copy of len",
+            "m is initialized with a copy of len",
+        ],
     },
     // A struct declared in an `if` arm: its field columns end with it, and
     // its scope end doesn't claim its fields were moved out (#730). On main,
