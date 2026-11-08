@@ -5538,6 +5538,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           self.update_rap(&r.clone(), line_num);
         }
         self.add_ev(line_num, evt, lhs, rty, false);
+      } else {
+        // A field of a temporary (`let k = (u, 1).1;`): no column to copy
+        // or move it from, but the variable still gets its value (#737).
+        let line_num = span_to_line(&inner.span, &self.tcx);
+        self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
       }
     }
     // explicitly using return keyword
