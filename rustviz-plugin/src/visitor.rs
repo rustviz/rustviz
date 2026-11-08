@@ -4706,12 +4706,29 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     );
                     self.unlent_refs.insert(pat_name.clone());
                   } else if pat_ty.is_ref() {
+                    // `for x in v.iter_mut()`: the loan came from `v`;
+                    // `iter_mut` is the method that lent it, not the
+                    // variable x hands the borrow back to (#749).
+                    let lender = match head_arg.kind {
+                      // Only an owner lends by autoref: a reference
+                      // receiver (`text.split_whitespace()` with
+                      // `text: &str`) is copied, so nothing is lent from it.
+                      ExprKind::MethodCall(_, recv, _, _)
+                        if !self.tcx.typeck(recv.hir_id.owner).node_type(recv.hir_id).is_ref() =>
+                      {
+                        match get_rap(recv, &self.tcx, &self.raps) {
+                          r @ ResourceTy::Value(_) => r,
+                          _ => head_rty.clone(),
+                        }
+                      }
+                      _ => head_rty.clone(),
+                    };
                     self.add_ref(
                       pat_name.clone(),
                       bool_of_mut(pat_ty.ref_mutability().unwrap()),
                       false,
                       for_line,
-                      head_rty.clone(),
+                      lender,
                       std::collections::VecDeque::new(),
                       self.current_scope,
                       false,
