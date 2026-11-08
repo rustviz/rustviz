@@ -1760,14 +1760,36 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             None => String::new(),
         };
     }
-    if let ViaCarrier::PatternBinding { from_call, moved } = carrier {
+    if let ViaCarrier::PatternBinding { from_call, moved, field_of } = carrier {
         // `Some(x)` on `third` / on `v.get(2)` (#391): x is the
         // reference stored in that value (copied, or moved for `&mut`).
+        // With `field_of`, the binding is a struct `x` and the borrower
+        // its reference field `x.part` (#692).
         let how = if moved { "moved" } else { "copied" };
-        return if from_call {
-            format!(": {0} is a reference {1} out of the value {2} returned", to_fmt, how, func_fmt)
+        let bound = to_name.rsplit_once('.').map_or(to_name.as_str(), |(b, _)| b);
+        let head = match (field_of, from_call) {
+            (false, true) => format!(": {0} is a reference {1} out of the value {2} returned", to_fmt, how, func_fmt),
+            (false, false) => format!(": {0} is a reference {1} out of {2}", to_fmt, how, func_fmt),
+            (true, true) => format!(": {0} is a reference that came with the value {1} returned, {2} into {3}", to_fmt, func_fmt, how, fmt_style(&bound.to_owned())),
+            (true, false) => format!(": {0} is a reference that came with the value {1} out of {2} into {3}", to_fmt, how, func_fmt, fmt_style(&bound.to_owned())),
+        };
+        // Several lenders, or a signature that also ties the value to
+        // an argument with no column: rustc's lifetimes let the
+        // reference point into any of them (#681).
+        // `tie` is set only when every reference in the value has the
+        // lifetime it describes.
+        let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+        let tied = !tie.tied.is_empty();
+        return if tied && (names.len() >= 2 || tie.tied.len() >= 2 || also_unnamed) {
+            format!("{}; {}", head, signature_tie(&func_fmt, "that value", "point into", to_name, &names, also_unnamed, tie))
+        } else if names.len() < 2 {
+            head
+        } else if from_call {
+            format!("{}, so it may point into {}, and {} while {} is in use",
+                head, either_word(names.len()), kept_words(&names, false), to_fmt)
         } else {
-            format!(": {0} is a reference {1} out of {2}", to_fmt, how, func_fmt)
+            format!("{}; {} borrows from {}, so it may point into {}, and {} while {} is in use",
+                head, func_fmt, join_names(&names), either_word(names.len()), kept_words(&names, false), to_fmt)
         };
     }
     // A value that isn't a reference (`let it = v.iter();`) or a
@@ -1781,14 +1803,49 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
     let point = if carrier == ViaCarrier::Value { "borrow from" } else { "point into" };
-    fn join(items: &[String]) -> String {
-        match items.len() {
-            0 => String::new(),
-            1 => items[0].clone(),
-            2 => format!("{} and {}", items[0], items[1]),
-            n => format!("{}, and {}", items[..n - 1].join(", "), items[n - 1]),
-        }
+    let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+    // `Some(Pair { l: &s, r: &t })` / `Some([&s, &t])`: the one argument
+    // holds every borrow itself; the signature merges nothing.
+    if tie.holds_all && names.len() >= 2 && !also_unnamed && tie.unnamed == 0 {
+        return format!(
+            ": {0} holds the borrows its argument holds: {1}, and {2} while {0} is in use{3}",
+            to_fmt, join_names(&names), kept_words(&names, false), not_ref
+        );
     }
+    format!(": {}{}", signature_tie(&func_fmt, &format!("the {} it returns", noun), point, to_name, &names, also_unnamed, tie), not_ref)
+}
+
+/// `a and b` / `a, b, and c`.
+fn join_names(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        2 => format!("{} and {}", items[0], items[1]),
+        n => format!("{}, and {}", items[..n - 1].join(", "), items[n - 1]),
+    }
+}
+
+fn either_word(n: usize) -> &'static str {
+    if n == 2 { "either" } else { "any of them" }
+}
+
+/// `both stay borrowed` / `all of them stay borrowed`, or the names
+/// when some of the tied arguments have no column.
+fn kept_words(names: &[String], unnamed: bool) -> String {
+    match (names.len(), unnamed) {
+        (2, false) => "both stay borrowed".to_owned(),
+        (_, false) => "all of them stay borrowed".to_owned(),
+        (_, true) => format!("{} stay borrowed", join_names(names)),
+    }
+}
+
+/// `{func}'s signature gives {what} the same lifetime as both
+/// arguments, so it may point into either, and both stay borrowed
+/// while x is in use`: which of the call's arguments the signature
+/// ties its result to, and what that means for `to_name` when the
+/// result borrows from several variables (`names`, already styled).
+fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, names: &[String], also_unnamed: bool, tie: &ArgTie) -> String {
+    let join = join_names;
     fn ordinal(i: usize) -> String {
         const NAMES: [&str; 10] = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
         NAMES.get(i).map(|s| s.to_string()).unwrap_or_else(|| format!("{}th", i + 1))
@@ -1831,22 +1888,18 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             (k, _) => format!(" ({} of them are values with no column here)", count_word(k)),
         });
     }
-    let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+    let to_fmt = fmt_style(to_name);
     let unnamed_slots = tie.unnamed.max(usize::from(also_unnamed));
     let tail = if names.len() >= 2 {
-        let either = if names.len() + unnamed_slots == 2 { "either" } else { "any of them" };
-        let kept = match (names.len(), unnamed_slots > 0) {
-            (2, false) => "both stay borrowed".to_owned(),
-            (_, false) => "all of them stay borrowed".to_owned(),
-            (_, true) => format!("{} stay borrowed", join(&names)),
-        };
+        let either = either_word(names.len() + unnamed_slots);
+        let kept = kept_words(names, unnamed_slots > 0);
         format!(", so it may {} {}, and {} while {} is in use", point, either, kept, to_fmt)
     } else if names.len() == 1 && (tied_count >= 2 || also_unnamed) {
-        format!(", so {} stays borrowed while {} is in use", names[0], fmt_style(to_name))
+        format!(", so {} stays borrowed while {} is in use", names[0], to_fmt)
     } else {
         String::new()
     };
-    format!(": {0}'s signature gives the {1} it returns the same lifetime as {2}{3}{4}", func_fmt, noun, tied, tail, not_ref)
+    format!("{0}'s signature gives {1} the same lifetime as {2}{3}", func_fmt, what, tied, tail)
 }
 
 // 1   0
@@ -2178,12 +2231,13 @@ pub fn state_holder_starts_empty(my_name: &String) -> String {
 // The holder's dot where its value starts borrowing `from`. When
 // `from` is itself a reference (a reference parameter `v: &Vec<i32>`
 // in `let it = v.iter();`; #393), the value borrows the data `from`
-// points to, not the reference.
-pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool) -> String {
+// points to, not the reference. A lender with nothing to drop (an
+// `i32`) holds a "value", not a "resource" (#484).
+pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool, from_is_copy: bool) -> String {
     let what = if from_is_ref {
         format!("the data {} points to", fmt_style(from_name))
     } else {
-        format!("{}'s resource", fmt_style(from_name))
+        format!("{}'s {}", fmt_style(from_name), if from_is_copy { "value" } else { "resource" })
     };
     format!(
         "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",

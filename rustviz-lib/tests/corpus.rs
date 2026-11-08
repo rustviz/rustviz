@@ -1111,6 +1111,16 @@ const EXPECTED_OK: &[&str] = &[
     "cast_let_binding",
     "struct_in_branch_field_scope_end",
     "block_tail_copy_order",
+    // A reference bound by a pattern borrows every variable rustc's
+    // lifetimes let it point into (#681), and a struct binding's
+    // reference field borrows what the matched value's field did (#692).
+    "pattern_ref_several_lenders",
+    "pattern_struct_ref_field",
+    // A holder's borrow end in an arm doesn't push the lines before
+    // it down a row (#712).
+    "holder_mut_moved_by_pattern",
+    // A literal aggregate passed to `Some` holds all its borrows (#711).
+    "holds_all_literal_arg",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5407,6 +5417,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Overwriting a String through the stored reference drops the
             // old String; no column shows it, so the tooltip says it.
             "*names[0] acquires ownership of a new resource; its previous resource is dropped",
+            // `vec![Holder { r: &mut z }]` holds a mutable borrow of z
+            // (#692), an i32: a value (#719).
+            "Mutable borrow from z to hs",
+            "hs holds a value that mutably borrows z's value (hs isn't a reference itself)",
+            "Return mutably borrowed value from hs to z",
         ],
         must_not_contain: &[
             "the resource slots points to is modified through *slots",
@@ -5472,18 +5487,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "pattern_struct_ref_fields",
         // `x.part` (a `&str` field of the struct bound by `if let
         // Some(x) = o`) is a reference, never an owner. It holds the
-        // reference `o` held, a borrow of `s` that RustViz doesn't
-        // carry through `o`, so no lender is named: no "from the
+        // reference `o` held, a borrow of `s` (#692): no "from the
         // caller", no return arrow to x.part or *x.part. `q`, a copy of
         // that reference, borrows what x.part borrows, not x.part.
+        // `w` holds a `&s` and a `&mut k`; RustViz records one kind of
+        // borrow per holder, so it doesn't track w's, and `y.e.part` /
+        // `y.m` still name no lender (#708).
         must_contain: &[
-            "x.part holds an immutable reference (it came with the value matched into x)",
+            "Immutable borrow from s to x.part: x.part is a reference that came with the value moved out of o into x",
             "Copy from x.part to q",
-            "q's immutable borrow ends",
+            "Return immutably borrowed resource from q to s",
+            "y.e.part holds an immutable reference (it came with the value matched into y)",
             "y.e.part's immutable borrow ends",
+            "y.m holds a mutable reference (it came with the value matched into y)",
             "y.m's mutable borrow ends",
         ],
         must_not_contain: &[
+            "x.part holds an immutable reference (it came with the value matched into x)",
+            // A borrow of the wrong kind (`s` is only read, `k` written).
+            "Mutable borrow from s to",
+            "Immutable borrow from k to",
             "x.part acquires ownership of a resource",
             "x.part is the owner of the resource",
             "x.part is an immutable borrow from the caller",
@@ -5512,13 +5535,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y.name acquires ownership of a resource",
             "y.name goes out of scope. Its resource is dropped.",
             "y.n goes out of scope",
-            "z.part holds an immutable reference (it came with the value matched into z)",
+            // z.part holds the reference `e` held, a borrow of `s` (#692).
+            "Immutable borrow from s to z.part: z.part is a reference that came with the value moved out of e into z",
+            "Return immutably borrowed resource from z.part to s",
             "z.part goes out of scope",
             "z.k goes out of scope",
             "w.name goes out of scope. Its resource is dropped.",
             "w.n goes out of scope",
         ],
         must_not_contain: &[
+            "z.part holds an immutable reference (it came with the value matched into z)",
             "y.n has no value yet",
             "z.part has no value yet",
             "z.k has no value yet",
@@ -7245,6 +7271,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a to h.r",
             "a's resource is moved",
             "Return mutably borrowed resource from h.r to t",
+            "Immutable borrow from z to hs",
+            "borrows z's resource",
         ],
     },
     // ─── Reads through a reference stored in an element (#438) ──────
@@ -7828,8 +7856,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from lens to s",
             "Return immutably borrowed value from lens to k",
             "Move from lens to sum",
+            // k is an i32: a value, not a resource (#484, #719).
+            "lens holds a value that immutably borrows k's value (lens isn't a reference itself)",
         ],
         must_not_contain: &[
+            "borrows k's resource",
             ", through the value chars returned",
             ", through the value map returned",
             "Move from map to lens",
@@ -12583,6 +12614,93 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    // #681: `pick<'a>(&'a String, &'a String) -> Option<&'a String>`
+    // gives the reference in its result the lifetime of both arguments,
+    // so `x` in `Some(x)` may point into either, and rustc keeps both
+    // `a` and `b` borrowed while x is in use. Same through a holder
+    // (`o`). `two` gives each element its own lifetime: `l` borrows
+    // only `a`, `r` only `b`. `pick_str(&a, "literal")` may also point
+    // into the literal, which has no column.
+    TooltipExpect {
+        name: "pattern_ref_several_lenders",
+        must_contain: &[
+            "Immutable borrow from a to x: x is a reference copied out of the value pick returned; pick's signature gives that value the same lifetime as both arguments, so it may point into either, and both stay borrowed while x is in use",
+            "Immutable borrow from b to x: x is a reference copied out of the value pick returned; pick's signature gives that value the same lifetime as both arguments, so it may point into either, and both stay borrowed while x is in use",
+            "Return immutably borrowed resource from x to a",
+            "Return immutably borrowed resource from x to b",
+            "Immutable borrow from a to y: y is a reference copied out of o; o borrows from a and b, so it may point into either, and both stay borrowed while y is in use",
+            "Immutable borrow from b to y: y is a reference copied out of o; o borrows from a and b, so it may point into either, and both stay borrowed while y is in use",
+            "Return immutably borrowed resource from y to a",
+            "Return immutably borrowed resource from y to b",
+            "Immutable borrow from a to l: l is a reference copied out of the value two returned",
+            "Immutable borrow from b to r: r is a reference copied out of the value two returned",
+            "Return immutably borrowed resource from l to a",
+            "Return immutably borrowed resource from r to b",
+            "Immutable borrow from a to z: z is a reference copied out of the value pick_str returned; pick_str's signature gives that value the same lifetime as both arguments (the other is a value with no column here), so a stays borrowed while z is in use",
+        ],
+        must_not_contain: &[
+            // The lenders used to be left out.
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "y's immutable borrow ends (what it borrows from isn't shown)",
+            "l's immutable borrow ends (what it borrows from isn't shown)",
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            // Each element of `two`'s tuple has one lifetime.
+            "Immutable borrow from b to l",
+            "Immutable borrow from a to r",
+            "Return immutably borrowed resource from l to b",
+            "Return immutably borrowed resource from r to a",
+            // `two`'s signature doesn't give l the lifetime of both.
+            "two's signature gives that value the same lifetime",
+        ],
+    },
+    // #692: `x.part` in `Some(x)` on `o = Some(Part { part: &s })` holds
+    // the reference o held, so it borrows `s`, and so does `q`, copied
+    // out of it; s stays borrowed until q's last use. Same for a call's
+    // result (`m.part` borrows `t`), and a struct with two lifetimes
+    // gives each field its own lender (`w.l` -> s, `w.r` -> t).
+    TooltipExpect {
+        name: "pattern_struct_ref_field",
+        must_contain: &[
+            "Immutable borrow from s to o: Some's signature gives the value it returns the same lifetime as its argument; o isn't a reference, but its value holds one",
+            "Immutable borrow from s to x.part: x.part is a reference that came with the value moved out of o into x",
+            "Return immutably borrowed resource from q to s",
+            "Immutable borrow from t to m.part: m.part is a reference that came with the value make returned, moved into m",
+            "Return immutably borrowed resource from m.part to t",
+            "Immutable borrow from s to p: p holds the borrows its argument holds: s and t, and both stay borrowed while p is in use; p isn't a reference, but its value holds one",
+            "Immutable borrow from s to w.l: w.l is a reference that came with the value moved out of p into w",
+            "Immutable borrow from t to w.r: w.r is a reference that came with the value moved out of p into w",
+            "Return immutably borrowed resource from w.l to s",
+            "Return immutably borrowed resource from w.r to t",
+        ],
+        must_not_contain: &[
+            // The fields' lenders used to be left out.
+            "x.part holds an immutable reference (it came with the value matched into x)",
+            "m.part holds an immutable reference (it came with the value matched into m)",
+            "w.l holds an immutable reference (it came with the value matched into w)",
+            "w.r holds an immutable reference (it came with the value matched into w)",
+            // Each field has its own lifetime.
+            "Immutable borrow from t to w.l",
+            "Immutable borrow from s to w.r",
+            // `Pair { l: &s, r: &t }` holds both; nothing is chosen (#711).
+            "so it may borrow from either",
+        ],
+    },
+    // #711: the one argument of `Some` already holds `&s` and `&t`
+    // (separate fields, or two array elements), so the result holds all
+    // of them. "May borrow from either" is only for one reference whose
+    // lifetime joins separate arguments (`pick(&a, &b)`).
+    TooltipExpect {
+        name: "holds_all_literal_arg",
+        must_contain: &[
+            "Immutable borrow from s to p: p holds the borrows its argument holds: s and t, and both stay borrowed while p is in use; p isn't a reference, but its value holds one",
+            "Immutable borrow from t to p: p holds the borrows its argument holds: s and t, and both stay borrowed while p is in use; p isn't a reference, but its value holds one",
+        ],
+        must_not_contain: &[
+            "so it may borrow from either",
+            "may point into either",
+            "same lifetime as its argument",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13541,6 +13659,52 @@ fn irrefutable_iflet_moving_a_mutref_field_returns_once() {
     let back = dots_with_tooltip(&timeline, "s's resource is no longer mutably borrowed");
     assert_eq!(back.len(), 1, "s's dots where the borrow ends: {:?}", back);
     assert!(dots_with_tooltip(&timeline, "s is live in a conditional expression").is_empty());
+}
+
+/// #681 / #692: a reference bound by a pattern keeps what it borrows
+/// borrowed until rustc ends the loan: `a` and `b` until `x`'s
+/// `println!`, not just for the call to `pick`; `s` until `q`'s
+/// `println!`, through `o`, `x.part` and `q`. And `o`'s borrow end,
+/// listed in the arm after the move out of `o`, doesn't push the lines
+/// before it down a row: `let q = x.part;` is drawn on its own row (#712).
+#[test]
+fn pattern_bound_references_keep_their_lenders_borrowed() {
+    let rv = run_with_local_backend("pattern_ref_several_lenders");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let call = code_row_y(&code, "if let Some(x) = pick(&a, &b) {");
+    let used = code_row_y(&code, "println!(\"{}\", x);");
+    for v in ["a", "b"] {
+        let back = dots_listing_tooltip(&timeline, &format!("{v}'s resource is no longer immutably borrowed"));
+        assert!(
+            back.iter().any(|d| (d.1 - used).abs() < 1.0),
+            "{v} isn't given back on x's println! row (y={used}): {back:?}",
+        );
+        assert!(
+            !back.iter().any(|d| (d.1 - call).abs() < 1.0),
+            "{v} is given back on the call's row (y={call}): {back:?}",
+        );
+    }
+
+    let rv = run_with_local_backend("pattern_struct_ref_field");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let bind = code_row_y(&code, "if let Some(x) = o {");
+    let copy = code_row_y(&code, "let q = x.part;");
+    let used = code_row_y(&code, "println!(\"{}\", q);");
+    let lent = dots_listing_tooltip(&timeline, "s's resource is immutably borrowed by x.part; s is read-only while the borrow is live");
+    assert!(lent.len() == 1 && (lent[0].1 - bind).abs() < 1.0, "s isn't lent to x.part on the if-let row (y={bind}): {lent:?}");
+    let init = dots_listing_tooltip(&timeline, "q is initialized with a copy of x.part");
+    assert!(init.len() == 1 && (init[0].1 - copy).abs() < 1.0, "q isn't initialized on its own row (y={copy}): {init:?}");
+    let back = dots_listing_tooltip(&timeline, "s's resource is no longer immutably borrowed");
+    assert!(back.iter().any(|d| (d.1 - used).abs() < 1.0), "s isn't given back on q's println! row (y={used}): {back:?}");
+    assert!(!back.iter().any(|d| d.1 < used - 1.0), "s is given back before q's last use (y={used}): {back:?}");
+
+    // The same for a `&mut` holder moved by the pattern: `o`'s borrow
+    // end used to push `x.push('a')` down onto the `println!` row (#712).
+    let rv = run_with_local_backend("holder_mut_moved_by_pattern");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let used = code_row_y(&code, "println!(\"{}\", x);");
+    let ends = dots_listing_tooltip(&timeline, "x's mutable borrow ends");
+    assert!(ends.len() == 1 && (ends[0].1 - used).abs() < 1.0, "x's borrow doesn't end on its println! row (y={used}): {ends:?}");
 }
 
 /// The timeline y of the code-panel row showing source line `src`

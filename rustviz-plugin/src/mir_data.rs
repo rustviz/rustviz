@@ -11,8 +11,8 @@ use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_to_line, w
 use log::info;
 use rustc_middle::mir::{BorrowKind, Location, Local, Operand, ProjectionElem, TerminatorKind, VarDebugInfoContents};
 use rustc_middle::mir::visit::Visitor;
-use rustc_middle::ty::Ty;
-use std::collections::HashMap;
+use rustc_middle::ty::{GenericArgKind, RegionVid, Ty, TyKind};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
 use rustc_utils::SpanExt;
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, BorrowIndex, Borrows, RustcFacts};
@@ -455,6 +455,74 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             .filter(|l| lines.0 <= *l && *l <= lines.1)
             .max();
         last
+    }
+
+    /// The variables whose loans rustc's borrow checker puts in the
+    /// lifetimes of `name`'s type, or of its field `name.f.g` when
+    /// `fields` is `["f", "g"]`: what a reference stored there may
+    /// point into. `if let Some(x) = pick(&a, &b)` with `pick<'a>(&'a
+    /// String, &'a String) -> Option<&'a String>` gives `{a, b}`: the
+    /// signature makes both loans flow into x's lifetime (#681). A
+    /// loan is named by the base variable of the place it borrows
+    /// (`s` for `&s`, `&s.f` and `&*s`), with whether one of its loans
+    /// there is mutable.
+    ///
+    /// `None` when this body has no MIR local named `name` (a binding
+    /// inside a closure), or a field in `fields` isn't found.
+    pub fn loans_held_by(&self, name: &str, fields: &[&str]) -> Option<BTreeMap<String, bool>> {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let names = self.mir_local_names(bwf);
+        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
+        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
+        if locals.is_empty() {
+            return None;
+        }
+        let mut regions: BTreeSet<RegionVid> = BTreeSet::new();
+        for local in locals {
+            let mut ty = body.local_decls[local].ty;
+            for f in fields {
+                ty = self.field_ty_named(ty, f)?;
+            }
+            for arg in ty.walk() {
+                if let GenericArgKind::Lifetime(r) = arg.kind() {
+                    if r.is_var() {
+                        regions.insert(r.as_var());
+                    }
+                }
+            }
+        }
+        let facts = bwf.input_facts.as_ref()?;
+        let p_output = Output::compute(facts, Algorithm::Naive, true);
+        let mut held: BTreeSet<Loan> = BTreeSet::new();
+        #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a BTreeSet")]
+        for origins in p_output.origin_contains_loan_at.values() {
+            for (origin, loans) in origins.iter() {
+                if regions.contains(&RegionVid::from(*origin)) {
+                    held.extend(loans.iter().copied());
+                }
+            }
+        }
+        let mut out: BTreeMap<String, bool> = BTreeMap::new();
+        for loan in held {
+            let b = &bwf.borrow_set[loan];
+            if let Some(n) = self.src_name_of_local(Some(b.borrowed_place().local), &names) {
+                *out.entry(n).or_insert(false) |= b.kind().mutability().is_mut();
+            }
+        }
+        Some(out)
+    }
+
+    /// The type of field `f` (a name, or a tuple index) of a struct or
+    /// tuple type `ty`, with `ty`'s own lifetimes.
+    fn field_ty_named(&self, ty: Ty<'tcx>, f: &str) -> Option<Ty<'tcx>> {
+        match ty.kind() {
+            TyKind::Adt(adt, args) if adt.is_struct() => adt.non_enum_variant().fields.iter()
+                .find(|fd| fd.name.as_str() == f)
+                .map(|fd| fd.ty(self.tcx, args)),
+            TyKind::Tuple(tys) => f.parse::<usize>().ok().and_then(|i| tys.get(i).copied()),
+            _ => None,
+        }
     }
 
     // would be nice to use MIR to figure out where drops occur rather than our own internal state logic

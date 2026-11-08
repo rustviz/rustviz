@@ -4013,6 +4013,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   } else {
                     None
                   };
+                  // Borrows the bindings take from what the scrutinee
+                  // borrows (#391) follow all the bindings, as in
+                  // `register_iflet_let_bindings`.
+                  let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
                   for (i, p) in pat_list.iter().enumerate() {
                     let parent_idx = if same_arity { i } else { 0 };
                     let (parent, parent_ty) = match part_parents.as_ref().and_then(|v| v[i].1.clone()) {
@@ -4048,19 +4052,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                         ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
                         _ => guard_expr,
                       };
-                      let borrow = self.pattern_ref_copy_borrow(to_ro, e, scrutinee);
+                      pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
                       // add_external_event gives a struct's fields their
                       // part of a whole (non-partial) move; otherwise
                       // that's done below.
                       if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
                         member_binds.push(to_ro.clone());
                       }
-                      for ev in std::iter::once(ext_ev).chain(borrow) {
-                        if inline {
-                          self.add_external_event(pat_line, ev);
-                        } else {
-                          branch_e_data.push((pat_line, ev));
-                        }
+                      if inline {
+                        self.add_external_event(pat_line, ext_ev);
+                      } else {
+                        branch_e_data.push((pat_line, ext_ev));
                       }
                       match e {
                         Evt::SBorrow => {
@@ -4073,9 +4075,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       }
                     }
                   }
+                  for ev in pending_borrows {
+                    if inline {
+                      self.add_external_event(pat_line, ev);
+                    } else {
+                      branch_e_data.push((pat_line, ev));
+                    }
+                  }
                 }
                 // <expr> => <expr> (just a singleton variable)
                 _ => {
+                  let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
                   for i in 0..parents.len() {
                     let mut associated_ro = Vec::new();
                     // `P { a, b } => …` on a struct variable: `a` / `b`
@@ -4099,16 +4109,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                         ExprKind::Tup(fields) if fields.len() == parents.len() => &fields[i],
                         _ => guard_expr,
                       };
-                      let borrow = self.pattern_ref_copy_borrow(to_ro, e, scrutinee);
+                      pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
                       if matches!(e, Evt::Move | Evt::Copy) && !inline {
                         member_binds.push(to_ro.clone());
                       }
-                      for ev in std::iter::once(ext_ev).chain(borrow) {
-                        if inline {
-                          self.add_external_event(pat_line, ev);
-                        } else {
-                          branch_e_data.push((pat_line, ev));
-                        }
+                      if inline {
+                        self.add_external_event(pat_line, ext_ev);
+                      } else {
+                        branch_e_data.push((pat_line, ext_ev));
                       }
                       match e {               // A borrow, mut/immut must be returned at the end of the block
                         Evt::SBorrow => {
@@ -4119,6 +4127,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                         }
                         _ => {}
                       }
+                    }
+                  }
+                  for ev in pending_borrows {
+                    if inline {
+                      self.add_external_event(pat_line, ev);
+                    } else {
+                      branch_e_data.push((pat_line, ev));
                     }
                   }
                 }

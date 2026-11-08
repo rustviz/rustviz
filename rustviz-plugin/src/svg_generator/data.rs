@@ -1042,6 +1042,10 @@ pub struct ArgTie {
     /// How many of the tied arguments have no column to draw (a
     /// literal, a value that isn't tracked).
     pub unnamed: usize,
+    /// The one tied argument is a literal aggregate (`Pair { l: &s, r: &t }`,
+    /// `[&s, &t]`): its value holds each of its borrows at once, so the
+    /// result holds all of them; nothing is chosen between them.
+    pub holds_all: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1064,8 +1068,11 @@ pub enum ViaCarrier {
     /// The borrower is a reference a pattern copied (or, for `&mut`,
     /// moved) out of a value that holds one (`Some(x)` on `third =
     /// v.get(2)`; #391). `func` names that value, or the function whose
-    /// result was matched when `from_call`.
-    PatternBinding { from_call: bool, moved: bool },
+    /// result was matched when `from_call`. With `field_of`, the
+    /// borrower is a reference field of a struct the pattern bound
+    /// (`x.part` for `Some(x)` on `o: Option<Part>`; #692), and `moved`
+    /// says how that struct was bound.
+    PatternBinding { from_call: bool, moved: bool, field_of: bool },
     /// The borrower is a closure variable bound to the closure a call
     /// returned (`let g = keep(|| s.len());`; #686), which holds the
     /// reference its capture made. `func` names the call; `through_ref`
@@ -2804,7 +2811,7 @@ impl Event {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref())
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref(), holds_copy_value(from))
                 } else {
                     hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }
@@ -2813,7 +2820,7 @@ impl Event {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref())
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref(), holds_copy_value(from))
                 } else {
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
                 }

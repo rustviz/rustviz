@@ -4079,9 +4079,18 @@ pub fn register_iflet_let_bindings(
     // the values they may take.
     let mut or_events: Vec<ExternalEvent> = Vec::new();
     let mut moved_by_pattern: Vec<ResourceTy> = Vec::new();
+    // The borrows the bindings take from what the scrutinee borrows
+    // (#391) follow all the bindings of their group: with `Some((l,
+    // r))` on a call, the renderer stacks `a -> l` and `b -> r` on rows
+    // of their own, and r's copy listed after `a -> l` was drawn below
+    // its own borrow.
+    let mut borrows: Vec<ExternalEvent> = Vec::new();
     let mut groups = [copies, others];
     for g in 0..groups.len() {
       if g == 1 && !groups[1].is_empty() {
+        for b in std::mem::take(&mut borrows) {
+            self.add_external_event(let_line, b);
+        }
         first_other = Some(*self.unique_id);
         or_events = self.if_let_or_conflict_events(&or_conflicts, &mut groups[1], let_line, &moved_into_scrutinee, &tuple_name);
       }
@@ -4100,9 +4109,7 @@ pub fn register_iflet_let_bindings(
         );
         self.add_external_event(let_line, event);
         *self.unique_id += 1;
-        if let Some(borrow) = self.pattern_ref_copy_borrow(&binding_rap, &evt_kind, scrutinee) {
-          self.add_external_event(let_line, borrow);
-        }
+        borrows.extend(self.pattern_ref_copy_borrow(&binding_rap, &evt_kind, scrutinee));
 
         // A struct binding's field columns (`x.name`, `x.n`) are
         // declared here too: they go out of scope with `x`, and in a
@@ -4123,6 +4130,9 @@ pub fn register_iflet_let_bindings(
             registered.insert(r);
         }
       }
+    }
+    for b in borrows {
+        self.add_external_event(let_line, b);
     }
     // A tuple-literal scrutinee moves its variables into the tuple
     // whether or not the pattern matches: show the ones the pattern
@@ -4145,36 +4155,83 @@ pub fn register_iflet_let_bindings(
 /// A by-value pattern binding of reference type out of a value that
 /// isn't a reference (`Some(x)` on `third: Option<&i32>`, or on
 /// `v.get(1)` directly) copies a reference stored in that value
-/// (#304), so it borrows what that reference borrows. When the
-/// matched value holds a borrow of exactly one variable we draw (a
-/// holder, #336, or a call whose signature ties its result to a
-/// variable, #171), record that variable as the binding's lender and
-/// return the borrow arrow to draw on the pattern's line (#391).
+/// (#304), so it borrows what that reference borrows. The matched
+/// value's lenders are the variables a holder borrows (#336), or those
+/// a call's signature ties its result to (#171); rustc's lifetimes say
+/// which of them the binding's reference can point into. Record them
+/// as the binding's lenders and return the borrow arrows to draw on
+/// the pattern's line (#391). `pick(&a, &b)` returning `Option<&'a
+/// String>` gives `x` both `a` and `b` (#681); a `(&'a str, &'b str)`
+/// gives each element only its own.
 ///
-/// Several lenders are left alone: the value may hold references
-/// with different lifetimes (`(&'a str, &'b str)`), and only rustc's
-/// regions, which are erased by now, say which one the binding got.
+/// A struct binding (`Some(x)` on `o: Option<Part>`) gets the same for
+/// each of its reference fields (`x.part`; #692).
 pub fn pattern_ref_copy_borrow(
   &mut self,
   binding: &ResourceAccessPoint,
   evt: &Evt,
   scrutinee: &'tcx Expr<'tcx>,
-) -> Option<ExternalEvent> {
-  if !binding.is_ref() || !matches!(evt, Evt::Copy | Evt::Move) {
-    return None;
+) -> Vec<ExternalEvent> {
+  if !matches!(evt, Evt::Copy | Evt::Move) {
+    return Vec::new();
   }
   let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
   if typeck.expr_ty(scrutinee).is_ref() {
-    return None;
+    return Vec::new();
   }
-  let name = binding.name().to_owned();
+  let moved = matches!(evt, Evt::Move);
+  if binding.is_ref() {
+    return self.pattern_ref_borrows(binding, binding.name(), &[], moved, false, scrutinee);
+  }
+  if !matches!(binding, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
+    return Vec::new();
+  }
+  let bound = binding.name().to_owned();
+  let mut out = Vec::new();
+  for member in self.struct_members_deep(&bound) {
+    if !member.is_ref() {
+      continue;
+    }
+    let path = member.name()[bound.len() + 1..].to_owned();
+    let fields: Vec<&str> = path.split('.').collect();
+    let evs = self.pattern_ref_borrows(&member, &bound, &fields, moved, true, scrutinee);
+    if !evs.is_empty() {
+      // The arrow says where the field's reference came from, in
+      // place of the dot that couldn't name a lender (#352).
+      let is_init = |ev: &ExternalEvent| matches!(ev, ExternalEvent::InitRefParam { param, in_pattern: Some(_), .. } if *param == member);
+      self.preprocessed_events.retain(|(_, ev)| !is_init(ev));
+      for evs_on_line in self.event_line_map.values_mut() {
+        evs_on_line.retain(|ev| !is_init(ev));
+      }
+    }
+    out.extend(evs);
+  }
+  out
+}
+
+/// `pattern_ref_copy_borrow` for one reference: the binding itself
+/// (`fields` empty) or a reference field `bound.f` of a struct binding
+/// (`in_field`).
+fn pattern_ref_borrows(
+  &mut self,
+  reference: &ResourceAccessPoint,
+  bound: &str,
+  fields: &[&str],
+  moved: bool,
+  in_field: bool,
+  scrutinee: &'tcx Expr<'tcx>,
+) -> Vec<ExternalEvent> {
+  let name = reference.name().to_owned();
   // `match third { Some(third) => .. }` shares third's column (#253);
   // the holder's own borrow already covers it.
   if self.holder_shadowed(&name) {
-    return None;
+    return Vec::new();
   }
-  if !matches!(self.borrow_map.get(&name).map(|rd| &rd.lender), Some(ResourceTy::Anonymous)) {
-    return None;
+  // Not yet given a lender: Anonymous for a binding, the `Caller`
+  // placeholder for a struct binding's reference field (#352).
+  let placeholder = if in_field { ResourceTy::Caller } else { ResourceTy::Anonymous };
+  if self.borrow_map.get(&name).map(|rd| &rd.lender) != Some(&placeholder) {
+    return Vec::new();
   }
   let mut lenders: Vec<ResourceTy> = Vec::new();
   for l in self.value_lenders(scrutinee) {
@@ -4182,41 +4239,74 @@ pub fn pattern_ref_copy_borrow(
       lenders.push(l);
     }
   }
-  if lenders.len() != 1 {
-    return None;
+  // Which of them the reference can point into: the variables whose
+  // loans rustc puts in its lifetime. A lender that is itself a
+  // reference (a parameter standing for the caller's data, #393)
+  // lends without a loan in this body, so it stays. A loan of the
+  // other kind (`&mut k` in the lifetime of a `&str` field that shares
+  // it) isn't drawn: the arrow would call it a borrow of the
+  // reference's own kind.
+  let is_mut = reference.is_mutref();
+  match self.loans_held_by(bound, fields) {
+    Some(held) => lenders.retain(|l| match l {
+      ResourceTy::Value(r) if !r.is_ref() => {
+        let base = r.name().split('.').next().unwrap_or_default();
+        held.get(base).is_some_and(|m| *m == is_mut)
+      }
+      _ => true,
+    }),
+    // Without rustc's lifetimes, only a single lender is certain.
+    None if lenders.len() > 1 || in_field => return Vec::new(),
+    None => {}
   }
-  let lender = lenders.remove(0);
+  if lenders.is_empty() {
+    return Vec::new();
+  }
   let (func, from_call) = match scrutinee.kind {
     ExprKind::MethodCall(seg, ..) => (seg.ident.as_str().to_owned(), true),
-    ExprKind::Call(fn_expr, _) => (hirid_to_var_name(fn_expr.hir_id, &self.tcx)?, true),
-    _ => (expr_to_rap_name(scrutinee, &self.tcx)?, false),
+    ExprKind::Call(fn_expr, _) => match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+      Some(f) => (f, true),
+      None => return Vec::new(),
+    },
+    _ => match expr_to_rap_name(scrutinee, &self.tcx) {
+      Some(n) => (n, false),
+      None => return Vec::new(),
+    },
   };
-  let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+  let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
   if let Some(rd) = self.borrow_map.get_mut(&name) {
-    rd.lender = lender.clone();
+    rd.lender = lenders[0].clone();
+    rd.co_lenders = lenders[1..].to_vec();
     rd.aliasing = aliasing;
   }
   self.pattern_copies.insert(name.clone());
   if from_call {
     // The call's result keeps the borrow past the call (#171).
-    self.mark_borrow_kept_by_result(scrutinee, std::slice::from_ref(&lender));
+    self.mark_borrow_kept_by_result(scrutinee, &lenders);
   }
-  let is_mut = binding.is_mutref();
+  // The signature's tie describes the reference only when the result
+  // has a single lifetime; the tooltip leaves it out otherwise.
+  let one_lifetime = from_call && self.call_result_has_one_lifetime(scrutinee);
   let via = BorrowVia {
     func,
-    lenders: vec![lender.name()],
-    also_unnamed: false,
-    tie: ArgTie::default(),
-    carrier: ViaCarrier::PatternBinding { from_call, moved: is_mut },
+    lenders: lenders.iter().map(|l| l.name()).collect(),
+    also_unnamed: one_lifetime && self.call_lenders_full(scrutinee).1,
+    tie: if one_lifetime { self.call_arg_tie(scrutinee, None) } else { ArgTie::default() },
+    carrier: ViaCarrier::PatternBinding { from_call, moved, field_of: in_field },
   };
-  let to = ResourceTy::Value(binding.clone());
-  let id = *self.unique_id;
-  *self.unique_id += 1;
-  Some(if is_mut {
-    ExternalEvent::MutableBorrow { from: lender, to, is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id }
-  } else {
-    ExternalEvent::StaticBorrow { from: lender, to, is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id }
-  })
+  let to = ResourceTy::Value(reference.clone());
+  let mut out = Vec::new();
+  for lender in lenders {
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    let via = Some(via.clone());
+    out.push(if is_mut {
+      ExternalEvent::MutableBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via, id }
+    } else {
+      ExternalEvent::StaticBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via, id }
+    });
+  }
+  out
 }
 
 /// `lhs` is a reference being bound to `call`'s result, and
@@ -5615,6 +5705,24 @@ pub fn print_out_of_scope(&mut self){
       };
       if let Some(kill) = chosen {
         data.lifetime = kill;
+      }
+    }
+    // A struct binding's reference field that a pattern gave a lender
+    // (`x.part` in `Some(x)`, #692) holds its loan while `x` is live:
+    // its last use is a use of `x`, which the visitor doesn't record
+    // for a field (`let q = x.part;`).
+    let mut field_ends: Vec<(String, usize)> = Vec::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec, each entry raised on its own")]
+    for name in self.pattern_copies.iter() {
+      let Some((bound, _)) = name.split_once('.') else { continue };
+      let Some(rd) = self.borrow_map.get(name) else { continue };
+      if let Some(last) = self.last_live_line(bound, (rd.assigned_at, usize::MAX)) {
+        field_ends.push((name.clone(), last));
+      }
+    }
+    for (name, last) in field_ends {
+      if let Some(rd) = self.borrow_map.get_mut(&name) {
+        rd.lifetime = rd.lifetime.max(last);
       }
     }
     // A reference that a pattern binding reborrows through stays
