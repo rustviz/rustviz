@@ -53,9 +53,9 @@ output with a backtrace while debugging, set `RUSTVIZ_DEBUG=1` or
 
 ## Limitations
 
-The authoritative list is in the top-level
-[`README.md`](../README.md#limitations) (mirrored in the playground's
-"Known limitations" panel). Known crashes are tracked as [issues labelled
+What RustViz can't draw correctly yet is tracked as [issues labelled
+`limitation`](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Alimitation);
+known crashes are [issues labelled
 `crash`](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash).
 The checklist below is the plugin's implementation-level TODO list.
 

@@ -25,28 +25,35 @@ writes through `&mut` mutate the referent, drops happen at scope end).
   `cargo install --locked --path rustviz-plugin`, or the tests silently
   exercise a stale build.
 
-## Keep the limitations lists in sync
+## Known gaps are issues, not README text
 
-What RustViz can't do is documented in two places. A PR that changes what
-the plugin supports (fixes wrong output, adds a construct, or discovers a
-new gap) updates both in the same PR:
+The README doesn't list limitations (maintainer decision, 2026-11-07); its
+Limitations section only links to the issue searches. What RustViz can't
+draw correctly yet is tracked as GitHub issues labelled `limitation`
+([search](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Alimitation)):
 
-1. `README.md` → **Limitations**, the canonical list. It describes `main`
-   exactly, so each fix PR deletes or rewrites the bullets it fixes.
-2. `playground/frontend/src/App.tsx` → the **Known limitations** panel
-   students see in the playground (a shorter, student-facing version).
+- A PR that fixes a gap closes its issue ("Fixes #N"); one that fixes
+  only part of it says "Part of #N" and leaves the issue open.
+- A newly found gap (wrong or missing output that isn't a crash) is filed
+  as an issue labelled `limitation`: minimal repro, current output,
+  expected output. Don't add limitation text to `README.md`.
+- `playground/frontend/src/App.tsx` → the **Known limitations** panel
+  students see in the playground (a short, student-facing list) is still
+  kept in sync with what `main` gets wrong, in the same PR, for now; its
+  future is decided at release prep.
 
-`rustviz-plugin/README.md` only links to the README list.
+`rustviz-plugin/README.md` only links to the issue searches.
 
-**Crashes are not listed in either place.** A plugin panic on valid Rust
-is tracked only as a GitHub issue labelled `crash` (minimal repro, and the
-file:line of the panic). Both lists just link to
+**Crashes are tracked only as issues labelled `crash`**, not `limitation`,
+and are listed in neither the README nor the playground panel. A plugin
+panic on valid Rust gets an issue labelled `crash` (minimal repro, and
+the file:line of the panic); the README and the panel just link to
 [that issue search](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash).
 A PR that fixes a crash closes its issue ("Fixes #N") and adds the repro as
 a fixture in `rustviz-plugin/tests/` with a corpus entry in
-`rustviz-lib/tests/corpus.rs`, so the crash stays fixed. A crash fix
-doesn't touch the limitations lists, unless the program now renders with
-something wrong; that goes in the lists as usual.
+`rustviz-lib/tests/corpus.rs`, so the crash stays fixed. If the program
+then renders with something wrong, that's a new `limitation` issue (and a
+panel entry, if students would hit it).
 
 ## Bumping the toolchain
 

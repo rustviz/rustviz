@@ -506,7 +506,8 @@ Issues and PRs welcome. Keep each PR focused on a single concern; for
 local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
 [`CLAUDE.md`](CLAUDE.md) has the project's ground rules (for human and AI
 contributors alike): tooltips must be semantically correct, tests must pin
-correct behaviour, and the limitations lists stay in sync.
+correct behaviour, and known gaps are tracked as issues labelled
+`limitation`.
 
 CI also lints the plugin for iteration over a `HashMap` / `HashSet`, whose
 order changes from run to run (#211). To run that lint locally:
