@@ -1205,6 +1205,9 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_tuple_scrutinee_nested",
     "or_pattern_tuple_scrutinee_struct",
     "reassign_partly_moved",
+    "return_ref_param_whole",
+    "return_ref_param_explicit",
+    "return_ref_param_reborrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13760,6 +13763,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a.n to x.n",
             "=a.n goes out of scope. Its resource is dropped.",
             "=b.n goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #754: a shared reference parameter returned as the fn's whole
+    // result (tail expression, or `return x;`). The reference is
+    // copied to the caller and the borrow carries on there, so main
+    // drew "x's immutable borrow ends" inside `id` (false).
+    TooltipExpect {
+        name: "return_ref_param_whole",
+        must_contain: &[
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "s's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "x's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "return_ref_param_explicit",
+        must_contain: &[
+            "a reference from x is returned to the caller; the data it points to is not copied",
+        ],
+        must_not_contain: &[
+            "x's immutable borrow ends",
+        ],
+    },
+    // #754: the same through a reborrow; main drew "list's immutable
+    // borrow ends" at the fn's end although `v` stays borrowed via `r`.
+    TooltipExpect {
+        name: "return_ref_param_reborrow",
+        must_contain: &[
+            "a reference from l is returned to the caller; the data it points to is not copied",
+            "the value list points to is immutably borrowed by l",
+            "v's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "list's immutable borrow ends",
         ],
     },
 ];
