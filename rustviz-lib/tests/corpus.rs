@@ -1143,6 +1143,8 @@ const EXPECTED_OK: &[&str] = &[
     // A holder moved into a `for` loop keeps its lender borrowed until
     // the loop ends (#722).
     "for_holder_borrow_end_722",
+    // An unbound struct update moves p's other fields into its temporary (#574).
+    "struct_update_unbound",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12910,6 +12912,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from o.inner.r to s",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_update_unbound",
+        // `P { n: 1, ..p };` moves p.name and p.tag (the fields it
+        // doesn't name that need drop) into the literal's temporary,
+        // which drops them at the end of the statement; `..q` with
+        // `name` given moves only q.tag, so q.name is still q's (and
+        // usable). Before (#574) nothing was drawn and p's fields each
+        // "went out of scope. Its resource is dropped."
+        must_contain: &[
+            "Move from p.name to (temporary)",
+            "Move from p.tag to (temporary)",
+            "Move from q.tag to (temporary 2)",
+            "p.name's resource is moved into a temporary that is dropped at the end of this statement",
+            "p.tag's resource is moved into a temporary that is dropped at the end of this statement",
+            "q.tag's resource is moved into a temporary that is dropped at the end of this statement",
+            "This temporary takes the value of p.name, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+            "This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "p.name goes out of scope. No resource is dropped.",
+            "p.tag goes out of scope. No resource is dropped.",
+            "p goes out of scope. p.name and p.tag were moved out earlier, so no resource is dropped.",
+            "q goes out of scope. q.tag was moved out earlier, so only q.name is dropped.",
+            "q.name goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=p.name goes out of scope. Its resource is dropped.",
+            "=p.tag goes out of scope. Its resource is dropped.",
+            "=q.tag goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+            "=q goes out of scope. Its resource is dropped.",
+            "Move from q.name to",
         ],
     },
 ];
