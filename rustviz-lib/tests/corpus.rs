@@ -1140,6 +1140,9 @@ const EXPECTED_OK: &[&str] = &[
     // A String lent in a loop branch that `break`s is still dropped (#759).
     "loop_break_borrow_scope_end",
     "field_write_in_arm_end_659",
+    // A holder moved into a `for` loop keeps its lender borrowed until
+    // the loop ends (#722).
+    "for_holder_borrow_end_722",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -17210,6 +17213,30 @@ fn no_split_or_join_dot_floats_off_its_column() {
         });
         assert_eq!(at.len(), n, "{}: {:?} is not on the dot of {:?} next on its column: {:?}",
             name, moved, onto, tooltip_lines(&timeline));
+    }
+}
+
+/// #722(a): `let it = v.iter_mut(); for x in it { .. }` moves `it` into
+/// the loop, which owns the iterator until it ends, so `v` is borrowed
+/// through the whole body (`v.len()` in it is E0502) and rustc ends the
+/// loan at the loop's end. (On main it was drawn at the last use of `x`,
+/// inside the body.)
+#[test]
+fn a_holder_moved_into_a_for_loop_ends_its_loan_at_the_loop_end() {
+    let rv = run_with_local_backend("for_holder_borrow_end_722");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (text, line) in [
+        ("v's resource is no longer mutably borrowed", "} // end of the for"),
+        ("it's mutable borrow ends", "} // end of the for"),
+        ("w's resource is no longer immutably borrowed", "} // end of the second for"),
+        ("it2's immutable borrow ends", "} // end of the second for"),
+    ] {
+        // (`v.push(3)` after the loop ends its own borrow with the same
+        // text: the loop's is the first.)
+        let mut ends = dots_listing_tooltip(&svg, text);
+        ends.sort_by(|a, b| a.1.total_cmp(&b.1));
+        assert!(!ends.is_empty(), "{}: no such dot", text);
+        assert_eq!(ends[0].1, code_row_y(&code, line), "{:?} should be on the row of `{}`: {:?}", text, line, ends);
     }
 }
 
