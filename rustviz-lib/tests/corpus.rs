@@ -9390,20 +9390,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u1's mutable reference is moved (not the value it points to)",
         ],
     },
-    // A dashed arm segment says what the dashes mean (#626): the arm isn't
-    // running on those lines, so nothing happens to the variable there.
+    // A dashed arm segment says which branch its line belongs to (#626).
     // Solid segments keep the ownership text. `c` has no arm columns.
     TooltipExpect {
         name: "dashed_arm_hover",
         must_contain: &[
-            "s on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to s here",
-            "t on the path through the _ branch: the _ branch isn't running on these lines (another branch's code is here), so nothing happens to t here",
-            "opt on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to opt here",
+            "This line is for the else branch. These lines are not part of that branch.",
+            "This line is for the _ branch. These lines are not part of that branch.",
             "s is the owner of the resource",
             "t is the owner of the resource",
         ],
         must_not_contain: &[
             "nothing happens to c here",
+            "on the path through",
+            "s on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to s here",
             "another arm's code is here",
             "the _ arm isn't running",
         ],
@@ -16412,7 +16412,7 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
 
 /// #626: the hover glow covers one stretch at a time. A `branch-group`
 /// is what `.branch-group:hover .tooltip-trigger` glows, so no group may
-/// hold both a dashed segment ("isn't running on these lines") and a
+/// hold both a dashed segment ("These lines are not part of that branch") and a
 /// solid one ("is the owner of the resource"); before, an arm's dashed
 /// and solid stretches glowed together as one piece.
 #[test]
@@ -16422,8 +16422,7 @@ fn dashed_and_solid_arm_stretches_glow_separately() {
     let (mut dashed_groups, mut solid_groups) = (0, 0);
     for group in timeline.split("<g class=\"branch-group\"").skip(1) {
         let group = &group[..group.find("</g>").unwrap_or(group.len())];
-        let dashed = group.contains("isn&#39;t running on these lines")
-            || group.contains("isn't running on these lines");
+        let dashed = group.contains("These lines are not part of that branch");
         let solid = group.contains("is the owner of the resource");
         assert!(
             !(dashed && solid),
