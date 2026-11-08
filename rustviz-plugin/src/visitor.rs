@@ -252,9 +252,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           walk.checks += 1;
         }
         let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, let_expr.pat.hir_id.owner);
-        let_expr.pat.each_binding(|_, hir_id, _, ident| {
+        // By column name: a binding that shadows a variable is `a₂`.
+        let_expr.pat.each_binding(|_, hir_id, _, _| {
           if typeck.node_type(hir_id).needs_drop(self.tcx, env) {
-            walk.drop_bindings.insert(ident.name.to_string());
+            walk.drop_bindings.insert(binding_name(&self.tcx, hir_id));
           }
         });
         let mark = self.preprocessed_events.len();
@@ -2959,10 +2960,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             bound
           } else if is_let_chain(guard_expr) {
             // `if let A = x && let B = y && cond` (#198): see
-            // visit_if_let_chain.
-            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-            let outer: HashSet<ResourceAccessPoint> =
-              self.raps.values().map(|rd| rd.rap.clone()).filter(|r| !r.is_fn()).collect();
+            // visit_if_let_chain. The variables in scope here: a name
+            // that was in scope earlier and has ended (an earlier `if
+            // let`'s binding `a`) is free for the chain's own bindings
+            // (#696).
+            let outer: HashSet<ResourceAccessPoint> = self.in_scope.iter()
+              .filter_map(|name| self.raps.get(name))
+              .map(|rd| rd.rap.clone()).filter(|r| !r.is_fn()).collect();
             if_hash_lo = self.rap_hashes;
             let mut decls = HashSet::new();
             let start = *self.unique_id;
