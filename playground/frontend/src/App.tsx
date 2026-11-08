@@ -426,10 +426,6 @@ const Description: React.FC = () => (
         <code>*cell.borrow_mut()</code> shows only the call, not the write.
       </li>
       <li>
-        In <code>fn f(ref s: String)</code>, <code>s</code> borrows the String{' '}
-        <code>f</code> owns; that String has no column, so its drop is stated only in the tooltip.
-      </li>
-      <li>
         A reference field of a struct bound by <code>if let</code>/
         <code>match</code> (<code>x.part</code>) isn&apos;t linked to what it
         borrows.

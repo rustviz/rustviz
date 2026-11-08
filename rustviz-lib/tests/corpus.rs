@@ -1034,6 +1034,9 @@ const EXPECTED_OK: &[&str] = &[
     // `if let`'s binding (#696), or shadows a variable in scope.
     "edition2024/if_let_chain_reused_name",
     "edition2024/if_let_chain_shadowing_binding",
+    // A `ref` binding of a by-value parameter borrows a `(parameter)`
+    // column of its own (#691).
+    "param_ref_value_column",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -4934,13 +4937,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (`&(ref x, y)`) or implicit (`(w, z): &(String, i32)`), do
         // borrow the caller's data.
         must_contain: &[
-            // The borrowed value has no column, so the tooltip states
-            // its drop (with the parameter, when the function returns;
-            // checked with a Drop-printing program). An i32 has none.
-            "s is an immutable borrow of the value passed to whole, which whole owns; that value is dropped when whole returns",
-            "a is an immutable borrow of part of the value passed to part, which part owns; that part is dropped when part returns",
-            "v is a mutable borrow of the value passed to grow, which grow owns; that value is dropped when grow returns",
-            "name is an immutable borrow of part of the value passed to field, which field owns; that part is dropped when field returns",
+            // The whole parameter's value has a `(parameter)` column of
+            // its own (#691): the caller's value arrives there, the
+            // binding borrows it, and it is dropped when the function
+            // returns (checked with a Drop-printing program).
+            "(parameter) is the value the caller passed to whole. whole owns it, and a ref binding borrows it",
+            "Immutable borrow from (parameter) to s",
+            "Return immutably borrowed resource from s to (parameter)",
+            "(parameter) is the value the caller passed to grow. grow owns it, and a ref binding borrows it",
+            "Mutable borrow from (parameter) to v",
+            "(parameter) goes out of scope. Its resource is dropped.",
+            // A `ref` inside a tuple or struct pattern borrows part of
+            // the parameter: that part gets the column (#698). An i32
+            // has nothing to drop, so no column.
+            "(parameter) is part of the value the caller passed to part. part owns it, and a ref binding borrows it",
+            "Immutable borrow from (parameter) to a",
+            "(parameter) is part of the value the caller passed to field. field owns it, and a ref binding borrows it",
+            "Immutable borrow from (parameter) to name",
             "n is an immutable borrow of the value passed to small, which small owns",
             "x is an immutable borrow from the caller",
             "w is an immutable borrow from the caller",
@@ -4948,10 +4961,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from t to part",
         ],
         must_not_contain: &[
-            "=s is an immutable borrow of the value passed to whole, which whole owns",
-            "=a is an immutable borrow of part of the value passed to part, which part owns",
-            "=v is a mutable borrow of the value passed to grow, which grow owns",
-            "=name is an immutable borrow of part of the value passed to field, which field owns",
+            "s is an immutable borrow of the value passed to whole",
+            "v is a mutable borrow of the value passed to grow",
+            "that value is dropped when whole returns",
+            "that value is dropped when grow returns",
+            "a is an immutable borrow of part of the value passed to part",
+            "name is an immutable borrow of part of the value passed to field",
+            "that part is dropped when part returns",
+            "that part is dropped when field returns",
             "n is an immutable borrow of the value passed to small, which small owns; that value is dropped when small returns",
             "s is an immutable borrow from the caller",
             "a is an immutable borrow from the caller",
@@ -4959,6 +4976,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "name is an immutable borrow from the caller",
             "x is an immutable borrow of",
             "w is an immutable borrow of",
+        ],
+    },
+    TooltipExpect {
+        name: "param_ref_value_column",
+        // Several `ref` bindings of by-value parameters that own a
+        // resource (#691): each parameter's value gets its own column,
+        // numbered like the temporaries (`(parameter)`, `(parameter 2)`),
+        // that its binding borrows and that is dropped where the
+        // function ends. The old plugin drew no such column and stated
+        // the drop only in each binding's tooltip.
+        must_contain: &[
+            "(parameter) is the value the caller passed to two. two owns it, and a ref binding borrows it",
+            "(parameter 2) is the value the caller passed to two. two owns it, and a ref binding borrows it",
+            "Immutable borrow from (parameter) to a",
+            "Immutable borrow from (parameter 2) to b",
+            "(parameter) goes out of scope. Its resource is dropped.",
+            "(parameter 2) goes out of scope. Its resource is dropped.",
+            // An i32 has nothing to drop: no column.
+            "n is an immutable borrow of the value passed to small, which small owns",
+        ],
+        must_not_contain: &[
+            "a is an immutable borrow of the value passed to two",
+            "b is an immutable borrow of the value passed to two",
+            "that value is dropped when two returns",
+            "(parameter 2) goes out of scope. No resource is dropped",
+            "(parameter 3)",
+            "Immutable borrow from (parameter) to n",
         ],
     },
     TooltipExpect {
