@@ -4071,19 +4071,22 @@ fn render_branches(
                 String::new()
             };
 
-            let mut branch_svg = String::new();
+            // The arm's column is split into stretches (see
+            // `render_branch_run`), each its own `branch-group`.
+            let mut stretches: Vec<String> = Vec::new();
             for run in &runs {
-                branch_svg.push_str(&render_branch_run(rap, *hash, run, own_y, get_y_axis_pos(*split_point) as f64, stop_at));
+                let (joints, run_stretches) = render_branch_run(rap, *hash, run, own_y, get_y_axis_pos(*split_point) as f64, stop_at);
+                // Joint discs are decorative; they ride with the first stretch.
+                let mut run_stretches = run_stretches.into_iter();
+                if let Some(first) = run_stretches.next() { stretches.push(joints + &first); }
+                stretches.extend(run_stretches);
             }
-            branch_svg.push_str(&stop_bar);
+            if let Some(last) = stretches.last_mut() { last.push_str(&stop_bar); }
+            let branch_svg: String = stretches.iter().map(|st| format!(
+                "        <g class=\"branch-group\"{}>\n{}        </g>\n", arm_rows_attr, st,
+            )).collect();
 
-            // Wrap in branch-group so any `:hover` inside the
-            // strip glows the whole arm via
-            // `.branch-group:hover .tooltip-trigger` in the CSS.
-            output.entry(-1).or_insert_with(empty_panel_pair).0.timelines.push_str(&format!(
-                "        <g class=\"branch-group\"{}>\n{}        </g>\n",
-                arm_rows_attr, branch_svg,
-            ));
+            output.entry(-1).or_insert_with(empty_panel_pair).0.timelines.push_str(&branch_svg);
 
             render_branches(
                 hash, rap, &branch.e_data, &branch.states,
@@ -4208,7 +4211,7 @@ fn render_branch_run(
     own_y: Option<(f64, f64)>,
     split_row: f64,
     stop_at: Option<(f64, f64)>,
-) -> String {
+) -> (String, Vec<String>) {
     let mut svg = String::new();
 
     // Classify each segment up front so the bevel pass can
@@ -4220,8 +4223,22 @@ fn render_branch_run(
         (style, dashed, *seg)
     }).collect();
 
+    // A stretch is a maximal run of segments that are all dashed or all
+    // not. The caller wraps each stretch in its own `branch-group`, so
+    // hovering the dashed part of an arm's column glows only that part,
+    // not the solid part below it (#626).
+    let mut chunk_of: Vec<usize> = Vec::with_capacity(classified.len());
+    for (i, (_, dashed, _)) in classified.iter().enumerate() {
+        let c = if i == 0 { 0 } else if classified[i - 1].1 == *dashed { chunk_of[i - 1] } else { chunk_of[i - 1] + 1 };
+        chunk_of.push(c);
+    }
+    let n_chunks = chunk_of.last().map_or(0, |c| c + 1);
+    let mut lines: Vec<String> = vec![String::new(); n_chunks];
+    let mut polys: Vec<String> = vec![String::new(); n_chunks];
+
     // Visible lines per segment.
-    for (style, dashed, seg) in &classified {
+    for (i, (style, dashed, seg)) in classified.iter().enumerate() {
+        let svg = &mut lines[chunk_of[i]];
         let dasharray = if *dashed { "4 4" } else { "none" };
         match style {
             OwnerLine::Solid => svg.push_str(&format!(
@@ -4278,7 +4295,8 @@ fn render_branch_run(
     // leading-into-body transition reads as "the leading ends
     // here". Solid segments share a centerline with their
     // neighbors and need no bevel.
-    for window in classified.windows(2) {
+    for (wi, window) in classified.windows(2).enumerate() {
+        let svg = &mut lines[chunk_of[wi]];
         let (prev_style, prev_dashed, prev_seg) = &window[0];
         let (curr_style, _, curr_seg) = &window[1];
         if !matches!(prev_style, OwnerLine::Hollow) { continue; }
@@ -4316,7 +4334,8 @@ fn render_branch_run(
     // lines: the part of a vertical segment on the arm's own lines
     // (`seg_underline_y`); a diagonal, a segment beside another arm's
     // code, or an arm with no lines of its own, nothing (#369).
-    for seg in run.iter() {
+    for (si, seg) in run.iter().enumerate() {
+        let svg = &mut polys[chunk_of[si]];
         let (dx, dy) = (seg.p2.0 - seg.p1.0, seg.p2.1 - seg.p1.1);
         if dx.abs() < 1e-6 && dy.abs() < 1e-6 { continue; }
         let mut quad = seg_quad(seg);
@@ -4340,7 +4359,8 @@ fn render_branch_run(
         ));
     }
 
-    svg
+    let stretches = lines.iter().zip(&polys).map(|(l, p)| format!("{}{}", l, p)).collect();
+    (svg, stretches)
 }
 
 /// Half the height of the hover polygon over a stop bar (the bar's 3px

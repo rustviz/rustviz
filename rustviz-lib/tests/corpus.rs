@@ -16389,7 +16389,15 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
                 if !v.contains(&row) { v.push(row); }
             }
         }
-        seen.push(((first, last), on_own, off_own));
+        // An arm's dashed and solid stretches are separate hover groups
+        // with the same `data-arm-rows`; merge them per arm.
+        match seen.iter_mut().find(|s| s.0 == (first, last)) {
+            Some(entry) => {
+                for r in on_own { if !entry.1.contains(&r) { entry.1.push(r); } }
+                for r in off_own { if !entry.2.contains(&r) { entry.2.push(r); } }
+            }
+            None => seen.push(((first, last), on_own, off_own)),
+        }
     }
     let find = |arm: (usize, usize)| seen.iter().find(|s| s.0 == arm)
         .unwrap_or_else(|| panic!("no arm on rows {:?} in {:?}", arm, seen));
@@ -16400,6 +16408,32 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
     assert_eq!(find((23, 26)).1, vec![23, 24, 25, 26], "_ arm's solid stretch: {:?}", seen);
     assert_eq!(find((23, 26)).2, vec![19, 20, 21, 22], "_ arm's dashed stretch: {:?}", seen);
     assert!(implicit_else.contains(&vec![30]), "implicit else's dashed stretch: {:?}", implicit_else);
+}
+
+/// #626: the hover glow covers one stretch at a time. A `branch-group`
+/// is what `.branch-group:hover .tooltip-trigger` glows, so no group may
+/// hold both a dashed segment ("isn't running on these lines") and a
+/// solid one ("is the owner of the resource"); before, an arm's dashed
+/// and solid stretches glowed together as one piece.
+#[test]
+fn dashed_and_solid_arm_stretches_glow_separately() {
+    let rv = run_with_local_backend("dashed_arm_hover");
+    let timeline = rv.timeline_panel_string();
+    let (mut dashed_groups, mut solid_groups) = (0, 0);
+    for group in timeline.split("<g class=\"branch-group\"").skip(1) {
+        let group = &group[..group.find("</g>").unwrap_or(group.len())];
+        let dashed = group.contains("isn&#39;t running on these lines")
+            || group.contains("isn't running on these lines");
+        let solid = group.contains("is the owner of the resource");
+        assert!(
+            !(dashed && solid),
+            "a dashed and a solid stretch share one hover group:\n{group}"
+        );
+        dashed_groups += dashed as usize;
+        solid_groups += solid as usize;
+    }
+    assert!(dashed_groups >= 3, "expected dashed stretches for else, _ and the implicit else");
+    assert!(solid_groups >= 3, "expected solid stretches too");
 }
 
 /// #710: in a one-line match arm, a pattern binding's borrow (`v` to `x`)
