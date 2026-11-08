@@ -338,14 +338,19 @@ const Description: React.FC = () => (
         friends is shown as that read.
       </li>
       <li>
-        An or-pattern arm that binds one name from different places (
-        <code>(x, _) | (_, x)</code>) draws the name as a new value with no
-        arrow, and each place it may move from as maybe-moved (in{' '}
-        <code>match (a, b)</code>, what the name didn't take is dropped with the
-        tuple). A reference (<code>(ref x, _) | (_, ref x)</code>) draws each
-        place as borrowed until the reference&apos;s last use. A few shapes are
-        refused, such as matching on two reference variables. The same pattern
-        in an <code>if let</code> or <code>let</code> is drawn wrongly.
+        An or-pattern that binds one name from different places (
+        <code>(x, _) | (_, x)</code>, in a <code>match</code> arm,{' '}
+        <code>if let</code>, <code>while let</code> or <code>let</code>) draws
+        the name as a new value with no arrow, and each place it may move from
+        as maybe-moved (in <code>match (a, b)</code>, what the name didn&apos;t
+        take is dropped with the tuple). In a <code>match</code> arm, a
+        reference (<code>(ref x, _) | (_, ref x)</code>) draws each place as
+        borrowed until the reference&apos;s last use; in an{' '}
+        <code>if let</code> or <code>let</code>, a reference or a tuple or
+        struct name is refused rather than drawn. A few other shapes are
+        refused, such as matching on two reference variables. Nested inside
+        another pattern (<code>(a, (x, _) | (_, x))</code>), it is drawn
+        wrong.
       </li>
       <li>
         A <code>ref</code> binding in a <code>match</code> arm keeps what it

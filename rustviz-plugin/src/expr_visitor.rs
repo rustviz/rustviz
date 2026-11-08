@@ -3514,10 +3514,26 @@ pub fn register_iflet_let_bindings(
     // the binding's own RAP since is_global=false).
     let scope = emit_gos_at.unwrap_or(let_line);
 
+    // An or-pattern that binds a name from a different place in each
+    // alternative (`if let (x, _) | (_, x) = u`, `if let (Some(x), _) |
+    // (_, Some(x)) = (a, b)`): drawn like such a match arm (#533,
+    // #597), `x` as a new value and each place as moved into it only if
+    // its alternative matched. The parents are the tuple literal's
+    // elements, as for `match (a, b)`.
+    let (or_parents, or_parents_ty): (Vec<ResourceTy>, Vec<Ty<'tcx>>) = match scrutinee.kind {
+        ExprKind::Tup(elems) if !scrutinee.span.from_expansion() => (
+            elems.iter().map(|e| self.rap_or_field_through_ref(e)).collect(),
+            elems.iter().map(|e| typeck_res.node_type(e.hir_id)).collect(),
+        ),
+        _ => (vec![parent.clone()], vec![scrutinee_ty]),
+    };
+    let moved_into_scrutinee = self.tuple_scrutinee_moves(scrutinee);
+    let (pat, or_conflicts) = self.or_arm_stand_in(let_expr.pat, &or_parents, &or_parents_ty, let_line, typeck_res, &moved_into_scrutinee);
+
     // `if let (Some(a), Some(b)) = (x, y)`: like `match (x, y)`, each
     // sub-pattern destructures its own element of the tuple literal
     // (#327). Otherwise the whole pattern matches the scrutinee.
-    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (let_expr.pat.kind, scrutinee.kind) {
+    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (pat.kind, scrutinee.kind) {
         (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(elems)) if !scrutinee.span.from_expansion() => {
             let gap = elems.len().saturating_sub(sub_pats.len());
             sub_pats.iter().enumerate().map(|(k, sp)| {
@@ -3529,7 +3545,7 @@ pub fn register_iflet_let_bindings(
                 (sp, crate::expr_visitor_utils::get_rap(elem, &self.tcx, &self.raps), typeck_res.node_type(elem.hir_id))
             }).collect()
         }
-        _ => vec![(let_expr.pat, parent.clone(), scrutinee_ty)],
+        _ => vec![(pat, parent.clone(), scrutinee_ty)],
     };
     let mut decls = Vec::new();
     for (sp, sp_parent, sp_parent_ty) in pairs {
@@ -3538,25 +3554,37 @@ pub fn register_iflet_let_bindings(
         let sp_ty = typeck_res.node_type(sp.hir_id);
         for (r, e, from, partial) in sub {
             let from = self.retarget_tuple_borrow(scrutinee, &r, &e, from);
-            decls.push((r, e, from, partial.unwrap_or(sp_parent_ty != sp_ty)));
+            decls.push((r, e, from, Some(partial.unwrap_or(sp_parent_ty != sp_ty))));
         }
     }
 
-    let moved_into_scrutinee = self.tuple_scrutinee_moves(scrutinee);
-    let moved_by_pattern: Vec<ResourceTy> = decls.iter()
-        .filter(|(_, e, _, _)| matches!(e, Evt::Move))
-        .map(|(_, _, from, _)| from.clone())
-        .collect();
+    let tuple_name = match self.tuple_scrutinee_target(scrutinee) {
+        ResourceTy::Temporary { tuple: Some(t), .. } => t,
+        _ => String::new(),
+    };
 
     // Copies first (stable, so each group keeps pattern order).
-    let (copies, others): (Vec<_>, Vec<_>) =
+    let (mut copies, others): (Vec<_>, Vec<_>) =
         decls.into_iter().partition(|(_, evt, _, _)| matches!(evt, Evt::Copy));
-    let n_copies = copies.len();
+    // A copied or-pattern name is just bound: nothing moves.
+    let _ = self.if_let_or_conflict_events(&or_conflicts, &mut copies, let_line, &moved_into_scrutinee, &tuple_name);
     let mut first_other = None;
     let mut registered: HashSet<ResourceAccessPoint> = HashSet::new();
-    for (i, (binding_rap, evt, from, is_partial)) in copies.into_iter().chain(others).enumerate() {
-        if i == n_copies {
-            first_other = Some(*self.unique_id);
+    // The moves into an or-pattern's name happen only when the pattern
+    // matches: in the branch (their ids follow the copies), drawn after
+    // the bindings and the moves into a tuple scrutinee, which holds
+    // the values they may take.
+    let mut or_events: Vec<ExternalEvent> = Vec::new();
+    let mut moved_by_pattern: Vec<ResourceTy> = Vec::new();
+    let mut groups = [copies, others];
+    for g in 0..groups.len() {
+      if g == 1 && !groups[1].is_empty() {
+        first_other = Some(*self.unique_id);
+        or_events = self.if_let_or_conflict_events(&or_conflicts, &mut groups[1], let_line, &moved_into_scrutinee, &tuple_name);
+      }
+      for (binding_rap, evt, from, is_partial) in std::mem::take(&mut groups[g]) {
+        if matches!(evt, Evt::Move) {
+            moved_by_pattern.push(from.clone());
         }
         let evt_kind = evt.clone();
         let event = self.ext_ev_of_evt(
@@ -3564,7 +3592,8 @@ pub fn register_iflet_let_bindings(
             ResourceTy::Value(binding_rap.clone()),
             from,
             *self.unique_id,
-            is_partial,
+            // (None: an or-pattern's name, bound as a new value.)
+            is_partial.unwrap_or(false),
         );
         self.add_external_event(let_line, event);
         *self.unique_id += 1;
@@ -3590,6 +3619,7 @@ pub fn register_iflet_let_bindings(
             }
             registered.insert(r);
         }
+      }
     }
     // A tuple-literal scrutinee moves its variables into the tuple
     // whether or not the pattern matches: show the ones the pattern
@@ -3602,6 +3632,9 @@ pub fn register_iflet_let_bindings(
             *self.unique_id += 1;
             self.add_external_event(let_line, event);
         }
+    }
+    for ev in or_events {
+        self.add_external_event(let_line, ev);
     }
     (registered, end_of_bindings)
 }

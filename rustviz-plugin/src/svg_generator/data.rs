@@ -1289,12 +1289,17 @@ pub enum ExternalEvent {
     // `p` that may move as a whole into the struct or tuple `x` (#565);
     // `into` is then `x`'s matching field, and `from` still names the
     // places `x` may be bound from.
+    //
+    // The same for an `if let` / `while let` / `let` pattern (#597);
+    // `in_let` for a `let`'s, which is no branch: the place's drop is
+    // then "only if nothing above moved it", not "no branch above".
     OrAltMove {
         ro: ResourceAccessPoint,
         into: String,
         from: Vec<String>,
         tuple: Option<String>,
         part_of: Option<(String, String)>,
+        in_let: bool,
         id: usize
     },
     // An or-pattern arm binds the reference `into` from a different
@@ -1599,7 +1604,7 @@ pub enum Event {
     TupleTempDrop { tuple: String, at: TupleDropAt, with: Vec<TupleLeft> },
     // See ExternalEvent::OrAltMove. `value`: the place holds a value
     // with nothing to drop, not a resource (#484).
-    OrAltMove { into: String, sources: Vec<String>, tuple: Option<String>, part_of: Option<(String, String)>, value: bool },
+    OrAltMove { into: String, sources: Vec<String>, tuple: Option<String>, part_of: Option<(String, String)>, value: bool, in_let: bool },
     // The place's side of an ExternalEvent::OrAltBorrow: it may be
     // borrowed by `into` (`end: false`), or that borrow ends (`end:
     // true`). Changes the place's state like a StaticLend / MutableLend
@@ -2065,7 +2070,7 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else)
             }
-            Event::OrAltMove { into, sources, tuple, part_of, value } => {
+            Event::OrAltMove { into, sources, tuple, part_of, value, .. } => {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
             }
             Event::OrAltLend { into, is, sources, mutable, end } => {
@@ -3333,8 +3338,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TupleTempDrop{ tuple, at, with, .. } => {
           vec![(line_num, Event::TupleTempDrop { tuple: tuple.clone(), at: *at, with: with.clone() })]
           },
-        ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, ..} => {
-          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value() })]
+        ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, ..} => {
+          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value(), in_let: *in_let })]
         },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
@@ -3672,9 +3677,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TupleTempDrop{ro, tuple, at, with, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TupleTempDrop { tuple, at, with }, line_number);
             },
-            ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, ..} => {
+            ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, ..} => {
                 let value = ro.holds_value();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from, tuple, part_of, value }, line_number);
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from, tuple, part_of, value, in_let }, line_number);
             },
             ExternalEvent::OrAltBorrow{ref ro, ref into, ..} => {
                 let (lend, borrow) = event.or_alt_borrow_events();

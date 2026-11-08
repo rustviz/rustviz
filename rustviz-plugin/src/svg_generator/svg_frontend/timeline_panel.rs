@@ -1251,7 +1251,7 @@ fn render_dot(
                             hash: *hash as u64,
                             dot_x: cx,
                             dot_y: cy,
-                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), moved_by_chain_condition(history)),
+                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), moved_by_chain_condition(history) || maybe_moved_by_let(history)),
                             p1x: cx - 3, p1y: cy - 1,
                             p2x: cx + 3, p2y: cy - 1,
                             p3x: cx,     p3y: cy + 3,
@@ -1382,7 +1382,12 @@ fn render_dot(
                     let note = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false, .. } | Event::OwnerDropIfTryReturns) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
-                    let title = if note.is_empty() {
+                    let title = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false })
+                        // (Before the new value's Acquire on this line.)
+                        && maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)) {
+                        // A `let` or-pattern, not a branch, may have moved it (#597).
+                        hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, true)
+                    } else if note.is_empty() {
                         event.print_message_with_name(&mut name)
                     } else if matches!(event, Event::OwnerDropIfTryReturns) {
                         hover_messages::event_dot_owner_drop_if_try_returns(&name, &note)
@@ -1612,6 +1617,31 @@ fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
         _ => false,
     })
+}
+
+// Whether what makes this column maybe-moved at its end (as
+// `maybe_moved_at_end` reads it) is a `let` whose or-pattern binds a
+// name from it or from another place (`let ((x, _) | (_, x)) = t;`,
+// #597): no branch, so its drop wording says "nothing above".
+fn maybe_moved_by_let<'a>(history: impl IntoIterator<Item = &'a (usize, Event)>) -> bool {
+    let mut by_let = false;
+    for (_, e) in history {
+        match e {
+            Event::Branch { branch_history, ty, .. } => {
+                let (mixed, all_moved) = merge_move_kind(branch_history, ty);
+                if mixed || all_moved {
+                    by_let = false;
+                }
+            }
+            Event::OrAltMove { in_let, .. } => by_let = *in_let,
+            Event::LoopExitMove { .. }
+            | Event::Acquire { is: ResourceTy::Value(_), .. }
+            | Event::Copy { is: ResourceTy::Value(_), .. }
+            | Event::Move { .. } | Event::ClosureCall { .. } => by_let = false,
+            _ => {}
+        }
+    }
+    by_let
 }
 
 fn all_paths_present(ty: &BranchType, n_branches: usize) -> bool {
@@ -2072,7 +2102,9 @@ struct PartialMoveSplit {
     maybe_moved: Vec<String>,
     // Non-Copy leaf fields that still hold a value on every path.
     dropped: Vec<String>,
-    // A let-chain's condition may have moved one of `maybe_moved` (#281).
+    // A let-chain's condition (#281) or a `let` or-pattern (#597; see
+    // `maybe_moved_by_let`), not only a branch, may have moved one of
+    // `maybe_moved`.
     by_cond: bool,
 }
 
@@ -2113,7 +2145,7 @@ fn struct_partial_move_split(
             // Moved in one arm of a `match` on the struct, or one
             // branch of an `if`, and not in the others (#395).
             if maybe_moved_at_end(&timeline.history) {
-                by_cond |= moved_by_chain_condition(&timeline.history);
+                by_cond |= moved_by_chain_condition(&timeline.history) || maybe_moved_by_let(&timeline.history);
                 maybe_moved.push((*name).clone());
             } else {
                 moved.push((*name).clone());
