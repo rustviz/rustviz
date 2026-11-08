@@ -922,6 +922,8 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_struct_moved_holder",
     // A struct field of a struct overwritten by a call (#638).
     "borrow_struct_field_overwrite_call",
+    // A struct field of a struct overwritten by another variable (#655).
+    "borrow_struct_field_overwrite_var",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -10177,6 +10179,57 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o.inner.r's immutable borrow ends (what it borrows from isn't shown)",
         ],
     },
+    TooltipExpect {
+        name: "borrow_struct_field_overwrite_var",
+        // `o.inner = other;` overwrites a struct field of `o` with
+        // another variable: other.r's reference, and the loan of t it
+        // holds, move to o.inner.r, which gives t back at its last use
+        // (as `let hold = other;` does, #637). The old borrow of s lasts
+        // until o's last use (a partial write; o's type has one
+        // lifetime, so a `s.push` between the write and the println! is
+        // E0502), ended on s's column, not handed back from o.inner.r,
+        // which no longer points to s (as for `o.inner = mk(&t)`, #638).
+        // #654 + #650's plugin drew no end of s's (u's, a's, e's)
+        // borrow at all, so s stayed borrowed to the end of main, and u
+        // was said to drop nothing at its scope end. See
+        // `struct_field_overwrite_by_variable_moves_the_loan`.
+        must_contain: &[
+            "Move from other.r to o.inner.r",
+            // Reads like `o.inner.r = other.r` (#650); the arrow names
+            // the source.
+            "o.inner.r is assigned other.r's immutable reference",
+            "p.inner.r is assigned m.r's mutable reference",
+            "o.inner.r is assigned o2.inner.r's immutable reference",
+            "Return immutably borrowed resource from o.inner.r to t",
+            "s's resource is no longer immutably borrowed",
+            "Move from m.r to p.inner.r",
+            "Return mutably borrowed resource from p.inner.r to v",
+            "u's resource is no longer mutably borrowed",
+            "u goes out of scope. Its resource is dropped.",
+            "Move from o2.inner.r to o.inner.r",
+            "Return immutably borrowed resource from o.inner.r to b",
+            "a's resource is no longer immutably borrowed",
+            "Copy from c.r to q.inner.r",
+            "e's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // The old lender handed back from a field that now points
+            // to the new value's lender.
+            "Return immutably borrowed resource from o.inner.r to s",
+            "Return mutably borrowed resource from p.inner.r to u",
+            "Return immutably borrowed resource from o.inner.r to a",
+            "Return immutably borrowed resource from q.inner.r to e",
+            // The moved-from field returning a borrow it no longer holds.
+            "Return immutably borrowed resource from other.r to t",
+            "Return mutably borrowed resource from m.r to v",
+            "Return immutably borrowed resource from o2.inner.r to b",
+            // u owns its String to the end.
+            "u goes out of scope. No resource is dropped.",
+            "isn't shown",
+            // A place assignment has no "(moved out of …)" parenthetical.
+            "(moved out of",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -12991,6 +13044,30 @@ fn ref_borrow_outlasts_pattern_reborrow() {
         assert!(ends_x == back_x && ends_x != split_x,
             "{}: {}'s borrow-end dot is at x={}; the arm's column is x={}, the match diamond's x={}",
             name, outer, ends_x, back_x, split_x);
+    }
+}
+
+/// #655: `o.inner = other;` is a partial write, so s's old borrow ends
+/// at o's last use (the println!), as for `o.inner = mk(&t);` (#638)
+/// and `o.inner.r = &t;` (#531); the loan of t that other.r held moves
+/// to o.inner.r and ends at its last use too. Same for a `&mut` field
+/// (u, v), a field of another struct (a, b) and a Copy struct (e, f).
+#[test]
+fn struct_field_overwrite_by_variable_moves_the_loan() {
+    let rv = run_with_local_backend("borrow_struct_field_overwrite_var");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (tip, line) in [
+        ("s's resource is no longer immutably borrowed", "println!(\"{} {}\", o.inner.r, o.n);"),
+        ("t's resource is no longer immutably borrowed", "println!(\"{} {}\", o.inner.r, o.n);"),
+        ("u's resource is no longer mutably borrowed", "println!(\"{}\", p.n);"),
+        ("v's resource is no longer mutably borrowed", "println!(\"{}\", p.n);"),
+        ("a's resource is no longer immutably borrowed", "println!(\"{} {}\", o.inner.r, o2.n);"),
+        ("b's resource is no longer immutably borrowed", "println!(\"{} {}\", o.inner.r, o2.n);"),
+        ("e's resource is no longer immutably borrowed", "println!(\"{} {}\", q.inner.r, c.r);"),
+    ] {
+        let dots = dots_listing_tooltip(&svg, tip);
+        assert_eq!(dots.len(), 1, "{}: {:?}", tip, dots);
+        assert_eq!(dots[0].1, code_row_y(&code, line), "`{}` should be on the row of `{}`: {:?}", tip, line, dots);
     }
 }
 

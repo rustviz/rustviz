@@ -346,7 +346,11 @@ rather than listed here.
   (`hold.r = &t` after `H { r: &s }`) keeps `s` borrowed until the
   struct's last use, as the borrow checker does (the struct's type has
   one lifetime for the reference); so does overwriting a struct field
-  of it (`o.inner = I { r: &t }`, `o.inner = make_inner(&t)`).
+  of it (`o.inner = I { r: &t }`, `o.inner = make_inner(&t)`,
+  `o.inner = other`, where `other`'s borrow moves to `o.inner`'s field).
+  Inside an `if` / `match` arm that is drawn as a diamond, that end is
+  drawn on the lender's arm column below the join, not on its own
+  column (#659).
   Overwriting the whole struct (`hold = H { r: &t }`,
   `hold = make(&t)`, `hold = other`) drops the old value, so the old
   borrow ends at the write, as in rustc (or at the old value's last use,

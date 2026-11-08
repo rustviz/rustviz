@@ -385,6 +385,15 @@ const Description: React.FC = () => (
         <code>o.inner = make_inner(&amp;t)</code>) doesn&apos;t draw the new
         borrow. In a few programs a borrow is drawn ending earlier than
         rustc allows: after <code>let hold = other;</code>, assigning{' '}
+        A borrow that a struct field write keeps alive until the struct&apos;s
+        last use (<code>o.inner.r = &amp;t;</code>,{' '}
+        <code>o.inner = other;</code>) is drawn ending on the lender&apos;s arm
+        column below the join when the write is inside an <code>if</code> /{' '}
+        <code>match</code> arm.
+      </li>
+      <li>
+        In a few programs a borrow is drawn ending earlier than rustc
+        allows: after <code>let hold = other;</code>, assigning{' '}
         <code>other</code> again keeps what <code>hold</code> borrows
         borrowed until <code>other</code>&apos;s last use in rustc.
         A struct that holds a borrow and is moved to another variable (
