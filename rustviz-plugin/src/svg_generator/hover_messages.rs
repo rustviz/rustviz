@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, ResourceAccessPoint};
+use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -642,17 +642,20 @@ pub fn event_dot_move_iterator_into_loop(my_name: &String) -> String {
 // `break` leaves it), or at a `return` from inside the loop (`early`)
 // (#482). What the iterator still owns goes with it: the elements it
 // hasn't handed out, a `vec::IntoIter`'s buffer.
-pub fn event_dot_loop_iterator_drop(my_name: &String, early: bool) -> String {
-    if early {
-        format!(
+pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft) -> String {
+    match left {
+        LoopLeft::Return => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped here: the function returns from inside the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             fmt_style(my_name)
-        )
-    } else {
-        format!(
+        ),
+        LoopLeft::Break => format!(
+            "{0}'s former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+            fmt_style(my_name)
+        ),
+        LoopLeft::End => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
             fmt_style(my_name)
-        )
+        ),
     }
 }
 

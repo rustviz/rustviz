@@ -352,10 +352,10 @@ const Description: React.FC = () => (
         borrows borrowed to the end of the arm, not just to its last use.
       </li>
       <li>
-        A <code>for</code> loop drops its iterator where the loop is left. That
-        isn&apos;t drawn for a tuple pattern (<code>for (a, b) in pairs</code>):{' '}
-        <code>pairs</code> isn&apos;t shown moved into the loop, and reads as
-        dropped at the end of its scope.
+        A <code>for</code> loop drops its iterator where the loop is left. A{' '}
+        <code>break &apos;outer</code> out of an inner loop is drawn only in an{' '}
+        <code>if</code>/<code>else</code> branch, and a{' '}
+        <code>continue &apos;outer</code> isn&apos;t drawn.
       </li>
       <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}
