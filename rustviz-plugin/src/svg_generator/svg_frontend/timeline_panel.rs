@@ -954,6 +954,10 @@ fn render_dot(
     // second block's own `s`), not the column's penultimate state.
     let scope_ends = history.iter().filter(|(_, e)| matches!(e, Event::OwnerGoOutOfScope)).count();
     let resource_hold_of_column = resource_hold;
+    // Whether the column's value was moved away earlier in `history`
+    // (and nothing was put back): a conditional after that finds it
+    // empty, so no line runs into or out of its split (#694).
+    let mut moved_out = false;
     for (i, (line_number, event)) in history.iter().enumerate() {
         let resource_hold = if scope_ends > 1 && matches!(event, Event::OwnerGoOutOfScope) {
             held
@@ -961,8 +965,13 @@ fn render_dot(
             resource_hold_of_column
         };
         let held_at_event = held;
+        let moved_at_event = moved_out;
         let event_y = event_dot_y(history, i);
         held = holds_value_after(held, event);
+        moved_out = match event {
+            Event::Move { .. } | Event::LoopExitMove { definite: true, .. } => true,
+            _ => moved_out && !held,
+        };
         // Closure-capture per-upvar dots on the closure's own
         // timeline are suppressed here: the closure's Bind-Acquire
         // dot at the same line carries a combined tooltip listing
@@ -1004,19 +1013,27 @@ fn render_dot(
                 // begins. When the branches share lines it sits on
                 // the top corner of their diamond (#117).
                 let collapsed = branch_is_collapsed(*split_point, *merge_point);
-                let b_data = EventDotData {
-                    hash: *hash as u64,
-                    dot_x: timeline_data.x_val,
-                    dot_y: if collapsed {
-                        get_y_axis_pos(*split_point) - COLLAPSED_APEX
-                    } else if CollapsedApexes::of(history).raised_splits.contains(split_point) {
-                        get_y_axis_pos(*split_point) - PATTERN_SPLIT_RISE
-                    } else {
-                        get_y_axis_pos(*line_number)
-                    },
-                    title: event.print_message_with_name(& mut is.real_name())
-                };
-                append_dot(b_data, timeline_data, dots, None);
+                // A conditional on a column whose value was already moved
+                // away (a nested `if` in an arm after `match (x, y)` moved
+                // x into the temporary tuple): x isn't live in it, and no
+                // arm line leaves the split, so a dot there would float
+                // (#694). Its arms still draw their events (a drop stated
+                // at a `return`).
+                if !moved_at_event {
+                    let b_data = EventDotData {
+                        hash: *hash as u64,
+                        dot_x: timeline_data.x_val,
+                        dot_y: if collapsed {
+                            get_y_axis_pos(*split_point) - COLLAPSED_APEX
+                        } else if CollapsedApexes::of(history).raised_splits.contains(split_point) {
+                            get_y_axis_pos(*split_point) - PATTERN_SPLIT_RISE
+                        } else {
+                            get_y_axis_pos(*line_number)
+                        },
+                        title: event.print_message_with_name(& mut is.real_name())
+                    };
+                    append_dot(b_data, timeline_data, dots, None);
+                }
 
                 // Each branch column gets its real events rendered.
                 // No "If"/"Else" bookend dots: the per-branch
@@ -1056,9 +1073,9 @@ fn render_dot(
                 // merge dot as a drop dot (down-arrow triangle
                 // inside the circle, same shape as a regular OOS
                 // drop) and use a tooltip that explains the
-                // semantics. The all-moved and all-alive cases
-                // get the regular dot — no implicit drop is
-                // inserted in those situations.
+                // semantics. The all-alive case gets the regular
+                // dot and the all-moved case none (#694) — no
+                // implicit drop is inserted in those situations.
                 // Look at each branch's *effective* end state — what
                 // `branch.states.last()` reports — rather than just
                 // walking events for syntactic Move/Acquire. That's
@@ -1155,18 +1172,13 @@ fn render_dot(
                     };
                     append_dot(m_data, timeline_data, dots, None);
                 } else if all_moved {
-                    // Every branch ends without the resource —
-                    // either by a direct move or by an implicit
-                    // drop already inserted at a nested merge.
-                    // Don't say "at least one"; pin it as "every".
-                    let title = hover_messages::event_dot_branch_merge_all_moved(&is.real_name(), any_diverges(branch_history));
-                    let m_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: cx,
-                        dot_y: cy,
-                        title,
-                    };
-                    append_dot(m_data, timeline_data, dots, None);
+                    // Every branch ends without the resource, by a move
+                    // or a drop (or an implicit drop at a nested merge):
+                    // no line comes out of any arm, so a join dot here
+                    // would float, unconnected, between the arms (#694).
+                    // Like a column after a plain move, it just ends with
+                    // the arms; the scope-end dot says why nothing is
+                    // dropped there (`all_moved_at_end`).
                 } else {
                     let m_data = EventDotData {
                         hash: *hash as u64,
@@ -1309,10 +1321,15 @@ fn render_dot(
                     } else if !resource_hold {
                         // Resource was already moved out — same copy
                         // for both Copy and non-Copy types: just note
-                        // there's nothing to drop here.
-                        let resource_info: &str = ". No resource is dropped.";
+                        // there's nothing to drop here, and why, when a
+                        // conditional moved or dropped it in every branch
+                        // (#694: that join has no dot of its own).
                         data.title = event.print_message_with_name(& mut name);
-                        data.title.push_str(resource_info);
+                        match all_moved_at_end(history) {
+                            Some(some_diverge) => data.title.push_str(
+                                &hover_messages::event_dot_go_out_of_scope_all_moved_suffix(&name, some_diverge)),
+                            None => data.title.push_str(". No resource is dropped."),
+                        }
                     } else if let Some(split) = struct_partial_move_split(visualization_data, *hash) {
                         // Partially moved struct (#207): only the
                         // fields still holding a value are dropped,
@@ -1638,6 +1655,32 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
         }
     }
     maybe
+}
+
+// `Some(some_diverge)` when the last thing that decided this column's
+// ownership was a conditional that moved or dropped it in every branch
+// that reaches its end (`some_diverge`: another branch returned or
+// panicked instead), so it owns nothing afterwards.
+fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
+    let mut all = None;
+    for (_, e) in history {
+        match e {
+            Event::Branch { branch_history, ty, .. } => {
+                let (mixed, all_moved) = merge_move_kind(branch_history, ty);
+                if all_moved && !mixed {
+                    all = Some(any_diverges(branch_history));
+                } else if mixed || branch_history.iter().any(|b| !b.e_data.is_empty()) {
+                    all = None;
+                }
+            }
+            Event::LoopExitMove { .. }
+            | Event::Acquire { .. } | Event::Copy { .. }
+            | Event::Move { .. } | Event::ClosureCall { .. }
+            | Event::OwnerDropAtReassign { .. } => all = None,
+            _ => {}
+        }
+    }
+    all
 }
 
 // True when a let-chain's condition may have moved this column's value
