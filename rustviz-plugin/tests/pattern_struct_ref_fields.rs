@@ -1,7 +1,7 @@
 // A reference field of a struct bound by a pattern (`x.part: &str`) is
 // a reference, not an owner. It holds the reference the matched value
 // held (here, a borrow of `s` made on line 10), so it borrows `s` (#692).
-// `w` mixes a `&s` and a `&mut k`, which isn't tracked (#708).
+// `w` mixes a `&s` and a `&mut k`, which `w` holds with their own kinds (#708).
 struct E<'a> { part: &'a str, n: i32 }
 struct W<'a> { e: E<'a>, m: &'a mut i32 }
 
