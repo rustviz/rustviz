@@ -12302,6 +12302,25 @@ fn code_rows_y(code_svg: &str, src: &str) -> Vec<f64> {
 }
 
 /// The points of the gray arrow shaft whose tooltip is exactly `text`.
+/// The raw shaft (a polyline's `points`, or a hopping arrow's path `d`)
+/// of each arrow whose tooltip is `text`.
+fn arrow_shafts<'a>(svg: &'a str, text: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for (i, _) in svg.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
+        let group = &svg[i..i + svg[i..].find("</g>").unwrap_or(svg.len() - i)];
+        let open = &group[..group.find('>').unwrap_or(group.len()) + 1];
+        if timeline_tooltips(open) != [text] {
+            continue;
+        }
+        out.extend(start_tags(group, "polyline")
+            .into_iter()
+            .filter_map(|t| attr(t, "points"))
+            .chain(start_tags(group, "path").into_iter().filter_map(|t| attr(t, "d")))
+            .next());
+    }
+    out
+}
+
 fn arrow_points(svg: &str, text: &str) -> Vec<Vec<(f64, f64)>> {
     let mut out = Vec::new();
     for (i, _) in svg.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
@@ -13458,6 +13477,57 @@ fn moved_struct_returns_its_borrow_from_the_new_holder() {
     assert_eq!(w.len(), 2, "w: {:?}", w);
     assert_eq!(w[0], code_row_y(&code, "println!(\"branch {}\", hold.r);"), "w: {:?}", w);
     assert!(w[1] > w[0] && w[1] < code_row_y(&code, "w.push('!');"), "w's other end should be at the if's end: {:?}", w);
+}
+
+/// #624: `p = P { a: &z, b: &z };` over `P { a: &x, b: &y }` has four
+/// arrows: x's and y's borrows returned from p.a and p.b, and z lent to
+/// both. Each arrow after the first dipped a whole row lower than the one
+/// before, with a row added for it, so the line took four rows, the
+/// println! below it three rows away from its code. z's two borrows now
+/// share one track (a fork out of z), and tracks are half a row apart:
+/// the write takes two rows, the `let` above it one, and the println!'s
+/// two returns to z (a fan-in) share its row.
+#[test]
+fn struct_write_arrows_share_rows() {
+    let rv = run_with_local_backend("borrow_struct_overwrite_whole");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let init = code_row_y(&code, "let mut p = P { a: &x, b: &y };");
+    let write = code_row_y(&code, "p = P { a: &z, b: &z };");
+    let read = code_row_y(&code, "println!(\"{} {}\", p.a, p.b);");
+    assert_eq!(write - init, 30.0, "a row is added below the `let` of p");
+    assert_eq!(read - write, 60.0, "the write of p should take two rows");
+    // Each arrow stays within its line's rows: (arrow, its line's row,
+    // how far below it may run).
+    for (text, row, below) in [
+        ("Immutable borrow from y to p.b", init, 15.0),
+        ("Return immutably borrowed resource from p.b to y", write, 15.0),
+        ("Immutable borrow from z to p.a", write, 30.0),
+        ("Immutable borrow from z to p.b", write, 30.0),
+    ] {
+        let arrow = arrow_points(&svg, text);
+        assert_eq!(arrow.len(), 1, "{}", text);
+        let lowest = arrow[0].iter().map(|p| p.1).fold(f64::MIN, f64::max);
+        assert_eq!(lowest, row + below, "{}: {:?}", text, arrow[0]);
+    }
+    // z's two borrows leave z along one trunk.
+    let (to_a, to_b) = (arrow_points(&svg, "Immutable borrow from z to p.a"), arrow_points(&svg, "Immutable borrow from z to p.b"));
+    assert_eq!(to_a[0][..2], to_b[0][..2], "z's borrows should fork from one trunk");
+    // Both returns to z run straight along the println!'s row (the one
+    // from p.b hops over p.a's dot).
+    for text in ["Return immutably borrowed resource from p.a to z", "Return immutably borrowed resource from p.b to z"] {
+        let shafts = arrow_shafts(&svg, text);
+        assert_eq!(shafts.len(), 1, "{}", text);
+        let shaft = shafts[0];
+        // The y of every point: after `M` / `L` in a path, every second
+        // number in a polyline. An arc's own numbers are skipped.
+        let toks: Vec<&str> = shaft.split(|c: char| c == ' ' || c == ',').filter(|t| !t.is_empty()).collect();
+        let ys: Vec<f64> = if toks[0] == "M" {
+            toks.windows(3).filter(|w| w[0] == "M" || w[0] == "L").filter_map(|w| w[2].parse().ok()).collect()
+        } else {
+            toks.chunks(2).filter_map(|c| c.get(1)?.parse().ok()).collect()
+        };
+        assert!(!ys.is_empty() && ys.iter().all(|&y| y == read), "{}: {}", text, shaft);
+    }
 }
 
 #[test]

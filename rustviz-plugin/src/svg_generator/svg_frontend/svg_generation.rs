@@ -160,6 +160,68 @@ fn chain_bindings_side_by_side(evs: &[ExternalEvent], pairs: &[(u64, u64)]) -> b
     })
 }
 
+/// Whether two arrows of one line can be drawn on one track: arrows of
+/// the same kind going the same way out of one variable (a fan-out, `z`
+/// lending to `p.a` and `p.b`) or into one (a fan-in, `p.a` and `p.b`
+/// giving `z` its resource back). Their shared stretch then reads as one
+/// arrow that forks. Columns are laid out in declaration (hash) order,
+/// with a struct's fields right after it, so the hashes give the
+/// direction.
+fn arrows_share_track(a: &ExternalEvent, b: &ExternalEvent) -> bool {
+    let ends = |e: &ExternalEvent| -> Option<(u64, u64)> {
+        let (from, to) = ResourceAccessPoint_extract(e);
+        Some((*from.extract_rap()?.hash(), *to.extract_rap()?.hash()))
+    };
+    let (Some((af, at)), Some((bf, bt))) = (ends(a), ends(b)) else { return false };
+    std::mem::discriminant(a) == std::mem::discriminant(b)
+        && (af < at) == (bf < bt)
+        && (af == bf || at == bt)
+}
+
+/// The tracks of the arrows on one line of a struct write with reference
+/// fields (#624). `p = P { a: &z, b: &z };` over `P { a: &x, b: &y }` has
+/// four arrows (x's and y's borrows returned from `p.a` and `p.b`, `z`
+/// lent to both), and each arrow after the first used to dip a whole row
+/// lower, with a row inserted for it: the line grew four rows tall, and
+/// the code below it moved away from its rows. Here arrows that fan out
+/// of or into one variable share a track (`arrows_share_track`), and
+/// tracks are half a row apart, so that line takes two rows.
+///
+/// Applies when every arrow on the line is between two variables and has
+/// a struct field at one end. Returns each arrow's id with the id of its
+/// track's first arrow, and the number of tracks.
+fn struct_write_tracks(evs: &[ExternalEvent]) -> Option<(Vec<(usize, usize)>, usize)> {
+    if evs.len() < 2 {
+        return None;
+    }
+    let mut tracks: Vec<Vec<&ExternalEvent>> = Vec::new();
+    let mut out = Vec::new();
+    for e in evs {
+        let (ResourceTy::Value(from), ResourceTy::Value(to)) = ResourceAccessPoint_extract(e) else { return None };
+        if from.is_fn() || to.is_fn() || !(from.is_member() || to.is_member()) || from.hash() == to.hash() {
+            return None;
+        }
+        match tracks.iter_mut().find(|t| t.iter().all(|o| arrows_share_track(o, e))) {
+            Some(t) => {
+                out.push((e.get_id(), t[0].get_id()));
+                t.push(e);
+            }
+            None => {
+                out.push((e.get_id(), e.get_id()));
+                tracks.push(vec![e]);
+            }
+        }
+    }
+    Some((out, tracks.len()))
+}
+
+/// Rows a line's arrows on `n` tracks half a row apart reach below the
+/// line's own row: the last track is `(n - 1) / 2` rows down, rounded
+/// down, since one half a row down still sits above the next row.
+fn half_row_tracks_extra_rows(n: usize) -> usize {
+    n.saturating_sub(1) / 2
+}
+
 /// Shifts the lines of the arm `b_data` by the rows inserted above it
 /// and below its stacked arrows. `pattern_lines` are the (unshifted)
 /// lines its conditional splits on and the arm starts on, where its
@@ -172,6 +234,7 @@ pub fn mutate_branch_lines(
     mut extra_lines: usize,
     pattern_lines: (usize, usize),
     binding_columns: &mut Vec<(u64, u64)>,
+    arrow_tracks: &mut HashMap<usize, usize>,
 ) -> usize {
     let old_extra_lines = extra_lines;
     let old_line_map = b_data.line_map.clone();
@@ -207,7 +270,7 @@ pub fn mutate_branch_lines(
                     let (start, end) = branch_type.get_mut_start_end(j);
                     let pattern_lines = (line_num, *start);
                     *start += extra_lines;
-                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns);
+                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -260,7 +323,11 @@ pub fn mutate_branch_lines(
                                 j += 1;
                             }
                         }
-                        let ev_len = ev.len() - 1;
+                        let mut ev_len = ev.len() - 1;
+                        if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
+                            arrow_tracks.extend(tracks);
+                            ev_len = half_row_tracks_extra_rows(n);
+                        }
                         if !back.is_empty() {
                             same_line_shift = Some((line_num, back_line - line_num));
                             new_line_map.insert(back_line, back);
@@ -629,7 +696,7 @@ pub fn render_svg(
                     let pattern_lines = (*line_num, *start);
                     *start += extra_lines;
                     // recurse into the branch
-                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns);
+                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -755,7 +822,11 @@ pub fn render_svg(
                     // lines right after `line_num`, those blank rows do
                     // the same job — reuse them instead of stacking our
                     // own on top, which produces an awkward double gap.
-                    let needed = ev.len() - 1;
+                    let mut needed = ev.len() - 1;
+                    if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
+                        visualization_data.arrow_tracks.extend(tracks);
+                        needed = half_row_tracks_extra_rows(n);
+                    }
                     let trailing_blanks = source_lines_for_absorb
                         .iter()
                         .skip(line_num) // 1-indexed → start at the line right after line_num
