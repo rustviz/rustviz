@@ -1048,6 +1048,13 @@ const EXPECTED_OK: &[&str] = &[
     "exit_loop_body_temporary",
     "exit_branch_local_panic",
     "exit_if_let_local_break",
+    // A lender borrowed by a reference the exiting branch declared is
+    // dropped at the exit, after the borrow ends (#645); a `return` in
+    // an `if` in a match arm drops the arm's binding (#651).
+    "exit_borrowed_owner_return",
+    "exit_borrowed_owner_panic",
+    "exit_borrowed_owner_mut_arm",
+    "exit_arm_binding_nested_return",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11730,6 +11737,54 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    // #645: `let r = &t;` in a branch that returns or panics. The exit
+    // drops t's String, but main drew t's drop ahead of the end of r's
+    // borrow on that row and worded it from the still-borrowed state:
+    // "t goes out of scope. No resource is dropped.", false. Order on
+    // the row: `borrow_ends_before_lender_drop_at_exit`.
+    TooltipExpect {
+        name: "exit_borrowed_owner_return",
+        must_contain: &[
+            "t's resource is no longer immutably borrowed",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=t goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "exit_borrowed_owner_panic",
+        must_contain: &[
+            "t's resource is no longer immutably borrowed",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=t goes out of scope. No resource is dropped."],
+    },
+    // A `&mut` borrow in a returning arm, and a lender `u` the
+    // returning branch declares itself.
+    TooltipExpect {
+        name: "exit_borrowed_owner_mut_arm",
+        must_contain: &[
+            "t's resource is no longer mutably borrowed",
+            "t goes out of scope. Its resource is dropped.",
+            "u's resource is no longer immutably borrowed",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=t goes out of scope. No resource is dropped.",
+            "=u goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #651: `Some(a) => { if c { return 0; } … }` drops `a` at the
+    // `return` (main drew nothing on a's column there). Row and count:
+    // `borrow_ends_before_lender_drop_at_exit`,
+    // `return_drops_what_the_branch_owns`.
+    TooltipExpect {
+        name: "exit_arm_binding_nested_return",
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=a goes out of scope. No resource is dropped."],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -14181,6 +14236,14 @@ fn return_drops_what_the_branch_owns() {
         // #630 at a panic, a `break` and a `continue`: once, there.
         ("exit_branch_local_panic", &[("t", 1), ("s", 2)][..]),
         ("exit_if_let_local_break", &[("a", 1), ("b", 1), ("c", 1)][..]),
+        // #645: a lender borrowed in the exiting branch is dropped at
+        // the exit (main: "No resource is dropped." there).
+        ("exit_borrowed_owner_return", &[("t", 2), ("t:No", 0)][..]),
+        ("exit_borrowed_owner_panic", &[("t", 2), ("t:No", 0)][..]),
+        ("exit_borrowed_owner_mut_arm", &[("t", 4), ("t:No", 0), ("u", 1), ("u:No", 0)][..]),
+        // #651: `a` at the `return` and at the arm's end (main: the
+        // arm's end only).
+        ("exit_arm_binding_nested_return", &[("a", 2), ("t", 2)][..]),
     ] {
         let rv = run_with_local_backend(name);
         let tooltips = timeline_tooltips(&rv.timeline_panel_string());
@@ -14264,6 +14327,40 @@ fn drops_at_exits_not_at_unreached_braces() {
         let mut want: Vec<f64> = rows.iter().map(|r| code_row_y(&code, r)).collect();
         want.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(got, want, "{}: rows of {:?} (wanted on {:?})", name, drop, rows);
+    }
+}
+
+/// At an exit in the branch that declared a reference, the reference's
+/// borrow ends (its last use is on the exit's line) before the lender
+/// is dropped there: one dot on the lender's column, on the exit's row,
+/// listing the borrow's end and then the drop (#645). main listed the
+/// drop first and worded it from the still-borrowed state ("No resource
+/// is dropped."). Also #651: an arm's binding is dropped at a `return`
+/// nested in an `if` in the arm.
+#[test]
+fn borrow_ends_before_lender_drop_at_exit() {
+    for (name, before, drop, row) in [
+        ("exit_borrowed_owner_return", Some("t's resource is no longer immutably borrowed"),
+            "t goes out of scope. Its resource is dropped.", "return r.len();"),
+        ("exit_borrowed_owner_panic", Some("t's resource is no longer immutably borrowed"),
+            "t goes out of scope. Its resource is dropped.", "panic!(\"{}\", r);"),
+        ("exit_borrowed_owner_mut_arm", Some("t's resource is no longer mutably borrowed"),
+            "t goes out of scope. Its resource is dropped.", "return r.len();"),
+        ("exit_borrowed_owner_mut_arm", Some("u's resource is no longer immutably borrowed"),
+            "u goes out of scope. Its resource is dropped.", "return r.len() + t.len();"),
+        ("exit_arm_binding_nested_return", None,
+            "a goes out of scope. Its resource is dropped.", "return 0;"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+        let y = code_row_y(&code, row);
+        let ok = dots_where(&timeline, |lines| {
+            let Some(d) = lines.iter().position(|l| l == drop) else { return false };
+            before.map_or(true, |b| lines[..d].iter().any(|l| l == b))
+        });
+        assert!(ok.iter().any(|(_, dy)| *dy == y),
+            "{}: no dot on the {:?} row lists {:?} after {:?}; dots listing the drop: {:?}",
+            name, row, drop, before, dots_listing_tooltip(&timeline, drop));
     }
 }
 
