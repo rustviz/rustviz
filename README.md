@@ -322,13 +322,9 @@ rather than listed here.
   drawn before the split. When a part moves a variable and a later
   part can still fail (`x` into `a` above, then `y` isn't `Some`), the
   `else` branch (or, without an `else`, the path that skips the body)
-  starts with that variable "may have been moved"; likewise for a call
-  of a closure that can only be called once and a move out of a `Box`
-  (`take(*b)`). A part that assigns to such a variable (`{ z = a; z > 0
-  }`) starts the `else` branch with it "may have been assigned a new
-  value". Other events of the parts that ran before the failing one
-  (e.g. a borrow made by the first `let`) aren't shown in the `else`
-  column.
+  starts with that variable "may have been moved". Other events of the
+  parts that ran before the failing one (e.g. a borrow made by the
+  first `let`) aren't shown in the `else` column.
 - Assignments to a place that has no column of its own are drawn on
   the column of the variable the place is reached from, like an
   element write: a tuple field
