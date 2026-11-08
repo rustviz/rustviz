@@ -2037,12 +2037,15 @@ fn collect_closure_captures(
 }
 
 // The `break` a borrow came from, when it is one of several `break`
-// values reaching a loop's receiver (#657). The lend event doesn't
-// carry it, so look up the borrow it came from.
+// values reaching a loop's receiver (#657), or a call that loop is
+// the argument of (#662). The lend event doesn't carry it, so look up
+// the borrow it came from.
 fn borrow_break_alt<'v>(id: usize, visualization_data: &'v VisualizationData) -> Option<&'v BreakAlt> {
     visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
         ExternalEvent::StaticBorrow { id: i, break_alt: Some(alt), .. }
-        | ExternalEvent::MutableBorrow { id: i, break_alt: Some(alt), .. } if *i == id => Some(alt),
+        | ExternalEvent::MutableBorrow { id: i, break_alt: Some(alt), .. }
+        | ExternalEvent::PassByStaticReference { id: i, break_alt: Some(alt), .. }
+        | ExternalEvent::PassByMutableReference { id: i, break_alt: Some(alt), .. } if *i == id => Some(alt),
         _ => None,
     })
 }
@@ -3350,13 +3353,24 @@ fn render_arrow (
                         }
                         _ => String::new(),
                     };
+                    // The argument is one of several `break` values of a
+                    // `loop` (`take(loop { if c { break ra; } else {
+                    // break rb; } })`, #662): passed only if that `break`
+                    // ended the loop. Said right after the argument, as
+                    // the reborrow note holds whichever `break` ran.
+                    let alt = match external_event {
+                        ExternalEvent::PassByStaticReference { break_alt: Some(alt), .. }
+                        | ExternalEvent::PassByMutableReference { break_alt: Some(alt), .. } => Some(alt),
+                        _ => None,
+                    };
+                    let alt_suffix = alt.map_or(String::new(), |a| hover_messages::break_alt_if_suffix(&a.brk));
                     let title = if interior_mut {
-                        hover_messages::fn_dot_shared_borrow_interior_mut(
+                        let msg = hover_messages::fn_dot_shared_borrow_interior_mut(
                             &function.name, &from_variable.name(),
-                            matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }))
-                            + &stored_suffix
+                            matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
+                        alt.map_or(msg.clone(), |a| hover_messages::with_break_alt_lend(&msg, &a.brk)) + &stored_suffix
                     } else {
-                        format!("{}{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, implicit_suffix, reborrow_suffix, stored_suffix)
+                        format!("{}{}{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, alt_suffix, implicit_suffix, reborrow_suffix, stored_suffix)
                     };
 
                     // The call icon shares the dot of the borrow it makes

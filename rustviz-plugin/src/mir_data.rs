@@ -7,11 +7,12 @@
 //! you figure out when a copy occurs? You can't use the assignment operator - since a single HIR instr can be compiled down into
 //! multiple MIR instructions.
 
-use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_to_line, written_name}};
+use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_end_line, span_to_line, written_name}};
 use log::info;
 use rustc_middle::mir::{BorrowKind, Location, Local, Operand, ProjectionElem, TerminatorKind, VarDebugInfoContents};
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::ty::{GenericArgKind, RegionVid, Ty, TyKind};
+use rustc_hir::intravisit;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
 use rustc_utils::SpanExt;
@@ -127,7 +128,44 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
 
     fn location_to_line(&self, l: Location, body_with_facts: &BodyWithBorrowckFacts) -> usize {
-        span_to_line(&self.location_to_span(l, body_with_facts), &self.tcx)
+        let line = span_to_line(&self.location_to_span(l, body_with_facts), &self.tcx);
+        line.max(self.loop_arg_end_line(l, body_with_facts, line).unwrap_or(0))
+    }
+
+    /// A call at `l` with a `loop` argument (`take(loop { … break ra;
+    /// … })`) runs once the loop has ended: on the loop's last line,
+    /// where the visitor pairs the `break` values in its branches with
+    /// the argument (#452, #561). A loan live at the call is live on
+    /// that line, not just on the call's first one (#662). `line`: the
+    /// call's first line. Decided from the HIR: the argument is a `loop`
+    /// expression.
+    fn loop_arg_end_line(&self, l: Location, body_with_facts: &BodyWithBorrowckFacts, line: usize) -> Option<usize> {
+        let body = &body_with_facts.body;
+        let block = &body.basic_blocks[l.block];
+        if l.statement_index != block.statements.len() {
+            return None;
+        }
+        let TerminatorKind::Call { args, .. } = &block.terminator().kind else { return None };
+        let ends: Vec<(Span, usize)> = args.iter()
+            .filter_map(|a| a.span.as_local(body.span))
+            .map(|sp| (sp, span_end_line(&sp, &self.tcx)))
+            .filter(|(_, end)| *end > line)
+            .collect();
+        if ends.is_empty() {
+            return None;
+        }
+        struct Loops(Vec<Span>);
+        impl<'tcx> intravisit::Visitor<'tcx> for Loops {
+            fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+                if let rustc_hir::ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = e.kind {
+                    self.0.push(e.span);
+                }
+                intravisit::walk_expr(self, e);
+            }
+        }
+        let mut loops = Loops(Vec::new());
+        intravisit::Visitor::visit_expr(&mut loops, self.tcx.hir_body_owned_by(body.source.def_id().as_local()?).value);
+        ends.into_iter().filter(|(sp, _)| loops.0.contains(sp)).map(|(_, end)| end).max()
     }
 
     fn src_name_of_local(&self, l: Option<Local>, l_map: &HashMap<Local, String>) -> Option<String> {

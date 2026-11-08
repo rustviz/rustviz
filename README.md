@@ -304,10 +304,11 @@ rather than listed here.
   `break &a` or the reborrow rustc makes of a second `&mut`) says it
   happened only if its `break` ended the loop, and `a` and `b` are each
   shown as maybe moved. When that loop is a call argument (`take(loop {
-  if c { break ra; } else { break rb; } })`), the lenders' borrows are
-  drawn ending a row before the call, and the call's tooltips don't say
-  which `break` ran
-  ([#662](https://github.com/rustviz/rustviz/issues/662)).
+  if c { break ra; } else { break rb; } })`), the call is drawn where
+  the loop ends, each reference passed to it says which `break` it
+  came from, and the lenders stay borrowed until the call (the branch
+  whose `break` carries a reference doesn't give its lender back at the
+  `break`; the other branch does, as its reference is dead there).
 - Leaving early drops what is left behind, right there: a `return` or
   a panic (`panic!()`, `unreachable!()`, `todo!()`, which unwind) drops
   every value the function still owns, a `break` / `continue` the

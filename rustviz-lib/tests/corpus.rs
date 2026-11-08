@@ -1134,6 +1134,11 @@ const EXPECTED_OK: &[&str] = &[
     "reassign_maybe_moved_holds",
     "or_pattern_let_reassign_holds",
     "try_two_operands_on_a_line",
+    // A `loop` as a call argument: the lenders stay borrowed until the
+    // call, and each pass says which `break` it came from (#662).
+    "loop_break_call_arg",
+    // A String lent in a loop branch that `break`s is still dropped (#759).
+    "loop_break_borrow_scope_end",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12835,6 +12840,57 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` succeeds, nothing happens to b",
         ],
     },
+    TooltipExpect {
+        name: "loop_break_call_arg",
+        // `take(loop { if c { break ra; } else { break rb; } })` (#662):
+        // the call gets whichever reference the `break` that ended the loop
+        // carried, so each pass to the call happened only if its `break`
+        // ran, as each move into a receiver does ("Move from ra to r, if
+        // the loop ended with break ra", #588). rustc coerces each `break`
+        // value to the parameter's `&mut String`, a reborrow, so "can't be
+        // used until take returns" holds whichever ran. The old plugin
+        // drew both passes as made, with no `break` named. Where the
+        // borrows end is pinned by `loop_call_arg_borrows_end_at_the_call`.
+        must_contain: &[
+            "the resource ra points to is mutably borrowed by take through ra, if the loop ended with break ra; ra can't be used while the borrow is live",
+            "take reads from/writes to ra, if the loop ended with break ra (mutable reborrow — ra can't be used until take returns)",
+            "the resource rb points to is mutably borrowed by take through rb, if the loop ended with break rb; rb can't be used while the borrow is live",
+            "take reads from/writes to rb, if the loop ended with break rb (mutable reborrow — rb can't be used until take returns)",
+            "the resource re points to is immutably borrowed by look, if the loop ended with break re",
+            "look reads from re, if the loop ended with break re",
+            "the resource rf points to is immutably borrowed by look, if the loop ended with break rf",
+            "look reads from rf, if the loop ended with break rf",
+            // A single `break`: the call always gets rg.
+            "the resource rg points to is mutably borrowed by take through rg; rg can't be used while the borrow is live",
+            "take reads from/writes to rg (mutable reborrow — rg can't be used until take returns)",
+        ],
+        must_not_contain: &[
+            "=the resource ra points to is mutably borrowed by take through ra; ra can't be used while the borrow is live",
+            "=take reads from/writes to ra (mutable reborrow — ra can't be used until take returns)",
+            "=the resource rb points to is mutably borrowed by take through rb; rb can't be used while the borrow is live",
+            "=take reads from/writes to rb (mutable reborrow — rb can't be used until take returns)",
+            "=the resource re points to is immutably borrowed by look",
+            "=look reads from re",
+            "=the resource rf points to is immutably borrowed by look",
+            "=look reads from rf",
+            "if the loop ended with break rg",
+            // `a` is a String that is never moved: it is dropped (#759).
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "e goes out of scope. No resource is dropped.",
+            "f goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_borrow_scope_end",
+        // `a` is lent to `ra` and the borrow ends inside the `else` branch
+        // (`let x = ra; break;`); nothing moves `a`, so its String is
+        // dropped at the end of `main`. The old plugin ended `a`'s column
+        // at the conditional (every branch breaks) and said nothing was
+        // dropped (#759).
+        must_contain: &["a goes out of scope. Its resource is dropped."],
+        must_not_contain: &["a goes out of scope. No resource is dropped."],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17111,5 +17167,69 @@ fn no_split_or_join_dot_floats_off_its_column() {
         });
         assert_eq!(at.len(), n, "{}: {:?} is not on the dot of {:?} next on its column: {:?}",
             name, moved, onto, tooltip_lines(&timeline));
+    }
+}
+
+/// #662: with a `loop` as a call argument, the call runs once the loop
+/// has ended, on the loop's last line (`});`), where it is drawn. The
+/// lenders stay borrowed until then: the old plugin gave each one back
+/// on the `break` row, a row above the call that uses what it lent.
+#[test]
+fn loop_call_arg_borrows_end_at_the_call() {
+    let rv = run_with_local_backend("loop_break_call_arg");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (lender, kind, brk, call) in [
+        ("a", "mutably", "if c { break ra; } else { break rb; }", "take reads from/writes to ra"),
+        ("b", "mutably", "if c { break ra; } else { break rb; }", "take reads from/writes to rb"),
+        ("e", "immutably", "if c { break re; } else { break rf; }", "look reads from re"),
+        ("f", "immutably", "if c { break re; } else { break rf; }", "look reads from rf"),
+        ("g", "mutably", "if c { break rg; }", "take reads from/writes to rg"),
+    ] {
+        let brk_row = code_row_y(&code, brk);
+        // The last such dot: `e.len()` before the loop also lends `e`.
+        let back = dots_listing_tooltip(&tl, &format!("{lender}'s resource is no longer {kind} borrowed"))
+            .into_iter().map(|d| d.1).fold(f64::MIN, f64::max);
+        let calls = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(call)));
+        assert!(
+            calls.len() == 1 && back == calls[0].1 && back > brk_row,
+            "{lender}'s borrow should end on the call's row (call dots {:?}), below `{brk}` (y={brk_row}), found y={}",
+            calls, back
+        );
+    }
+}
+
+/// #662, the `break` row: in `take(loop { if c { break ra; } else { break rb;
+/// } })` the `break ra` branch carries `ra`'s borrow of `a` to the call, so
+/// `a` is still borrowed there; only the `break rb` branch, where `ra` is
+/// dead, gives `a` back. Each lender gets its dot and its return arrow once
+/// on the `break` row (in the branch that doesn't carry its reference), and
+/// once on the call's row. The old plugin returned both lenders in both
+/// branches.
+#[test]
+fn loop_break_row_returns_only_the_lenders_the_break_doesnt_carry() {
+    let rv = run_with_local_backend("loop_break_call_arg");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (brk, kind, borrow, [(l1, r1), (l2, r2)]) in [
+        ("if c { break ra; } else { break rb; }", "mutably", "mutable", [("a", "ra"), ("b", "rb")]),
+        ("if c { break re; } else { break rf; }", "immutably", "immutable", [("e", "re"), ("f", "rf")]),
+    ] {
+        let row = code_row_y(&code, brk);
+        let on_row = |text: String| dots_listing_tooltip(&tl, &text).into_iter()
+            .filter(|d| d.1 == row).map(|d| d.0).collect::<Vec<f64>>();
+        let [lender1, lender2] = [l1, l2].map(|l| on_row(format!("{l}'s resource is no longer {kind} borrowed")));
+        let [ref1, ref2] = [r1, r2].map(|r| on_row(format!("{r}'s {borrow} borrow ends")));
+        // The first branch breaks with r1: it gives l2 back (r2 is dead
+        // there) and keeps l1 lent. The second is the other way round.
+        // That is one dot each for l1 and l2 (one per branch would be two).
+        for (what, xs) in [("lender", [&lender1, &lender2]), ("reference", [&ref1, &ref2])] {
+            assert!(xs[0].len() == 1 && xs[1].len() == 1,
+                "{what} dots on the `{brk}` row: {} for {l1}/{r1}, {} for {l2}/{r2}; want one each",
+                xs[0].len(), xs[1].len());
+        }
+        for (l, r) in [(l1, r1), (l2, r2)] {
+            let arrow = format!("Return {kind} borrowed resource from {r} to {l}");
+            assert_eq!(timeline_tooltips(&tl).iter().filter(|t| **t == arrow).count(), 2,
+                "one return arrow {r} -> {l} on the `{brk}` row and one on the call's row");
+        }
     }
 }

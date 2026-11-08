@@ -917,6 +917,11 @@ pub struct ExtBranchData {
     // How a diverging branch leaves (empty when it reaches the merge).
     // Only used for the merge dot's wording.
     pub exits: Vec<BranchExit>,
+
+    // The variables the arm's `break value`s out of a loop mention
+    // (sorted): the loop's value carries their borrows out of it, so a
+    // borrow of theirs doesn't end at the `break` (#662).
+    pub break_carries: Vec<String>,
 }
 
 /// How a branch of type `!` leaves, for the merge dot's wording: it
@@ -1384,6 +1389,11 @@ pub enum ExternalEvent {
         // See `StoredIn`.
         stored_in: StoredIn,
         result_keeps_borrow: bool,
+        // The reference is one of several `break` values of a `loop`
+        // that is the call's argument (`take(loop { if c { break ra; }
+        // else { break rb; } })`, #662): passed only if that `break`
+        // ended the loop. See BreakAlt.
+        break_alt: Option<BreakAlt>,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -1400,6 +1410,7 @@ pub enum ExternalEvent {
         implicit: ImplicitRef, // see PassByStaticReference
         stored_in: StoredIn, // see PassByStaticReference
         result_keeps_borrow: bool,
+        break_alt: Option<BreakAlt>, // see PassByStaticReference
         id: usize
     },
     GoOutOfScope {
@@ -1974,6 +1985,12 @@ pub enum State {
     },
     // should not appear for visualization in a correct program
     Invalid,
+}
+
+/// A diverging branch that leaves only by `break`ing out of a loop
+/// (or a labeled block): what follows that is reached.
+fn breaks_out_only(exits: &[BranchExit]) -> bool {
+    !exits.is_empty() && exits.iter().all(|x| matches!(x, BranchExit::Break | BranchExit::BreakBlock))
 }
 
 impl std::fmt::Display for State {
@@ -3557,6 +3574,10 @@ impl Visualizable for VisualizationData {
                     // State of each branch that reaches the merge; a
                     // diverging branch (#296) never gets there.
                     let mut reaching_states: Vec<State> = Vec::new();
+                    // State of each diverging branch that only breaks
+                    // out of a loop: the code after the loop is reached
+                    // in it (#759).
+                    let mut broke_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         let diverges = branch.diverges;
                         branch.entry_state = Some(previous_state.clone());
@@ -3573,6 +3594,8 @@ impl Visualizable for VisualizationData {
                             previous_state.clone());
                         if !diverges {
                             reaching_states.push(end_state);
+                        } else if breaks_out_only(&branch.exits) {
+                            broke_states.push(end_state);
                         }
                     }
                     // If every recorded branch diverges, only a path
@@ -3590,8 +3613,17 @@ impl Visualizable for VisualizationData {
                     // Every branch leaves the function (#515): nothing
                     // follows the conditional, and the column ends in
                     // the branches.
+                    // Unless the branches `break` out of a loop: the code
+                    // after the loop follows them, with what they left
+                    // (#759: `a` was borrowed in an arm and gave its
+                    // resource back there; it is still dropped).
                     if !branch_history.is_empty() && branch_history.iter().all(|b| b.diverges) {
-                        previous_state = State::OutOfScope;
+                        if broke_states.is_empty() {
+                            previous_state = State::OutOfScope;
+                        } else {
+                            broke_states.sort();
+                            previous_state = convert_back(&broke_states[0]);
+                        }
                     }
                     // Resume the parent timeline at `merge_point`,
                     // not `merge_point + 1`. The join dot sits at
@@ -3643,6 +3675,10 @@ impl Visualizable for VisualizationData {
                     // State of each branch that reaches the merge; a
                     // diverging branch (#296) never gets there.
                     let mut reaching_states: Vec<State> = Vec::new();
+                    // State of each diverging branch that only breaks
+                    // out of a loop: the code after the loop is reached
+                    // in it (#759).
+                    let mut broke_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         let diverges = branch.diverges;
                         branch.entry_state = Some(previous_state.clone());
@@ -3659,6 +3695,8 @@ impl Visualizable for VisualizationData {
                             previous_state.clone());
                         if !diverges {
                             reaching_states.push(end_state);
+                        } else if breaks_out_only(&branch.exits) {
+                            broke_states.push(end_state);
                         }
                     }
                     // If every recorded branch diverges, only a path
@@ -3676,8 +3714,17 @@ impl Visualizable for VisualizationData {
                     // Every branch leaves the function (#515): nothing
                     // follows the conditional, and the column ends in
                     // the branches.
+                    // Unless the branches `break` out of a loop: the code
+                    // after the loop follows them, with what they left
+                    // (#759: `a` was borrowed in an arm and gave its
+                    // resource back there; it is still dropped).
                     if !branch_history.is_empty() && branch_history.iter().all(|b| b.diverges) {
-                        previous_state = State::OutOfScope;
+                        if broke_states.is_empty() {
+                            previous_state = State::OutOfScope;
+                        } else {
+                            broke_states.sort();
+                            previous_state = convert_back(&broke_states[0]);
+                        }
                     }
                     // Resume the parent timeline at `merge_point`,
                     // not `merge_point + 1`. The join dot sits at

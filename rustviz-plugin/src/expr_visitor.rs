@@ -1120,7 +1120,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if let Some(alt) = &self.break_alt {
       if let ExternalEvent::Move { break_alt, .. } | ExternalEvent::Copy { break_alt, .. }
         | ExternalEvent::Bind { break_alt, .. } | ExternalEvent::StaticBorrow { break_alt, .. }
-        | ExternalEvent::MutableBorrow { break_alt, .. } = &mut event {
+        | ExternalEvent::MutableBorrow { break_alt, .. }
+        | ExternalEvent::PassByStaticReference { break_alt, .. }
+        | ExternalEvent::PassByMutableReference { break_alt, .. } = &mut event {
         *break_alt = Some(alt.clone());
       }
     }
@@ -1532,10 +1534,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default() },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
-        result_keeps_borrow: false, stored_in: StoredIn::default(),
+        result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
       },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() }
@@ -1701,7 +1703,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(),
+      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
     });
     *self.unique_id += 1;
   }
@@ -1710,7 +1712,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_sref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
-      from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(),
+      from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
     });
     *self.unique_id += 1;
   }
@@ -2682,11 +2684,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
-            implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in,
+            implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in, break_alt: None,
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in,
+            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in, break_alt: None,
           }
         });
         *self.unique_id += 1;
@@ -6336,9 +6338,15 @@ fn end_borrows_at_exits_in(
       // function; a `break` the loop, so only a borrow not used after
       // the loop; a `continue` the iteration, so only a borrow also
       // made in it.
-      let leaves = |line: usize, made: usize| arm.exits.iter().all(|x| match x {
+      let leaves = |line: usize, made: usize, carries_r: bool| arm.exits.iter().all(|x| match x {
         BranchExit::Return | BranchExit::Panic | BranchExit::Other => true,
-        BranchExit::Break => scope.loop_lines.is_some_and(|(_, hi)| line <= hi),
+        // A `break` whose value mentions `r` carries the borrow out of
+        // the loop, to whatever uses the value: it doesn't end here
+        // (#662). In `take(loop { if c { break ra; } else { break rb; } })`
+        // `a` stays borrowed until `take` returns on the loop's last line,
+        // but on the path through `break rb` `ra` is dead and its borrow
+        // of `a` ended before the arm.
+        BranchExit::Break => !carries_r && scope.loop_lines.is_some_and(|(_, hi)| line <= hi),
         BranchExit::Continue => scope.loop_lines.is_some_and(|(lo, hi)| lo <= made && line <= hi),
         BranchExit::BreakBlock => false,
       });
@@ -6354,7 +6362,7 @@ fn end_borrows_at_exits_in(
         // An end on the conditional's own lines that wasn't put into
         // its arms (`end_outer_borrows_in_arms`) can't be told apart
         // from the conditional; leave it.
-        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made)
+        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made, arm.break_carries.iter().any(|n| n == r.name()))
           || to.extract_rap().is_some_and(|l| l.is_fn())
           || ends_on_every_path(&arm.e_data, r, to)
         {
