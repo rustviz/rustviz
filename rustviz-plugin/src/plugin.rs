@@ -250,6 +250,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               try_move: None,
               try_moves: HashMap::new(),
               tail_values: HashSet::new(),
+              exit_scopes: HashMap::new(),
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
@@ -365,6 +366,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           try_move: None,
           try_moves: HashMap::new(),
           tail_values: HashSet::new(),
+          exit_scopes: HashMap::new(),
         };
         visitor.visit_body(hir_body);
         visitor.print_lifetimes();
