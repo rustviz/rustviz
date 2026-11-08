@@ -1159,6 +1159,9 @@ const EXPECTED_OK: &[&str] = &[
     // binds parts of it by value: the rest is dropped with it (#469).
     "temporary_field_moved_out",
     "temporary_scrutinee_partly_moved",
+    // A for loop's loan ends with the loop; a reassigned reference's old
+    // loan ends at its last use (#739, #745).
+    "borrow_end_nll_loop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -17546,5 +17549,29 @@ fn loop_call_arg_unbranched_call_and_borrow_end_share_a_row() {
             "{lender}'s borrow should end on the call's row (call dots {:?}), below `{brk}` (y={brk_row}), found y={}",
             calls, back
         );
+    }
+}
+
+/// #739, #745: a borrow ends on the row where rustc's borrow checker
+/// ends it. (On main, the for loops' loans ended at the binding's last
+/// use, inside the body, and the old loans of `r` and `*z = &c` at the
+/// write that replaced them: one row early / one row late.)
+#[test]
+fn borrow_ends_at_rustcs_end_for_loops_and_reassigned_refs() {
+    let rv = run_with_local_backend("borrow_end_nll_loop");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (text, line) in [
+        // The iterator holds the loan until the loop ends.
+        ("m's resource is no longer mutably borrowed", "} // end of mut_loop's for"),
+        ("pairs's resource is no longer immutably borrowed", "} // end of shared_loop's for"),
+        // `r` is overwritten before it is used again: a is free after
+        // the println!.
+        ("a's value is no longer immutably borrowed", "println!(\"{}\", r);"),
+        // c's loan, made through `*z`, ends after the println!.
+        ("c's value is no longer immutably borrowed", "println!(\"c value {}\", **z);"),
+    ] {
+        let ends = dots_with_tooltip(&svg, text);
+        assert_eq!(ends.len(), 1, "{}: {:?}", text, ends);
+        assert_eq!(ends[0].1, code_row_y(&code, line), "{:?} should be on the row of `{}`: {:?}", text, line, ends);
     }
 }
