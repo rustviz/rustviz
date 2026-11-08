@@ -6659,6 +6659,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
             let evt = self.bind_evt(lhs_ty, hirid);
             let line = span_to_line(&init.span, &self.tcx);
+            self.narrow_call_result_lenders(&name, &rap, init);
             for b in self.pattern_ref_copy_borrow(&rap, &evt, init) {
               self.add_external_event(line, b);
             }
@@ -6704,6 +6705,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       | PatKind::Err(_)
       | PatKind::Expr(_)
       | PatKind::Range(..) => {}
+    }
+  }
+
+  /// `let (x, y) = two(&c, &d);` with `two<'a, 'b>(&'a T, &'b T) ->
+  /// (&'a T, &'b T)`: the call's result was given every lender the
+  /// signature ties it to, but each reference in it has only one of
+  /// the lifetimes, so `x` borrows `c` and not `d`. When rustc's
+  /// lifetimes put fewer of the lenders in `x` than were given, drop
+  /// those borrows so the pattern's own (`pattern_ref_copy_borrow`)
+  /// can be drawn from the lenders rustc says (#756).
+  fn narrow_call_result_lenders(&mut self, name: &str, rap: &ResourceAccessPoint, init: &'tcx Expr<'tcx>) {
+    if !rap.is_ref() || !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+      return;
+    }
+    let Some(rd) = self.borrow_map.get(name) else { return };
+    if rd.co_lenders.is_empty() {
+      return;
+    }
+    let lenders = rd.all_lenders();
+    let Some(held) = self.loans_held_by(name, &[]) else { return };
+    let kept = |l: &ResourceTy| match l {
+      ResourceTy::Value(r) if !r.is_ref() => {
+        held.contains_key(r.name().split('.').next().unwrap_or_default())
+      }
+      _ => true,
+    };
+    if lenders.iter().all(kept) || !lenders.iter().any(kept) {
+      return;
+    }
+    let to = ResourceTy::Value(rap.clone());
+    let ours = |ev: &ExternalEvent| matches!(ev,
+      ExternalEvent::StaticBorrow { to: t, via: Some(_), .. } | ExternalEvent::MutableBorrow { to: t, via: Some(_), .. } if *t == to);
+    self.preprocessed_events.retain(|(_, ev)| !ours(ev));
+    for evs in self.event_line_map.values_mut() {
+      evs.retain(|ev| !ours(ev));
+    }
+    if let Some(rd) = self.borrow_map.get_mut(name) {
+      rd.lender = ResourceTy::Anonymous;
+      rd.co_lenders = Vec::new();
     }
   }
 

@@ -1184,6 +1184,7 @@ const EXPECTED_OK: &[&str] = &[
     // (#718, #756).
     "pattern_let_else_struct_ref",
     "pattern_tuple_ref_elements",
+    "pattern_let_tuple_call_lenders",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13441,6 +13442,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from q to c",
             "Return immutably borrowed resource from x to b",
             "Return immutably borrowed resource from y to a",
+        ],
+    },
+    // #756: `let (x, y) = two(&c, &d);` with `two` returning `(&'a T, &'b T)`:
+    // x borrows only c, y only d (`d.push` between their last uses
+    // compiles).
+    TooltipExpect {
+        name: "pattern_let_tuple_call_lenders",
+        must_contain: &[
+            "Immutable borrow from c to x: x is a reference copied out of the value two returned",
+            "Immutable borrow from d to y: y is a reference copied out of the value two returned",
+            "Return immutably borrowed resource from x to c",
+            "Return immutably borrowed resource from y to d",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from x to d",
+            "Return immutably borrowed resource from y to c",
+            "Immutable borrow from d to x",
+            "Immutable borrow from c to y",
+            "two's signature gives the reference it returns the same lifetime as both arguments",
         ],
     },
 ];
