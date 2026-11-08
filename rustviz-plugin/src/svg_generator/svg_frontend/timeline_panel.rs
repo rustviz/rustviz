@@ -145,6 +145,16 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         .filter(|t| !t.is_empty())
         .collect();
     texts.dedup();
+    // Two `?` on a line: the drop at the first `?` is not about the
+    // second `?`'s move of the same variable (#668).
+    let moves_into_try = texts.iter().any(|t| t.contains("is moved into the `?`."));
+    let rewritten: Vec<Option<String>> = texts.iter()
+        .map(|t| if moves_into_try { hover_messages::try_drop_before_own_try(t) } else { None })
+        .collect();
+    let texts_owned: Vec<String> = texts.iter().zip(&rewritten)
+        .map(|(t, r)| r.clone().unwrap_or_else(|| (*t).to_owned()))
+        .collect();
+    let mut texts: Vec<&str> = texts_owned.iter().map(String::as_str).collect();
     // `s = String::from(..)` says "acquires ownership of a new resource;
     // its previous resource is dropped": the plain "acquires ownership of
     // a resource" next to it adds nothing (#506, #519).

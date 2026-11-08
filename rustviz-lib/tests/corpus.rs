@@ -1133,6 +1133,7 @@ const EXPECTED_OK: &[&str] = &[
     // The reassignment drop-flag message names what it holds (#679).
     "reassign_maybe_moved_holds",
     "or_pattern_let_reassign_holds",
+    "try_two_operands_on_a_line",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12815,6 +12816,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Its previous resource is dropped here only if",
+        ],
+    },
+    TooltipExpect {
+        name: "try_two_operands_on_a_line",
+        // `let n = a? + b?;` runs a's `?` first, then b's. b's dot lists
+        // both: the drop if a's `?` returns early (b is untouched until
+        // then) and b's own `?`, which moves b. The drop used to end
+        // "If the `?` succeeds, nothing happens to b here" right above
+        // "b's resource is moved into the `?`", which reads as a
+        // contradiction (#668).
+        must_contain: &[
+            "Only if an earlier `?` on this line returns early (on an `Err` or `None`): the function returns and b's resource (including the String it holds, if any) is dropped. If it succeeds, b is not dropped there; b's own `?` below moves it",
+            "b's resource is moved into the `?`. If b is `Ok`, `b?` gives the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+        ],
+        must_not_contain: &[
+            "nothing happens to b here",
+            "If the `?` succeeds, nothing happens to b",
         ],
     },
 ];
