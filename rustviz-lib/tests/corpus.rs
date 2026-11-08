@@ -1119,6 +1119,8 @@ const EXPECTED_OK: &[&str] = &[
     // A holder's borrow end in an arm doesn't push the lines before
     // it down a row (#712).
     "holder_mut_moved_by_pattern",
+    // A literal aggregate passed to `Some` holds all its borrows (#711).
+    "holds_all_literal_arg",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12664,6 +12666,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from q to s",
             "Immutable borrow from t to m.part: m.part is a reference that came with the value make returned, moved into m",
             "Return immutably borrowed resource from m.part to t",
+            "Immutable borrow from s to p: p holds the borrows its argument holds: s and t, and both stay borrowed while p is in use; p isn't a reference, but its value holds one",
             "Immutable borrow from s to w.l: w.l is a reference that came with the value moved out of p into w",
             "Immutable borrow from t to w.r: w.r is a reference that came with the value moved out of p into w",
             "Return immutably borrowed resource from w.l to s",
@@ -12678,6 +12681,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Each field has its own lifetime.
             "Immutable borrow from t to w.l",
             "Immutable borrow from s to w.r",
+            // `Pair { l: &s, r: &t }` holds both; nothing is chosen (#711).
+            "so it may borrow from either",
+        ],
+    },
+    // #711: the one argument of `Some` already holds `&s` and `&t`
+    // (separate fields, or two array elements), so the result holds all
+    // of them. "May borrow from either" is only for one reference whose
+    // lifetime joins separate arguments (`pick(&a, &b)`).
+    TooltipExpect {
+        name: "holds_all_literal_arg",
+        must_contain: &[
+            "Immutable borrow from s to p: p holds the borrows its argument holds: s and t, and both stay borrowed while p is in use; p isn't a reference, but its value holds one",
+            "Immutable borrow from t to p: p holds the borrows its argument holds: s and t, and both stay borrowed while p is in use; p isn't a reference, but its value holds one",
+        ],
+        must_not_contain: &[
+            "so it may borrow from either",
+            "may point into either",
+            "same lifetime as its argument",
         ],
     },
 ];

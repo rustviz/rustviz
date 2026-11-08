@@ -1042,6 +1042,10 @@ pub struct ArgTie {
     /// How many of the tied arguments have no column to draw (a
     /// literal, a value that isn't tracked).
     pub unnamed: usize,
+    /// The one tied argument is a literal aggregate (`Pair { l: &s, r: &t }`,
+    /// `[&s, &t]`): its value holds each of its borrows at once, so the
+    /// result holds all of them; nothing is chosen between them.
+    pub holds_all: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

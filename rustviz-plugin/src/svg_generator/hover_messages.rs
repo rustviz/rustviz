@@ -1804,6 +1804,14 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
     // `v.iter()` with a closure that borrows `extra`).
     let point = if carrier == ViaCarrier::Value { "borrow from" } else { "point into" };
     let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+    // `Some(Pair { l: &s, r: &t })` / `Some([&s, &t])`: the one argument
+    // holds every borrow itself; the signature merges nothing.
+    if tie.holds_all && names.len() >= 2 && !also_unnamed && tie.unnamed == 0 {
+        return format!(
+            ": {0} holds the borrows its argument holds: {1}, and {2} while {0} is in use{3}",
+            to_fmt, join_names(&names), kept_words(&names, false), not_ref
+        );
+    }
     format!(": {}{}", signature_tie(&func_fmt, &format!("the {} it returns", noun), point, to_name, &names, also_unnamed, tie), not_ref)
 }
 

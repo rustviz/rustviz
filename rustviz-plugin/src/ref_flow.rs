@@ -364,7 +364,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ..ArgTie::default()
     };
     let target = match field { Some(f) => FlowTarget::Field(f), None => FlowTarget::Result };
+    let mut holds_all_literal = false;
     for flow in self.call_arg_flows_into(call, target).unwrap_or_default() {
+      holds_all_literal = matches!(flow.arg.kind,
+        ExprKind::Array(..) | ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Repeat(..));
       let named = self.arg_lenders(flow.arg, flow.place, flow.content, flow.by_value).iter()
         .any(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
       tie.tied.push(flow.index);
@@ -374,6 +377,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         tie.unnamed += 1;
       }
     }
+    // A single aggregate argument holds all its borrows, not one of them.
+    tie.holds_all = tie.tied.len() == 1 && holds_all_literal;
     tie
   }
 
