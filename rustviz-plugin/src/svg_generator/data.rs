@@ -1227,11 +1227,16 @@ pub enum ExternalEvent {
     // `break`, `continue`, a panic) drops while it is still alive
     // (#553): its type isn't recorded, and the
     // tooltip says why it lived that long as well as when it drops.
+    // `early`: the drop at an early exit of a temporary that isn't
+    // split into the branches it's in (an `if let` scrutinee's, see
+    // `unbranched_temps`): it happens only on the path that leaves, so
+    // the column goes on for the others.
     TemporaryDrop {
         ro: ResourceAccessPoint,
         ty: Option<String>,
         when: String,
         literal: bool,
+        early: bool,
         id: usize
     },
     // At the end of a loop: `ro` (declared outside the loop) was moved
@@ -1584,7 +1589,7 @@ pub enum Event {
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
-    TemporaryDrop { ty: Option<String>, when: String, literal: bool },
+    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
@@ -2084,7 +2089,7 @@ impl Event {
             Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
                 hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
             }
-            Event::TemporaryDrop { ty: Some(ty), when, literal } => {
+            Event::TemporaryDrop { ty: Some(ty), when, literal, .. } => {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal)
             }
             Event::OwnerDropIfTryReturns => {
@@ -2903,6 +2908,9 @@ impl Visualizable for VisualizationData {
             // preserve the previous state for any input — the dot is
             // a visual annotation, not an ownership transition.
             (_, Event::OwnerDropAtReassign { .. }) => (*previous_state).clone(),
+            // Dropped only on the path that leaves early; the column
+            // goes on for the others.
+            (_, Event::TemporaryDrop { early: true, .. }) => (*previous_state).clone(),
             // An unbound temporary's column ends where it is dropped.
             (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
             // Dropped only on the path that returns; the code after the
@@ -3313,8 +3321,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
         },
-        ExternalEvent::TemporaryDrop{ ty, when, literal, .. } => {
-          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal })]
+        ExternalEvent::TemporaryDrop{ ty, when, literal, early, .. } => {
+          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early })]
         },
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
@@ -3652,8 +3660,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
             },
-            ExternalEvent::TemporaryDrop{ro, ty, when, literal, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal }, line_number);
+            ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early }, line_number);
             },
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);

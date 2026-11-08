@@ -364,9 +364,18 @@ pub fn moved_above(by_cond: bool) -> &'static str {
 // drops it when its statement (or other temporary scope) ends (#457).
 // The two dots of its column: where it comes into being, and the drop.
 pub fn event_dot_unbound_temporary_acquire(_my_name: &String, from_name: &String) -> String {
+    // The column the value comes from is a fn's, a std macro's (`vec!`)
+    // or a literal's (`P { .. }`, `(..)`, `[..]`) (#469).
+    let source = if from_name.ends_with('!') {
+        format!("the {0} macro produces", fmt_style(from_name))
+    } else if from_name.ends_with(" { .. }") || from_name == "(..)" || from_name == "[..]" {
+        format!("the literal {0} builds", fmt_style(from_name))
+    } else {
+        format!("{0} returns", fmt_style(from_name))
+    };
     format!(
-        "A temporary holds the value that {0} returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-        fmt_style(from_name)
+        "A temporary holds the value that {0}. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+        source
     )
 }
 

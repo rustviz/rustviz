@@ -771,6 +771,12 @@ const EXPECTED_OK: &[&str] = &[
     "field_mut_borrow_through_ref",
     // Copying out of an `if let` scrutinee doesn't branch it (#496).
     "if_let_copy_and_move_out_of_scrutinee",
+    // A let chain's scrutinee temporary lives until the matched block
+    // ends or the `else` runs (#604). Let chains need Rust 2024: Cargo
+    // compiles each tests/*.rs as an integration test in the plugin
+    // crate's edition (2021), but doesn't look in subdirectories. The
+    // plugin builds user code in edition 2024.
+    "edition2024/temporary_let_chain_scrutinee",
     // Or-pattern arms bind their names like a single pattern (#503).
     "or_pattern_arm",
     "or_pattern_arms",
@@ -938,6 +944,13 @@ const EXPECTED_OK: &[&str] = &[
     "return_deref_copy_early",
     "return_deref_copy_param",
     "return_deref_copy_ref",
+    // Temporaries of std macros, literals, `if let` / `while let`
+    // scrutinees and `for` heads are dropped and stated (#469).
+    "temporary_drop_macros_literals",
+    "temporary_drop_if_while_for",
+    // A `(temporary)` column still alive at an early exit is dropped
+    // there, with the exit's wording (#469 with #410).
+    "temporary_drop_early_exit",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6147,7 +6160,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // temporary, and the drop is stated (timing checked with a
         // Drop-printing program). Values that are moved on (`let kept =
         // make();`, `match Some(make()) { Some(s) => s, .. }`) are not
-        // temporaries: no 11th column.
+        // temporaries: no 12th column. The one-line `match` has a column
+        // since #469 (it panicked before, #459).
         must_contain: &[
             "Move from String::from to (temporary)",
             "Move from make to (temporary 2)",
@@ -6158,7 +6172,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from make to (temporary 7)",
             "Move from make to (temporary 8)",
             "Move from String::from to (temporary 9)",
-            "Move from make to (temporary 10)",
+            "Move from Some to (temporary 10)",
+            "Move from make to (temporary 11)",
             "A temporary holds the value that make returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
             "A temporary holds the value that String::from returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
             "A temporary holds the value that Some returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
@@ -6169,9 +6184,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "unbound temporary",
-            "Move from make to (temporary 11)",
-            "Move from Some to (temporary 11)",
-            "Move from String::from to (temporary 11)",
+            "Move from make to (temporary 12)",
+            "Move from Some to (temporary 12)",
+            "Move from String::from to (temporary 12)",
         ],
     },
     TooltipExpect {
@@ -6502,6 +6517,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "v's resource is moved",
             "v goes out of scope. No resource is dropped.",
+            // The `IntoIter` the scrutinee builds outlives the pattern
+            // match (#469): the `return` in the first branch drops it
+            // (#410), and the `else` path drops it before the `else` block.
+            "This temporary IntoIter<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
         ],
         must_not_contain: &[
             "v is live in a conditional expression ",
@@ -6511,6 +6531,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v was moved in at least one branch above, so it can't be used after the branches \
              (until it's assigned again). If the branch that ran didn't move it, its resource is \
              dropped when v goes out of scope.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it",
+            "dropped at the end of the condition",
+            // Stated once, with #410's wording.
+            "is left early, while this temporary is still alive",
         ],
     },
     TooltipExpect {
@@ -10377,6 +10401,118 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a reference from y is returned to the caller",
         ],
     },
+    // ─── Temporaries of macros, literals, if-let / for heads (#469) ──
+    TooltipExpect {
+        name: "edition2024/temporary_let_chain_scrutinee",
+        // In a let chain (edition 2024) a `let`'s scrutinee temporary is
+        // not dropped at the end of its `&&` operand: it lives until the
+        // block the chain matched ends, or until the `else` runs if the
+        // chain fails, and in a `while` to the end of the iteration
+        // (checked with a Drop-printing program). A plain operand's
+        // temporary (`label()`) is dropped at the end of that operand.
+        // Once rebased onto main's let-chain drawing (#198), the later
+        // parts sit in the if-branch; the temporary must still get no
+        // second, function-end drop ("left early").
+        must_contain: &[
+            "Move from make to (temporary)",
+            "Move from label to (temporary 2)",
+            "Move from make to (temporary 3)",
+            "Move from make to (temporary 4)",
+            "This temporary Option<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of this `&&` / `||` operand: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "This temporary Option<String> is dropped at the end of this `&&` / `||` operand",
+            "is left early",
+            "(temporary 5)",
+        ],
+    },
+    TooltipExpect {
+        name: "temporary_drop_macros_literals",
+        // `vec![..];`, `let _ = P { .. };`, `P { .. }.n`, `format!(..).len()`,
+        // `(.., ..).1` and `[.., ..].len()` each build a temporary that
+        // Rust drops at the end of the statement (timing checked with a
+        // Drop-printing program). The `make()` results moved into the
+        // literals are not temporaries of their own.
+        must_contain: &[
+            "Move from vec! to (temporary)",
+            "Move from P { .. } to (temporary 2)",
+            "Move from P { .. } to (temporary 3)",
+            "Move from format! to (temporary 4)",
+            "Move from (..) to (temporary 5)",
+            "Move from [..] to (temporary 6)",
+            "A temporary holds the value that the vec! macro produces. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the format! macro produces. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the literal P { .. } builds. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the literal (..) builds. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the literal [..] builds. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "This temporary Vec<String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary (String, i32) is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary [String; 2] is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "the value that vec! returns",
+            "the value that P { .. } returns",
+            "Move from make to (temporary",
+            "Move from String::new to (temporary",
+            "(temporary 7)",
+        ],
+    },
+    TooltipExpect {
+        name: "temporary_drop_if_while_for",
+        // The scrutinee `Some(make())` of an `if let` is dropped before
+        // the `else` block runs, or when the matched block ends (edition
+        // 2024, which `cargo new` gives the corpus; in 2021 it lives to
+        // the end of the whole statement, after the `else` block; both
+        // checked with a Drop-printing program), a `while let`'s to the end of each iteration, and the iterator a
+        // `for` makes from its head (`make_vec()`, `v`) to the end of
+        // the loop; `make().chars()` keeps its String that long too.
+        must_contain: &[
+            "Move from Some to (temporary)",
+            "Move from Some to (temporary 2)",
+            "Move from Some to (temporary 3)",
+            "Move from into_iter to (temporary 4)",
+            "Move from into_iter to (temporary 5)",
+            "Move from make to (temporary 6)",
+            "This temporary Option<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "A temporary holds the value that into_iter returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+        ],
+        must_not_contain: &[
+            "This temporary Option<String> is dropped at the end of the condition",
+            "This temporary Option<String> is dropped at the end of this statement",
+            "Move from make to (temporary 7)",
+            "(temporary 7)",
+        ],
+    },
+    TooltipExpect {
+        name: "temporary_drop_early_exit",
+        // A `while let` scrutinee's iterator, a `for` loop's iterator, an
+        // `if let` scrutinee and `match` scrutinees (`vec![..]`, a tuple)
+        // are still alive at the `return` / `break` in their branch: each
+        // is dropped there on its column, stated once with the exit's
+        // wording (#410), and again where it ends on the other paths.
+        must_contain: &[
+            "This temporary IntoIter<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary (String, usize) is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            // #469's own wording for the same drop, before #410 merged.
+            "is left early, while this temporary is still alive",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13374,5 +13510,76 @@ fn match_ref_binding_borrow_ends_at_last_use() {
         assert!(reach <= back,
             "{}: {}'s \"being shared\" segment runs to y={}, past the borrow's end at y={}",
             name, lender, reach, back);
+    }
+}
+
+/// The `(temporary)` columns whose drop dot says the temporary is
+/// dropped before an `if let`'s `else` block runs (#469, #604): each
+/// column's `data-hash` and the drop dot's y.
+fn else_path_temporary_drops(timeline: &str) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for tag in start_tags(timeline, "g") {
+        let Some(hash) = attr(tag, "data-hash") else { continue };
+        let lines = timeline_tooltips(&format!("{}>", tag));
+        if !lines.iter().any(|l| l.starts_with("This temporary") && l.contains("before the `else` block")) {
+            continue;
+        }
+        let at = timeline.find(tag).unwrap() + tag.len();
+        let body = &timeline[at..at + timeline[at..].find("</g>").unwrap()];
+        let Some(cy) = start_tags(body, "circle").first().and_then(|c| attr(c, "cy")?.parse::<f64>().ok()) else { continue };
+        out.push((hash.to_owned(), cy));
+    }
+    out
+}
+
+/// The lowest y that an element of the column `hash` (segment line,
+/// hover polygon or dot) reaches.
+fn column_bottom(timeline: &str, hash: &str) -> f64 {
+    let mut bottom = f64::MIN;
+    for kind in ["line", "polygon", "circle"] {
+        for tag in start_tags(timeline, kind) {
+            if attr(tag, "data-hash") != Some(hash) {
+                continue;
+            }
+            let ys: Vec<f64> = match kind {
+                "line" => ["y1", "y2"].iter().filter_map(|k| attr(tag, k)?.parse().ok()).collect(),
+                "circle" => attr(tag, "cy").and_then(|v| v.parse().ok()).into_iter().collect(),
+                _ => attr(tag, "points").unwrap_or("").split_whitespace()
+                    .filter_map(|p| p.split(',').nth(1)?.parse().ok()).collect(),
+            };
+            for y in ys {
+                bottom = bottom.max(y);
+            }
+        }
+    }
+    bottom
+}
+
+/// #571 follow-up: an `if let`'s scrutinee temporary is dropped before
+/// the `else` block runs (edition 2024), so it isn't alive in the else
+/// branch. Its column used to run on from that drop into the else
+/// branch and down to a join dot ("(temporary) isn't moved in any of
+/// the branches above"), its segments saying "(temporary) is the owner
+/// of the resource" there. Now nothing of the column is drawn below the
+/// drop, and it gets no join.
+#[test]
+fn if_let_scrutinee_temporary_ends_at_its_else_drop() {
+    for name in ["if_let_scrutinee_move", "temporary_drop_early_exit"] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let drops = else_path_temporary_drops(&timeline);
+        assert!(!drops.is_empty(), "{}: no drop dot before an `else` block", name);
+        for (hash, y) in drops {
+            let bottom = column_bottom(&timeline, &hash);
+            assert!(bottom <= y + 6.0,
+                "{}: the temporary column {} runs to y={}, below its drop before the `else` block at y={}",
+                name, hash, bottom, y);
+            let joins: Vec<String> = start_tags(&timeline, "circle").into_iter()
+                .filter(|t| attr(t, "data-hash") == Some(hash.as_str()))
+                .flat_map(|t| timeline_tooltips(&format!("{}>", t)))
+                .filter(|t| t.contains("branches above"))
+                .collect();
+            assert!(joins.is_empty(), "{}: the temporary column {} has a join dot: {:?}", name, hash, joins);
+        }
     }
 }
