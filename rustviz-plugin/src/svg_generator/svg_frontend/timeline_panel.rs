@@ -150,8 +150,15 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
     // a resource" next to it adds nothing (#506, #519).
     let all = texts.clone();
     texts.retain(|t| !all.iter().any(|r| hover_messages::reassign_subsumes_acquire(r, t)));
+    // The same for a value one of several `break`s carried (#586).
+    let mut texts: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+    if let Some((i, j, merged)) = (0..texts.len()).find_map(|i| (0..texts.len())
+        .find_map(|j| hover_messages::reassign_with_break_alt(&texts[i], &texts[j]).map(|m| (i, j, m)))) {
+        texts[i] = merged;
+        texts.remove(j);
+    }
     if texts.len() <= 1 {
-        return texts.first().copied().unwrap_or("").to_owned();
+        return texts.first().cloned().unwrap_or_default();
     }
     texts.iter()
         .map(|t| format!("• {}", t))

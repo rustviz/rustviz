@@ -2910,6 +2910,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
           _ => Vec::new(),
         };
+        let mut drop_line = line_num;
+        let mut drop_at: Option<usize> = None;
         if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
           // `v[i] += k`: k is an operand, not the element's new
           // value, so don't draw it as copied into v[i].
@@ -2928,17 +2930,40 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           if matches!(lhs_rty, ResourceTy::Index(..)) && self.preprocessed_events.len() == n_events {
             self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
           }
+          // `r = loop { … break a; };`: the loop runs first, and the
+          // old value is dropped when its value is assigned, after the
+          // loop ends: drawn where the new value arrives (#586), ahead
+          // of the arrivals, so that several `break`s' arrows stacked
+          // on that line (#561) don't push it onto a row of its own.
+          if let (ResourceTy::Value(rap), ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _)) = (&lhs_rty, rhs_expr.kind) {
+            let arrivals: Vec<(usize, usize)> = self.preprocessed_events.iter().enumerate().skip(n_events)
+              .filter(|(_, (_, ev))| matches!(ev,
+                ExternalEvent::Move { to: ResourceTy::Value(t), .. }
+                | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
+                | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if t.hash() == rap.hash()))
+              .map(|(i, (line, _))| (i, *line))
+              .collect();
+            match arrivals.first() {
+              Some(&(i, line)) => { drop_line = line; drop_at = Some(i); }
+              None => drop_line = span_end_line(&rhs_expr.span, &self.tcx),
+            }
+          }
         }
 
+        let n_before_drops = self.preprocessed_events.len();
         for (rap, maybe_moved) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved) {
           let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
-          self.add_external_event(line_num, ExternalEvent::OwnerDropAtReassign {
+          self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
             ro: rap,
             id: *self.unique_id,
             maybe_moved,
             by_cond,
           });
           *self.unique_id += 1;
+        }
+        if let Some(i) = drop_at {
+          let n_drops = self.preprocessed_events.len() - n_before_drops;
+          self.preprocessed_events[i..].rotate_right(n_drops);
         }
       }
 
@@ -7108,6 +7133,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.current_scope = loop_scope;
       self.inside_branch = loop_inside;
     } else if let Some((_, lhs, evt)) = self.break_binds.iter().rev().find(|(id, ..)| *id == target).cloned() {
+      self.inherit_break_lenders(&lhs, target);
       self.match_rhs(lhs, value, evt);
     } else {
       self.loop_breaks.push((target, value, brk));
