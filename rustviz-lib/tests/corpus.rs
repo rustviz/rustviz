@@ -17302,6 +17302,30 @@ fn no_split_or_join_dot_floats_off_its_column() {
     }
 }
 
+/// #747: a `ref` binding of a by-value parameter (#691) borrows a
+/// `(parameter)` column that the caller's value arrives in. The borrow
+/// arrow used to sit on the signature's row, on top of the arrow bringing
+/// the caller's value in, so the two read as one double-headed arrow; and
+/// with two such parameters the second borrow, and the second return, each
+/// took a row of their own (U-shaped arrows, rows 5-7 double height). The
+/// borrows now run half a row below the signature's row, all at one level,
+/// and the returns share their row: two `ref` parameters take the same
+/// rows as two plain ones.
+#[test]
+fn two_ref_params_borrow_arrows_are_apart_and_share_rows() {
+    let rv = run_with_local_backend("param_ref_value_column");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let sig = code_row_y(&code, "fn two(ref a: String, ref b: Vec<i32>) -> usize {");
+    let body = code_row_y(&code, "a.len() + b.len()");
+    assert_eq!(body - sig, 30.0, "the body is one row below the signature");
+    for text in ["Immutable borrow from (parameter) to a", "Immutable borrow from (parameter 2) to b"] {
+        let arrows = arrow_points(&timeline, text);
+        assert_eq!(arrows.len(), 1, "{}", text);
+        let level = arrows[0].iter().map(|p| p.1).fold(f64::MIN, f64::max);
+        assert_eq!(level, sig + 15.0, "{}: runs half a row below the signature's row, clear of the caller's value arrow: {:?}", text, arrows[0]);
+    }
+}
+
 /// #722(a): `let it = v.iter_mut(); for x in it { .. }` moves `it` into
 /// the loop, which owns the iterator until it ends, so `v` is borrowed
 /// through the whole body (`v.len()` in it is E0502) and rustc ends the

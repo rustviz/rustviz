@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -346,6 +346,9 @@ pub fn mutate_branch_lines(
                         if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                             arrow_tracks.extend(tracks);
                             ev_len = half_row_tracks_extra_rows(n);
+                        }
+                        if is_param_value_line(&ev) {
+                            ev_len = 0;
                         }
                         if !back.is_empty() {
                             same_line_shift = Some((line_num, back_line - line_num));
@@ -860,6 +863,9 @@ pub fn render_svg(
                     if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                         visualization_data.arrow_tracks.extend(tracks);
                         needed = half_row_tracks_extra_rows(n);
+                    }
+                    if is_param_value_line(&ev) {
+                        needed = 0;
                     }
                     let trailing_blanks = source_lines_for_absorb
                         .iter()

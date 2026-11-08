@@ -534,6 +534,25 @@ pub fn parameter_label(n: usize) -> String {
     }
 }
 
+/// Is `evs` a line of arrows that all run between a `(parameter)` column
+/// (#691) and the `ref` binding that borrows it: the borrows on the
+/// signature's line, or their returns at the binding's last use? Those
+/// arrows of different parameters sit in different columns and never
+/// overlap, so they share one level instead of stacking a row each, and
+/// the borrows (not the returns) run half a row below the line's row,
+/// clear of the arrow bringing the caller's value into the column (#747).
+pub fn is_param_value_line(evs: &[ExternalEvent]) -> bool {
+    !evs.is_empty() && evs.iter().all(|e| {
+        matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
+            | ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+            && {
+                let (from, to) = ResourceAccessPoint_extract(e);
+                let is_col = |t: &ResourceTy| matches!(t, ResourceTy::Value(r) if matches!(r, ResourceAccessPoint::Owner(_)) && r.name().starts_with("(parameter"));
+                is_col(from) || is_col(to)
+            }
+    })
+}
+
 impl ResourceAccessPoint {
     /// `Some` iff this RAP is an owner whose own type is `Rc` / `Arc` /
     /// `Weak`.
