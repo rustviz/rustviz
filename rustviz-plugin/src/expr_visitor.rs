@@ -5552,6 +5552,7 @@ pub fn print_out_of_scope(&mut self){
       }
     }
     self.nest_borrow_ends_in_arms();
+    end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.unique_id);
     self.end_outer_borrows_in_arms();
     // A lender that got a column in a conditional just now (its borrow
     // through an outer reference ends in an arm) has one for the arm's
@@ -5882,6 +5883,84 @@ fn arm_declaring(
     }
   }
   None
+}
+
+/// `if let Some(a) = x.as_mut() { … } else { … }` (and the `match`
+/// form, #693): the call lends `x` and its result keeps the borrow, so
+/// `x` enters the conditional borrowed. Where a pattern binds that
+/// borrow (`a`), it ends at the binding's last use, inside the arm
+/// (`nest_borrow_ends_in_arms`). An arm whose pattern binds nothing of
+/// it (the `else`, `None =>`) had nothing hold the borrow: it ended
+/// before the arm. Without saying so there, `x` reached the join still
+/// borrowed on that path, so its scope end said it dropped nothing.
+/// End it first thing in each such arm (no arrow: nothing gives it
+/// back).
+fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, unique_id: &mut usize) {
+  for k in 0..events.len() {
+    let (before, rest) = events.split_at_mut(k);
+    let ExternalEvent::Branch { branches, live_vars, branch_type, .. } = &mut rest[0].1 else { continue };
+    for arm in branches.iter_mut() {
+      end_scrutinee_borrows_in_other_arms(&mut arm.e_data, unique_id);
+    }
+    if matches!(branch_type, BranchType::Loop(..)) {
+      continue;
+    }
+    #[expect(clippy::disallowed_methods, reason = "sorted by declaration order below")]
+    let mut lenders: Vec<ResourceAccessPoint> = live_vars.iter().cloned().collect();
+    lenders.sort_by(|a, b| a.hash().cmp(b.hash()).then_with(|| a.name().cmp(b.name())));
+    for lender in lenders {
+      // The scrutinee's call lent it, and its result keeps the borrow.
+      let mutable = match before.iter().rev().find(|(_, e)| touches(e, &lender)) {
+        Some((_, ExternalEvent::PassByMutableReference { from: ResourceTy::Value(l), result_keeps_borrow: true, .. })) if *l == lender => true,
+        Some((_, ExternalEvent::PassByStaticReference { from: ResourceTy::Value(l), result_keeps_borrow: true, .. })) if *l == lender => false,
+        _ => continue,
+      };
+      // Arms whose pattern binds that borrow, and whether one of them
+      // gives it back in the arm.
+      let binds: Vec<bool> = branches.iter().map(|arm| binds_scrutinee_borrow(arm, &lender)).collect();
+      if !branches.iter().zip(&binds).any(|(arm, b)| *b && gives_back(&arm.e_data, &lender)) {
+        continue;
+      }
+      for (b, arm) in branches.iter_mut().enumerate() {
+        if binds[b] {
+          continue;
+        }
+        let id = *unique_id;
+        *unique_id += 1;
+        let (from, to) = (ResourceTy::Anonymous, ResourceTy::Value(lender.clone()));
+        let ev = if mutable {
+          ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new() }
+        } else {
+          ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new() }
+        };
+        let start = branch_type.get_start_end(b).0;
+        let at = arm.e_data.iter().position(|(l, _)| *l >= start).unwrap_or(arm.e_data.len());
+        arm.e_data.insert(at, (start, ev));
+      }
+    }
+  }
+}
+
+/// Whether `arm`'s pattern binds a borrow of `lender` out of the value
+/// the scrutinee's call returned (`Some(a)` on `x.as_mut()`).
+fn binds_scrutinee_borrow(arm: &ExtBranchData, lender: &ResourceAccessPoint) -> bool {
+  arm.e_data.iter().any(|(_, e)| match e {
+    ExternalEvent::StaticBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(r), via: Some(via), .. }
+    | ExternalEvent::MutableBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(r), via: Some(via), .. } =>
+      l == lender && arm.decl_vars.contains(r) && matches!(via.carrier, ViaCarrier::PatternBinding { from_call: true, .. }),
+    _ => false,
+  })
+}
+
+/// Whether `events` (one arm's, nested conditionals included) give
+/// `lender` its value back.
+fn gives_back(events: &[(usize, ExternalEvent)], lender: &ResourceAccessPoint) -> bool {
+  events.iter().any(|(_, e)| match e {
+    ExternalEvent::StaticDie { to: ResourceTy::Value(l), still_borrowed_by, .. }
+    | ExternalEvent::MutableDie { to: ResourceTy::Value(l), still_borrowed_by, .. } => l == lender && still_borrowed_by.is_empty(),
+    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| gives_back(&b.e_data, lender)),
+    _ => false,
+  })
 }
 
 /// Insert `ev` into the arm `path` leads to (see `arm_declaring`),
