@@ -2644,6 +2644,10 @@ fn render_arrow (
                 _ => Box::new(hover_messages::event_dot_move_to_caller),
             };
             let title = match external_event {
+                // `*r` returned with r a reference: a copy of the value
+                // r points to (#670).
+                ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('*') =>
+                    hover_messages::event_dot_copy_deref_to_caller(r.name(), place),
                 // `p.x` returned from behind a reference p: the field
                 // is copied, not p's resource (#266).
                 ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } =>

@@ -1139,6 +1139,29 @@ pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, poi
     )
 }
 
+// `*r` returned with r a reference (`r: &i32`): the caller gets a copy
+// of the value r points to, not a reference to it (#670). `**y` reads
+// the value behind the reference y points to.
+pub fn event_dot_copy_deref_to_caller(ref_name: &String, place: &String) -> String {
+    let depth = place.chars().take_while(|c| *c == '*').count();
+    match depth {
+        0 | 1 => format!(
+            "a copy of the value {0} points to is returned to the caller",
+            fmt_style(ref_name)
+        ),
+        2 => format!(
+            "a copy of {0}, the value behind the reference {1} points to, is returned to the caller",
+            fmt_style(place),
+            fmt_style(ref_name)
+        ),
+        _ => format!(
+            "a copy of {0}, the value reached by following {1}'s references, is returned to the caller",
+            fmt_style(place),
+            fmt_style(ref_name)
+        ),
+    }
+}
+
 // Copy out of a field reached through a reference: `let a = p.x;`
 // with p: &P. The value is read from what p points to (which p
 // doesn't own), so it's phrased like the write case above, including

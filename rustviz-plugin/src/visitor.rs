@@ -116,7 +116,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
 
     let to_ro = ResourceTy::Caller;
-    let from_ro = match fetch_rap(e, &self.tcx, &self.raps) {
+    // `*r` with r a reference: a copy of the value r points to is
+    // returned, not a reference (#670). (A `*r` that isn't Copy can only
+    // be reborrowed, never moved out from behind r; that's left as is.)
+    let deref = if matches!(evt, Evt::Copy) { self.deref_of_ref(e) } else { None };
+    let from_ro = if let Some(rty) = deref { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
       // A unit struct / enum constructor (`Marker`) or a fn item
       // named as the returned value has no column of its own, and
       // neither has the caller: an arrow between the two can't be
@@ -128,7 +132,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // the field (#266). Not `&self.name`, which returns a reference
       // rather than a copy.
       None => self.field_through_ref(e).unwrap_or(ResourceTy::Anonymous),
-    };
+    }};
 
     let line_num = expr_to_line(e, &self.tcx);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())

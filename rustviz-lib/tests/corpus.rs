@@ -932,6 +932,12 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/if_let_chain_else_try_moved",
     "try_in_if_else",
     "try_in_match_arm",
+    // `*r` returned with r a reference returns a copy of the value r
+    // points to, not a reference (#670).
+    "return_deref_copy",
+    "return_deref_copy_early",
+    "return_deref_copy_param",
+    "return_deref_copy_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -10330,6 +10336,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // The arm's pattern moved o's String into `s`.
             "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and o's \
              resource is dropped. If the `?` succeeds, nothing happens to o here.",
+        ],
+    },
+    // #670: `*r` with r: &i32 is an i32, which is Copy: the caller gets a
+    // copy of the value r points to. No reference is returned, and the
+    // caller gets no reference to x.
+    TooltipExpect {
+        name: "return_deref_copy",
+        must_contain: &["a copy of the value r points to is returned to the caller"],
+        must_not_contain: &["a reference from r is returned to the caller"],
+    },
+    TooltipExpect {
+        name: "return_deref_copy_early",
+        must_contain: &["a copy of the value r points to is returned to the caller"],
+        must_not_contain: &["a reference from r is returned to the caller"],
+    },
+    // `*r` from a `&i32` parameter, and `*m` from a `&mut i32` one: what is
+    // copied is the i32 m points to, not m (a reference) or m's "value".
+    TooltipExpect {
+        name: "return_deref_copy_param",
+        must_contain: &[
+            "a copy of the value r points to is returned to the caller",
+            "a copy of the value m points to is returned to the caller",
+        ],
+        must_not_contain: &[
+            "a reference from r is returned to the caller",
+            "m's value is copied to the caller",
+        ],
+    },
+    // `*r` with r: &&String copies out the `&String` r points to (a
+    // reference is a Copy value too); `**y` with y: &&i32 copies the i32.
+    TooltipExpect {
+        name: "return_deref_copy_ref",
+        must_contain: &[
+            "a copy of the value r points to is returned to the caller",
+            "a copy of **y, the value behind the reference y points to, is returned to the caller",
+        ],
+        must_not_contain: &[
+            "a reference from r is returned to the caller",
+            "a reference from y is returned to the caller",
         ],
     },
 ];
