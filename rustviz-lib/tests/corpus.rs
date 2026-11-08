@@ -1010,6 +1010,8 @@ const EXPECTED_OK: &[&str] = &[
     "loop_break_value_cond_receivers",
     // Renders without crashing; its values aren't paired yet (#561).
     "loop_break_value_several_tuple",
+    // A Result's or enum's drop says what it may hold (#684).
+    "enum_drop_holds",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2657,7 +2659,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from Cons to list",
             "Move from list to _l",
             "list goes out of scope. No resource is dropped.",
-            "_l goes out of scope. Its resource is dropped.",
+            "_l goes out of scope. Its resource is dropped (including the Box<List> it holds, if any).",
         ],
         must_not_contain: &[
             "list goes out of scope. Its resource is dropped.",
@@ -2668,7 +2670,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from List::Cons to list",
             "Move from list to _l",
-            "_l goes out of scope. Its resource is dropped.",
+            "_l goes out of scope. Its resource is dropped (including the Box<List> it holds, if any).",
         ],
         must_not_contain: &[
             "list goes out of scope. Its resource is dropped.",
@@ -6828,8 +6830,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from msg to s",
             "msg's resource is moved",
             "msg was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
-             dropped when msg goes out of scope.",
+             (until it's assigned again). If the branch that ran didn't move it, its resource \
+             (including the String it holds, if any) is dropped when msg goes out of scope.",
         ],
         must_not_contain: &["Move from msg to n", "Copy from msg to s", "msg's resource is copied"],
     },
@@ -8733,11 +8735,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o goes out of scope. Its resource (including the Result<String, String> it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Partial immutable borrow from r to t",
             "t immutably borrows a resource",
-            "r goes out of scope. Its resource is dropped.",
+            "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
             "Partial copy from n to k",
             "k is initialized with a copy of n",
         ],
-        must_not_contain: &["o goes out of scope. Its resource is dropped."],
+        must_not_contain: &["o goes out of scope. Its resource is dropped.", "=r goes out of scope. Its resource is dropped."],
     },
     TooltipExpect {
         name: "or_pattern_if_let",
@@ -11335,6 +11337,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=a goes out of scope. No resource is dropped.",
             "=x goes out of scope. Its resource is dropped.",
             "=z goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #684: an enum has no field columns, so its drop says what it holds.
+    TooltipExpect {
+        name: "enum_drop_holds",
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "b goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
+            "c goes out of scope. Its resource is dropped (including the String or Vec<i32> it holds).",
+            "e goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "f goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
+            "g goes out of scope. Its resource is dropped (including the String or Vec<i32> it holds).",
+            "i goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &[
+            "=a goes out of scope. Its resource is dropped.",
+            "=b goes out of scope. Its resource is dropped.",
+            "=c goes out of scope. Its resource is dropped.",
+            "=e goes out of scope. Its resource is dropped.",
+            "=f goes out of scope. Its resource is dropped.",
+            "=g goes out of scope. Its resource is dropped.",
+            "=i goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped (including",
+            "h goes out of scope. Its resource is dropped (including",
         ],
     },
 ];

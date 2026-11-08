@@ -1871,6 +1871,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
                 } else {
                   self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+                  self.mark_owner_type(&name, ty);
                 }
               }
             }

@@ -444,7 +444,7 @@ const BOOK: &[Snippet] = &[
             "Move from home to _a",
             "Move from loopback to _b",
             "loopback goes out of scope. No resource is dropped.",
-            "_b goes out of scope. Its resource is dropped.",
+            "_b goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
         ..E
     },
@@ -539,7 +539,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Partial immutable borrow from self to s",
             "call reads from m (implicitly borrowed)",
-            "m goes out of scope. Its resource is dropped.",
+            "m goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "L10+ s no longer borrows the resource self points to",
             "L10+ s's immutable borrow ends",
         ],
@@ -725,8 +725,8 @@ const BOOK: &[Snippet] = &[
             "Partial copy from r to n",
             "Partial move from r to e",
             "e goes out of scope. Its resource is dropped.",
-            "r was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when r goes out of scope.",
-            "r goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "r was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when r goes out of scope.",
+            "r goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "r was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
@@ -774,7 +774,7 @@ const BOOK: &[Snippet] = &[
         id: "c9_05_early_err_return",
         status: Missing,
         note: "`return Err(..)` and the tail `Ok(x)` are not shown as returned to the caller",
-        must_contain: &["Copy from x to Ok", "Move from check to r", "r goes out of scope. Its resource is dropped."],
+        must_contain: &["Copy from x to Ok", "Move from check to r", "r goes out of scope. Its resource is dropped (including the String it holds, if any)."],
         ..E
     },
     Snippet {
@@ -1040,7 +1040,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from Cons to list",
             "Move from list to _l",
-            "_l goes out of scope. Its resource is dropped.",
+            "_l goes out of scope. Its resource is dropped (including the Box&lt;List&gt; it holds, if any).",
             "list goes out of scope. No resource is dropped.",
         ],
         ..E
@@ -1380,7 +1380,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x07_cons_qualified",
         note: "single (non-nested) constructor",
-        must_contain: &["Move from List::Cons to list", "Move from list to _l", "_l goes out of scope. Its resource is dropped."],
+        must_contain: &["Move from List::Cons to list", "Move from list to _l", "_l goes out of scope. Its resource is dropped (including the Box&lt;List&gt; it holds, if any)."],
         ..E
     },
     Snippet {
@@ -1434,7 +1434,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from List::Cons to list",
             "Move from list to _l",
-            "_l goes out of scope. Its resource is dropped.",
+            "_l goes out of scope. Its resource is dropped (including the Box&lt;List&gt; it holds, if any).",
             "list goes out of scope. No resource is dropped.",
         ],
         ..E
