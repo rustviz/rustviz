@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint};
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, RcCall, RcDrop, StaticLender, TupleDropAt, TupleLeft, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, ChainFailHow, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -443,7 +443,9 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
     // Weak's drop note after it, #373)
     reassign.split_once(INFIX)
         .is_some_and(|(name, tail)| (tail.starts_with(" is dropped") || tail.starts_with(" (including "))
-            && acquire.strip_suffix(" acquires ownership of a resource") == Some(name))
+            && (acquire.strip_suffix(" acquires ownership of a resource") == Some(name)
+                // `s = r?;` (#652): r's dot says s gets what's inside it.
+                || acquire.strip_prefix(name).is_some_and(|rest| rest.starts_with(" acquires ownership of the resource the `?` takes out of "))))
 }
 
 // A drop of an `Rc` / `Arc` / `Weak` doesn't necessarily free the value
@@ -517,6 +519,44 @@ pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String
             "{0} makes a Weak pointing to the same value ({1}'s strong count is unchanged; nothing is copied), now owned by {2}",
             fn_fmt, k.strong_name(), to_fmt),
     }
+}
+
+// `r?` with `r` a non-`Copy` Result / Option moves `r`: `Try::branch`
+// takes it by value (#652). On success the value inside goes on to
+// `target` (the variable `r?` is bound to, "the caller", or `None`: the
+// expression `r?` itself); on failure the function returns early and
+// the error (converted with `From`) or the `None` goes to the caller.
+// `value`: what `r` holds needs no drop (#484).
+pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: TryMove, value: bool) -> String {
+    let name = fmt_style(my_name);
+    let gets = match target {
+        Some(t) => format!("{} gets the value inside it", fmt_style(t)),
+        None => format!("`{}?` gives the value inside it", my_name),
+    };
+    let what = if value { "value" } else { "resource" };
+    match kind {
+        TryMove::Result => format!(
+            "{name}'s {what} is moved into the `?`. If {name} is `Ok`, {gets}; if it is `Err`, the function returns early and the error goes to the caller."
+        ),
+        TryMove::Option => format!(
+            "{name}'s {what} is moved into the `?`. If {name} is `Some`, {gets}; if it is `None`, the function returns `None` early."
+        ),
+        TryMove::Other => format!(
+            "{name}'s {what} is moved into the `?`. If {name} holds a value to go on with, {gets}; otherwise the function returns early."
+        ),
+    }
+}
+
+// The other side of event_dot_move_into_try: `n` in `let n = r?;`.
+// `holds`: "is initialized with the value", "acquires ownership of the
+// resource", "is bound to the mutable reference", …
+pub fn event_dot_acquire_from_try(my_name: &String, from: &String, kind: TryMove, holds: &str) -> String {
+    let inside = match kind {
+        TryMove::Result => format!("{}'s `Ok`", fmt_style(from)),
+        TryMove::Option => format!("{}'s `Some`", fmt_style(from)),
+        TryMove::Other => fmt_style(from),
+    };
+    format!("{} {holds} the `?` takes out of {inside}", fmt_style(my_name))
 }
 
 // `x?` returns from the function on `Err` / `None`; every value the
@@ -734,6 +774,8 @@ pub fn event_dot_move_to_tuple_temporary(my_name: &String, tuple: &String, value
 pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleLeft]) -> String {
     let tuple = temporary_tuple(tuple);
     let (lead, when) = match at {
+        // Worded like event_dot_owner_drop_if_try_returns (#653).
+        TupleDropAt::TryReturns => ("Only if the `?` here returns early (on an `Err` or `None`): the function returns and ", ""),
         TupleDropAt::IfEnd => ("", "here, at the end of the if branch"),
         TupleDropAt::IfExit => ("", "when the if branch leaves early"),
         TupleDropAt::Else => ("The pattern didn't match, so ", "here, before the else branch runs"),
@@ -783,6 +825,9 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
             join_and(&names), if ws.len() > 1 { "s" } else { "" }, notes, join_and(&takers)));
     }
     let items = join_and(&parts);
+    if at == TupleDropAt::TryReturns {
+        return format!("{lead}{tuple} is dropped, and with it {items}. If the `?` succeeds, nothing happens to the tuple here.");
+    }
     format!("{lead}{tuple} is dropped {when}, and with it {items}")
 }
 

@@ -1425,12 +1425,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a name declared twice (shadowing) once. `moved` are the ones the
   /// exit's value hands on; `refs` says whether to include
   /// non-`Copy` references (`&mut T`). A temporary whose scope ended
-  /// before `line` was dropped already. `binds`: see `owns_value_here`.
-  fn droppable_locals(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool) -> Vec<ResourceAccessPoint> {
-    self.droppable_locals_at(from, end, moved, refs, line, binds).into_iter().map(|(_, r)| r).collect()
-  }
-
-  /// `droppable_locals`, each with its index in `in_scope`.
+  /// before `line` was dropped already. Each comes with its index in
+  /// `in_scope`.
   fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool) -> Vec<(usize, ResourceAccessPoint)> {
     if from >= end {
       return Vec::new();
@@ -1463,10 +1459,53 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// every value the function owns at that point (#430). That happens
   /// on the error path only, so it isn't a drop that ends a column:
   /// each such owner gets a dot saying so, on the line of the `?`.
+  ///
+  /// `r?` with `r` a non-`Copy` variable (or field) moves `r` first, on
+  /// both paths (#652): unless `match_rhs` drew that move into the
+  /// variable `r?` is bound to, it is drawn here as a move into the
+  /// `?`. `r` isn't dropped by the early return: the error in it goes
+  /// to the caller.
+  ///
+  /// A tuple-literal scrutinee whose arm or if branch the `?` is in
+  /// (`live_tuples`) is dropped too if it returns early, after what
+  /// the arm declared and before what was declared before the match
+  /// (#653). It has no column: like at an exit, each variable whose
+  /// value is still in it gets a dot that says so.
   fn note_try(&mut self, try_expr: &'tcx Expr<'tcx>) {
     let line = span_end_line(&try_expr.span, &self.tcx);
+    let moved = self.try_moved_place(try_expr);
+    if let Some((rap, kind, operand)) = &moved {
+      if !self.try_moves.contains_key(&try_expr.hir_id) {
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        self.add_external_event(span_to_line(&operand.span, &self.tcx), ExternalEvent::Move {
+          from: ResourceTy::Value(rap.clone()),
+          to: ResourceTy::Anonymous,
+          is_partial: false,
+          into_closure: false,
+          loop_head: LoopHead::No,
+          break_out: false,
+          via_try: Some(*kind),
+          id,
+        });
+        self.try_moves.insert(try_expr.hir_id, Some(id));
+      }
+    }
     let end = self.in_scope.len();
-    for rap in self.droppable_locals(0, end, &BTreeSet::new(), false, line, true) {
+    let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.clone();
+    let tuple_dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
+      && matches!(e, ExternalEvent::TupleTempDrop { at: TupleDropAt::TryReturns, .. }));
+    if tuple_dup {
+      tuples.clear();
+    }
+    for (idx, rap) in self.droppable_locals_at(0, end, &BTreeSet::new(), false, line, true) {
+      while tuples.last().is_some_and(|t| idx < t.len) {
+        let t = tuples.pop().unwrap();
+        self.drop_tuple_if_try_returns(&t, line);
+      }
+      if moved.as_ref().is_some_and(|(r, _, _)| r.hash() == rap.hash()) {
+        continue;
+      }
       let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
         && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
       if dup {
@@ -1475,6 +1514,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let id = *self.unique_id;
       *self.unique_id += 1;
       self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id });
+    }
+    while let Some(t) = tuples.pop() {
+      self.drop_tuple_if_try_returns(&t, line);
+    }
+  }
+
+  /// The drop of the live tuple scrutinee `t` if the `?` on `line`
+  /// returns early (#653).
+  fn drop_tuple_if_try_returns(&mut self, t: &LiveTuple<'tcx>, line: usize) {
+    for ev in self.tuple_drop_events(t.scrutinee, &t.tuple, Some(t.pat), TupleDropAt::TryReturns) {
+      self.add_external_event(line, ev);
     }
   }
 
@@ -3180,6 +3230,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               into_closure: false,
               loop_head: LoopHead::No,
               break_out: false,
+              via_try: None,
             }));
             *self.unique_id += 1;
             liveness.insert(r.clone());

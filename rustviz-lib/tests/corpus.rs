@@ -1014,6 +1014,8 @@ const EXPECTED_OK: &[&str] = &[
     "enum_drop_holds",
     // Borrows that rustc's checker keeps live past the holder's last use (#644).
     "borrow_end_nll",
+    "try_moves_operand",
+    "try_in_tuple_scrutinee_arm",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11399,6 +11401,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from o2 to c",
             "Return mutably borrowed resource from m2 to w",
             "Return mutably borrowed resource from rb to x",
+        ],
+    },
+    TooltipExpect {
+        name: "try_moves_operand",
+        // `r?` calls `Try::branch(r)`, which takes `r` by value: a
+        // non-`Copy` `r` is moved by the `?` on both paths (using it
+        // afterwards is E0382), and the early return hands its error to
+        // the caller, so it isn't dropped there (#652). It used to be
+        // drawn as a copy into `n` (n is an `i32`), with a dot saying the
+        // early return drops `r`. A `Copy` `Result<i32, i32>` is copied.
+        must_contain: &[
+            "Move from r to n",
+            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "n is initialized with the value the `?` takes out of r's `Ok`",
+            "r goes out of scope. No resource is dropped.",
+            "Move from rs to s",
+            "rs's resource is moved into the `?`. If rs is `Ok`, s gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "s acquires ownership of the resource the `?` takes out of rs's `Ok`",
+            "o's resource is moved into the `?`. If o is `Some`, t gets the value inside it; if it is `None`, the function returns `None` early.",
+            "t acquires ownership of the resource the `?` takes out of o's `Some`",
+            "Copy from c to m",
+            "m is initialized with a copy of c",
+            "e's resource is moved into the `?`. If e is `Ok`, `e?` gives the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "e goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Copy from r to n",
+            "n is initialized with a copy of r",
+            "r's value is copied",
+            "nothing happens to r here",
+            "nothing happens to rs here",
+            "nothing happens to o here",
+            "nothing happens to e here",
+            "=r goes out of scope. Its resource is dropped.",
+            "=e goes out of scope. Its resource is dropped.",
+            "Move from c",
+        ],
+    },
+    TooltipExpect {
+        name: "try_in_tuple_scrutinee_arm",
+        // A `?` in a `match (x, y)` arm or an `if let … = (p, q)` branch
+        // that returns early drops the temporary tuple, with the value of
+        // y (q) still in it, as a `return` there does (#653); worded like
+        // the `?`'s drops of the function's values (#430). The `?` also
+        // moves r / w (#652).
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and the temporary tuple (x, y) is dropped, and with it y's resource. If the `?` succeeds, nothing happens to the tuple here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and the temporary tuple (p, q) is dropped, and with it q's resource. If the `?` succeeds, nothing happens to the tuple here.",
+            "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
+            "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
+            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "w still owns its resource here: the branch that moved w returned before reaching this point",
+        ],
+        must_not_contain: &[
+            "Copy from r to n",
+            "Copy from w to k",
+            "nothing happens to r here",
+            "nothing happens to w here",
         ],
     },
 ];
