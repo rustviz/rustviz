@@ -1762,6 +1762,9 @@ pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &St
             format!("what the static {} points to ends (it lives for the whole program)", fmt_style(name)),
         StaticLender::PointeeOfConst(name) =>
             format!("what the constant {} points to ends (it lives for the whole program)", fmt_style(name)),
+        // Never drawn as an arrow (see the renderer).
+        StaticLender::TupleTemporary =>
+            "the temporary tuple ends".to_string(),
         StaticLender::PromotedConst(name) =>
             format!("the constant {} ends (Rust stores the borrowed value for the whole program)", fmt_style(name)),
     };

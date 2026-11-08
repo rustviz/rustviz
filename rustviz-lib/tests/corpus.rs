@@ -9629,8 +9629,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
             "p was moved or dropped in every branch above",
             "p goes out of scope. No resource is dropped.",
+            // The `ref mut s` end dot keeps its text (#658); the arrow
+            // that used to carry the "(what it borrows from isn't
+            // shown)" text is gone (see `ref_mut_out_of_temporary_tuple_ends_without_arrow`).
+            "s's mutable borrow ends",
         ],
         must_not_contain: &[
+            "(what it borrows from isn't shown)",
             "Immutable borrow from x to a",
             "Return immutably borrowed resource from a to x",
             "x's resource is immutably borrowed by a",
@@ -13837,6 +13842,30 @@ fn struct_field_overwrite_by_variable_moves_the_loan() {
         assert_eq!(dots.len(), 1, "{}: {:?}", tip, dots);
         assert_eq!(dots[0].1, code_row_y(&code, line), "`{}` should be on the row of `{}`: {:?}", tip, line, dots);
     }
+}
+
+/// #658: `ref mut s` out of the temporary tuple `(p, q)` ends on s's
+/// column with a plain end dot, as `ref a` does in the match above it.
+/// The tuple has no column, so the end used to be drawn as a short arrow
+/// pointing at nothing. The dot's tooltip still says the borrow ends.
+#[test]
+fn ref_mut_out_of_temporary_tuple_ends_without_arrow() {
+    let rv = run_with_local_backend("tuple_scrutinee_ref");
+    let timeline = rv.timeline_panel_string();
+    // Arrows are `tooltip-trigger` groups holding a gray shaft.
+    let mut arrows = Vec::new();
+    for (i, _) in timeline.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
+        let group = &timeline[i..i + timeline[i..].find("</g>").unwrap_or(timeline.len() - i)];
+        if group.contains("stroke=\"gray\"") {
+            arrows.extend(timeline_tooltips(&group[..group.find('>').unwrap_or(group.len()) + 1]));
+        }
+    }
+    let ends: Vec<&String> = arrows.iter().filter(|t| t.contains("borrow ends")).collect();
+    assert!(ends.is_empty(), "borrow-end arrow(s) drawn to the temporary tuple: {:?}", ends);
+    assert!(
+        timeline_tooltips(&timeline).iter().any(|t| t.contains("s's mutable borrow ends")),
+        "the end dot lost its text"
+    );
 }
 
 /// #578: on `if let Some(w) = wrap(s) && w.len() > 1` the dot where `w`

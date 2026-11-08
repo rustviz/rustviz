@@ -220,6 +220,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// loop variable of `for x in it`, #417): they get no lender, so no
   /// borrow is "returned" when they end.
   pub unlent_refs: HashSet<String>,
+  /// `ref` / `ref mut` bindings out of a tuple-literal scrutinee's
+  /// element (#580): they borrow the temporary tuple, which has no
+  /// column, so their borrow's end is drawn as a plain end dot with no
+  /// arrow (#658).
+  pub tuple_temp_refs: HashSet<String>,
   /// References a pattern copied (or moved) out of a value that holds
   /// a borrow (`Some(n)` on `it.next()`, #391): their borrow is part of
   /// that value's, and ends at their own last use (#575).
@@ -1334,6 +1339,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let id = *self.unique_id;
     *self.unique_id += 1;
     let static_lender = match ref_data.lender {
+      ResourceTy::Anonymous if from.extract_rap().is_some_and(|r| self.tuple_temp_refs.contains(r.name())) =>
+        Some(StaticLender::TupleTemporary),
       ResourceTy::Anonymous => ref_data.static_lender.clone(),
       _ => None,
     };
@@ -3905,6 +3912,7 @@ pub fn tuple_elem_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: Re
 pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: ResourceTy) -> ResourceTy {
   let lender = self.tuple_elem_lender(scrutinee, evt, from.clone());
   if lender != from {
+    self.tuple_temp_refs.insert(binding.name().to_string());
     if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
       if rd.lender == from {
         rd.lender = lender.clone();
