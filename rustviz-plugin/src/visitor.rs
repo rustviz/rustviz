@@ -4133,6 +4133,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     };
                     let mut associated_ro = Vec::new();
                     self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
+                    // `(p, q)` on `pair = (&c, &d)` copies the references
+                    // in `pair.0` / `pair.1`: `p` borrows what `pair.0`
+                    // borrows, as in `let (p, q) = pair;` (#756).
+                    if part_parents.as_ref().is_some_and(|v| v[i].1.is_some()) && parent_ty.is_ref() {
+                      for (r, _, _, _) in associated_ro.iter() {
+                        self.adopt_part_borrow(r.name(), &parent.name());
+                      }
+                    }
                     // A `ref` binding out of `(x, y)` borrows the tuple's
                     // element, not x (#580).
                     for (r, e, from, _) in associated_ro.iter_mut() {
@@ -6626,21 +6634,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     init: &'tcx Expr<'tcx>,
     is_skipped: bool,
   ) {
+    self.bind_walk_in(pat, init, is_skipped, false);
+  }
+
+  /// `bind_walk`; `nested` when `pat` is inside a destructuring
+  /// pattern (`Some(y)`, `(x, y)`) rather than the whole of it: a
+  /// reference bound there is copied out of `init`'s value, so it
+  /// borrows what that value borrows (`let Some(y) = o else { .. }`
+  /// with `o` holding `Part { part: &s }` gives `y.part` the loan of
+  /// `s`; #718, #756).
+  fn bind_walk_in(
+    &mut self,
+    pat: &'tcx Pat<'tcx>,
+    init: &'tcx Expr<'tcx>,
+    is_skipped: bool,
+    nested: bool,
+  ) {
     match pat.kind {
       PatKind::Binding(annotation, hirid, _, sub_pat) => {
-        self.bind_one(binding_name(&self.tcx, hirid), annotation, hirid, init, is_skipped);
+        let name = binding_name(&self.tcx, hirid);
+        self.bind_one(name.clone(), annotation, hirid, init, is_skipped);
+        if nested && !is_skipped && self.own_ref_binding(hirid).is_none() {
+          if let Some(rap) = self.raps.get(&name).map(|rd| rd.rap.to_owned()) {
+            let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
+            let evt = self.bind_evt(lhs_ty, hirid);
+            let line = span_to_line(&init.span, &self.tcx);
+            for b in self.pattern_ref_copy_borrow(&rap, &evt, init) {
+              self.add_external_event(line, b);
+            }
+          }
+        }
         if let Some(sp) = sub_pat {
-          self.bind_walk(sp, init, is_skipped);
+          self.bind_walk_in(sp, init, is_skipped, nested);
         }
       }
       PatKind::Tuple(pats, _) | PatKind::TupleStruct(_, pats, _) => {
         for p in pats {
-          self.bind_walk(p, init, is_skipped);
+          self.bind_walk_in(p, init, is_skipped, true);
         }
       }
       PatKind::Struct(_, fields, _) => {
         for f in fields {
-          self.bind_walk(f.pat, init, is_skipped);
+          self.bind_walk_in(f.pat, init, is_skipped, true);
         }
       }
       PatKind::Or(pats) => {
@@ -6648,19 +6683,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // from the first alt is enough — the other alts would
         // duplicate the same RAPs.
         if let Some(first) = pats.first() {
-          self.bind_walk(first, init, is_skipped);
+          self.bind_walk_in(first, init, is_skipped, nested);
         }
       }
       PatKind::Ref(inner, _, _)
       | PatKind::Box(inner)
       | PatKind::Deref(inner)
       | PatKind::Guard(inner, _) => {
-        self.bind_walk(inner, init, is_skipped);
+        self.bind_walk_in(inner, init, is_skipped, true);
       }
       PatKind::Slice(before, mid, after) => {
-        for p in before { self.bind_walk(p, init, is_skipped); }
-        if let Some(p) = mid { self.bind_walk(p, init, is_skipped); }
-        for p in after { self.bind_walk(p, init, is_skipped); }
+        for p in before { self.bind_walk_in(p, init, is_skipped, true); }
+        if let Some(p) = mid { self.bind_walk_in(p, init, is_skipped, true); }
+        for p in after { self.bind_walk_in(p, init, is_skipped, true); }
       }
       // No bindings inside these.
       PatKind::Wild
