@@ -1145,6 +1145,9 @@ const EXPECTED_OK: &[&str] = &[
     "for_holder_borrow_end_722",
     // An unbound struct update moves p's other fields into its temporary (#574).
     "struct_update_unbound",
+    // The unbranched form: the call and the borrow's end share the
+    // loop's last row (#677).
+    "loop_break_call_arg_unbranched",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -17335,5 +17338,29 @@ fn loop_break_row_returns_only_the_lenders_the_break_doesnt_carry() {
             assert_eq!(timeline_tooltips(&tl).iter().filter(|t| **t == arrow).count(), 2,
                 "one return arrow {r} -> {l} on the `{brk}` row and one on the call's row");
         }
+    }
+}
+
+/// #677: with a single, unbranched `break` in a `loop` that is a call's
+/// argument, the call and the end of the borrow it uses are on the same
+/// row, the loop's last line (`});`). The call used to be drawn up on the
+/// `break` row, a row above where the lender's borrow ends.
+#[test]
+fn loop_call_arg_unbranched_call_and_borrow_end_share_a_row() {
+    let rv = run_with_local_backend("loop_break_call_arg_unbranched");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (lender, kind, brk, call) in [
+        ("a", "mutably", "break r;", "take reads from/writes to r"),
+        ("e", "immutably", "break re;", "look reads from re"),
+    ] {
+        let brk_row = code_row_y(&code, brk);
+        let back = dots_listing_tooltip(&tl, &format!("{lender}'s resource is no longer {kind} borrowed"))
+            .into_iter().map(|d| d.1).fold(f64::MIN, f64::max);
+        let calls = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(call)));
+        assert!(
+            calls.len() == 1 && back == calls[0].1 && back > brk_row,
+            "{lender}'s borrow should end on the call's row (call dots {:?}), below `{brk}` (y={brk_row}), found y={}",
+            calls, back
+        );
     }
 }

@@ -2600,13 +2600,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     mine.into_iter().map(|(_, v, t)| (v, t)).collect()
   }
 
+  /// Whether `e` mentions a local variable declared inside `scope`.
+  fn mentions_local_declared_in(&self, e: &'tcx Expr<'tcx>, scope: rustc_span::Span) -> bool {
+    struct Mentions<'a, 'tcx>(rustc_middle::ty::TyCtxt<'tcx>, rustc_span::Span, &'a mut bool);
+    impl<'a, 'tcx> rustc_hir::intravisit::Visitor<'tcx> for Mentions<'a, 'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if local_of_path(e).is_some_and(|l| self.1.contains(self.0.hir_span(l))) {
+          *self.2 = true;
+        }
+        rustc_hir::intravisit::walk_expr(self, e);
+      }
+    }
+    let mut found = false;
+    rustc_hir::intravisit::Visitor::visit_expr(&mut Mentions(self.tcx, scope, &mut found), e);
+    found
+  }
+
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     // `f(loop { … break k; })`: what `break` carries is the argument
     // (#452).
     if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = arg.kind {
       let seen = self.take_loop_breaks(arg);
+      let deferred = self.deferred_lines.iter().any(|(id, ..)| *id == arg.hir_id);
       let saved = self.enter_deferred(arg.hir_id);
+      // A single `break` that wasn't in a branch was paired where it
+      // is; the call runs once the loop has ended, on its last line,
+      // where its lenders' borrows end too (#677).
+      // (Not a value that mentions a variable the loop declares: that
+      // goes out of scope at the loop's end, after its move.)
+      let end_line = (!deferred && seen.len() == 1
+        && !self.mentions_local_declared_in(seen[0].0, arg.span))
+        .then(|| span_end_line(&arg.span, &self.tcx));
+      let saved_line = end_line.map(|l| self.line_override.replace(l));
       if seen.len() > 1 {
         // Several: only the `break` that ended the loop ran (#561).
         self.pair_break_alternatives(arg, seen, |this, v| this.match_arg(v, fn_name.clone()));
@@ -2614,6 +2640,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         for (value, _) in seen {
           self.match_arg(value, fn_name.clone());
         }
+      }
+      if let Some(l) = saved_line {
+        self.line_override = l;
       }
       self.leave_deferred(saved);
       return;
