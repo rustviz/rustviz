@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -2839,6 +2839,14 @@ fn arrow_order_of(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> i64
 /// arrows share tracks (`VisualizationData::arrow_tracks`), half a row
 /// per track before its own (#624). 0 means drawn level on the row.
 fn arrow_dip_of(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> i64 {
+    // The arrows between `(parameter)` columns and their `ref` bindings
+    // (#747): all on one level, the borrows half a row below the row, so
+    // the caller's value arrow into the column stays clear of them.
+    if let Some(evs) = fetch_line_map(vd, ev.get_id()).get(&row).filter(|evs| is_param_value_line(evs)) {
+        if evs.iter().any(|x| x == ev) {
+            return if matches!(ev, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) { LINE_SPACE / 2 } else { 0 };
+        }
+    }
     let arrow_order = arrow_order_of(vd, row, ev);
     match vd.arrow_tracks.get(&ev.get_id()) {
         Some(&track) if arrow_order > 0 => {
