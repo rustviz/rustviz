@@ -922,7 +922,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &["Closure add_one is bound"],
         must_not_contain: &["add_one's resource is copied"],
         known_wrong: &[
-            "y is initialized with a copy of add_one",
+            "y is initialized with the value add_one() returns",
             "Copy from add_one to y",
         ],
         ..E
@@ -1157,7 +1157,7 @@ const BOOK: &[Snippet] = &[
             "spaces is bound to an immutable reference",
             "len reads from spaces",
             "L3 spaces's borrow of the string literal ends (string literals live for the whole program)",
-            "L3 spaces₂ is initialized with a copy of len",
+            "L3 spaces₂ is initialized with the value len() returns",
             "L5 spaces₂ goes out of scope",
         ],
         must_not_contain: &[

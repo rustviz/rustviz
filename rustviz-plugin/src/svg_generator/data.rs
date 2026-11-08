@@ -329,6 +329,17 @@ pub struct Function {
     /// Set only on the copy a call's result event carries, when the
     /// resolved callee clones an `Rc` / `Arc` or downgrades one.
     pub rc_call: Option<RcCall>,
+    /// Set only on the copy a call's result event carries, when the call
+    /// is the operand of an `as` cast to another type (`v.len() as i32`):
+    /// the value the variable gets is the call's result, converted to
+    /// this type.
+    pub cast_to: Option<String>,
+    /// Set only on the copy a call's result event carries, when the
+    /// variable gets a value from INSIDE what the call returns: `Some(m)
+    /// = n.checked_mul(2)` or `parse()?`. "Option" / "Result" (a pattern
+    /// on the return value), "Ok" / "Some" (`?`), or "" when the
+    /// wrapper is not Option / Result.
+    pub inside: Option<String>,
 }
 
 // ResourceTy is a wrapper for ResourceAccessPoints
@@ -553,6 +564,25 @@ impl ResourceAccessPoint {
         let mut rap = self.clone();
         if let ResourceAccessPoint::Function(f) = &mut rap {
             f.rc_call = Some(call);
+        }
+        rap
+    }
+
+    /// A copy of this function RAP whose result is taken apart (a
+    /// pattern or `?`) before the variable gets its value.
+    pub fn with_inside(&self, wrapper: String) -> ResourceAccessPoint {
+        let mut rap = self.clone();
+        if let ResourceAccessPoint::Function(f) = &mut rap {
+            f.inside = Some(wrapper);
+        }
+        rap
+    }
+
+    /// A copy of this function RAP whose result is cast to `ty`.
+    pub fn with_cast_to(&self, ty: String) -> ResourceAccessPoint {
+        let mut rap = self.clone();
+        if let ResourceAccessPoint::Function(f) = &mut rap {
+            f.cast_to = Some(ty);
         }
         rap
     }
@@ -2760,6 +2790,12 @@ impl Event {
                     Some(rap) => hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref()),
                     None => hover_messages::event_dot_acquire_copyable(&self.deref_name(my_name), &String::new()),
                 }
+            }
+            // The result of a call (`let n = v.len();`, `v.len() as i32`)
+            // isn't a copy of anything named in the code: the variable
+            // gets the value the call returns (#733).
+            Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), ..} => {
+                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, f.cast_to.as_deref(), f.inside.as_deref())
             }
             Event::Copy{ from ,..} => {
                 safe_message(hover_messages::event_dot_copy_from, &self.deref_name(my_name), from)

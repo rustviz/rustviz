@@ -982,7 +982,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds a function RAP
   pub fn add_fn(&mut self, name: String) {
-    self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None }), self.current_scope, true);
+    self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None }), self.current_scope, true);
   }
 
   // Adds a struct RAP
@@ -5301,6 +5301,22 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     }
     ExprKind::DropTemps(exp) => {
       self.match_rhs(lhs, &exp, evt);
+    }
+    // `let n = v.len() as i32;` / `let b = a as i64;` (#729): a cast
+    // of a number reads its operand and makes a new value of the same
+    // kind, so `n` is bound the way its operand would bind it (a copy of
+    // `a`, of what `v.len()` returned, a fresh value for `x + 1`). A cast
+    // to or from a reference or pointer has no such source: `n` just
+    // gets a value.
+    ExprKind::Cast(inner, _) => {
+      let typeck = self.tcx.typeck(rhs.hir_id.owner);
+      let plain = |e: &Expr| typeck.expr_ty_opt(e).is_some_and(|t| t.is_numeric() || t.is_bool() || t.is_char());
+      if plain(inner) && plain(rhs) {
+        self.match_rhs(lhs, inner, evt);
+      } else {
+        let line_num = span_to_line(&rhs.span, &self.tcx);
+        self.bind_from_anonymous(line_num, lhs);
+      }
     }
     // `let f = move || ...` / `let f = || ...`. The closure itself
     // is conceptually a small struct that holds the upvars it

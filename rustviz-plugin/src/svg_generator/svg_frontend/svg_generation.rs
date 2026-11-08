@@ -112,6 +112,25 @@ fn uses_ref_ended_on_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
     group.iter().filter_map(ended_ref).any(|r| uses_rap(e, r))
 }
 
+/// Whether `e`, an event of a line that draws no arrow, binds a variable
+/// that one of the line's stacked arrows (`group`) copies or moves out
+/// of: `let k = { let t = m * 2; t };` binds `t` and copies it into `k`
+/// on one line. The binding comes first, so its dot belongs on the line's
+/// own row, before the arrow's dot, not on a row inserted below for the
+/// stack (#731).
+fn binds_source_of_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
+    if !matches!(e, ExternalEvent::Bind { .. }) {
+        return false;
+    }
+    let ResourceTy::Value(t) = ResourceAccessPoint_extract(e).1 else { return false };
+    let t = *t.hash();
+    // Only an arrow that comes after the binding: `n = n + 1;` copies `n`
+    // first and is assigned after.
+    group.iter().any(|o| o.get_id() > e.get_id()
+        && matches!(o, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. })
+        && matches!(ResourceAccessPoint_extract(o).0, ResourceTy::Value(f) if *f.hash() == t))
+}
+
 /// The (source, binding) column pairs of the arrows `evs` of one line of
 /// an arm, when they are all bindings of the arm's pattern (`to` is
 /// declared by the arm) from distinct variables that aren't bound there
@@ -812,6 +831,14 @@ pub fn render_svg(
                         .filter(|(l, e)| *l == line_num && !ev.iter().any(|g| g.get_id() == e.get_id()))
                         .map(|(_, e)| e.clone())
                         .collect();
+                    // A variable bound on this line and copied or moved out
+                    // of by one of its arrows is bound first: its binding
+                    // goes on the line's own row, before the arrow's dot
+                    // (#731).
+                    for e in rest_of_line.iter().filter(|e| binds_source_of_line(e, &ev)) {
+                        visualization_data.append_processed_external_event(e.clone(), final_line_num);
+                        skippable_ev.insert(e.get_id());
+                    }
                     for (e, row) in front.iter().map(|e| (e, final_line_num))
                         .chain(back.iter().map(|e| (e, back_row))) {
                         // append all the events in the line map on the same line
