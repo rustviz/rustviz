@@ -1590,7 +1590,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   /// Registered RAP name for a closure capture's place: the root
-  /// variable, plus any struct-field projections (`p.name` for a
+  /// variable, plus any struct-field or tuple-element projections (`p.name`, `t.0` for a
   /// disjoint capture of one field, which has its own column). A
   /// capture through a dereference (`*r`) is named after the reference
   /// itself. `None` if a field projection isn't a named struct field.
@@ -1600,8 +1600,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       match proj.kind {
         rustc_middle::hir::place::ProjectionKind::Field(idx, variant) => {
           let ty = place.ty_before_projection(i);
-          let adt = ty.ty_adt_def().filter(|a| a.is_struct())?;
-          name = format!("{}.{}", name, adt.variant(variant).fields[idx].name.as_str());
+          if matches!(ty.kind(), rustc_middle::ty::TyKind::Tuple(_)) {
+            // A tuple element capture (`move || t.0.len()`): the
+            // element's column is `t.0` (#341).
+            name = format!("{}.{}", name, idx.as_usize());
+          } else {
+            let adt = ty.ty_adt_def().filter(|a| a.is_struct())?;
+            name = format!("{}.{}", name, adt.variant(variant).fields[idx].name.as_str());
+          }
         }
         _ => break,
       }
@@ -1613,8 +1619,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// column (`p.name` for a disjoint field capture, see
   /// `capture_rap_name`), or, if that field has no column, the nearest
   /// enclosing place that does (`p.a` for `p.a.b`, then `p`). A tuple
-  /// element capture (`move || t.0.len()`) falls back to `t`: tuples
-  /// have no element columns yet (#189).
+  /// element capture (`move || t.0.len()`) is drawn on `t.0`.
   fn capture_rap(&self, place: &rustc_middle::hir::place::Place<'tcx>, root: &str) -> Option<ResourceAccessPoint> {
     let mut name = self.capture_rap_name(place, root).unwrap_or_else(|| root.to_owned());
     loop {
