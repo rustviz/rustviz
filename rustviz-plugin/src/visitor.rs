@@ -163,6 +163,54 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// The values `e`, a returned value, can be: the value each branch
+  /// of an `if` / `else` or `match` yields, through nested ones and
+  /// blocks (`if b { s } else { t }` → `s`, `t`), or `e` itself.
+  /// A branch that diverges (`return`, `panic!()`) yields nothing.
+  fn returned_values(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+    if self.expr_diverges(e) {
+      return;
+    }
+    if e.span.from_expansion() {
+      out.push(e);
+      return;
+    }
+    match e.kind {
+      ExprKind::If(_, then, Some(els)) => {
+        self.returned_values(then, out);
+        self.returned_values(els, out);
+      }
+      ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) => {
+        for arm in arms {
+          self.returned_values(arm.body, out);
+        }
+      }
+      ExprKind::Block(b, None) => match b.expr {
+        Some(tail) => self.returned_values(tail, out),
+        None => {}
+      },
+      ExprKind::DropTemps(inner) => self.returned_values(inner, out),
+      _ => out.push(e),
+    }
+  }
+
+  /// `e` is returned to the caller (the function's tail, or what a
+  /// `return` carries). If it's an `if` / `else` or a `match`, mark
+  /// the value each branch yields, which goes to the caller inside its
+  /// branch, where `visit_expr` reaches it (#674): on the paths
+  /// through the other branches it stays where it is. False for any
+  /// other `e`, which `return_to_caller` sends to the caller as a whole.
+  fn mark_branch_returns(&mut self, e: &'tcx Expr<'tcx>) -> bool {
+    if e.span.from_expansion()
+      || !matches!(e.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) {
+      return false;
+    }
+    let mut values = Vec::new();
+    self.returned_values(e, &mut values);
+    self.tail_values.extend(values.iter().map(|v| v.hir_id));
+    true
+  }
+
   /// Visit a match-arm guard. `if let` parts register their bindings
   /// into `guard_decls` (the caller scopes them to the arm); `&&`
   /// chains are walked part by part; anything else is visited as an
@@ -1371,7 +1419,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => return,
       },
     };
-    let moved = value.map(|e| locals_moved_by(self.tcx, e)).unwrap_or_default();
+    // Of an `if` / `match` value's branches, only what every branch
+    // moves is gone on all paths; the drop of the rest (drawn with a
+    // drop flag) depends on the branch taken (#674).
+    let moved = value.map(|e| {
+      let mut values = Vec::new();
+      if matches!(e.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) && !e.span.from_expansion() {
+        self.returned_values(e, &mut values);
+      }
+      let mut sets = values.into_iter().map(|v| locals_moved_by(self.tcx, v));
+      match sets.next() {
+        Some(first) => sets.fold(first, |acc, m| acc.intersection(&m).cloned().collect()),
+        None => locals_moved_by(self.tcx, e),
+      }
+    }).unwrap_or_default();
     let end = self.exit_frames[branch_at + 1..].iter()
       .find_map(|f| match f {
         ExitFrame::Loop { len, .. } => Some(*len),
@@ -1857,23 +1918,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       self.add_borrow_ev(line, if is_mut { Evt::MBorrow } else { Evt::SBorrow }, r, lender, false);
     }
 
-    self.visit_expr(body.value); // visit fn body
-    match body.value { // handle return expression if there is one
-      Expr{kind: ExprKind::Block(b, _), ..} => {
-        match b.expr {
-          // A tail `return v` is handled by visit_expr's `Ret` arm.
-          Some(Expr{kind: ExprKind::Ret(_), ..}) => {}
-          Some(e) => {
-            if self.fn_ret { // only append this event if parent fn ctxt doesn't return void
-              self.return_to_caller(e);
-            }
-          }
-          _ => {}
-        }
-      }
+    // The tail of an `if` / `match` returned as the body's value: each
+    // branch's value goes to the caller in its branch (#674).
+    let tail = match body.value {
+      Expr{kind: ExprKind::Block(b, _), ..} => b.expr,
       _ => {
         warn!("unexpected fn body {:#?}", body);
+        None
       }
+    };
+    // A tail `return v` is handled by visit_expr's `Ret` arm. Only
+    // append this event if the fn returns a value.
+    let tail = tail.filter(|e| self.fn_ret && !matches!(e.kind, ExprKind::Ret(_)));
+    let plain_tail = tail.filter(|e| !self.mark_branch_returns(e));
+    self.visit_expr(body.value); // visit fn body
+    if let Some(e) = plain_tail {
+      self.return_to_caller(e);
     }
     self.annotate_expr(body.value); // then annotate the body
   } 
@@ -2078,6 +2138,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
   }
 
   fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+    // A value a branch of the returned `if` / `match` yields goes to
+    // the caller once it's evaluated, inside its branch (#674).
+    if self.tail_values.remove(&expr.hir_id) {
+      self.visit_expr(expr);
+      self.return_to_caller(expr);
+      return;
+    }
     // Two complementary behaviours for synthesized HIR nodes (those
     // whose span originates from a macro / desugar expansion):
     //
@@ -2868,11 +2935,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // and doesn't count at the merge (#296), so code after the
       // conditional still sees `v` as owned.
       ExprKind::Ret(ret) => {
+        // `return if b { s } else { t }`: what a branch yields goes to
+        // the caller in that branch (#674).
         if let Some(e) = ret {
-          self.visit_expr(e);
           // Not the `return` a macro or `?` expands to, and not one in
           // a closure (it returns from the closure) (#515).
-          if self.fn_ret && !expr.span.from_expansion() && !self.in_closure(expr) {
+          let to_caller = self.fn_ret && !expr.span.from_expansion() && !self.in_closure(expr);
+          let plain = !to_caller || !self.mark_branch_returns(e);
+          self.visit_expr(e);
+          if to_caller && plain {
             self.return_to_caller(e);
           }
         }

@@ -866,6 +866,9 @@ const BOOK: &[Snippet] = &[
             "L8 string2's borrow of the string literal ends (string literals live for the whole program)",
             "L8 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments (the other is a value with no column here), so string1 stays borrowed while result is in use",
             "L9 Return immutably borrowed resource from result to string1",
+            // Each branch of the tail `if` returns its reference (#674).
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "a reference from y is returned to the caller; the data it points to is not copied",
         ],
         must_not_contain: &[
             "string2 is the owner of the resource",
@@ -888,6 +891,9 @@ const BOOK: &[Snippet] = &[
             "L10 Return immutably borrowed resource from result to string1",
             "L10 Return immutably borrowed resource from result to string2",
             "L11 string2 goes out of scope. Its resource is dropped.",
+            // Each branch of the tail `if` returns its reference (#674).
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "a reference from y is returned to the caller; the data it points to is not copied",
         ],
         must_not_contain: &[
             "result is the owner of the resource",

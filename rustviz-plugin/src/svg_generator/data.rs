@@ -3096,7 +3096,10 @@ impl Visualizable for VisualizationData {
             (State::FullPrivilege{..}, Event::MutableReacquire { .. }) => {
               State::FullPrivilege { s: LineState::Full }
             }
-            (_, Event::Duplicate { to: ResourceTy::Caller,..}) => State::OutOfScope,
+            // A copy to the caller leaves the value where it is: in a
+            // branch of the returned `if` / `match` (#674), what the
+            // other branches do with it still counts.
+            (_, Event::Duplicate { to: ResourceTy::Caller,..}) => (*previous_state).clone(),
             (_, Event::Duplicate { .. }) => (*previous_state).clone(),
 
             (_, Event::Branch { .. }) => { // technically not necessary - this is handled inside the compute_states function

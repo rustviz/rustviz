@@ -2319,7 +2319,8 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // Rust doesn't drop the value at the end of the non-moving branches: it
 // keeps a runtime "drop flag" and, at the end of the variable's scope,
 // drops the value only if it wasn't moved (#179). The scope-end dot
-// says that (`event_dot_go_out_of_scope_maybe_moved`).
+// says that (`event_dot_go_out_of_scope_maybe_moved`). `value`: it holds
+// a value or a reference, which owns nothing to drop.
 pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, note: &str) -> String {
     let my_name_fmt = fmt_style(my_name);
     if value {
