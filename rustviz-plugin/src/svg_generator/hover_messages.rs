@@ -366,11 +366,13 @@ pub fn event_dot_owner_drop_at_reassign(my_name: &String, note: &str) -> String 
 // only if it's still there, which Rust decides at runtime.
 // `by_cond`: a let-chain's condition, not only a branch, may have moved
 // it (#281): see `moved_above`.
-pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, by_cond: bool) -> String {
+// `note`: what else the drop drops, or an Rc's count note (#542, #679).
+pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str, by_cond: bool) -> String {
+    let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} acquires ownership of a new resource. Its previous resource is dropped here only if \
-         {1} moved it (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), moved_above(by_cond)
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
+         {3} moved it (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name), holds, rest, moved_above(by_cond)
     )
 }
 

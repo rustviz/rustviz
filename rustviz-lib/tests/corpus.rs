@@ -1130,6 +1130,9 @@ const EXPECTED_OK: &[&str] = &[
     "interior_mut_opaque",
     // An `FnOnce` closure called out of a struct field (#725).
     "closure_field_call_once",
+    // The reassignment drop-flag message names what it holds (#679).
+    "reassign_maybe_moved_holds",
+    "or_pattern_let_reassign_holds",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -10070,9 +10073,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // it, so its drop at the reassignment is decided by a drop flag.
         must_contain: &[
             "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "x acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a new resource. Its previous resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // The holds note goes before "is dropped" (#679).
+            "Its previous resource is dropped here only if",
             // The condition, not a branch, may have moved it (maintainer, #581).
             "only if no branch above moved it",
             "x acquires ownership of a new resource; its previous resource is dropped",
@@ -12790,6 +12795,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "h goes out of scope. Its resource is dropped",
             "h.f goes out of scope. Its resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "reassign_maybe_moved_holds",
+        // The drop-flag reassignment message says what the old value holds,
+        // before "is dropped" (#679).
+        must_contain: &[
+            "o acquires ownership of a new resource. Its previous resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Its previous resource is dropped here only if",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_let_reassign_holds",
+        must_contain: &[
+            "p.a acquires ownership of a new resource. Its previous resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Its previous resource is dropped here only if",
         ],
     },
 ];
