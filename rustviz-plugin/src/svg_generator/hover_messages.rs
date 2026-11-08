@@ -2240,30 +2240,43 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_co
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
     format!("{0} isn't moved in any of the branches above", fmt_style(my_name))
 }
-// Extra text for a column label with a subscript (`s₂`): a variable
+// Extra text for a column label: for a subscript (`s₂`), a variable
 // that shadows an earlier one of the same name (`let s` while the first
-// `s` is in scope, see `binding_name`). Empty for any other name.
+// `s` is in scope, see `binding_name`); for a column of a variable whose
+// same-named variables in separate scopes are a different kind of value
+// and have columns of their own (#598), that it is a different variable
+// from those. Empty for any other name.
 pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::data::ShadowNote>) -> String {
-    let (Some((base, _)), Some(note)) = (crate::expr_visitor_utils::split_numbered_name(name), note) else {
-        return String::new();
-    };
-    let base = String::from(base);
-    let declared = match note.lines.as_slice() {
-        [one] => format!("a new variable named {}, declared on line {}", fmt_style(&base), one),
-        many => {
-            let (last, init) = many.split_last().unwrap();
+    let Some(note) = note else { return String::new() };
+    let mut out = String::new();
+    if let (Some((base, _)), Some(shadowed)) = (crate::expr_visitor_utils::split_numbered_name(name), &note.shadows) {
+        let base = String::from(crate::expr_visitor_utils::written_name(base));
+        let declared = match note.lines.as_slice() {
+            [one] => format!("a new variable named {}, declared on line {}", fmt_style(&base), one),
+            many => {
+                let (last, init) = many.split_last().unwrap();
+                let init: Vec<String> = init.iter().map(|l| l.to_string()).collect();
+                format!(
+                    "a new variable named {}, declared on lines {} and {} (in different branches or blocks, so only one exists at a time)",
+                    fmt_style(&base), init.join(", "), last
+                )
+            }
+        };
+        out += &format!(". {0} shadows {1}: it is {2}", fmt_style(name), fmt_style(shadowed), declared);
+    }
+    if let Some((last, init)) = note.apart_from.split_last() {
+        let lines = if init.is_empty() {
+            format!("line {}", last)
+        } else {
             let init: Vec<String> = init.iter().map(|l| l.to_string()).collect();
-            format!(
-                "a new variable named {}, declared on lines {} and {} (in different branches or blocks, so only one exists at a time)",
-                fmt_style(&base), init.join(", "), last
-            )
-        }
-    };
-    let Some(shadowed) = &note.shadows else { return String::new() };
-    format!(
-        ". {0} shadows {1}: it is {2}",
-        fmt_style(name), fmt_style(shadowed), declared
-    )
+            format!("lines {} and {}", init.join(", "), last)
+        };
+        out += &format!(
+            ". A different variable from the {0} declared on {1} (separate scopes, so only one exists at a time)",
+            fmt_style(name), lines
+        );
+    }
+    out
 }
 
 // Merge dot for a reference declared before the conditional whose

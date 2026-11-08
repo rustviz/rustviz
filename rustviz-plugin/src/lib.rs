@@ -177,7 +177,8 @@ fn catch_plugin_panic(f: impl FnOnce()) -> Result<(), String> {
         .map_or_else(|| l.file().to_string(), |f| f.to_string_lossy().into_owned());
       format!("{}:{}", file, l.line())
     });
-    let msg = friendly_reason(&msg);
+    // (Without the marks of a same-named variable's column, #598.)
+    let msg = crate::expr_visitor_utils::display_text(&friendly_reason(&msg));
     let mut slot = LAST_PANIC.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot.is_none() {
       *slot = Some(match loc {

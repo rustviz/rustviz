@@ -2496,13 +2496,16 @@ pub struct VisualizationData {
 #[derive(Debug, Clone)]
 pub struct ShadowNote {
     /// The variable it shadows (its column name, e.g. `s`), if it
-    /// shadows one: `None` for a variable that only has a column of its
-    /// own because it's in another branch from a same-named variable.
+    /// shadows one.
     pub shadows: Option<String>,
     /// Source lines of the declarations drawn in this column: several
     /// when same-named variables of different branches or blocks share
     /// it.
     pub lines: Vec<usize>,
+    /// Declaration lines of same-named variables in separate scopes
+    /// that have columns of their own because they are a different
+    /// kind of value (a reference, an owner, …; #598).
+    pub apart_from: Vec<usize>,
 }
 
 /// The RAPs of `raps` in declaration order: by RAP hash (assigned from

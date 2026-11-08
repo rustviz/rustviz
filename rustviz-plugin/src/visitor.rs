@@ -5600,8 +5600,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut taken = Vec::new();
     for (k, entry) in bound.iter_mut().enumerate() {
       // The conflict names the binding as written; its column may be
-      // `x₂` when an earlier `x` is in the same function.
-      let written = split_numbered_name(entry.0.name()).map_or(entry.0.name().as_str(), |(base, _)| base);
+      // `x₂` when an earlier `x` is in the same function, or `x` with
+      // `SCOPE_MARK`s when a same-named variable in a separate scope is
+      // a different kind of value (#598).
+      let written = written_name(entry.0.name());
       let Some(c) = conflicts.iter().find(|c| c.name == written) else { continue };
       let xname = entry.0.name().clone();
       let names: Vec<String> = c.places.iter().map(|r| r.name().to_string()).collect();

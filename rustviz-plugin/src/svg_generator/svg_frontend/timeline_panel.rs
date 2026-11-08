@@ -755,7 +755,9 @@ fn compute_column_layout<'a>(
                 Some(_name) => _name,
                 None => panic!("internal state: no variable has hash {}", hash),
             };
-            let mut x_space = cmp::max(70, (&(name.len() as i64) - 1) * 13);
+            // Sized by what's shown (`SCOPE_MARK`s aren't).
+            let shown = crate::expr_visitor_utils::display_text(&name);
+            let mut x_space = cmp::max(70, (&(shown.len() as i64) - 1) * 13);
             let (extent_left, extent_right) = *extent_map.get(hash).unwrap();
             let left_px = extent_left * BRANCH_WEIGHT;
             let right_px = extent_right * BRANCH_WEIGHT;
@@ -768,14 +770,14 @@ fn compute_column_layout<'a>(
 
             // render reference label
             let label_len = if timeline.resource_access_point.is_ref() {
-                let temp_name = name.clone() + "|*" + &name;
+                let temp_name = shown.clone() + "|*" + &shown;
                 x = x - x_space;
                 x_space = cmp::max(90, (&(temp_name.len() as i64) - 1) * 7);
                 x = x + x_space;
                 ref_bool = true;
                 temp_name.chars().count() as i64
             } else {
-                name.chars().count() as i64
+                shown.chars().count() as i64
             };
 
             // Labels are centred on their column, so the previous
