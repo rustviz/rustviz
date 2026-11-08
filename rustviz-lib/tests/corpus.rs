@@ -1077,6 +1077,10 @@ const EXPECTED_OK: &[&str] = &[
     // (#585); `r = loop`'s old value is dropped where the loop ends (#586).
     "loop_break_ref_lender",
     "loop_break_reassign_drop",
+    // A borrow a call leaves in a variable: a closure the callee hands
+    // back (#686), references `extend` stores (#682).
+    "closure_kept_by_callee",
+    "extend_stores_borrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7642,9 +7646,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // by reference for as long as the closure lives (#298). For
         // `apply`, `run` and `Option::map` the closure is gone when
         // the call returns, so the borrow is drawn like a `&k`
-        // argument. `keep` hands the closure back (it lives on in
-        // `g`), so the borrow of `s` doesn't end at the call and
-        // isn't drawn.
+        // argument. `keep` hands the closure back: it lives on in `g`,
+        // so `s` stays borrowed by `g` until `g`'s last use (#686).
         must_contain: &[
             // k and count are i32: a value, not a resource (#484).
             "k's value is immutably borrowed by the closure passed to apply; k is read-only while the borrow is live",
@@ -7653,12 +7656,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the closure passed to run reads from/writes to count",
             "the closure passed to map reads from k",
             "s goes out of scope. Its resource is dropped.",
+            "s's resource is immutably borrowed by g; s is read-only while the borrow is live",
+            "Immutable borrow from s to g: g holds the closure keep returned, which borrows s, so s stays borrowed while g is in use",
+            "Return immutably borrowed resource from g to s",
+            "Closure returned from keep to g",
         ],
         must_not_contain: &[
             "k's resource is immutably borrowed by the closure passed to apply; k is read-only while the borrow is live",
             "count's resource is mutably borrowed by the closure passed to run; count can't be used while the borrow is live",
             "the closure passed to keep reads from s",
             "s's resource is immutably borrowed by the closure passed to keep; s is read-only while the borrow is live",
+            // Nothing is captured from `keep`: it returns the closure (#686).
+            "Closure capture (copy) from keep",
             "k's resource is moved",
             "count's resource is moved",
         ],
@@ -12169,6 +12178,66 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=t acquires ownership of a resource (from whichever break ended the loop)",
         ],
     },
+    // #686: `keep` hands back the closure that captured `s` by
+    // reference; `g` holds it, so `s` stays borrowed until `g`'s last
+    // use (`borrow_kept_after_call_ends_at_holders_last_use` pins the
+    // rows). Main drew nothing on `s`'s column and an arrow saying a
+    // closure capture came from `keep`, and said `h` owned a captured
+    // resource (it only borrows `t`). `k = keep(f)` holds the borrow
+    // `f`'s capture made; `m`'s `move` closure owns `v`.
+    TooltipExpect {
+        name: "closure_kept_by_callee",
+        must_contain: &[
+            "Immutable borrow from s to g: g holds the closure keep returned, which borrows s, so s stays borrowed while g is in use",
+            "s's resource is immutably borrowed by g; s is read-only while the borrow is live",
+            "g is bound to the closure keep returned, which borrows: s (immutably)",
+            "Closure returned from keep to g",
+            "Return immutably borrowed resource from g to s",
+            "g's immutable borrow ends",
+            "Mutable borrow from t to h: h holds the closure keep_mut returned, which mutably borrows t, so t stays borrowed while h is in use",
+            "t's resource is mutably borrowed by h; t can't be used while the borrow is live",
+            "h is bound to the closure keep_mut returned, which borrows: t (mutably)",
+            "Return mutably borrowed resource from h to t",
+            "Immutable borrow from u to k: k holds the closure keep returned, which borrows u, so u stays borrowed while k is in use",
+            "Return immutably borrowed resource from k to u",
+            // h's closure only borrows t; m's closure owns v, which it
+            // took with `move`.
+            "h owns a closure",
+            "h goes out of scope",
+            "m owns a closure which owns 1 resource via capture",
+            "m goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            // Nothing is captured from the function: it returns the closure.
+            "Closure capture (copy) from keep",
+            "Closure capture (move) from keep_mut",
+            // Main counted the closure's move out of keep_mut as a
+            // capture that h owns.
+            "h owns a closure which owns",
+            "h goes out of scope. Its 1 captured resource is dropped.",
+            // `g` didn't capture `s` itself; the closure literal did.
+            "captured (immutably borrowed) by closure g",
+            "captured (mutably borrowed) by closure h",
+        ],
+    },
+    // #682: `extend` stores `&s` (and `r`, a reference to `a`) in the
+    // Vec, like `push(&s)`: `s` stays borrowed until `refs`'s last use.
+    // Main drew only `extend`'s borrow of `refs`.
+    TooltipExpect {
+        name: "extend_stores_borrow",
+        must_contain: &[
+            "Immutable borrow from s to refs, stored in refs by extend; refs isn't a reference, but its value now holds one",
+            "s's resource is immutably borrowed by refs; s is read-only while the borrow is live",
+            "Return immutably borrowed resource from refs to s",
+            "refs owns a value that can hold references (refs isn't a reference itself)",
+            "Immutable borrow from a to more, stored in more by extend; more isn't a reference, but its value now holds one",
+            "a's resource is immutably borrowed by more; a is read-only while the borrow is live",
+            "Return immutably borrowed resource from more to a",
+        ],
+        // Main's text wasn't false, only missing the borrow: the
+        // `must_contain` lines and the row test fail on main.
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -15833,6 +15902,44 @@ fn a_break_value_in_a_branch_moves_where_the_loop_ends() {
             "{}: `{}` is at y={}; the move out of the loop should be at y={} (where the loop ends), found {:?}",
             name, brk, row, want, dots
         );
+    }
+}
+
+/// A borrow a call leaves in a variable lasts until that variable's last
+/// use, where rustc ends the loan (#686, #682): the closure `keep` hands
+/// back holds its capture's borrow, and `extend` stores `&s` in `refs`.
+/// The lender is lent on the call's row and gets the borrow back on the
+/// holder's last use, not at the call.
+#[test]
+fn borrow_kept_after_call_ends_at_holders_last_use() {
+    // (fixture, lend dot, the call's line, the lender's "no longer
+    // borrowed" dot, the holder's last use)
+    for (name, lent, lent_at, back, back_at) in [
+        ("closure_kept_by_callee",
+         "s's resource is immutably borrowed by g; s is read-only while the borrow is live",
+         "let g = keep(|| s.len());",
+         "s's resource is no longer immutably borrowed",
+         "println!(\"{}\", g());"),
+        ("closure_kept_by_callee",
+         "t's resource is mutably borrowed by h; t can't be used while the borrow is live",
+         "let mut h = keep_mut(|| t.push('!'));",
+         "t's resource is no longer mutably borrowed",
+         "h();"),
+        ("extend_stores_borrow",
+         "s's resource is immutably borrowed by refs; s is read-only while the borrow is live",
+         "refs.extend([&s]);",
+         "s's resource is no longer immutably borrowed",
+         "println!(\"{}\", refs.len());"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|d| d.1).collect() };
+        let (call, last) = (code_row_y(&code, lent_at), code_row_y(&code, back_at));
+        assert_eq!(ys(lent), vec![call], "{}: {:?} isn't on the row of {:?}", name, lent, lent_at);
+        // The first time the lender gets a borrow back after the call
+        // (a later `println!` of it lends and returns again).
+        let first_back = ys(back).into_iter().filter(|&y| y > call).reduce(f64::min);
+        assert_eq!(first_back, Some(last), "{}: {:?} isn't on the row of {:?}", name, back, back_at);
     }
 }
 

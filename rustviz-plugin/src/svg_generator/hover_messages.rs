@@ -1484,6 +1484,36 @@ pub fn event_dot_closure_bind_with_captures(
     )
 }
 
+// Dot where a closure variable is bound to the closure a call returned
+// (`let g = keep(|| s.len());`, #686). `captures` are the references
+// that closure holds which g keeps (see expr_visitor's
+// `draw_kept_closure_borrows`), labelled as in
+// event_dot_closure_bind_with_captures.
+pub fn event_dot_closure_returned(
+    my_name: &String,
+    func: &String,
+    captures: &[(String, &'static str)],
+) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let func_fmt = fmt_style(func);
+    if captures.is_empty() {
+        return format!("{0} is bound to the closure {1} returned", my_name_fmt, func_fmt);
+    }
+    let parts: Vec<String> = captures
+        .iter()
+        .map(|(name, kind)| {
+            let how = if kind.starts_with("mutably") { "mutably" } else { "immutably" };
+            format!("{} ({})", fmt_style(name), how)
+        })
+        .collect();
+    format!(
+        "{0} is bound to the closure {1} returned, which borrows: {2}",
+        my_name_fmt,
+        func_fmt,
+        parts.join(", ")
+    )
+}
+
 // Closure-side dot when a `move`-captured upvar lands on `f`'s
 // timeline. Mirrors event_dot_acquire.
 pub fn event_dot_closure_capture_acquire_value(my_name: &String, from_name: &String) -> String {
@@ -1685,6 +1715,24 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             func_fmt, list, either, kept, to_fmt
         );
     }
+    if let ViaCarrier::ReturnedClosure { mutable, through_ref } = carrier {
+        // `let g = keep(|| s.len());` (#686): `func` is the call. The
+        // closure may hold the borrow because it captured s, or got it
+        // through a reference it captured (`|| r.len()`), so say only
+        // that it borrows s.
+        let how = if mutable { "mutably borrows" } else { "borrows" };
+        return match lenders.first() {
+            Some(l) if through_ref => format!(
+                ": {0} holds the closure {1} returned, which {3} what {2} points to, so that data stays borrowed while {0} is in use",
+                to_fmt, func_fmt, fmt_style(l), how
+            ),
+            Some(l) => format!(
+                ": {0} holds the closure {1} returned, which {3} {2}, so {2} stays borrowed while {0} is in use",
+                to_fmt, func_fmt, fmt_style(l), how
+            ),
+            None => String::new(),
+        };
+    }
     if let ViaCarrier::PatternBinding { from_call, moved } = carrier {
         // `Some(x)` on `third` / on `v.get(2)` (#391): x is the
         // reference stored in that value (copied, or moved for `&mut`).
@@ -1701,7 +1749,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::ReturnedClosure { .. } => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).

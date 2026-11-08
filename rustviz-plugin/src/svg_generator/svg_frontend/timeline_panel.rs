@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{rc_call_of, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1021,6 +1021,10 @@ fn render_dot(
         // each capture arrow's endpoint.
         let is_closure_capture_event = match event {
             Event::Acquire { from: ResourceTy::Anonymous, .. } => false,
+            // `let g = keep(|| s.len());`: the closure arrives from the
+            // call that returned it (#686); its dot lists the captures.
+            Event::Acquire { from: ResourceTy::Value(f), .. }
+            | Event::Copy { from: ResourceTy::Value(f), .. } if f.is_fn() => false,
             Event::Acquire { is, .. }
             | Event::Copy { is, .. }
             | Event::StaticBorrow { is, .. }
@@ -1566,6 +1570,13 @@ fn render_dot(
                         data.title = hover_messages::event_dot_copyable_assign(&name);
                     } else if let (true, Event::Copy { from, is: ResourceTy::Value(_), .. }) = (copyable_assign, event) {
                         data.title = hover_messages::event_dot_copyable_assign_copy(&name, &from.name());
+                    } else if let Some((func, true)) = match event {
+                        Event::Acquire { from: ResourceTy::Value(f), is, .. }
+                        | Event::Copy { from: ResourceTy::Value(f), is, .. } if f.is_fn() => Some((f.name().to_owned(), is.is_closure())),
+                        _ => None,
+                    } {
+                        let captures = collect_closure_captures(visualization_data, *hash, *line_number);
+                        data.title = hover_messages::event_dot_closure_returned(&name, &func, &captures);
                     } else if let Event::Acquire { from: ResourceTy::Anonymous, is, .. } = event {
                         if is.is_closure() {
                             let captures = collect_closure_captures(visualization_data, *hash, *line_number);
@@ -1573,6 +1584,8 @@ fn render_dot(
                         } else {
                             data.title = event.print_message_with_name(& mut name);
                         }
+                    } else if let Some(title) = kept_closure_lend_title(event, &name, visualization_data) {
+                        data.title = title;
                     } else if let Some(title) = closure_reborrow_lend_title(event, visualization_data) {
                         data.title = title;
                     } else {
@@ -2019,6 +2032,39 @@ fn closure_reborrow_lend_title(event: &Event, visualization_data: &Visualization
     Some(hover_messages::event_dot_capture_reborrow_through_ref(r.name(), &to.name(), mutable, r.is_mutref()))
 }
 
+// Source-side dot of a borrow kept by a closure a call returned (`let
+// g = keep(|| s.len());`, #686): g didn't capture s itself (the closure
+// literal did, or it borrows s through a reference it captured), so
+// this reads like any other lend to g rather than "captured by closure
+// g".
+fn kept_closure_lend_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
+    let (to, is, id, mutable) = match event {
+        Event::StaticLend { to, is, id } => (to, is, *id, false),
+        Event::MutableLend { to, is, id } => (to, is, *id, true),
+        _ => return None,
+    };
+    if !to.is_closure() {
+        return None;
+    }
+    let reborrow = visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
+        ExternalEvent::StaticBorrow { id: i, is_reborrow, via, .. }
+        | ExternalEvent::MutableBorrow { id: i, is_reborrow, via, .. } if *i == id && returned_closure(via) => Some(*is_reborrow),
+        _ => None,
+    })?;
+    let r = is.extract_rap()?;
+    let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
+    if reborrow {
+        return Some(hover_messages::event_dot_lend_through_ref(r.name(), &to.name(), mutable, r.is_mutref(), r.points_to_copy()));
+    }
+    if mutable {
+        return Some(hover_messages::event_dot_mut_lend(name, &to.name(), is_copy));
+    }
+    // A `&T` lender was read-only already; a RefCell / Cell lender isn't
+    // read-only at all (as in Event::StaticLend's own message).
+    let omit_read_only = (r.is_ref() && !r.is_mutref()) || r.has_interior_mut();
+    Some(hover_messages::event_dot_static_lend(name, &to.name(), omit_read_only, is_copy))
+}
+
 // Count of upvars move-captured by the closure identified by
 // `closure_hash`. Zero ⇒ borrow-only or capture-less closure;
 // distinguishes the scope-end "captured resources are dropped"
@@ -2028,11 +2074,22 @@ fn closure_move_capture_count(
     visualization_data: &VisualizationData,
     closure_hash: u64,
 ) -> usize {
-    visualization_data
-        .external_events
-        .iter()
-        .filter(|(_, ev)| matches!(ev, ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash)))
-        .count()
+    let evs = &visualization_data.external_events;
+    evs.iter()
+        .map(|(line, ev)| match ev {
+            // `let h = keep_mut(|| t.push('!'));` (#686): the closure a
+            // call returned is moved out of the call, which captures
+            // nothing. It owns what the closure literal passed to that
+            // call on the same line moved in (none here: `&mut t`).
+            ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } if f.is_fn() && matches_closure(to, closure_hash) =>
+                evs.iter()
+                    .filter(|(l, e)| l == line && matches!(e,
+                        ExternalEvent::Move { to: ResourceTy::Value(g), into_closure: true, .. } if g.hash() == f.hash()))
+                    .count(),
+            ExternalEvent::Move { to, .. } if matches_closure(to, closure_hash) => 1,
+            _ => 0,
+        })
+        .sum()
 }
 
 // A holder (#336) whose value was created without a borrow (`let mut
@@ -2211,7 +2268,8 @@ fn matches_closure(rty: &ResourceTy, closure_hash: u64) -> bool {
 }
 
 fn upvar_name(rty: &ResourceTy) -> Option<String> {
-    rty.extract_rap().map(|r| r.name().to_owned())
+    // A function isn't captured: it returned the closure (#686).
+    rty.extract_rap().filter(|r| !r.is_fn()).map(|r| r.name().to_owned())
 }
 
 /// Whether every event in these branches (and in the conditionals

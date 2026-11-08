@@ -6051,6 +6051,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let rap = self.raps.get(&name).unwrap().rap.to_owned();
       self.match_rhs(ResourceTy::Value(rap), init, evt);
       self.emit_holder_literal_borrows(&name, init);
+      self.draw_kept_closure_borrows(&name, init);
     }
   }
 

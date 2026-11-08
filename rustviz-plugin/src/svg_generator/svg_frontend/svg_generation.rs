@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -775,8 +775,15 @@ pub fn render_svg(
                 let place_borrow = (is_borrow && matches!(to, ResourceTy::Index(..)))
                     || (matches!(event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
                         && matches!(from, ResourceTy::Index(..)));
+                // A borrow kept by the closure a call returned (`let g =
+                // keep(|| s.len());`, #686) isn't one of the line's
+                // stacked arrows (see `add_external_event`): it follows
+                // the closure's arrival from the call on g's column.
+                let kept_by_returned_closure = matches!(&event,
+                    ExternalEvent::StaticBorrow { via, .. } | ExternalEvent::MutableBorrow { via, .. } if returned_closure(via));
                 if (is_transfer && (from_fn || into_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
                     || borrow_of_temporary
+                    || kept_by_returned_closure
                     || ref_param_ends
                     || place_borrow {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
