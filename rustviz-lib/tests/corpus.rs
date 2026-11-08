@@ -10503,7 +10503,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
-             resource is dropped (including the String it holds, if any). If the `?` succeeds, \
+             resource (including the String it holds, if any) is dropped. If the `?` succeeds, \
              nothing happens to x here.",
         ],
         must_not_contain: &[
@@ -10534,7 +10534,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource is dropped (including every String it holds). If the `?` succeeds, nothing \
+             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
              happens to v here.",
         ],
         must_not_contain: &[
@@ -10551,7 +10551,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource is dropped (including every String it holds). If the `?` succeeds, nothing \
+             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
              happens to v here.",
         ],
         must_not_contain: &[
