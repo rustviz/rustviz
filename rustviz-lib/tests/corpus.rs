@@ -1139,6 +1139,7 @@ const EXPECTED_OK: &[&str] = &[
     "loop_break_call_arg",
     // A String lent in a loop branch that `break`s is still dropped (#759).
     "loop_break_borrow_scope_end",
+    "field_write_in_arm_end_659",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12891,6 +12892,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["a goes out of scope. Its resource is dropped."],
         must_not_contain: &["a goes out of scope. No resource is dropped."],
     },
+    // ─── An old lender's borrow end after the join (#659) ───────────
+    TooltipExpect {
+        name: "field_write_in_arm_end_659",
+        // A field write in an `if` arm keeps the old lender (`s`)
+        // borrowed until the struct's last use, after the `if`: rustc
+        // rejects an `s.push_str` right after the write. The end is on
+        // s's own column at that use. The text is the same before the
+        // fix; the geometry is pinned by
+        // `field_write_in_an_arm_ends_the_old_loan_after_the_join`.
+        must_contain: &[
+            "s's resource is no longer immutably borrowed",
+            "s4's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from o.inner.r to s",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -16335,6 +16353,31 @@ fn ref_mut_out_of_temporary_tuple_ends_without_arrow() {
         timeline_tooltips(&timeline).iter().any(|t| t.contains("s's mutable borrow ends")),
         "the end dot lost its text"
     );
+}
+
+/// #659: the old lender's borrow end after a field write in an `if` arm
+/// is drawn on the lender's own column, where the struct's last use
+/// (after the `if`) is, not on an arm column that ran on below the join.
+#[test]
+fn field_write_in_an_arm_ends_the_old_loan_after_the_join() {
+    let rv = run_with_local_backend("field_write_in_arm_end_659");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (lender, line) in [
+        ("s", "println!(\"{}\", o.n);"),
+        ("t", "println!(\"{}\", o.n);"),
+        ("s2", "println!(\"{}\", o2.n);"),
+        ("t2", "println!(\"{}\", o2.n);"),
+        ("s3", "println!(\"{}\", o3.n);"),
+        ("t3", "println!(\"{}\", o3.n);"),
+        ("s4", "println!(\"{}\", o4.n);"),
+        ("t4", "println!(\"{}\", o4.n);"),
+    ] {
+        let tip = format!("{}'s resource is no longer immutably borrowed", lender);
+        let dots = dots_listing_tooltip(&svg, &tip);
+        assert_eq!(dots.len(), 1, "{}: {:?}", tip, dots);
+        assert_eq!(dots[0].1, code_row_y(&code, line), "`{}` should be on the row of `{}`: {:?}", tip, line, dots);
+        assert_eq!(dots[0].0, label_x(&svg, lender), "`{}` should be on {}'s own column: {:?}", tip, lender, dots);
+    }
 }
 
 /// #578: on `if let Some(w) = wrap(s) && w.len() > 1` the dot where `w`

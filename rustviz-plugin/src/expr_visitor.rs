@@ -1565,6 +1565,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let rhs = body.and_then(|b| self.rhs_arm_ids.get(&b.hir_id).copied());
     let mine = |id: usize| (ids.contains(&id) && !keep.contains(&id)) || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&id));
     let unbranched = &self.unbranched_temps;
+    // The end of a loan a field write in the branch leaves to last
+    // until the struct's last use (#531) is drawn on a line after the
+    // branch when that use is: it happens after the branches join, so
+    // it stays on the global timeline, not on a branch's column (#659).
+    let body_end = body.map(|b| span_end_line(&b.span, &self.tcx));
+    let escapes = |l: usize, ev: &ExternalEvent| body_end.is_some_and(|end| l > end)
+      && matches!(ev, ExternalEvent::StaticDie { from: ResourceTy::Index(..), .. } | ExternalEvent::MutableDie { from: ResourceTy::Index(..), .. });
     let mut taken = Vec::new();
     self.preprocessed_events.retain(|(l, ev)| {
       // A drop of a temporary in `unbranched_temps` (at an early exit)
@@ -1572,7 +1579,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if matches!(ev, ExternalEvent::TemporaryDrop { ro, .. } if unbranched.contains(ro)) {
         return true;
       }
-      if mine(ev.get_id()) {
+      if mine(ev.get_id()) && !escapes(*l, ev) {
         taken.push((*l, ev.clone()));
         false
       } else {
