@@ -1,6 +1,7 @@
 // The Book's guessing game: `Err(_) => continue` drops this
 // iteration's `guess` (#410); `secret` was declared before the loop
-// and isn't dropped there.
+// and isn't dropped there. The `break` in the `if` without `else`
+// drops `guess` too (#429).
 
 fn parse(s: &String) -> Result<u32, String> {
     if s.is_empty() {

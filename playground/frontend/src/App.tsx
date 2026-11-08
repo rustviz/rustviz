@@ -293,11 +293,6 @@ const Description: React.FC = () => (
         clone is drawn as its own owner, and its drop says only that it lowers
         the count (which clone frees the value isn&apos;t shown).
       </li>
-      <li>
-        An <code>if</code> written on one line (<code>if c {'{'} take(s); {'}'}</code>)
-        is drawn as if its body always ran; spread it over several lines to see
-        the move as conditional.
-      </li>
     </ul>
     <p>
       <strong>Some valid programs crash the visualizer</strong> (you&apos;ll
@@ -359,10 +354,10 @@ const Description: React.FC = () => (
       <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}
         <code>break</code>/<code>continue</code> are drawn when it&apos;s in an{' '}
-        <code>if</code>/<code>else</code> branch or a <code>match</code> arm, but not
-        in an <code>if</code> without <code>else</code>. The <code>?</code>{' '}
-        operator&apos;s early return is drawn as a dot on each owner at the{' '}
-        <code>?</code>: the value is dropped only if it returns early.
+        <code>if</code> branch (with or without an <code>else</code>) or a{' '}
+        <code>match</code> arm. The <code>?</code> operator&apos;s early return is
+        drawn as a dot on each owner at the <code>?</code>: the value is dropped
+        only if it returns early.
       </li>
       <li>
         A write to a field through a reference (<code>self.n += 1</code> in a{' '}
