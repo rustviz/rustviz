@@ -2453,7 +2453,7 @@ impl Event {
                 hover_messages::event_dot_owner_drop_at_reassign(my_name, "")
             }
             Event::OwnerDropAtReassign { maybe_moved: true, by_cond } => {
-                hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name, *by_cond)
+                hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name, "", *by_cond)
             }
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
