@@ -152,6 +152,20 @@ impl PartialEq for PlaceWrite { fn eq(&self, _: &Self) -> bool { true } }
 impl Eq for PlaceWrite {}
 impl Hash for PlaceWrite { fn hash<H: Hasher>(&self, _: &mut H) {} }
 
+/// Whether a type can be mutated through a shared reference: it
+/// contains an `UnsafeCell` (`Cell`, `RefCell`, `Mutex`, atomics, ...)
+/// inline or behind a pointer it owns or borrows. `Unknown` when part
+/// of it is opaque (`dyn Trait`, a type parameter, `impl Trait`): such
+/// a part could hold a cell, or not, so neither "it has interior
+/// mutability" nor "it is read-only" may be said (#706).
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, Default)]
+pub enum InteriorMut {
+    #[default]
+    No,
+    Yes,
+    Unknown,
+}
+
 // when something is not a reference
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Owner {
@@ -167,11 +181,11 @@ pub struct Owner {
     /// (`ExprVisitor::ty_is_plain`): tooltips say "value", not
     /// "resource" (#484).
     pub is_plain_value: bool,
-    /// True iff this owner's type can be mutated through a shared
+    /// Whether this owner's type can be mutated through a shared
     /// reference (`Cell`, `RefCell`, `Mutex`, `Rc<RefCell<T>>`, ...);
     /// see `ExprVisitor::ty_has_interior_mut`. An immutable borrow of
     /// such an owner doesn't make it read-only.
-    pub interior_mut: bool,
+    pub interior_mut: InteriorMut,
     /// True iff this owner binds a closure literal (`let f = || ...`
     /// or `let f = move || ...`). Routes capture-related events
     /// (Move/StaticBorrow/MutableBorrow into `f`) and `f`'s scope-end
@@ -264,7 +278,7 @@ pub struct Struct {
     /// Same as Owner::is_plain_value.
     pub is_plain_value: bool,
     /// Same as Owner::interior_mut.
-    pub interior_mut: bool,
+    pub interior_mut: InteriorMut,
     /// Same as Owner::is_manually_drop, for a `ManuallyDrop<T>` field.
     pub is_manually_drop: bool,
     /// `Some` iff this member's own type is `Rc<T>`, `Arc<T>` or one of
@@ -721,8 +735,21 @@ impl ResourceAccessPoint {
     /// they're values, not heap resources — so this lets the tooltip
     /// dispatcher pick non-ownership wording where appropriate.
     pub fn has_interior_mut(&self) -> bool {
-        matches!(self, ResourceAccessPoint::Owner(Owner { interior_mut: true, .. })
-                     | ResourceAccessPoint::Struct(Struct { interior_mut: true, .. }))
+        self.interior_mut() == InteriorMut::Yes
+    }
+
+    /// Not known to be free of interior mutability: it has some, or
+    /// part of its type is opaque (see `InteriorMut::Unknown`).
+    pub fn may_have_interior_mut(&self) -> bool {
+        self.interior_mut() != InteriorMut::No
+    }
+
+    fn interior_mut(&self) -> InteriorMut {
+        match self {
+            ResourceAccessPoint::Owner(Owner { interior_mut, .. })
+            | ResourceAccessPoint::Struct(Struct { interior_mut, .. }) => *interior_mut,
+            _ => InteriorMut::No,
+        }
     }
 
     pub fn is_union(&self) -> bool {
@@ -1245,11 +1272,15 @@ pub enum ExternalEvent {
     // `from` by value (`thread::spawn(move || ..v..)`): `from` moves
     // (or is copied) into the closure, not into the callee; `to` is
     // the callee. Only `match_closure_arg` sets it.
+    // `closure_value`: `from` and `to` are closures and the whole
+    // closure value is moved or copied (`let h = g;`, #704). It is not
+    // a capture, although `to` is a closure.
     Copy {
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
         into_closure: bool,
+        closure_value: bool,
         id: usize,
         break_alt: Option<BreakAlt>,
     },
@@ -1273,6 +1304,7 @@ pub enum ExternalEvent {
         id: usize,
         break_alt: Option<BreakAlt>,
         break_out: bool,
+        closure_value: bool,
     },
     // `is_reborrow`: the borrow was written `&*r` / `&mut *r` with
     // `r` a reference — a reborrow through `r`, as opposed to a fresh
@@ -2514,7 +2546,7 @@ impl Event {
             // resource" (#282).
             Event::StaticLend{ to: ResourceTy::Anonymous, is, ..} => {
                 let omit_read_only = is.extract_rap()
-                    .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
+                    .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.may_have_interior_mut());
                 let through_ref = ref_lender(is).map(|r| r.points_to_copy());
                 hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), false, omit_read_only, through_ref, is.extract_rap().map_or(false, |r| r.holds_value()))
             }
@@ -2629,7 +2661,7 @@ impl Event {
                     // isn't read-only at all (it can be mutated through
                     // the shared borrow); see event_dot_static_lend.
                     let omit_read_only = is.extract_rap()
-                        .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.has_interior_mut());
+                        .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.may_have_interior_mut());
                     let target_name = safe_message(|_, t| t.clone(), my_name, to);
                     if let Some(r) = ref_lender(is) {
                         return hover_messages::event_dot_lend_through_ref(r.name(), &target_name, false, r.is_mutref(), r.points_to_copy());
@@ -2992,12 +3024,12 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         ExternalEvent::Bind{ .. } => {
             String::from("Bind")
         },
-        ExternalEvent::Copy{ is_partial, from, to, .. } => {
+        ExternalEvent::Copy{ is_partial, from, to, closure_value, .. } => {
             if *is_partial { String::from("Partial copy") }
             // `let g = keep(|| s.len());`: the call returns the closure
             // (#686); nothing is captured from `keep`.
             else if to.is_closure() && is_fn_rap(from) { String::from("Closure returned") }
-            else if to.is_closure() { String::from("Closure capture (copy)") }
+            else if to.is_closure() && !*closure_value { String::from("Closure capture (copy)") }
             else { String::from("Copy") }
         },
         // Move/StaticBorrow/MutableBorrow into a closure binding are
@@ -3005,10 +3037,10 @@ pub fn string_of_external_event(e: &ExternalEvent) -> String {
         // (in render_arrow) reads e.g. "Closure capture (move)" as
         // "Closure capture (move) from s to f", which scans more
         // clearly than a bare "Move" arrow into a closure.
-        ExternalEvent::Move{ is_partial, from, to, .. } => {
+        ExternalEvent::Move{ is_partial, from, to, closure_value, .. } => {
             if *is_partial { String::from("Partial move") }
             else if to.is_closure() && is_fn_rap(from) { String::from("Closure returned") }
-            else if to.is_closure() { String::from("Closure capture (move)") }
+            else if to.is_closure() && !*closure_value { String::from("Closure capture (move)") }
             else { String::from("Move") }
         },
         ExternalEvent::StaticBorrow{ is_partial, is_reborrow, to, via, .. } => {

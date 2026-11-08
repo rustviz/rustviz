@@ -147,8 +147,14 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
             }
           }
           _ => {
-            let fn_name = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
-            self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
+            match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+              Some(fn_name) => {
+                self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
+              }
+              // A callee that is an expression (`(w.f)()`, `make()(x)`;
+              // #703): its variables are highlighted like anywhere else.
+              None => self.annotate_expr(fn_expr),
+            }
             for a in fn_args.iter() {
               self.annotate_expr(a);
             }

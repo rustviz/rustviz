@@ -1121,6 +1121,15 @@ const EXPECTED_OK: &[&str] = &[
     "holder_mut_moved_by_pattern",
     // A literal aggregate passed to `Some` holds all its borrows (#711).
     "holds_all_literal_arg",
+    // A closure called out of a struct field, or out of a call's
+    // result, used to panic (#703).
+    "closure_field_call",
+    // `let h = g;` with g a closure (#704).
+    "closure_moved_or_copied",
+    // `dyn Fn()` doesn't say whether there's interior mutability (#706).
+    "interior_mut_opaque",
+    // An `FnOnce` closure called out of a struct field (#725).
+    "closure_field_call_once",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12701,6 +12710,88 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "same lifetime as its argument",
         ],
     },
+    // #703: `(w.f)()` and `adder(t)(1)` call an expression, not a name;
+    // both panicked. The result is a new value; `t` is moved into
+    // `adder`, and the closure it returns is a temporary, dropped at
+    // the end of the statement.
+    TooltipExpect {
+        name: "closure_field_call",
+        must_contain: &[
+            "n is bound to a copyable value",
+            "Move from t to adder",
+            "m is bound to a copyable value",
+            "A temporary holds the value that adder returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "t goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    // #704: `let h = g;` copies (g captures only `&s`, so it's Copy) or
+    // moves the closure value; nothing is captured. The borrow g's
+    // capture made goes with it: s stays borrowed until h's last use
+    // (pinned by `copied_closure_keeps_its_lender_borrowed`), and after
+    // a move h2, not g2, gives t back. h2 owns no resource (it borrows
+    // t); h3 owns u, which g3 captured by move.
+    TooltipExpect {
+        name: "closure_moved_or_copied",
+        must_contain: &[
+            "Copy from g to h",
+            "g's value is copied",
+            "h is initialized with a copy of g, and holds the same borrow as g",
+            "Return immutably borrowed resource from h to s",
+            "Move from g2 to h2",
+            "g2's value is moved",
+            "h2 takes over g2's value, and the borrow it holds",
+            "Return mutably borrowed resource from h2 to t",
+            "Move from g3 to h3",
+            "g3's resource is moved",
+            "h3 takes over g3's value",
+            "h3 goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Closure capture (copy) from g to h",
+            "captured (copied) by closure h",
+            "Closure capture (move) from g2 to h2",
+            "captured (moved) by closure h2",
+            "Return mutably borrowed resource from g2 to t",
+            "h2 goes out of scope. Its 1 captured resource is dropped",
+            "h2 owns a closure which owns",
+            "Closure capture (move) from g3 to h3",
+            "captured (moved) by closure h3",
+        ],
+    },
+    // #706: `Vec<Box<dyn Fn()>>` has no `UnsafeCell` we can see; a
+    // `dyn Fn()` could hide one, or not, so neither interior mutability
+    // nor "read-only" is claimed. `Cell` and `Vec<Cell<_>>` still are.
+    TooltipExpect {
+        name: "interior_mut_opaque",
+        must_contain: &[
+            "len reads from fns (implicitly borrowed)",
+            "fns's resource is immutably borrowed by r",
+            "set borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
+            "len borrows cells immutably (a shared borrow); cells has interior mutability, so its contents can change even through a shared borrow",
+        ],
+        must_not_contain: &[
+            "fns has interior mutability",
+            "fns is read-only",
+        ],
+    },
+    // #725: `(h.f)()` with an `FnOnce` closure in `h.f` moves `h.f` into
+    // the call; `u` comes back as `e`. With only the #703 fix, nothing was
+    // drawn for the call and both `h` and `h.f` were said to drop their
+    // resource at the end, a second drop of the String `e` drops.
+    TooltipExpect {
+        name: "closure_field_call_once",
+        must_contain: &[
+            "h.f is moved into the call (an FnOnce closure can only be called once). u, which h.f captured, is moved out of the closure as the call's result",
+            "h goes out of scope. h.f was moved out earlier, so no resource is dropped.",
+            "h.f goes out of scope. No resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "h goes out of scope. Its resource is dropped",
+            "h.f goes out of scope. Its resource is dropped",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13612,6 +13703,27 @@ fn reference_copied_out_of_a_holder_returns_at_its_last_use() {
         .collect();
     assert_eq!(back.len(), 1, "v is unborrowed at {:?} after the loop starts", back);
     assert!(back[0].1 > row, "v is unborrowed at {:?}, not below n's last use (y={}); it still borrows v", back[0], row);
+}
+
+/// #704: `let h = g;` copies a closure that borrows `s`. The loan lasts
+/// while either copy can be used, so h gives it back where h is last
+/// used, below g's last use, and s is borrowed until then. (g gives it
+/// back on the same line, the loan's end, so h's arrow may be stacked
+/// below it.)
+#[test]
+fn copied_closure_keeps_its_lender_borrowed() {
+    let rv = run_with_local_backend("closure_moved_or_copied");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let g_row = code_row_y(&code, "println!(\"{}\", g());");
+    let row = code_row_y(&code, "println!(\"{}\", h());");
+    let arrows = arrow_points(&timeline, "Return immutably borrowed resource from h to s");
+    assert_eq!(arrows.len(), 1, "h's return arrows: {:?}", arrows);
+    let start = arrows[0][0];
+    assert!((start.1 - row).abs() < 6.0, "h's return arrow {:?} doesn't start on h's last use (y={})", arrows[0], row);
+    assert!(
+        arrows[0].iter().all(|p| p.1 > g_row + 1.0),
+        "h's return arrow {:?} reaches g's last use (y={}) or above", arrows[0], g_row,
+    );
 }
 
 /// #587: `*x += 1;` as x's last use reads `*x`, writes through it, and
