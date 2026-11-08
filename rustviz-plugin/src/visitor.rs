@@ -1690,6 +1690,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.try_moves.insert(try_expr.hir_id, Some(id));
       }
     }
+    if !self.in_closure(try_expr) {
+      self.note_try_loop_iterators(line);
+    }
     let end = self.in_scope.len();
     let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.clone();
     let tuple_dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
@@ -1738,6 +1741,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for (_, ro) in self.loop_iterators.clone() {
       let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Return);
       self.exit_drops.insert(id);
+    }
+  }
+
+  /// A `?` inside a `for` loop over an iterator variable returns early
+  /// on `Err` / `None`, dropping that iterator with the rest (#649).
+  /// Conditional, so it ends no column (like `note_try`'s dots).
+  fn note_try_loop_iterators(&mut self, line: usize) {
+    for (_, ro) in self.loop_iterators.clone() {
+      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
+        && matches!(e, ExternalEvent::LoopIteratorDrop { ro: r, left: LoopLeft::Try, .. } if *r == ro));
+      if !dup {
+        self.add_loop_iterator_drop(ro, line, LoopLeft::Try);
+      }
     }
   }
 
@@ -1884,6 +1900,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn note_panic(&mut self, call: &'tcx Expr<'tcx>) {
     if let Some(line) = self.panic_line(call) {
       self.drop_locals_on_exit(line, None, None, false, "panic");
+      if !self.in_closure(call) && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
+        for (_, ro) in self.loop_iterators.clone() {
+          let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Panic);
+          self.exit_drops.insert(id);
+        }
+      }
     }
   }
 
@@ -4813,8 +4835,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
         if let Ok(target) = dest.target_id {
-          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), dest.label.is_some(), "break");
-          self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, dest.label.is_some(), LoopLeft::Break);
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), true, "break");
+          self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, true, LoopLeft::Break);
         }
       }
       ExprKind::Continue(dest) => {

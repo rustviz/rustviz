@@ -1213,8 +1213,12 @@ pub enum LoopLeft {
     End,
     /// At a `return` inside the loop.
     Return,
-    /// At a `break` to an outer loop, leaving this one.
+    /// At a `break` out of the loop, or to an outer loop, leaving this one.
     Break,
+    /// At a `?` inside the loop, if it returns early (#649).
+    Try,
+    /// At a `panic!()` inside the loop, as it unwinds (#649).
+    Panic,
 }
 
 /// What a `for` loop does with a head it moves (`for s in v`, `for s

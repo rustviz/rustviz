@@ -1151,6 +1151,10 @@ const EXPECTED_OK: &[&str] = &[
     "return_if_in_branch",
     "return_tail_if_mutref_param",
     "return_tail_match_ref_param",
+    // A `for` loop's iterator is also dropped at a plain `break`, a `?`
+    // and a `panic!()` inside the loop (#740, #649).
+    "for_break_drops",
+    "for_iterator_try_panic",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12996,6 +13000,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=p goes out of scope. Its resource is dropped.",
             "=q goes out of scope. Its resource is dropped.",
             "Move from q.name to",
+        ],
+    },
+    // ─── a for loop's iterator at a plain `break`, `?`, `panic!()` ───
+    TooltipExpect {
+        name: "for_break_drops",
+        // #740: a plain `break` leaves the loop, dropping its iterator
+        // (the variable `it` moved into it) right there.
+        must_contain: &[
+            "it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+            "it's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
+        ],
+        // `twice`'s second `for n in b` binds a fresh `n`; it isn't an
+        // assignment to the first loop's. (Main already prints the
+        // right text for this program; the entry guards #740 item 3.)
+        must_not_contain: &["n is assigned a new value", "n's value is copied"],
+    },
+    TooltipExpect {
+        name: "for_iterator_try_panic",
+        // #649: `?` returns early on `Err`, a panic unwinds: either way
+        // the loop's iterator, with the elements it hasn't handed out,
+        // is dropped there, on `it`'s column.
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+            "it's former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+            // `w`'s own drop at the `?` (#430).
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
+        ],
+        must_not_contain: &[
+            "the function returns from inside the loop",
+            "this `break` leaves the `for` loop",
         ],
     },
 ];
