@@ -985,6 +985,15 @@ const EXPECTED_OK: &[&str] = &[
     "temporary_moves_variable",
     // A for loop's iterator with drop glue is dropped when the loop ends (#482).
     "for_iterator_drop",
+    // A let-chain part that assigns to an outer variable, calls an outer
+    // FnOnce closure, or moves out of a Box, before a part that can
+    // still be false (#579).
+    "edition2024/if_let_chain_assign",
+    "edition2024/if_let_chain_assign_owner",
+    "edition2024/if_let_chain_assign_no_else",
+    "edition2024/if_let_chain_fnonce_call",
+    "edition2024/if_let_chain_box_move",
+    "edition2024/if_let_chain_nested_effects",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11043,6 +11052,88 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "words was moved or dropped in every branch",
         ],
     },
+    // ─── A let-chain that assigns / calls / moves out of a Box, then fails (#579) ───
+    // These were refused. An assignment in the condition lasts on the
+    // path into the else branch: the variable holds its old value or the
+    // new one there (it isn't moved). A call of an FnOnce closure and a
+    // move out of `*b` are moves, drawn like #281's.
+    TooltipExpect {
+        name: "edition2024/if_let_chain_assign",
+        must_contain: &[
+            "z is assigned a copy of a",
+            "z may have been assigned a new value: when the condition assigns to z and then turns out false, the else branch runs after that assignment, so here z holds either its previous value or the new one.",
+        ],
+        must_not_contain: &[
+            // An assignment isn't a move, and z has no resource.
+            "z may have been moved",
+            "z was moved",
+            "z holds either its previous resource",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_assign_owner",
+        must_contain: &[
+            "z may have been assigned a new resource: when the condition assigns to z and then turns out false, the else branch runs after that assignment, so here z holds either its previous resource or the new one. When the assignment runs, it drops z's previous resource.",
+            "y may have been moved: when the condition moves y to a and then turns out false, the else branch runs after that move, so y can't be used here",
+            // z holds a String on every path: no drop flag.
+            "z goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "z may have been moved",
+            "z goes out of scope. Its resource is dropped here only if",
+            "only if no branch above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_assign_no_else",
+        must_contain: &[
+            "s may have been moved: when the condition moves s to z and then turns out false, the body is skipped but the move has happened, so s can't be used after the if",
+            "z may have been assigned a new resource: when the condition assigns to z and then turns out false, the body is skipped but the assignment has happened, so after the if z holds either its previous resource or the new one. When the assignment runs, it drops z's previous resource.",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "z goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "z goes out of scope. Its resource is dropped here only if",
+            "only if no branch above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_fnonce_call",
+        must_contain: &[
+            "f may have been moved: when the condition calls f (it can only be called once, so the call moves it) and then turns out false, the else branch runs after that call, so f can't be used here",
+            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The call may have dropped them already.
+            "=f goes out of scope. Its 1 captured resource is dropped.",
+            "only if no branch above called it",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_box_move",
+        must_contain: &[
+            "*b may have been moved: when the condition moves *b to take and then turns out false, the else branch runs after that move, so *b can't be used here",
+            "b goes out of scope. Its resource (including the String it holds) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The String in the box may have been moved to take.
+            "=b goes out of scope. Its resource is dropped.",
+            "=b goes out of scope. Its resource is dropped (including the String it holds).",
+            "only if no branch above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_nested_effects",
+        // Effects inside an `if` within a chain part last too. Before,
+        // the else column showed s and z as untouched.
+        must_contain: &[
+            "s may have been moved: when the condition moves s to take and then turns out false, the else branch runs after that move, so s can't be used here",
+            "z may have been assigned a new value: when the condition assigns to z and then turns out false, the else branch runs after that assignment, so here z holds either its previous value or the new one.",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &["s goes out of scope. Its resource is dropped here only if no branch above moved it"],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -13403,27 +13494,52 @@ fn return_drops_what_the_branch_owns() {
     }
 }
 
-/// What a let-chain still can't draw (#281): a part that assigns to a
-/// variable declared outside the condition, followed by a part that can
-/// be false. The assignment lasts on the path into the `else`, which
-/// would need the variable's old and new values on one column.
+/// What a let-chain still can't draw (#579): a part that assigns a new
+/// reference to, writes through, or gives a first value to a variable
+/// declared outside the condition, followed by a part that can be false.
+/// Each lasts on the path into the `else`, where RustViz can't show
+/// which borrow is live, or that the variable may hold no value.
 #[test]
-fn if_let_chain_that_assigns_is_refused() {
+fn if_let_chain_lasting_effects_still_refused() {
     env::set_var("RV_RUNNER", "local");
-    let src = "fn main() {\n\
-               \x20   let y = Some(1);\n\
-               \x20   let mut z = 0;\n\
-               \x20   if let Some(a) = y && { z = a; z > 0 } {\n\
-               \x20       println!(\"{}\", z);\n\
-               \x20   } else {\n\
-               \x20       println!(\"no\");\n\
-               \x20   }\n\
-               }\n";
-    let err = Rustviz::new(src).expect_err("a let-chain that assigns, with an else, must not render");
-    let msg = err.to_string();
-    assert!(msg.contains("`if let` chains that assign to a variable declared outside the condition (`z`, line 4)")
-        && msg.contains("the condition is false and the else branch runs"),
-        "expected the let-chain-assign refusal, got:\n{}", msg);
+    let cases = [
+        ("fn main() {\n\
+          \x20   let s = String::from(\"a\");\n\
+          \x20   let t = String::from(\"b\");\n\
+          \x20   let y = Some(1);\n\
+          \x20   let mut r = &t;\n\
+          \x20   if let Some(_n) = y && { r = &s; r.len() > 3 } {\n\
+          \x20       println!(\"{}\", r);\n\
+          \x20   } else {\n\
+          \x20       println!(\"{}\", r);\n\
+          \x20   }\n\
+          }\n",
+         "`if let` chains that assign a new reference to a variable declared outside the condition (`r`, line 6)"),
+        ("fn main() {\n\
+          \x20   let y = Some(5);\n\
+          \x20   let mut n = 0;\n\
+          \x20   let r = &mut n;\n\
+          \x20   if let Some(a) = y && { *r = a; a > 3 } {\n\
+          \x20       println!(\"big\");\n\
+          \x20   }\n\
+          \x20   println!(\"{}\", r);\n\
+          }\n",
+         "`if let` chains that assign to a place reached through a variable declared outside the condition (`*r`, line 5)"),
+        ("fn main() {\n\
+          \x20   let y = Some(String::from(\"a\"));\n\
+          \x20   let mut z = String::from(\"z\");\n\
+          \x20   drop(z);\n\
+          \x20   if let Some(a) = y && { z = a; z.len() > 3 } {\n\
+          \x20       println!(\"{}\", z);\n\
+          \x20   }\n\
+          }\n",
+         "`if let` chains that assign to a variable declared outside the condition that may hold no value before (`z`, line 5)"),
+    ];
+    for (src, want) in cases {
+        let err = Rustviz::new(src).expect_err("a let-chain with this lasting effect must not render");
+        let msg = err.to_string();
+        assert!(msg.contains(want), "expected {:?}, got:\n{}", want, msg);
+    }
 }
 
 /// Column header labels in one row as (x, visible text), left to right.

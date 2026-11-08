@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, ResourceAccessPoint};
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, RcCall, RcDrop, StaticLender, TupleDropAt, TupleLeft, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, ChainFailHow, RcCall, RcDrop, StaticLender, TupleDropAt, TupleLeft, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -2427,6 +2427,7 @@ pub fn event_dot_chain_fail_move(
     to: &[String],
     dropped: &[String],
     no_else: bool,
+    how: &ChainFailHow,
 ) -> String {
     fn join(names: &[String]) -> String {
         let fmt: Vec<String> = names.iter().map(fmt_style).collect();
@@ -2435,30 +2436,37 @@ pub fn event_dot_chain_fail_move(
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
         }
     }
-    let name = fmt_style(my_name);
-    let moves = if to.is_empty() {
-        format!("the condition moves {}", name)
-    } else {
-        format!("the condition moves {} to {}", name, join(to))
+    // What is moved: the variable, or for `take(*b)` the place `*b`
+    // (#579).
+    let name = match how {
+        ChainFailHow::Out(place) => fmt_style(place),
+        _ => fmt_style(my_name),
+    };
+    // A call of an FnOnce closure moves it into the call (#579).
+    let (moves, act) = match how {
+        ChainFailHow::Call => (format!(
+            "the condition calls {} (it can only be called once, so the call moves it)", name), "call"),
+        _ if to.is_empty() => (format!("the condition moves {}", name), "move"),
+        _ => (format!("the condition moves {} to {}", name, join(to)), "move"),
     };
     let if_kw = fmt_style(&"if".to_owned());
     let mut out = match (definite, no_else) {
         (false, false) => format!(
             "{0} may have been moved: when {1} and then turns out false, the else branch runs \
-             after that move, so {0} can't be used here",
-            name, moves),
+             after that {2}, so {0} can't be used here",
+            name, moves, act),
         (true, false) => format!(
             "{0} was moved: {1} before it can turn out false, so the else branch runs after that \
-             move, and {0} can't be used here",
-            name, moves),
+             {2}, and {0} can't be used here",
+            name, moves, act),
         (false, true) => format!(
             "{0} may have been moved: when {1} and then turns out false, the body is skipped but \
-             the move has happened, so {0} can't be used after the {2}",
-            name, moves, if_kw),
+             the {2} has happened, so {0} can't be used after the {3}",
+            name, moves, act, if_kw),
         (true, true) => format!(
-            "{0} was moved: {1} before it can turn out false, so the move has happened even when \
-             the body is skipped, and {0} can't be used after the {2}",
-            name, moves, if_kw),
+            "{0} was moved: {1} before it can turn out false, so the {2} has happened even when \
+             the body is skipped, and {0} can't be used after the {3}",
+            name, moves, act, if_kw),
     };
     if !dropped.is_empty() {
         let plural = dropped.len() > 1;
@@ -2581,6 +2589,43 @@ pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, is_copy
             me, x, held(is_copy)
         )
     }
+}
+
+// At the start of the `else` branch of an `if` whose let-chain
+// condition assigns the variable a new value in one part and can still
+// be false in a later one (`if let Some(a) = y && { z = a; z > 0 }`,
+// #579): the assignment lasts, so on that path the variable holds its
+// new value, and on the paths where the condition failed before the
+// assignment its old one. `drops_old`: the assignment drops the old
+// value (`rc`: what that drop does for an Rc). `no_else`: there's no
+// `else`, so it's the path where the body is skipped.
+pub fn event_dot_chain_fail_assign(
+    my_name: &String,
+    drops_old: bool,
+    rc: Option<RcDrop>,
+    no_else: bool,
+) -> String {
+    let name = fmt_style(my_name);
+    let what = if drops_old { "resource" } else { "value" };
+    let mut out = if no_else {
+        format!(
+            "{0} may have been assigned a new {1}: when the condition assigns to {0} and then \
+             turns out false, the body is skipped but the assignment has happened, so after the \
+             {2} {0} holds either its previous {1} or the new one.",
+            name, what, fmt_style(&"if".to_owned()))
+    } else {
+        format!(
+            "{0} may have been assigned a new {1}: when the condition assigns to {0} and then \
+             turns out false, the else branch runs after that assignment, so here {0} holds \
+             either its previous {1} or the new one.",
+            name, what)
+    };
+    if drops_old {
+        out.push_str(&format!(
+            " When the assignment runs, it drops {}'s previous resource{}.",
+            name, rc_drop_note(rc)));
+    }
+    out
 }
 
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
