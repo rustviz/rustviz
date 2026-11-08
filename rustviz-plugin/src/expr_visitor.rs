@@ -345,6 +345,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // so `print_lifetimes` can't see that `o`'s borrow has to last
   // until then; the arm records it here instead.
   pub borrow_floor: HashMap<String, usize>,
+  // Holders (`let it = v.iter_mut();`) moved into a `for` loop (#722).
+  // The loop owns what they held from there, so the end of that borrow
+  // is not drawn on their (moved-out) columns (#767).
+  pub for_moved_holders: HashSet<String>,
   // `let r = loop { … break k; };` (#431): the loop's id, what its
   // `break` values go to (`r`) and how (move or copy). A `break` with a
   // value, in that loop, pairs the value with `r` the way `let r = k;`
@@ -6129,7 +6133,11 @@ pub fn print_out_of_scope(&mut self){
       }
       else {
         // otherwise it does return a resource
-        self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data, Vec::new());
+        // A holder moved into a `for` loop has no value left to end a
+        // borrow on: the loop gives the lender back, drawn on the
+        // lender's column alone (#767).
+        let end_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous } else { ResourceTy::Value(from_ro) };
+        self.add_borrow_end_ev(*lifetime, to_ro, end_from, ref_data, Vec::new());
       }
     }
     self.nest_borrow_ends_in_arms();
@@ -6159,8 +6167,19 @@ pub fn print_out_of_scope(&mut self){
     let assigned: HashMap<String, usize> = self.borrow_map.iter()
       .map(|(n, d)| (n.clone(), d.assigned_at))
       .collect();
-    let mut cx = ExitCtx { scopes: &self.exit_scopes, assigned: &assigned, unique_id: self.unique_id };
+    let mut cx = ExitCtx { scopes: &self.exit_scopes, assigned: &assigned, unique_id: self.unique_id, dropped: Vec::new(), refdied: Vec::new() };
     end_borrows_at_exits_in(self.preprocessed_events, &[], &mut cx);
+    // The ends the arms made redundant (#767) are no arrows either.
+    let (dropped, refdied) = (cx.dropped, cx.refdied);
+    for evs in self.event_line_map.values_mut() {
+      evs.retain(|e| !dropped.contains(&e.get_id()));
+      for e in evs.iter_mut() {
+        if !refdied.contains(&e.get_id()) { continue; }
+        if let ExternalEvent::StaticDie { from, to, id, .. } | ExternalEvent::MutableDie { from, to, id, .. } = e {
+          *e = ExternalEvent::RefDie { from: from.clone(), to: to.clone(), num_curr_borrowers: 0, id: *id };
+        }
+      }
+    }
   }
 
   /// For a reference `k` that a pattern copied (or moved) out of a
@@ -6380,6 +6399,10 @@ struct ExitCtx<'b> {
   /// Each reference's `RefData::assigned_at`.
   assigned: &'b HashMap<String, usize>,
   unique_id: &'b mut usize,
+  /// Ids of the borrow ends that were dropped for being redundant.
+  dropped: Vec<usize>,
+  /// Ids of the borrow ends that now give nothing back (a `RefDie`).
+  refdied: Vec<usize>,
 }
 
 /// `(r, lender)` if `e` ends the borrow the reference `r` holds;
@@ -6419,22 +6442,37 @@ fn ends_on_every_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint
   })
 }
 
+/// Whether every path through `events` gives `to` its resource back
+/// (by any reference's borrow end).
+fn gives_back_on_every_path(events: &[(usize, ExternalEvent)], to: &ResourceTy) -> bool {
+  events.iter().any(|(_, e)| match e {
+    ExternalEvent::Branch { branches, branch_type, .. } => !matches!(branch_type, BranchType::Loop(..))
+      && !branches.is_empty()
+      && branches.iter().all(|b| gives_back_on_every_path(&b.e_data, to)),
+    _ => matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+      && borrow_end_of(e).is_some_and(|(_, t)| t == to),
+  })
+}
+
 /// See `ExprVisitor::end_borrows_at_exits`. `after`: the borrow ends
 /// that come after `events` on the path through them. Returns the
 /// variables this gave events in `events`' conditionals, which need a
 /// column in a conditional around them too.
 fn end_borrows_at_exits_in(
-  events: &mut [(usize, ExternalEvent)],
+  events: &mut Vec<(usize, ExternalEvent)>,
   after: &[(usize, ExternalEvent)],
   cx: &mut ExitCtx,
 ) -> HashSet<ResourceAccessPoint> {
   let mut out = HashSet::new();
+  let mut redundant: Vec<usize> = Vec::new();
+  let mut to_ref_die: Vec<usize> = Vec::new();
   for k in 0..events.len() {
     if !matches!(events[k].1, ExternalEvent::Branch { .. }) {
       continue;
     }
     // The borrow ends after this conditional: later in `events`, then
     // after them.
+    let tail: Vec<(usize, ExternalEvent)> = events[k + 1..].to_vec();
     let mut later = Vec::new();
     borrow_ends_in(&events[k + 1..], &mut later);
     later.extend(after.iter().cloned());
@@ -6534,12 +6572,48 @@ fn end_borrows_at_exits_in(
         arm.e_data.insert(at, (line, ev));
       }
     }
+    // The borrow ends the arms drew on every path through them, and
+    // that the same list draws again right after the conditional,
+    // are drawn once: `loop { if c { break; } else { let x = ra; break; } }`
+    // ends `ra`'s borrow in both branches, so the join draws no third
+    // end (#767). Only the next end of the borrow, with no use of it
+    // in between.
+    for j in 0..tail.len() {
+      let Some((r, to)) = borrow_end_of(&tail[j].1).map(|(r, to)| (r.clone(), to.clone())) else {
+        continue;
+      };
+      if tail[..j].iter().any(|(_, e)| touches(e, &r)) || branches.is_empty() {
+        continue;
+      }
+      if declared.contains(&r) {
+        // A reference the arms made (`let x = ra;`) is out of scope
+        // after the conditional. If every arm already gave `to` back,
+        // x's end stays (it is the end of x's own borrow, in the arm
+        // that made it) but gives nothing back again.
+        if branches.iter().all(|b| gives_back_on_every_path(&b.e_data, &to)) {
+          to_ref_die.push(k + 1 + j);
+        }
+      } else if added.contains(&r) && branches.iter().all(|b| ends_on_every_path(&b.e_data, &r, &to)) {
+        redundant.push(k + 1 + j);
+        cx.dropped.push(tail[j].1.get_id());
+      }
+    }
     // What the arms' new events are on has a column in the conditional.
     added.retain(|v| !declared.contains(v));
     #[expect(clippy::disallowed_methods, reason = "inserted into a set")]
     live_vars.extend(added.iter().cloned());
     out.extend(added);
   }
+  for &i in &to_ref_die {
+    let (from, to, id) = match &events[i].1 {
+      ExternalEvent::StaticDie { from, to, id, .. } | ExternalEvent::MutableDie { from, to, id, .. } => (from.clone(), to.clone(), *id),
+      _ => continue,
+    };
+    events[i].1 = ExternalEvent::RefDie { from, to, num_curr_borrowers: 0, id };
+    cx.refdied.push(id);
+  }
+  let mut j = 0;
+  events.retain(|_| { j += 1; !redundant.contains(&(j - 1)) });
   out
 }
 

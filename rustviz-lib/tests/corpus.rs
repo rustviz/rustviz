@@ -17967,9 +17967,7 @@ fn a_holder_moved_into_a_for_loop_ends_its_loan_at_the_loop_end() {
     let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     for (text, line) in [
         ("v's resource is no longer mutably borrowed", "} // end of the for"),
-        ("it's mutable borrow ends", "} // end of the for"),
         ("w's resource is no longer immutably borrowed", "} // end of the second for"),
-        ("it2's immutable borrow ends", "} // end of the second for"),
     ] {
         // (`v.push(3)` after the loop ends its own borrow with the same
         // text: the loop's is the first.)
@@ -17978,6 +17976,50 @@ fn a_holder_moved_into_a_for_loop_ends_its_loan_at_the_loop_end() {
         assert!(!ends.is_empty(), "{}: no such dot", text);
         assert_eq!(ends[0].1, code_row_y(&code, line), "{:?} should be on the row of `{}`: {:?}", text, line, ends);
     }
+}
+
+/// #767: `loop { if c { break; } else { let x = ra; break; } }` ends
+/// `ra`'s borrow of `a` in each branch. The join, on the loop's `}` row
+/// below, ended it a third time ("ra's immutable borrow ends", "a's
+/// resource is no longer immutably borrowed"), reading as the borrow
+/// ending twice. Each of the two branches ends it once; none after.
+#[test]
+fn a_borrow_every_branch_ended_is_not_ended_again_at_the_join() {
+    let rv = run_with_local_backend("loop_break_borrow_scope_end");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let branch_row = code_row_y(&code, "if c { break; } else { let x = ra; break; }");
+    for text in ["a's resource is no longer immutably borrowed", "ra's immutable borrow ends"] {
+        let ends = dots_listing_tooltip(&svg, text);
+        // (`a.len()` above the loop ends its own implicit borrow too.)
+        let after: Vec<_> = ends.iter().filter(|(_, y)| *y >= branch_row).collect();
+        assert_eq!(after.len(), 2, "{:?}: one end per branch, none at the join: {:?}", text, ends);
+        assert!(after.iter().all(|(_, y)| *y == branch_row),
+            "{:?} should only be on the branches' row {}: {:?}", text, branch_row, ends);
+    }
+}
+
+/// #767: `for x in it` moves `it` into the loop. The loop gives `v` its
+/// borrow back at its closing brace, but `it`'s column holds nothing
+/// after the move, so it draws no "it's mutable borrow ends" there:
+/// only its move and its scope end.
+#[test]
+fn a_holder_moved_into_a_for_loop_draws_no_borrow_end_on_its_column() {
+    let rv = run_with_local_backend("for_holder_borrow_end_722");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (holder, end) in [("it", "it's mutable borrow ends"), ("it2", "it2's immutable borrow ends")] {
+        assert!(dots_listing_tooltip(&svg, end).is_empty(), "{}: no end on a moved-out column", end);
+        let moved = dots_listing_tooltip(&svg, &format!("{}'s value is moved", holder));
+        let scope = dots_listing_tooltip(&svg, &format!("{} goes out of scope", holder));
+        assert_eq!((moved.len(), scope.len()), (1, 1), "{}: moved and scope-end dots", holder);
+        // No dot on the holder's column between the move and its scope end.
+        let between = dots_where(&svg, |_| true).into_iter()
+            .filter(|(x, y)| *x == moved[0].0 && *y > moved[0].1 && *y < scope[0].1)
+            .count();
+        assert_eq!(between, 0, "{}: a dot on its column after it was moved into the loop", holder);
+    }
+    // The lenders' ends stay on the loops' closing braces (#722).
+    let end = code_row_y(&code, "} // end of the for");
+    assert!(dots_listing_tooltip(&svg, "v's resource is no longer mutably borrowed").iter().any(|(_, y)| *y == end));
 }
 
 /// #662: with a `loop` as a call argument, the call runs once the loop
