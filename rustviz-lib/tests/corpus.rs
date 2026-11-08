@@ -9395,13 +9395,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "dashed_arm_hover",
         must_contain: &[
-            "This line is for the else branch. These lines are not part of that branch.",
-            "This line is for the _ branch. These lines are not part of that branch.",
+            "This segment is for the else branch. The underlined code is not part of that branch.",
+            "This segment is for the _ branch. The underlined code is not part of that branch.",
             "s is the owner of the resource",
             "t is the owner of the resource",
         ],
         must_not_contain: &[
             "nothing happens to c here",
+            "This line is for the else branch. These lines are not part of that branch.",
+            "This line is for the _ branch. These lines are not part of that branch.",
             "on the path through",
             "s on the path through the else branch: the else branch isn't running on these lines (another branch's code is here), so nothing happens to s here",
             "another arm's code is here",
@@ -16412,7 +16414,7 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
 
 /// #626: the hover glow covers one stretch at a time. A `branch-group`
 /// is what `.branch-group:hover .tooltip-trigger` glows, so no group may
-/// hold both a dashed segment ("These lines are not part of that branch") and a
+/// hold both a dashed segment ("The underlined code is not part of that branch") and a
 /// solid one ("is the owner of the resource"); before, an arm's dashed
 /// and solid stretches glowed together as one piece.
 #[test]
@@ -16422,7 +16424,7 @@ fn dashed_and_solid_arm_stretches_glow_separately() {
     let (mut dashed_groups, mut solid_groups) = (0, 0);
     for group in timeline.split("<g class=\"branch-group\"").skip(1) {
         let group = &group[..group.find("</g>").unwrap_or(group.len())];
-        let dashed = group.contains("These lines are not part of that branch");
+        let dashed = group.contains("The underlined code is not part of that branch");
         let solid = group.contains("is the owner of the resource");
         assert!(
             !(dashed && solid),

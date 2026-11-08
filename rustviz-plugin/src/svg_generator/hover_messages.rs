@@ -2065,7 +2065,7 @@ pub fn state_inactive_arm(_my_name: &String, label: &str) -> String {
         l => l.to_owned(),
     };
     format!(
-        "This line is for the {} branch. These lines are not part of that branch.",
+        "This segment is for the {} branch. The underlined code is not part of that branch.",
         fmt_style(&name)
     )
 }
