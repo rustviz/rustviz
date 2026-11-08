@@ -235,6 +235,13 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               premoved: HashSet::new(),
               live_tuples: Vec::new(),
               binding_columns: Vec::new(),
+              break_binds: Vec::new(),
+              deferred_breaks: Vec::new(),
+              line_override: None,
+              deferred_lines: Vec::new(),
+              break_out: Vec::new(),
+              break_pats: Vec::new(),
+              loop_breaks: Vec::new(),
             };
             visitor.visit_body(hir_body);
             visitor.print_lifetimes();
@@ -329,6 +336,13 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           break_moves: Vec::new(),
               all_paths_exit: false,
           borrow_floor: HashMap::new(),
+          break_binds: Vec::new(),
+          deferred_breaks: Vec::new(),
+          line_override: None,
+              deferred_lines: Vec::new(),
+              break_out: Vec::new(),
+          break_pats: Vec::new(),
+          loop_breaks: Vec::new(),
           in_scope: Vec::new(),
           exit_frames: Vec::new(),
           literal_temps: HashMap::new(),

@@ -1000,6 +1000,16 @@ const EXPECTED_OK: &[&str] = &[
     "for_tuple_pattern_move",
     "for_tuple_pattern_borrow",
     "for_iterator_break_outer",
+    // `let r = loop { … break k; }` gives `r` the value (#431).
+    "loop_break_value_moved",
+    "loop_break_value_outer_var",
+    "loop_break_value_labelled",
+    "loop_break_value_receivers",
+    "loop_break_value_in_branch",
+    "loop_break_value_local",
+    "loop_break_value_cond_receivers",
+    // Renders without crashing; its values aren't paired yet (#561).
+    "loop_break_value_several_tuple",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -11213,6 +11223,120 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
         ],
     },
+    // ─── `let r = loop { … break k; }` (#431) ───────────────────────
+    TooltipExpect {
+        name: "loop_break_value_moved",
+        must_contain: &[
+            "Move from k to r",
+            "r acquires ownership of a resource",
+            "r goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=r goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "loop_break_value_outer_var",
+        // `break s` (in an `if`) moves `s` out of the loop: `r` has it
+        // where the loop ends (#350's approach), so `s` has nothing to
+        // drop at the end of `main` and `r` does. `break n * 2` copies.
+        must_contain: &[
+            "Move from s to r",
+            "r goes out of scope. Its resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+            "doubled is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "=r goes out of scope. No resource is dropped.",
+            "=s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_value_in_branch",
+        // `break a` in a match arm, `break b` in an `if` / `else`: the
+        // values reach `r` and `q` at the end of their loops.
+        must_contain: &[
+            "Move from a to r",
+            "Move from b to q",
+            "r goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=r goes out of scope. No resource is dropped.",
+            "=q goes out of scope. No resource is dropped.",
+            "=a goes out of scope. Its resource is dropped.",
+            "=b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_value_labelled",
+        must_contain: &[
+            "Move from String::from to w",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["=w goes out of scope. No resource is dropped."],
+    },
+    TooltipExpect {
+        name: "loop_break_value_receivers",
+        must_contain: &[
+            "Move from k to r",
+            "Move from x to a",
+            "Move from y to b",
+            "Move from z to take",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=a goes out of scope. No resource is dropped.",
+            "=b goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_value_local",
+        // `if n == 3 { break k; }` with `k` declared in the loop: `k`
+        // moves to `r` on the iteration that ends the loop and is
+        // dropped at the end of the body on every other one. Main left
+        // `r` without a value; the first rework said `k` dropped nothing
+        // there. With `else { continue; }` (the `continue` drops `j`)
+        // nothing reaches the end of the body.
+        must_contain: &[
+            "Move from k to r",
+            "k's resource is moved to r by the break that ends the loop",
+            "k goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "r goes out of scope. Its resource is dropped.",
+            "Move from j to q",
+            "j goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=r goes out of scope. No resource is dropped.",
+            "=q goes out of scope. No resource is dropped.",
+            "=k goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_value_cond_receivers",
+        // A `break` in a branch whose loop is assigned (`r = loop`),
+        // bound to a tuple or passed as an argument: the move is drawn
+        // where the loop ends, as for `let r = loop`, so inside the loop
+        // `s` and `z` are still owned after the `if`.
+        must_contain: &[
+            "Move from s to r",
+            "Move from x to a",
+            "Copy from n to m",
+            "Move from z to take",
+            "a goes out of scope. Its resource is dropped.",
+            "r goes out of scope. Its resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+            "x goes out of scope. No resource is dropped.",
+            "z goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=a goes out of scope. No resource is dropped.",
+            "=x goes out of scope. Its resource is dropped.",
+            "=z goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -14492,5 +14616,35 @@ fn same_name_kinds_get_separate_columns() {
         let labels = header_labels(&t);
         assert!(!labels.iter().any(|l| l.2.starts_with(label) && l.2[label.len()..].starts_with(|c: char| "₀₁₂₃₄₅₆₇₈₉".contains(c))),
             "{}: a subscripted {:?} column: {:?}", name, label, labels);
+    }
+}
+
+/// #431: a `break` in a branch (`if n == 3 { break s; }`) carries its
+/// value out of the loop. As for any move out of a loop (#350), the move
+/// is drawn where the loop ends (`rows` rows below the `break`), so
+/// inside the loop the value is still owned after the `if`. This holds whatever receives the value: a `let`, an assignment
+/// or a call argument.
+///
+/// This test fails on the plugin before the fix (no move at all on main;
+/// the move on the `break` row for `r = loop` and `take(loop …)` on the
+/// first rework).
+#[test]
+fn a_break_value_in_a_branch_moves_where_the_loop_ends() {
+    for (name, brk, moved, rows) in [
+        ("loop_break_value_outer_var", "break s;", "s's resource is moved", 2.0),
+        ("loop_break_value_in_branch", "break b;", "b's resource is moved", 4.0),
+        ("loop_break_value_cond_receivers", "break s;", "s's resource is moved", 2.0),
+        ("loop_break_value_cond_receivers", "break z;", "z's resource is moved", 2.0),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let row = code_row_y(&code, brk);
+        let want = row + rows * 30.0;
+        let dots = dots_listing_tooltip(&tl, moved);
+        assert!(
+            dots.len() == 1 && dots[0].1 == want,
+            "{}: `{}` is at y={}; the move out of the loop should be at y={} (where the loop ends), found {:?}",
+            name, brk, row, want, dots
+        );
     }
 }

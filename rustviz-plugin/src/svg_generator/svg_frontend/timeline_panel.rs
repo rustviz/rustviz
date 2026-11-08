@@ -1254,6 +1254,23 @@ fn render_dot(
                                 hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, false),
                             _ => event.print_message_with_name(&mut name),
                         };
+                    } else if history.iter().any(|(l, e)| l == line_number && matches!(e, Event::Move { break_out: true, .. })) {
+                        // A `break` carried it out of the loop on this
+                        // line (#431), but only on the iteration that
+                        // ended the loop: every other one drops it here.
+                        let cx = timeline_data.x_val;
+                        let cy = event_y;
+                        let drop_data = DropDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title: hover_messages::event_dot_break_out_go_out_of_scope(&name),
+                            p1x: cx - 3, p1y: cy - 1,
+                            p2x: cx + 3, p2y: cy - 1,
+                            p3x: cx,     p3y: cy + 3,
+                        };
+                        append_drop_dot(drop_data, timeline_data, dots);
+                        continue;
                     } else if !resource_hold && maybe_moved_at_end(history) {
                         // Moved in some branches of a conditional but
                         // not others (#179): the drop flag decides here.

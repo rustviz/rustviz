@@ -2307,6 +2307,27 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_co
     )
 }
 
+// `let r = loop { let k = …; if c { break k; } };` (#431): the
+// `break` moves `k`, declared inside the loop, to the loop's receiver.
+// That is drawn where the loop ends, which is also where `k` goes out
+// of scope on the iterations that don't break (they drop it there).
+pub fn event_dot_break_out_move(my_name: &String, to: &String, value: bool) -> String {
+    format!(
+        "{0}'s {1} is moved to {2} by the {3} that ends the loop",
+        fmt_style(my_name),
+        if value { "value" } else { "resource" },
+        fmt_style(to),
+        fmt_style(&"break".to_owned())
+    )
+}
+
+pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+        fmt_style(my_name)
+    )
+}
+
 // Merge dot for a variable that no branch above moved (#179; this used
 // to be an empty tooltip).
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
