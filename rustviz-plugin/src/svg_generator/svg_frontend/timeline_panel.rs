@@ -51,6 +51,10 @@ struct DotLayer {
     /// arrows are: an arrow ending on such a dot stops short of the icon,
     /// which is wider than the dot (#578).
     call_spots: DotPositions,
+    /// Text of a split or join dot that isn't drawn because no line of
+    /// its column reaches it (#702), per column: it goes on the next
+    /// event dot drawn on that column, before that dot's own text.
+    carry: HashMap<u64, Vec<String>>,
 }
 
 impl DotLayer {
@@ -75,10 +79,29 @@ impl DotLayer {
     fn add_event(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData,
                  title: String, drop: bool, lend_id: Option<usize>) {
         self.positions.insert((x, y));
+        let carried = self.carry.remove(&hash).unwrap_or_default();
         let dot = self.entry(hash, x, y, column);
         dot.event = true;
         dot.drop |= drop;
+        // Carried text happened before anything recorded on this dot.
+        dot.lines.splice(0..0, carried.into_iter().map(|t| (None, t)));
         dot.lines.push((lend_id, title));
+    }
+
+    /// Text waiting for the next event dot of column `hash` (see
+    /// `carry`), taken off it.
+    fn take_carry(&mut self, hash: u64) -> Vec<String> {
+        self.carry.remove(&hash).unwrap_or_default()
+    }
+
+    /// Makes `texts` the text waiting for the next event dot of column
+    /// `hash`, replacing what was waiting.
+    fn set_carry(&mut self, hash: u64, texts: Vec<String>) {
+        if texts.is_empty() {
+            self.carry.remove(&hash);
+        } else {
+            self.carry.insert(hash, texts);
+        }
     }
 
     /// The `f` icon of a call that borrows the variable (`f(&s)`), from
@@ -1013,13 +1036,41 @@ fn render_dot(
                 // begins. When the branches share lines it sits on
                 // the top corner of their diamond (#117).
                 let collapsed = branch_is_collapsed(*split_point, *merge_point);
+                let rap = &visualization_data.timelines[hash].resource_access_point;
+                // A dot sits on a line of its column. Where none reaches
+                // it, it isn't drawn, and its text goes on the column's
+                // next dot (`DotLayer::carry`, #702).
+                // The split: the arms leave it in the state the column has
+                // there (as `render_branches` draws them). None does while
+                // the column is mutably borrowed (`r = &mut s` live across
+                // the conditional), so the arms start from nothing; each
+                // arm's first dot then says s is live in the conditional.
+                let split_has_line = branch_history.first()
+                    .and_then(|b| b.entry_state.as_ref())
+                    .map_or(true, |entry| {
+                        let leading = match entry {
+                            State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
+                            s => convert_back(s),
+                        };
+                        line_drawn(rap, &leading)
+                    });
                 // A conditional on a column whose value was already moved
                 // away (a nested `if` in an arm after `match (x, y)` moved
                 // x into the temporary tuple): x isn't live in it, and no
                 // arm line leaves the split, so a dot there would float
-                // (#694). Its arms still draw their events (a drop stated
-                // at a `return`).
-                if !moved_at_event {
+                // (#694), and its text isn't true. Its arms still draw
+                // their events (a drop stated at a `return`).
+                let split_drawn = !moved_at_event && split_has_line;
+                // Text waiting from before the conditional goes on the
+                // split dot, or else on each arm's first dot.
+                let mut arm_carry = Vec::new();
+                if !split_drawn {
+                    arm_carry = dots.take_carry(*hash);
+                    if !moved_at_event {
+                        arm_carry.push(event.print_message_with_name(& mut is.real_name()).trim_end().to_owned());
+                    }
+                }
+                if split_drawn {
                     let b_data = EventDotData {
                         hash: *hash as u64,
                         dot_x: timeline_data.x_val,
@@ -1045,7 +1096,12 @@ fn render_dot(
                 // closing-brace line. Branch identity is already
                 // communicated by column position; the join dot
                 // below speaks for what happened.
+                // Text an arm that reaches the join leaves waiting goes on
+                // the join dot or past it; one an arm that returns or
+                // panics leaves can't (that arm never gets there).
+                let mut leftover: Vec<String> = Vec::new();
                 for branch in branch_history.iter() {
+                    dots.set_carry(*hash, arm_carry.clone());
                     // Whether the value is still owned when it goes out
                     // of scope inside the branch: only at a `return`
                     // (#363), where it's dropped if so.
@@ -1057,7 +1113,13 @@ fn render_dot(
                             State::FullPrivilege { .. } | State::PartialPrivilege { .. }
                         ));
                                         render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, hold, dots, held_at_event);
+                    for text in dots.take_carry(*hash) {
+                        if !branch.diverges && !leftover.contains(&text) {
+                            leftover.push(text);
+                        }
+                    }
                 }
+                dots.set_carry(*hash, leftover);
 
                 // Per-variable merge dot, on the parent column at
                 // `merge_point` (the closing-brace line). Sat at
@@ -1116,22 +1178,11 @@ fn render_dot(
                             Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
                         ) && ends_borrow(&b.e_data)
                     });
-                if borrow_ended_in_every_arm {
-                    let m_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: cx,
-                        dot_y: cy,
-                        title: hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()),
-                    };
-                    append_dot(m_data, timeline_data, dots, None);
+                // `None`: no join dot at all (the all-moved case below).
+                let title = if borrow_ended_in_every_arm {
+                    Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
                 } else if partly_initialized {
-                    let m_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: cx,
-                        dot_y: cy,
-                        title: String::new(),
-                    };
-                    append_dot(m_data, timeline_data, dots, None);
+                    Some(String::new())
                 } else if mixed_moved {
                     // Mixed: at least one branch moved, at least
                     // one didn't (counting the implicit untouched
@@ -1152,7 +1203,7 @@ fn render_dot(
                         .filter(|(l, _)| *l > *merge_point)
                         .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
                         .map_or(false, |(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_moved: true, .. }));
-                    let title = if reassigned_next {
+                    Some(if reassigned_next {
                         hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name())
                     } else {
                         // A `&mut` reference moved on some paths (`if b {
@@ -1163,14 +1214,7 @@ fn render_dot(
                             is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
                             &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
                         )
-                    };
-                    let m_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: cx,
-                        dot_y: cy,
-                        title,
-                    };
-                    append_dot(m_data, timeline_data, dots, None);
+                    })
                 } else if all_moved {
                     // Every branch ends without the resource, by a move
                     // or a drop (or an implicit drop at a nested merge):
@@ -1179,14 +1223,35 @@ fn render_dot(
                     // Like a column after a plain move, it just ends with
                     // the arms; the scope-end dot says why nothing is
                     // dropped there (`all_moved_at_end`).
+                    None
                 } else {
-                    let m_data = EventDotData {
-                        hash: *hash as u64,
-                        dot_x: cx,
-                        dot_y: cy,
-                        title: branch_join_message(branch_history, ty, is),
-                    };
-                    append_dot(m_data, timeline_data, dots, None);
+                    Some(branch_join_message(branch_history, ty, is))
+                };
+                // The join is reached by the line of each arm that gets
+                // there still holding something (`render_branches`). Where
+                // no arm does (the arms of a nested `if` that kept s end at
+                // its own join, a reference's borrow ended in every arm),
+                // the dot would float: its text goes on the column's next
+                // dot instead, the scope end or the next event (#702).
+                let join_has_line = branch_history.iter().any(|b| {
+                    !b.diverges && line_drawn(rap, &b.states.last().map_or(State::OutOfScope, |s| s.2.clone()))
+                });
+                match title {
+                    Some(title) if join_has_line => {
+                        let m_data = EventDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title,
+                        };
+                        append_dot(m_data, timeline_data, dots, None);
+                    }
+                    Some(title) if !title.is_empty() => {
+                        let mut waiting = dots.take_carry(*hash);
+                        waiting.push(title);
+                        dots.set_carry(*hash, waiting);
+                    }
+                    _ => {}
                 }
                 continue;
             }
@@ -3602,6 +3667,12 @@ fn state_is_alive(state: &State) -> bool {
     !matches!(state, State::ResourceMoved { .. } | State::OutOfScope)
 }
 
+/// Whether a conditional's arm draws a line for the column in `state`
+/// (`push_seg_if_renderable`): where it doesn't, it draws nothing.
+fn line_drawn(rap: &ResourceAccessPoint, state: &State) -> bool {
+    !matches!(determine_owner_line_styles(rap, state), OwnerLine::Empty | OwnerLine::Dotted)
+}
+
 /// Half-width of a hollow strip — matches `compute_hollow_line_data`'s
 /// `w = 3.5 / 2`, so branch strips share endpoint coordinates with
 /// regular columns at the seams.
@@ -3877,7 +3948,7 @@ fn push_seg_if_renderable(
     state: State,
     visualization_data: &VisualizationData,
 ) {
-    if matches!(determine_owner_line_styles(rap, &state), OwnerLine::Empty | OwnerLine::Dotted) {
+    if !line_drawn(rap, &state) {
         return;
     }
     let title = timeline_segment_title(&state, rap, visualization_data, None);
