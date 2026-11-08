@@ -2707,6 +2707,56 @@ pub fn event_dot_chain_fail_assign(
     out
 }
 
+// ── Several `break`s that carry a value (#561) ─────────────────────
+//
+// `let r = loop { if c { break a; } else { break b; } };`: every
+// `break` value is paired with `r` where the loop ends, but only the
+// `break` that ended the loop ran. `brk` is that `break` as written
+// (`break a`), `None` when it is too long to quote.
+
+fn quoted_break(brk: &Option<String>) -> String {
+    match brk {
+        Some(b) => fmt_style(b),
+        None => "the break that carries it".to_owned(),
+    }
+}
+
+/// Appended to the receiver's dot: it got the value of one `break`,
+/// whichever ran.
+pub fn break_alt_receiver_suffix() -> String {
+    format!(" (from whichever {} ended the loop)", fmt_style(&"break".to_owned()))
+}
+
+/// Appended to the source's dot and to the arrow: the copy or move
+/// happened only if this `break` ended the loop.
+pub fn break_alt_if_suffix(brk: &Option<String>) -> String {
+    format!(", if the loop ended with {}", quoted_break(brk))
+}
+
+/// The source's dot when a `break` moves it into the receiver (see
+/// BreakAlt for `alt`). `what`: "resource", "value", or "reference" (a
+/// `&mut` moved), what moves out of it. A variable declared inside the
+/// loop goes out of scope with it anyway, so it is only said where it
+/// went.
+pub fn event_dot_break_alt_move(my_name: &String, to: &String, alt: &crate::svg_generator::data::BreakAlt, what: &str) -> String {
+    let name = fmt_style(my_name);
+    let to = fmt_style(to);
+    let brk = &alt.brk;
+    let moved = if what == "reference" {
+        format!("the reference in {0}", name)
+    } else {
+        format!("{0}'s {1}", name, what)
+    };
+    if alt.in_loop {
+        format!("{0} is moved to {1} if the loop ended with {2}", moved, to, quoted_break(brk))
+    } else {
+        format!(
+            "{0} may have been moved: the loop can end with {1}, which moves {2} to {3}, so {0} can't be used after the loop",
+            name, quoted_break(brk), moved, to
+        )
+    }
+}
+
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
 // moved into the call, and each value it captured by value is dropped
 // or moved out of it inside the call. `fates` comes from the closure

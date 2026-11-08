@@ -298,11 +298,10 @@ rather than listed here.
   creates it afresh each iteration.
 - A `loop` hands its receiver (`let r = loop { … break k; }`, `r = loop
   { … }`, a tuple pattern, a call argument) the value of its `break`.
-  With one `break` that carries a value, in a branch (`if c { break s;
-  }`), the value moves to the receiver where the loop ends. With
-  several (`if c { break a; } else { break b; }`), each is drawn moving
-  into the receiver in its own branch, so after the loop the receiver
-  is shown without a value ("No resource is dropped"), which is false.
+  A `break` value in a branch (`if c { break s; }`) moves to the
+  receiver where the loop ends. So do several (`if c { break a; } else
+  { break b; }`): each arrow says it happened only if its `break` ended
+  the loop, and `a` and `b` are each shown as maybe moved.
 - A reference that a `break` carries out of a loop (`let r = loop {
   break ra; }`) isn't linked back to what it borrows: its borrow end
   says "what it borrows from isn't shown", and for a `&mut` the lender
