@@ -1185,6 +1185,9 @@ const EXPECTED_OK: &[&str] = &[
     "pattern_let_else_struct_ref",
     "pattern_tuple_ref_elements",
     "pattern_let_tuple_call_lenders",
+    // A `move` closure returned from a fn takes its captures with it
+    // (#760).
+    "closure_return_move",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13461,6 +13464,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from d to x",
             "Immutable borrow from c to y",
             "two's signature gives the reference it returns the same lifetime as both arguments",
+        ],
+    },
+    // #760: a `move` closure returned to the caller carries what it
+    // captured: the parameter `s` (and the local `label`) is moved into
+    // it, and the String is dropped when the caller drops the closure,
+    // not when `adder` / `make` returns. The old plugin said `s goes out
+    // of scope. Its resource is dropped.` n is Copy, so it's copied in.
+    TooltipExpect {
+        name: "closure_return_move",
+        must_contain: &[
+            "s's resource is moved into the returned closure, which goes to the caller",
+            "s goes out of scope. No resource is dropped.",
+            "label's resource is moved into the returned closure, which goes to the caller",
+            "label goes out of scope. No resource is dropped.",
+            "n's value is copied into the returned closure",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped",
+            "label goes out of scope. Its resource is dropped",
         ],
     },
 ];

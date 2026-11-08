@@ -2662,6 +2662,14 @@ impl Event {
                 hover_messages::event_dot_lend_to_undrawn_place(&self.deref_name(my_name), true, false, through_ref, is.extract_rap().map_or(false, |r| r.holds_value()))
             }
             // arrow going out
+            // A closure literal returned from the fn (#760): its by-value
+            // captures go to the caller inside it.
+            Event::Duplicate{ to: ResourceTy::Caller, into_closure: true, ..} => {
+                hover_messages::event_dot_copy_into_returned_closure(&self.deref_name(my_name))
+            }
+            Event::Move{ to: ResourceTy::Caller, is, into_closure: true, ..} => {
+                hover_messages::event_dot_move_into_returned_closure(&self.deref_name(my_name), is_plain(is))
+            }
             Event::Duplicate{ to, into_closure: true, ..} => {
                 hover_messages::event_dot_copy_into_closure_arg(&self.deref_name(my_name), &to.name())
             }

@@ -173,6 +173,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }};
 
     let line_num = expr_to_line(e, &self.tcx);
+    // A closure literal as the returned value: what it captures by
+    // value goes to the caller inside it (#760), so those variables
+    // are moved (or copied) out, not dropped at the end of the fn.
+    if let ExprKind::Closure(c) = e.kind {
+      if !e.span.from_expansion() && self.match_closure_arg(c, e, &to_ro, "") {
+        return;
+      }
+    }
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
       || vec_macro_elems(e).is_some() {
       // `User { email, .. }` / `(s, 1)` / `[s, t]` as the returned value: the
