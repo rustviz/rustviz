@@ -614,6 +614,31 @@ pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
     ))
 }
 
+// `return if b { p } else { q };` in a branch (#697): the value the
+// `return` hands to the caller is one of the `if`'s branch values; `p`
+// is the one that isn't it on the paths through the others, where it is
+// dropped as the function returns. The dot sits on p's column.
+// `value`: p holds a value with nothing to drop. `note`: see
+// event_dot_owner_drop_if_try_returns.
+pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, note: &str) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    if value {
+        return format!(
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. \
+             If that value isn't {0}'s, {0} goes out of scope here as the function returns (it has \
+             nothing to drop). If it is {0}'s, {0}'s value goes to the caller.",
+            my_name_fmt
+        );
+    }
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "The `return` here hands the caller one of the values its `if` / `match` chooses between. \
+         If that value isn't {0}'s, {0}'s resource{1} is dropped here as the function returns{2}. \
+         If it is {0}'s, its resource goes to the caller instead and isn't dropped.",
+        my_name_fmt, holds, rest
+    )
+}
+
 // A variable moved (or copied) into the temporary that a tuple / struct
 // / array literal on the right of a `let` builds, where the pattern
 // doesn't bind it by value (`_`, `..`, a `ref` binding): #439. The

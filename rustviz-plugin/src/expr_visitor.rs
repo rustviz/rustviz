@@ -1092,6 +1092,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ChainFailUse { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
+      | ExternalEvent::OwnerDropUnlessReturned { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. }
       | ExternalEvent::LoopIteratorDrop { ro, .. } => {
         self.skip_raps.contains(ro.name())
@@ -1486,12 +1487,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// True iff `name` is a reference whose value was moved, since it was
   /// last assigned, into something that carries the borrow on and ends
   /// it itself: another reference (`let r2 = r;`, `Holder { r }`) or the
-  /// caller (`r` as a fn's result). After such a move `name` holds
+  /// caller (`r` as a fn's result, also from a branch of its tail `if` / `match`). After such a move `name` holds
   /// nothing, so its own borrow-end / return-to-lender event would be
   /// false (#209). A `&mut` moved into a call (`take(r)`) isn't covered:
   /// nothing else with a column ends that borrow, so `r`'s end stands
-  /// for it. Moves inside a branch aren't seen here (Branch events
-  /// aren't searched); those keep the old drawing.
+  /// for it.
   pub fn ref_handed_off(&self, name: &str) -> bool {
     let (Some(rd), Some(rap_data)) = (self.borrow_map.get(name), self.raps.get(name)) else {
       return false;
@@ -1499,19 +1499,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let hash = *rap_data.rap.hash();
     let swapped_here = |line: usize| self.destructure_swapped.iter()
       .any(|(n, lo, hi)| n == name && (*lo..=*hi).contains(&line) && (*lo..=*hi).contains(&rd.assigned_at));
-    self.preprocessed_events.iter().any(|(line, ev)| match ev {
-      ExternalEvent::Move { from: ResourceTy::Value(f), to, .. }
-        if *f.hash() == hash && *line >= rd.assigned_at && !swapped_here(*line) =>
-      {
-        match to {
-          ResourceTy::Caller => true,
-          ResourceTy::Value(t) => self.borrow_map.contains_key(t.name())
-            && self.raps.get(t.name()).map_or(false, |r| r.rap.hash() == t.hash()),
-          _ => false,
+    // `in_branch`: the event is inside a branch of a conditional. There
+    // only a hand-off to the caller counts: a `&mut` moved or a shared
+    // reference copied to the caller (`if c { x } else { y }` as the
+    // tail, #742): the reference goes to the caller on
+    // that path, so its borrow doesn't end there.
+    fn handed(this: &ExprVisitor, events: &[(usize, ExternalEvent)], hash: u64, rd_assigned_at: usize, swapped_here: &dyn Fn(usize) -> bool, in_branch: bool) -> bool {
+      events.iter().any(|(line, ev)| match ev {
+        ExternalEvent::Move { from: ResourceTy::Value(f), to, .. }
+          if *f.hash() == hash && *line >= rd_assigned_at && !swapped_here(*line) =>
+        {
+          match to {
+            ResourceTy::Caller => true,
+            // Moves into another reference inside a branch keep the old drawing.
+            ResourceTy::Value(t) if !in_branch => this.borrow_map.contains_key(t.name())
+              && this.raps.get(t.name()).map_or(false, |r| r.rap.hash() == t.hash()),
+            _ => false,
+          }
         }
-      }
-      _ => false,
-    })
+        ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Caller, .. }
+          if in_branch && *f.hash() == hash && *line >= rd_assigned_at => true,
+        ExternalEvent::Branch { branches, .. } => branches.iter()
+          .any(|b| handed(this, &b.e_data, hash, rd_assigned_at, swapped_here, true)),
+        _ => false,
+      })
+    }
+    handed(self, self.preprocessed_events, hash, rd.assigned_at, &swapped_here, false)
   }
 
   /// `let r2: &mut String = r;`, `Holder { r: a }`, `q = r;`: a `&mut`

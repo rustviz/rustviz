@@ -1148,6 +1148,9 @@ const EXPECTED_OK: &[&str] = &[
     // The unbranched form: the call and the borrow's end share the
     // loop's last row (#677).
     "loop_break_call_arg_unbranched",
+    "return_if_in_branch",
+    "return_tail_if_mutref_param",
+    "return_tail_match_ref_param",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -12070,6 +12073,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "its resource is dropped when z goes out of scope",
+        ],
+    },    // #697: `return if b { p } else { q };` in a branch. The path that
+    // returns q drops p at the `return`, and the other path drops q:
+    // which one depends on b, so each dot says "if that value isn't
+    // p's". Before, nothing was drawn at the `return`.
+    TooltipExpect {
+        name: "return_if_in_branch",
+        must_contain: &[
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't p's, p's resource is dropped here as the function returns. If it is p's, its resource goes to the caller instead and isn't dropped.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't q's, q's resource is dropped here as the function returns. If it is q's, its resource goes to the caller instead and isn't dropped.",
+            "p's resource is moved to the caller",
+            "q's resource is moved to the caller",
+        ],
+        must_not_contain: &[],
+    },
+    // #742: a `&mut` parameter returned from one branch of a tail `if`
+    // goes to the caller there. Main's join said "m's mutable borrow
+    // ends" / "n's mutable borrow ends" (false on the path that hands it
+    // on: that borrow carries on in the caller, through `w`).
+    TooltipExpect {
+        name: "return_tail_if_mutref_param",
+        must_contain: &[
+            "m's mutable reference is moved to the caller (not the resource it points to)",
+            "n's mutable reference is moved to the caller (not the resource it points to)",
+            "m was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+            "n was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+        ],
+        must_not_contain: &[
+            "m's mutable borrow ends",
+            "n's mutable borrow ends",
+        ],
+    },
+    // #742, shared references: the arm that returns `y` copies the
+    // reference to the caller; main drew "y's immutable borrow ends"
+    // there.
+    TooltipExpect {
+        name: "return_tail_match_ref_param",
+        must_contain: &[
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "a reference from y is returned to the caller; the data it points to is not copied",
+            "y isn't moved in any of the branches above",
+        ],
+        must_not_contain: &[
+            "y's immutable borrow ends",
+            "y's borrow ended in each branch above",
+            "y's borrow has ended on this path",
         ],
     },
     // #663: `let r = &t;` before an `if`, used again after it. The arm

@@ -274,12 +274,6 @@ const Description: React.FC = () => (
         or <code>v.iter()</code>, is.)
       </li>
       <li>
-        A variable returned as the value of a branch of the function&apos;s last{' '}
-        <code>if</code>/<code>else</code> isn&apos;t drawn going to the caller, and
-        is said to be dropped at the end of the function (<code>return s;</code> is
-        drawn correctly).
-      </li>
-      <li>
         A variable assigned in only some branches of an <code>if</code> is drawn
         as owning a value afterwards; Rust treats it as possibly uninitialized.
       </li>

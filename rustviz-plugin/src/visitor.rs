@@ -1505,15 +1505,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Of an `if` / `match` value's branches, only what every branch
     // moves is gone on all paths; the drop of the rest (drawn with a
     // drop flag) depends on the branch taken (#674).
-    let moved = value.map(|e| {
+    // The ones some branches move and others don't are dropped on the
+    // paths through the others: stated by a dot saying so (#697).
+    let (moved, moved_some) = value.map(|e| {
       let mut values = Vec::new();
       if matches!(e.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) && !e.span.from_expansion() {
         self.returned_values(e, &mut values);
       }
-      let mut sets = values.into_iter().map(|v| locals_moved_by(self.tcx, v));
-      match sets.next() {
-        Some(first) => sets.fold(first, |acc, m| acc.intersection(&m).cloned().collect()),
-        None => locals_moved_by(self.tcx, e),
+      let sets: Vec<BTreeSet<String>> = values.into_iter().map(|v| locals_moved_by(self.tcx, v)).collect();
+      match sets.split_first() {
+        Some((first, rest)) => {
+          let all = rest.iter().fold(first.clone(), |acc, m| acc.intersection(m).cloned().collect());
+          let any = rest.iter().fold(first.clone(), |acc, m| acc.union(m).cloned().collect());
+          let some = any.difference(&all).cloned().collect::<BTreeSet<String>>();
+          (all, some)
+        }
+        None => (locals_moved_by(self.tcx, e), BTreeSet::new()),
       }
     }).unwrap_or_default();
     let end = self.exit_frames[branch_at + 1..].iter()
@@ -1565,6 +1572,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     while let Some(t) = tuples.pop() {
       self.drop_tuple_on_exit(&t, line);
+    }
+    // Innermost first, like the drops above. Not `exit_drops`: the
+    // column doesn't end in this dot, whose drop happens on some paths
+    // only (#697).
+    let mut seen: HashSet<&str> = HashSet::new();
+    let maybe_dropped: Vec<ResourceAccessPoint> = self.in_scope[from..end].iter().rev()
+      .filter(|n| seen.insert(n.as_str()))
+      .filter(|n| moved_some.contains(n.split('.').next().unwrap_or(n)))
+      .filter_map(|n| self.raps.get(n))
+      .filter(|rd| !rd.rap.is_copy() && !rd.rap.is_fn() && !rd.rap.is_ref() && !self.skip_raps.contains(&rd.rap.name().to_string()))
+      .map(|rd| rd.rap.clone())
+      .collect();
+    for rap in maybe_dropped {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line, ExternalEvent::OwnerDropUnlessReturned { ro: rap, id });
     }
   }
 
