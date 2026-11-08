@@ -924,6 +924,12 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_struct_field_overwrite_call",
     // A struct field of a struct overwritten by another variable (#655).
     "borrow_struct_field_overwrite_var",
+    // A `?` in a let-chain part after the first, or in a branch of an
+    // `if` with an `else`, draws the drops of its early return (#636).
+    "edition2024/if_let_chain_else_try",
+    "edition2024/if_let_chain_else_try_moved",
+    "try_in_if_else",
+    "try_in_match_arm",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -10228,6 +10234,75 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "isn't shown",
             // A place assignment has no "(moved out of …)" parenthetical.
             "(moved out of",
+        ],
+    },
+    // ─── `?` in a let-chain part / an if-else branch (#636) ─────────
+    // The plugin drew none of these dots: a branch's columns dropped
+    // `?` events (a let-chain's parts after the first are drawn in the
+    // if branch). The bug was an omission (no false text), so the
+    // must_contain entries are what fail on #581's head; the
+    // must_not_contain ones pin owners that have nothing to drop.
+    TooltipExpect {
+        name: "edition2024/if_let_chain_else_try",
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
+             resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
+             resource is dropped (including the String it holds, if any). If the `?` succeeds, \
+             nothing happens to x here.",
+        ],
+        must_not_contain: &[
+            // `a` is a reference.
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+             resource is dropped. If the `?` succeeds, nothing happens to a here.",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_else_try_moved",
+        // `let Some(a) = x` moved the String into `a` before the `?`.
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
+             resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+             resource is dropped. If the `?` succeeds, nothing happens to a here.",
+        ],
+        must_not_contain: &[
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
+             resource is dropped. If the `?` succeeds, nothing happens to x here.",
+        ],
+    },
+    TooltipExpect {
+        name: "try_in_if_else",
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+             resource is dropped. If the `?` succeeds, nothing happens to t here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+             resource is dropped. If the `?` succeeds, nothing happens to u here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+             resource is dropped (including every String it holds). If the `?` succeeds, nothing \
+             happens to v here.",
+        ],
+        must_not_contain: &[
+            // `s` is a reference, bound after the `?`.
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+             resource is dropped. If the `?` succeeds, nothing happens to s here.",
+        ],
+    },
+    TooltipExpect {
+        name: "try_in_match_arm",
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+             resource is dropped. If the `?` succeeds, nothing happens to s here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+             resource is dropped. If the `?` succeeds, nothing happens to t here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+             resource is dropped (including every String it holds). If the `?` succeeds, nothing \
+             happens to v here.",
+        ],
+        must_not_contain: &[
+            // The arm's pattern moved o's String into `s`.
+            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and o's \
+             resource is dropped. If the `?` succeeds, nothing happens to o here.",
         ],
     },
 ];

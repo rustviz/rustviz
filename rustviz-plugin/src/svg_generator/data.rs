@@ -3424,6 +3424,13 @@ impl Visualizable for VisualizationData {
                         b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                     }
                 }
+                // Likewise the drop a `?` in the branch causes if it
+                // returns early (#430, #636).
+                else if let ExternalEvent::OwnerDropIfTryReturns { ro, .. } = event {
+                    if ro.hash() == rap.hash() {
+                        b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                    }
+                }
             }
         }
     }
