@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint};
+use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint, IF_LET_ARM};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -2050,6 +2050,23 @@ pub fn state_uninitialized(my_name: &String) -> String {
     format!(
         "{0} has no value yet",
         my_name_fmt
+    )
+}
+
+/// A dashed arm column: the rows belong to another arm, so this arm
+/// isn't running here; the tooltip says which branch the line belongs to (#626).
+/// `label` is the arm's label (see `BranchType`): "If" / "Else" /
+/// `IF_LET_ARM` for an `if`, the arm's pattern for a `match`.
+pub fn state_inactive_arm(_my_name: &String, label: &str) -> String {
+    let name = match label {
+        "If" => "if".to_owned(),
+        "Else" => "else".to_owned(),
+        l if l == IF_LET_ARM => "if let".to_owned(),
+        l => l.to_owned(),
+    };
+    format!(
+        "This segment is for the {} branch. The underlined code is not part of that branch.",
+        fmt_style(&name)
     )
 }
 

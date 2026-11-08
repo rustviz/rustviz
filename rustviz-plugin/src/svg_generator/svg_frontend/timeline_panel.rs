@@ -3841,6 +3841,46 @@ struct BranchSeg {
     title: String,
 }
 
+/// A column never draws two segments over the same rows: a dashed
+/// vertical segment gives way to a solid one on the rows they share.
+/// A dashed state can reach down over rows where the arm's own first
+/// event already starts it (an `if let` binding's dot sits above the
+/// arm's body rows, so the leading dashes cover rows the arm owns),
+/// and drawing both made two hover regions with different tooltips on
+/// the same rows (#626).
+fn trim_dashes_under_solid(segs: Vec<BranchSeg>) -> Vec<BranchSeg> {
+    let vertical = |s: &BranchSeg| (s.p1.0 - s.p2.0).abs() < 1e-6 && (s.p1.1 - s.p2.1).abs() > 1e-6;
+    // (x, top, bottom) of each solid vertical segment.
+    let solid: Vec<(f64, f64, f64)> = segs.iter()
+        .filter(|s| vertical(s) && !state_is_dashed(&s.state))
+        .map(|s| (s.p1.0, s.p1.1.min(s.p2.1), s.p1.1.max(s.p2.1)))
+        .collect();
+    let mut out = Vec::with_capacity(segs.len());
+    for seg in segs {
+        if !vertical(&seg) || !state_is_dashed(&seg.state) { out.push(seg); continue; }
+        let down = seg.p1.1 < seg.p2.1;
+        let (top, bot) = (seg.p1.1.min(seg.p2.1), seg.p1.1.max(seg.p2.1));
+        // Pieces of [top, bot] not covered by a solid segment.
+        let mut pieces = vec![(top, bot)];
+        for &(x, st, sb) in &solid {
+            if (x - seg.p1.0).abs() > 1e-6 { continue; }
+            pieces = pieces.into_iter().flat_map(|(a, b)| {
+                if sb <= a || st >= b { return vec![(a, b)]; }
+                let mut v = Vec::new();
+                if st > a { v.push((a, st)); }
+                if sb < b { v.push((sb, b)); }
+                v
+            }).collect();
+        }
+        if !down { pieces.reverse(); }
+        for (a, b) in pieces {
+            let (p1y, p2y) = if down { (a, b) } else { (b, a) };
+            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone() });
+        }
+    }
+    out
+}
+
 /// Unit-length perpendicular to `p1 → p2`. Used to offset the two
 /// sides of a hollow strip by `±BRANCH_HALF_W` perpendicular to the
 /// segment direction so the visual gap between sides is constant
@@ -3930,6 +3970,7 @@ fn render_branches(
             // and any empty body, render passive (Gray-converted
             // leading so it's dashed).
             let is_active = i == 0 && !branch.e_data.is_empty();
+            let arm_label = ty.string_of_branch(i);
             let leading_state = if is_active {
                 parent_active.clone()
             } else {
@@ -3945,7 +3986,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, column_top_y),
-                leading_state.clone(), visualization_data,
+                leading_state.clone(), visualization_data, &arm_label,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with.
@@ -3955,7 +3996,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
-                        leading_state, visualization_data,
+                        leading_state, visualization_data, &arm_label,
                     );
                 }
             }
@@ -3999,7 +4040,7 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state.clone(), visualization_data,
+                    state.clone(), visualization_data, &arm_label,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
@@ -4013,7 +4054,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_bot_y), (parent_x, merge_y),
-                        end_state, visualization_data,
+                        end_state, visualization_data, &arm_label,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -4049,6 +4090,7 @@ fn render_branches(
                 }
             }
 
+            let segs = trim_dashes_under_solid(segs);
             let runs = split_centerline_runs(&segs);
 
             // The arm's own source lines, as the y-range that hovering
@@ -4070,19 +4112,22 @@ fn render_branches(
                 String::new()
             };
 
-            let mut branch_svg = String::new();
+            // The arm's column is split into stretches (see
+            // `render_branch_run`), each its own `branch-group`.
+            let mut stretches: Vec<String> = Vec::new();
             for run in &runs {
-                branch_svg.push_str(&render_branch_run(rap, *hash, run, own_y, stop_at));
+                let (joints, run_stretches) = render_branch_run(rap, *hash, run, own_y, get_y_axis_pos(*split_point) as f64, stop_at);
+                // Joint discs are decorative; they ride with the first stretch.
+                let mut run_stretches = run_stretches.into_iter();
+                if let Some(first) = run_stretches.next() { stretches.push(joints + &first); }
+                stretches.extend(run_stretches);
             }
-            branch_svg.push_str(&stop_bar);
+            if let Some(last) = stretches.last_mut() { last.push_str(&stop_bar); }
+            let branch_svg: String = stretches.iter().map(|st| format!(
+                "        <g class=\"branch-group\"{}>\n{}        </g>\n", arm_rows_attr, st,
+            )).collect();
 
-            // Wrap in branch-group so any `:hover` inside the
-            // strip glows the whole arm via
-            // `.branch-group:hover .tooltip-trigger` in the CSS.
-            output.entry(-1).or_insert_with(empty_panel_pair).0.timelines.push_str(&format!(
-                "        <g class=\"branch-group\"{}>\n{}        </g>\n",
-                arm_rows_attr, branch_svg,
-            ));
+            output.entry(-1).or_insert_with(empty_panel_pair).0.timelines.push_str(&branch_svg);
 
             render_branches(
                 hash, rap, &branch.e_data, &branch.states,
@@ -4101,34 +4146,75 @@ fn push_seg_if_renderable(
     p2: (f64, f64),
     state: State,
     visualization_data: &VisualizationData,
+    arm_label: &str,
 ) {
     if !line_drawn(rap, &state) {
         return;
     }
-    let title = timeline_segment_title(&state, rap, visualization_data, None);
+    // A dashed arm column (`Gray`): another arm's code runs on these
+    // rows, so say what the dashes mean instead of repeating the
+    // solid segment's text (#626).
+    let title = if matches!(
+        state,
+        State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray }
+    ) {
+        hover_messages::state_inactive_arm(rap.name(), arm_label)
+    } else {
+        timeline_segment_title(&state, rap, visualization_data, None)
+    };
     segs.push(BranchSeg { p1, p2, state, title });
 }
 
-/// The y-range of code to underline while hovering a segment: the part
-/// of a vertical segment that lies on the arm's own lines (`own_y`: the
-/// timeline y of its first and last line). A code line's text sits 5px
-/// below its timeline row, so the last line extends by 5. A diagonal
-/// (the split's or the join's connector), a segment beside another
-/// arm's code and an arm with no lines of its own give `None` (#369).
-fn seg_underline_y(seg: &BranchSeg, own_y: Option<(f64, f64)>) -> Option<(f64, f64)> {
+/// The y-range of code to underline while hovering a segment. A solid
+/// vertical segment underlines the part that lies on the arm's own lines
+/// (`own_y`: the timeline y of its first and last line). A code line's
+/// text sits 5px below its timeline row, so the last line extends by 5.
+/// A dashed segment runs beside the other arms' code, which this path
+/// skips: it underlines those rows and not the arm's own, so hovering
+/// the two stretches highlights separate code (#626). A diagonal (the
+/// split's or the join's connector) and a solid segment of an arm with
+/// no lines of its own give `None` (#369).
+fn seg_underline_y(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64) -> Option<(f64, f64)> {
     if (seg.p1.0 - seg.p2.0).abs() > 1e-6 { return None; }
-    let (own_top, own_bot) = own_y?;
     let (top, bot) = (seg.p1.1.min(seg.p2.1), seg.p1.1.max(seg.p2.1));
+    if state_is_dashed(&seg.state) {
+        // Stay off the arm's own rows (rows are 30px apart; the hover
+        // script matches a row within 2px of the range).
+        // Nor the conditional's own line (an `if let`'s arms fork from it).
+        let (mut top, mut bot) = (top.max(split_row + 3.0), bot);
+        if let Some((own_top, own_bot)) = own_y {
+            // Dashes on the arm's own rows (a value not acquired yet)
+            // aren't beside another arm's code.
+            if top >= own_top - 3.0 && bot <= own_bot + 3.0 { return None; }
+            if top < own_top - 3.0 {
+                bot = bot.min(own_top - 3.0);
+            } else {
+                top = top.max(own_bot + 3.0);
+            }
+        }
+        return if top < bot { Some((top, bot)) } else { None };
+    }
+    let (own_top, own_bot) = own_y?;
     let (top, bot) = (top.max(own_top), bot.min(own_bot));
     // Touching an arm's first or last row only at its end isn't beside it.
     if top >= bot { return None; }
     Some((top, if bot >= own_bot { own_bot + 5.0 } else { bot }))
 }
 
+/// Whether a segment is drawn dashed (another arm's code runs here, or
+/// the variable has no value yet on this path).
+fn state_is_dashed(state: &State) -> bool {
+    matches!(
+        state,
+        State::FullPrivilege { s: LineState::Gray | LineState::Uninit }
+        | State::PartialPrivilege { s: LineState::Gray }
+    )
+}
+
 /// ` data-underline-y` / ` data-underline="none"` for one drawn line of
 /// a segment (read by `insertUnderline` in helpers.js).
-fn underline_attr(seg: &BranchSeg, own_y: Option<(f64, f64)>) -> String {
-    match seg_underline_y(seg, own_y) {
+fn underline_attr(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64) -> String {
+    match seg_underline_y(seg, own_y, split_row) {
         Some((t, b)) => format!(" data-underline-y=\"{} {}\"", t, b),
         None => " data-underline=\"none\"".to_owned(),
     }
@@ -4164,8 +4250,9 @@ fn render_branch_run(
     hash: u64,
     run: &[&BranchSeg],
     own_y: Option<(f64, f64)>,
+    split_row: f64,
     stop_at: Option<(f64, f64)>,
-) -> String {
+) -> (String, Vec<String>) {
     let mut svg = String::new();
 
     // Classify each segment up front so the bevel pass can
@@ -4173,21 +4260,31 @@ fn render_branch_run(
     // classifier.
     let classified: Vec<(OwnerLine, bool, &BranchSeg)> = run.iter().map(|seg| {
         let style = determine_owner_line_styles(rap, &seg.state);
-        let dashed = matches!(
-            seg.state,
-            State::FullPrivilege { s: LineState::Gray | LineState::Uninit }
-            | State::PartialPrivilege { s: LineState::Gray }
-        );
+        let dashed = state_is_dashed(&seg.state);
         (style, dashed, *seg)
     }).collect();
 
+    // A stretch is a maximal run of segments that are all dashed or all
+    // not. The caller wraps each stretch in its own `branch-group`, so
+    // hovering the dashed part of an arm's column glows only that part,
+    // not the solid part below it (#626).
+    let mut chunk_of: Vec<usize> = Vec::with_capacity(classified.len());
+    for (i, (_, dashed, _)) in classified.iter().enumerate() {
+        let c = if i == 0 { 0 } else if classified[i - 1].1 == *dashed { chunk_of[i - 1] } else { chunk_of[i - 1] + 1 };
+        chunk_of.push(c);
+    }
+    let n_chunks = chunk_of.last().map_or(0, |c| c + 1);
+    let mut lines: Vec<String> = vec![String::new(); n_chunks];
+    let mut polys: Vec<String> = vec![String::new(); n_chunks];
+
     // Visible lines per segment.
-    for (style, dashed, seg) in &classified {
+    for (i, (style, dashed, seg)) in classified.iter().enumerate() {
+        let svg = &mut lines[chunk_of[i]];
         let dasharray = if *dashed { "4 4" } else { "none" };
         match style {
             OwnerLine::Solid => svg.push_str(&format!(
                 "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} style=\"stroke-dasharray: {};\"/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, underline_attr(seg, own_y), dasharray,
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, underline_attr(seg, own_y, split_row), dasharray,
             )),
             OwnerLine::Hollow => {
                 let perp = perp_unit(seg.p1, seg.p2);
@@ -4196,7 +4293,7 @@ fn render_branch_run(
                     let oy = perp.1 * sign * BRANCH_HALF_W;
                     svg.push_str(&format!(
                         "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} style=\"stroke-dasharray: {};\"/>\n",
-                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, underline_attr(seg, own_y), dasharray,
+                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, underline_attr(seg, own_y, split_row), dasharray,
                     ));
                 }
             }
@@ -4239,7 +4336,8 @@ fn render_branch_run(
     // leading-into-body transition reads as "the leading ends
     // here". Solid segments share a centerline with their
     // neighbors and need no bevel.
-    for window in classified.windows(2) {
+    for (wi, window) in classified.windows(2).enumerate() {
+        let svg = &mut lines[chunk_of[wi]];
         let (prev_style, prev_dashed, prev_seg) = &window[0];
         let (curr_style, _, curr_seg) = &window[1];
         if !matches!(prev_style, OwnerLine::Hollow) { continue; }
@@ -4277,7 +4375,8 @@ fn render_branch_run(
     // lines: the part of a vertical segment on the arm's own lines
     // (`seg_underline_y`); a diagonal, a segment beside another arm's
     // code, or an arm with no lines of its own, nothing (#369).
-    for seg in run.iter() {
+    for (si, seg) in run.iter().enumerate() {
+        let svg = &mut polys[chunk_of[si]];
         let (dx, dy) = (seg.p2.0 - seg.p1.0, seg.p2.1 - seg.p1.1);
         if dx.abs() < 1e-6 && dy.abs() < 1e-6 { continue; }
         let mut quad = seg_quad(seg);
@@ -4294,14 +4393,15 @@ fn render_branch_run(
             .map(|p| format!("{},{}", p.0, p.1))
             .collect::<Vec<_>>()
             .join(" ");
-        let underline = underline_attr(seg, own_y);
+        let underline = underline_attr(seg, own_y, split_row);
         svg.push_str(&format!(
             "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
             hash, pts_str, seg.title, underline,
         ));
     }
 
-    svg
+    let stretches = lines.iter().zip(&polys).map(|(l, p)| format!("{}{}", l, p)).collect();
+    (svg, stretches)
 }
 
 /// Half the height of the hover polygon over a stop bar (the bar's 3px

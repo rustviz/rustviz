@@ -194,7 +194,8 @@ pub static CSS_TEMPLATE: &'static str =
     }
 
     /* When the cursor is anywhere inside a branch column,
-       glow every element grouped under .branch-group.
+       glow every element grouped under .branch-group: one dashed or
+       solid stretch of the arm, not the whole arm (#626).
        Single-element hover otherwise only highlighted one of
        the two parallel sides at a time, with no feedback on
        the transparent gap between them. */
