@@ -167,9 +167,12 @@ impl RV1Helper {
       hide_lines: HashSet::new(),
     }
   }
-  pub fn initialize_line_map(&mut self) -> Result<BTreeMap<usize, String>> {
-    self.source_path = current_dir()?;
-    self.source_path = self.source_path.join("src/lib.rs"); // could change this to whatever
+  /// `root_file` is the source file rustc is compiling as the crate
+  /// root (`src/lib.rs` or `src/main.rs`, #752); it falls back to
+  /// `src/lib.rs` when rustc doesn't report a real local path.
+  pub fn initialize_line_map(&mut self, root_file: Option<PathBuf>) -> Result<BTreeMap<usize, String>> {
+    let root = root_file.unwrap_or_else(|| PathBuf::from("src/lib.rs"));
+    self.source_path = if root.is_absolute() { root } else { current_dir()?.join(root) };
     info!("source path {:#?}", self.source_path);
 
     let mut line_map: BTreeMap<usize, String> = BTreeMap::new();

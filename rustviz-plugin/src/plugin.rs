@@ -91,12 +91,19 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let mut testing_helper: RV1Helper = RV1Helper::new();
   let mut line_map: BTreeMap<usize, String> = BTreeMap::new();
   let mut line_map2: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
-  match testing_helper.initialize_line_map() {
+  // The crate root rustc is compiling: `src/lib.rs` or `src/main.rs`.
+  let root_file = match tcx.sess.source_map().span_to_filename(tcx.def_span(rustc_hir::def_id::CRATE_DEF_ID)) {
+    rustc_span::FileName::Real(f) => f.local_path().map(|p| p.to_path_buf()),
+    _ => None,
+  };
+  match testing_helper.initialize_line_map(root_file) {
     Ok(l) => {
       line_map = l;
     }
     Err(e) => {
       error!("{}", e);
+      eprintln!("RustViz couldn't read the crate's source file ({e}). RustViz visualizes a single-file crate: src/lib.rs or src/main.rs.");
+      std::process::exit(1);
     }
   }
   let a_map: BTreeMap<usize, String> = line_map.clone();
