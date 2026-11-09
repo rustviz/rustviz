@@ -1239,6 +1239,10 @@ const EXPECTED_OK: &[&str] = &[
     // A returned reborrow through a reference parameter (`&self.s`) hands
     // the parameter's borrow to the caller (#784).
     "return_reborrow_tail_784",
+    // A reference reassigned on one branch only: the old lender stays
+    // borrowed until the latest end over the paths (#778).
+    "borrow_end_join_one_branch",
+    "borrow_end_join_else",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13945,23 +13949,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "borrow_end_other_path",
-        // x's loan is dead on the way to `c = &y;` (c is overwritten
-        // before it is read), so the end is drawn there, not at the write
-        // (the row tests pin where). The reassignment's own dot only
-        // starts the new borrow (#770).
+        // c is overwritten before it is read on the path through the `if`,
+        // so `x += 1;` there compiles, but the path that skips the `if`
+        // keeps x borrowed until the `println!`: the borrow checker's end
+        // is the latest over the paths, and that is where x's borrow is
+        // drawn to (#778; #770 drew it ending at the `if`). The write sits
+        // inside the drawn span, so the scope end reads "No resource is
+        // dropped" like any written lender's. The reassignment's own dot
+        // only starts the new borrow (#770).
         must_contain: &[
             "x's value is no longer immutably borrowed",
             "c's immutable borrow ends",
             "c immutably borrows a value",
-            // A written Copy lender's scope end reads like any Copy
-            // value's (a plain `let mut x = 8; let c = &x; ..; x += 1;`
-            // says the same); main's extra ". No resource is dropped."
-            // came from the write being drawn inside the borrowed span.
-            "x goes out of scope",
         ],
         must_not_contain: &[
             "c's immutable borrow ends• c immutably borrows a value",
-            "x goes out of scope. No resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -14218,6 +14220,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "self's immutable borrow ends",
             "self's mutable borrow ends",
             // No dot without a tooltip.
+            "=",
+        ],
+    },
+    // #778: the lender's borrow ends where the borrow checker ends it on
+    // the latest path (the row tests pin where); the reassignment's own
+    // dot only starts the new borrow.
+    TooltipExpect {
+        name: "borrow_end_join_one_branch",
+        must_contain: &[
+            "x's value is no longer immutably borrowed",
+            "c immutably borrows a value",
+        ],
+        must_not_contain: &[
+            "c's immutable borrow ends• c immutably borrows a value",
+            // No dot without a tooltip.
+            "=",
+        ],
+    },
+    TooltipExpect {
+        name: "borrow_end_join_else",
+        must_contain: &[
+            "x's value is no longer immutably borrowed",
+            "c immutably borrows a value",
+        ],
+        must_not_contain: &[
+            "c's immutable borrow ends• c immutably borrows a value",
             "=",
         ],
     },
@@ -18057,7 +18085,6 @@ fn reassigned_reference_ends_its_old_borrow_first() {
     for (name, used, nth, write, end, start) in [
         ("advanced_deref", "println!(\"c value {}\", **z);", 0, "y = &x;", "y's immutable borrow ends", "y immutably borrows a value"),
         ("advanced_deref2", "let mut y = & mut x;", 0, "y = &mut c;", "y's mutable borrow ends", "y mutably borrows a value"),
-        ("basic_if12", "if true {", 0, "c = &y; // c -> y {x} // (returns x)", "c's immutable borrow ends", "c immutably borrows a value"),
         ("basic_if12", "c = &y; // c -> y {x} // (returns x)", 0, "c = &z; // c -> z {y, x} (returns y)", "c's immutable borrow ends", "c immutably borrows a value"),
         ("basic_if12", "c = &z; // c -> z {y, x} (returns y)", 0, "c = &s; // c -> s (returns y)", "c's immutable borrow ends", "c immutably borrows a value"),
         ("ref_reassign_wording", "println!(\"{}\", r);", 1, "r = s;", "r's immutable borrow ends", "r is assigned a copy of s's reference"),
@@ -18066,8 +18093,8 @@ fn reassigned_reference_ends_its_old_borrow_first() {
         let rv = run_with_local_backend(name);
         let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
         let (used_y, write_y) = (code_rows_y(&code, used)[nth], code_row_y(&code, write));
-        // (basic_if12's `c = &y;` is among them too: x's loan is dead on
-        // the way to it, #770.)
+        // (basic_if12's `c = &y;` is not among them: x's loan lives on
+        // the path that skips the `if`, so it ends after the join, #778.)
         let combined: Vec<f64> = dots_where(&timeline, |l| l == [end, start]).into_iter().map(|d| d.1).collect();
         assert!(!combined.contains(&write_y),
             "{}: `{}` has a dot \"{} • {}\", but the old borrow ended earlier", name, write, end, start);
@@ -18093,10 +18120,8 @@ fn reassigned_reference_ends_its_old_borrow_first() {
 #[test]
 fn old_loan_ends_on_the_path_that_reaches_the_write() {
     for (name, end, used, nth, write, back) in [
-        ("borrow_end_other_path", "x's value is no longer immutably borrowed", "if true {", 0, "x += 1;", "println!(\"{}\", c);"),
         ("borrow_end_two_lenders", "a's value is no longer immutably borrowed", "println!(\"{}\", r);", 0, "a += 1;", "println!(\"{} {} {}\", r, a, b);"),
         ("borrow_end_two_lenders", "b's value is no longer immutably borrowed", "println!(\"{}\", r);", 0, "b += 1;", "println!(\"{} {} {}\", r, a, b);"),
-        ("basic_if12", "x's value is no longer immutably borrowed", "if true {", 0, "x += 8;", "println!(\"c {}\", *c);"),
     ] {
         let rv = run_with_local_backend(name);
         let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
@@ -18119,6 +18144,35 @@ fn old_loan_ends_on_the_path_that_reaches_the_write() {
         let rows_start: Vec<f64> = dots_listing_tooltip(&timeline, start).into_iter().map(|d| d.1).collect();
         assert!(combined.is_empty(), "{}: a dot lists both {:?} and {:?}: {:?}", name, end, start, combined);
         assert!(!rows_end.is_empty() && !rows_start.is_empty(), "{}: no dot with {:?} / {:?}", name, end, start);
+    }
+}
+
+/// #778: a reference reassigned on one branch only. The old lender stays
+/// borrowed until the latest end over the paths that meet after the `if`:
+/// rustc rejects a write to it before that row (`x += 1;` above the
+/// `println!` is E0506, checked), and accepts it right below. The end is
+/// not drawn where the reference stops pointing on the path through the
+/// reassignment.
+#[test]
+fn old_lender_stays_borrowed_until_the_latest_end_over_the_paths() {
+    for (name, end, used, write) in [
+        ("borrow_end_join_one_branch", "x's value is no longer immutably borrowed", "println!(\"{}\", c);", "x += 1;"),
+        ("borrow_end_join_else", "x's value is no longer immutably borrowed", "println!(\"{}\", c);", "x += 1;"),
+        ("borrow_end_other_path", "x's value is no longer immutably borrowed", "println!(\"{}\", c);", "x += 1;"),
+        ("basic_if12", "x's value is no longer immutably borrowed", "println!(\"c {}\", *c);", "y += 9;"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let used_y = *code_rows_y(&code, used).last().unwrap();
+        let ends: Vec<f64> = dots_listing_tooltip(&timeline, end).into_iter().map(|d| d.1).collect();
+        assert!(!ends.is_empty(), "{}: no {:?}", name, end);
+        assert!(ends.iter().all(|&y| y >= used_y),
+            "{}: {:?} is drawn above `{}` (y={}), though the path that skips the reassignment still borrows: {:?}", name, end, used, used_y, ends);
+        if name.starts_with("borrow_end_join") {
+            let write_y = *code_rows_y(&code, write).last().unwrap();
+            assert!(ends.iter().all(|&y| y < write_y),
+                "{}: {:?} is drawn on or below `{}` (y={}): {:?}", name, end, write, write_y, ends);
+        }
     }
 }
 

@@ -3425,7 +3425,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }?;
     let in_range = |end: usize| end < write_line && end >= rd.assigned_at;
     Some(own.region.1).filter(|&end| in_range(end))
-      .or_else(|| self.loan_end_on_path_to(own.borrow_idx, write_line).filter(|&end| in_range(end)))
+      .or_else(|| {
+        // The write is on one path only (`if c { r = &y; }`) and the loan
+        // is still in scope on another path after it: the borrow checker
+        // keeps the lender borrowed until the latest end over the paths
+        // that meet there (#778), not where the loan stops on the path
+        // through the write.
+        let path_end = self.loan_end_on_path_to(own.borrow_idx, write_line).filter(|&end| in_range(end))?;
+        Some(if own.region.1 > write_line { own.region.1 } else { path_end })
+      })
   }
 
   /// `src` (its old data `old`) is being given a new value: the
