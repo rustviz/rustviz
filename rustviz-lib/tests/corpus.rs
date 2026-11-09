@@ -1211,6 +1211,9 @@ const EXPECTED_OK: &[&str] = &[
     "return_ref_param_reborrow",
     // `for n in a` over Copy elements draws no move into `n` (#772).
     "for_copy_arrow",
+    // A constructor of literals draws no arrow; a constructor is never a
+    // borrower (#768).
+    "ctor_literals_768",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -2348,7 +2351,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // one branch (#517: this fixture used to claim there is no Branch
         // event).
         must_contain: &[
-            "Move from Some to opt",
+            "Move from String::from to opt",
             "Move from opt to x",
             "show reads from x",
             "x goes out of scope. Its resource is dropped.",
@@ -2357,6 +2360,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              dropped when opt goes out of scope.",
         ],
         must_not_contain: &[
+            // #768: `Some` is a constructor, never an actor.
+            "Move from Some to opt",
+            "to Some",
             "may have been moved",
             "moved or dropped in every branch",
             "in branches where it was not",
@@ -2573,9 +2579,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Copy of the value inside the Ok that parse() returns to n",
             "n is initialized with the value inside the Ok that parse() returns",
-            "Copy from n to Ok",
+            // #768: the tail `Ok(n)` copies n to the caller; `Ok` isn't
+            // an actor.
+            "n's value is copied to the caller",
         ],
         must_not_contain: &[
+            "Copy from n to Ok",
             "n is initialized with the value parse() returns",
             "n is bound to a copyable value",
         ],
@@ -2857,27 +2866,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── One Function RAP receiving several values ───────────────────
     TooltipExpect {
         name: "cons_list_nested",
-        // Book ch15 cons list. The outer constructor's value moves into
-        // `list`; the inner `Cons` / `Box::new` calls are fn-to-fn
-        // hand-offs, which (as for any nested call) draw no arrow.
+        // Book ch15 cons list. The `Box::new` result moves into `list`
+        // (a constructor is never an actor, #768); the inner `Cons` /
+        // `Box::new` calls are fn-to-fn hand-offs, which (as for any
+        // nested call) draw no arrow.
         must_contain: &[
-            "Move from Cons to list",
+            "Move from Box::new to list",
             "Move from list to _l",
             "list goes out of scope. No resource is dropped.",
             "_l goes out of scope. Its resource is dropped (including the Box<List> it holds, if any).",
         ],
         must_not_contain: &[
+            "Move from Cons to list",
+            "to Cons",
             "list goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
         name: "cons_list_qualified_nested",
         must_contain: &[
-            "Move from List::Cons to list",
+            "Move from Box::new to list",
             "Move from list to _l",
             "_l goes out of scope. Its resource is dropped (including the Box<List> it holds, if any).",
         ],
         must_not_contain: &[
+            "Move from List::Cons to list",
+            "to List::Cons",
             "list goes out of scope. Its resource is dropped.",
         ],
     },
@@ -13581,7 +13595,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // its (Copy) value.
             "k is bound to a copyable value",
             // #758: `Some(5)` is written out, not a call that returns.
-            "x is initialized with the value inside a Some value",
+            // (#768: and it draws no arrow, so x is just bound to a
+            // copyable value.)
+            "x is bound to a copyable value",
         ],
         must_not_contain: &[
             "len is initialized with a copy of len",
@@ -13843,6 +13859,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // No `else` exists for these two.
             "This temporary Vec<String> is dropped before the `else` block",
             "This temporary Option<Box<i32>> is dropped before the `else` block",
+        ],
+    },
+    // #768: `Some(5)`, `Ok(1)`, `None` build a value of the type like a
+    // literal does: no arrow from the constructor (on main "Copy from
+    // Some to o"), but the variable's dot still says what it holds. A
+    // constructor isn't a borrower: `Some(&s)` is borrowed by the
+    // variable that holds it, or by the call it's passed to (on main "s
+    // is immutably borrowed by Some"). `Some(m)` with a variable draws
+    // "Move from m to moved" (on main "Move from m to Some" and "Move
+    // from Some to moved"). A reference returned inside `Some(a)` is
+    // copied to the caller; its borrow doesn't end in the fn.
+    TooltipExpect {
+        name: "ctor_literals_768",
+        must_contain: &[
+            "o is initialized with a Some value",
+            "r is initialized with an Ok value",
+            "n is initialized with a None value",
+            "x is bound to a copyable value",
+            "y is bound to a copyable value",
+            "s's resource is immutably borrowed by b; s is read-only while the borrow is live",
+            "s's resource is immutably borrowed by d; s is read-only while the borrow is live",
+            "s's resource is immutably borrowed by take; s is read-only while the borrow is live",
+            // A variable moved into a constructor goes to whoever takes
+            // the value: the variable it is bound to, or the call.
+            "Move from m to moved",
+            "Move from w to c",
+            "Move from m2 to take",
+            // A call's result moved into a constructor goes to the
+            // holder too.
+            "Move from String::from to wrapped",
+            "Move from String::from to r2",
+            // A reference returned inside `Some(a)` goes to the caller.
+            "a reference from a is returned to the caller; the data it points to is not copied",
+        ],
+        must_not_contain: &[
+            "to Some",
+            "to Ok",
+            "Move from Some to",
+            "Move from Err to",
+            "returned to the caller; the data it points to is not copied• a's immutable borrow ends",
+            "Copy from Some to",
+            "Copy from Ok to",
+            "Copy from None to",
+            "Partial copy from Some to",
+            "borrowed by Some",
+            "Some reads from s",
         ],
     },
 ];

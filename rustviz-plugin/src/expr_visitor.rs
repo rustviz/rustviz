@@ -240,6 +240,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // right branch (`branch_ids`).
   pub rhs_arm_ids: HashMap<rustc_hir::HirId, (usize, usize)>,
 
+  // A constructor call's HirId -> the range of event ids its arguments
+  // used (moves and copies into the constructor). The constructor is
+  // never the receiver: whoever takes the built value (the variable it
+  // is bound to, or the call it is passed to) is, so these events are
+  // retargeted there (#768).
+  pub ctor_arg_ids: HashMap<rustc_hir::HirId, (usize, usize)>,
+
   // Ids of the GoOutOfScope events emitted at a `return` inside a
   // branch for the values still owned there (#363). They make their
   // variables live in that branch (an ordinary scope-end GoOutOfScope
@@ -1393,6 +1400,86 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// an operator's result, a macro expansion, a `const`). When `lhs`
   /// is a struct, each of its fields gets its part of that value too,
   /// the same as `let x = make();` (`propagate_struct_transfer`).
+  /// A constructor applied to literals only (`Some(5)`, `None`) whose
+  /// type is Copy: a value like a literal, with nothing to draw an
+  /// arrow from (#768).
+  pub fn is_copy_literal_value(&self, e: &'tcx Expr<'tcx>) -> bool {
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    matches!(e.kind, ExprKind::Call(..) | ExprKind::Path(..))
+      && crate::visitor::is_literal_value(e, typeck)
+      && self.tcx.type_is_copy_modulo_regions(
+        rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner),
+        typeck.expr_ty(e),
+      )
+  }
+
+  /// `let o = Some(5);`: `o` is bound to the value the constructor
+  /// builds. The constructor stays the event's source so the dot can
+  /// say "o is initialized with a Some value", but nothing is drawn
+  /// between them (#768).
+  pub fn bind_from_ctor(&mut self, line_num: usize, lhs: ResourceTy, e: &'tcx Expr<'tcx>) {
+    let callee = match e.kind {
+      ExprKind::Call(callee, _) => callee,
+      _ => e,
+    };
+    let from = match hirid_to_var_name(callee.hir_id, &self.tcx) {
+      Some(n) => {
+        if !self.raps.contains_key(&fn_key(&n)) {
+          self.add_fn(n.clone());
+        }
+        self.raps.get(&fn_key(&n)).map(|rd| ResourceTy::Value(rd.rap.to_owned())).unwrap_or(ResourceTy::Anonymous)
+      }
+      None => ResourceTy::Anonymous,
+    };
+    self.add_ev(line_num, Evt::Bind, lhs, from, false);
+  }
+
+  /// The moves and copies of a constructor's arguments, drawn into the
+  /// constructor while its arguments were visited, are redrawn into
+  /// `new_to` (the variable holding the built value, or the call it is
+  /// passed to): a constructor is never an actor (#768). True if any
+  /// event was moved.
+  pub fn retarget_ctor_arg_events(&mut self, ctor: &'tcx Expr<'tcx>, new_to: ResourceTy) -> bool {
+    let Some(&(lo, hi)) = self.ctor_arg_ids.get(&ctor.hir_id) else { return false };
+    let is_ctor_fn = |t: &ResourceTy| matches!(t,
+      ResourceTy::Value(ResourceAccessPoint::Function(f))
+        if f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())));
+    let mut taken: Vec<(usize, ExternalEvent)> = Vec::new();
+    self.preprocessed_events.retain(|(l, e)| {
+      // A variable's or a call's result's move or copy (a literal has
+      // no source to draw from).
+      let hit = (lo..hi).contains(&e.get_id()) && match e {
+        ExternalEvent::Move { from, to, .. } | ExternalEvent::Copy { from, to, .. } =>
+          is_ctor_fn(to) && from.extract_rap().is_some(),
+        _ => false,
+      };
+      if hit { taken.push((*l, e.clone())); }
+      !hit
+    });
+    // A reference variable put into a value that has a holder: the
+    // holder's borrow is drawn from the lender, so the copy of the
+    // reference itself isn't drawn. Returned to the caller it is.
+    let any = !taken.is_empty();
+    if !matches!(new_to, ResourceTy::Caller) {
+      taken.retain(|(_, e)| !matches!(e,
+        ExternalEvent::Move { from, .. } | ExternalEvent::Copy { from, .. }
+          if from.extract_rap().is_some_and(|r| r.is_ref())));
+    } else {
+      // A call's result has no column to return from (an arrow from a
+      // function to the caller can't be drawn).
+      taken.retain(|(_, e)| !matches!(e,
+        ExternalEvent::Move { from, .. } | ExternalEvent::Copy { from, .. }
+          if from.extract_rap().is_some_and(|r| r.is_fn())));
+    }
+    for (l, mut e) in taken {
+      if let ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } = &mut e {
+        *to = new_to.clone();
+      }
+      self.add_external_event(l, e);
+    }
+    any
+  }
+
   pub fn bind_from_anonymous(&mut self, line_num: usize, lhs: ResourceTy) {
     let struct_name = match &lhs {
       ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => Some(rap.name().clone()),
@@ -2611,6 +2698,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `get_rap`, falling back to `field_access_through_ref` for a field
   /// behind a reference (`match self.kind`, `if let Some(n) =
   /// &cur.next`).
+  /// What a pattern's bindings are drawn as taken from: the scrutinee's
+  /// column, or nothing for a constructor of literals (`Some(5)`), which
+  /// has none (#768).
+  pub fn scrutinee_rap(&self, expr: &'tcx Expr<'tcx>) -> ResourceTy {
+    if self.is_copy_literal_value(expr) {
+      return ResourceTy::Anonymous;
+    }
+    self.rap_or_field_through_ref(expr)
+  }
+
   pub fn rap_or_field_through_ref(&self, expr: &'tcx Expr<'tcx>) -> ResourceTy {
     if let Some(tmp) = self.part_temp_of(expr) {
       return ResourceTy::Value(tmp);
@@ -2766,6 +2863,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           self.match_arg(elem, fn_name.clone());
         }
         return;
+      }
+    }
+    // `take(Some(&s))`: the constructor isn't an actor. A borrow it
+    // wraps is made for the call the value is passed to (#768); the
+    // other arguments were moved or copied into the constructor.
+    if let ExprKind::Call(callee, ctor_args) = arg.kind {
+      let typeck = self.tcx.typeck(arg.hir_id.owner);
+      if !arg.span.from_expansion() && crate::visitor::is_ctor_path(callee, typeck) {
+        let mut borrowed = false;
+        for a in ctor_args.iter() {
+          let nested = matches!(a.kind, ExprKind::Call(c, _) if crate::visitor::is_ctor_path(c, typeck));
+          if typeck.node_type(a.hir_id).is_ref() {
+            borrowed = true;
+            self.match_arg(a, fn_name.clone());
+          } else if nested {
+            let before = *self.unique_id;
+            self.match_arg(a, fn_name.clone());
+            borrowed |= *self.unique_id != before;
+          }
+        }
+        // A value moved or copied into the constructor goes into the
+        // call, not out of the constructor.
+        let fn_rap = self.raps.get(&fn_key(&fn_name)).map(|rd| ResourceTy::Value(rd.rap.to_owned()));
+        let moved = fn_rap.is_some_and(|to| self.retarget_ctor_arg_events(arg, to));
+        if borrowed || moved || self.is_copy_literal_value(arg) {
+          return;
+        }
       }
     }
     // An array (or `vec![…]`) built in the argument list
@@ -4284,7 +4408,7 @@ pub fn register_iflet_let_bindings(
     let typeck_res = self.tcx.typeck(scrutinee.hir_id.owner);
     let scrutinee_ty = typeck_res.node_type(scrutinee.hir_id);
     // `if let Some(n) = &cur.next` with cur a reference (#266).
-    let parent = self.rap_or_field_through_ref(scrutinee);
+    let parent = self.scrutinee_rap(scrutinee);
 
     let let_line = crate::expr_visitor_utils::span_to_line(&let_expr.span, &self.tcx);
     // Body-end is only needed if we're going to emit a GoOutOfScope.
@@ -5251,6 +5375,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         return;
       }
       let line_num = span_to_line(&p.span, &self.tcx);
+      // `let n: Option<i32> = None;` is a literal value too (#768).
+      if self.is_copy_literal_value(rhs) {
+        self.bind_from_ctor(line_num, lhs, rhs);
+        return;
+      }
       let rhs_name: String = match p.res {
         Res::Def(rustc_hir::def::DefKind::Ctor(_, _), _) => {
           let mut name = String::new();
@@ -5307,6 +5436,13 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // second arg, is a list of args to the function
     ExprKind::Call(fn_expr, _) => {
       let line_num = span_to_line(&fn_expr.span, &self.tcx);
+      // `let o = Some(5);`: a constructor of literals is a value of the
+      // type, like `let x = 5;`. Nothing is copied from the
+      // constructor (#768).
+      if self.is_copy_literal_value(rhs) {
+        self.bind_from_ctor(line_num, lhs, rhs);
+        return;
+      }
       // Fall back to Anonymous when the call doesn't have a name we
       // can resolve. Two cases land here: (1) a macro-expanded call
       // (e.g. `vec![1,2,3]` lowering to `<[_]>::into_vec(…)`) whose
@@ -5324,10 +5460,17 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // A returned reference that borrows from the caller's variables
       // (`let w = first_word(&s);`) is drawn as a borrow of each of
       // them, not as a copy out of the function (#171).
+      let retargeted = crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner))
+        && self.retarget_ctor_arg_events(rhs, lhs.clone());
       if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
         if self.emit_call_result_borrows(&lhs, rhs, func, line_num) {
           return;
         }
+      }
+      // `let moved = Some(m);`: `m` was moved into `moved`; nothing is
+      // moved out of the constructor (#768).
+      if retargeted {
+        return;
       }
       // A call through a local `f` (closure, fn pointer) that leaves
       // `f` in place: the result comes from the call, so its source is

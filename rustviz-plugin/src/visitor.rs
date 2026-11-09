@@ -181,7 +181,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         return;
       }
     }
+    // `Some(a)` as the returned value: what it wraps goes to the caller
+    // (a constructor never receives anything, #768).
+    let ctor_value = !e.span.from_expansion()
+      && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
+        && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))))
+      && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
+      || ctor_value
       || vec_macro_elems(e).is_some() {
       // `User { email, .. }` / `(s, 1)` / `[s, t]` as the returned value: the
       // literal's field initialisers move/copy their sources into
@@ -2393,6 +2400,44 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           self.note_temporary_drop(expr, name, Vec::new());
         }
 
+        // A tuple struct / variant constructor (`Some(&s)`, `Wrapper(s)`)
+        // is not a function that acts: an argument that is a borrow isn't
+        // borrowed *by the constructor*. The variable the built value
+        // is bound to holds that borrow (drawn from the binding), and a
+        // temporary passed to a call is borrowed by that call
+        // (`match_arg`'s constructor case). Moves and copies into the
+        // constructor are still drawn (#768).
+        if !expr.span.from_expansion() && is_ctor_path(fn_expr, self.tcx.typeck(expr.hir_id.owner)) {
+          if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+            self.add_fn(name.clone());
+            let typeck = self.tcx.typeck(expr.hir_id.owner);
+            let lo = *self.unique_id;
+            let to_call = matches!(self.tcx.parent_hir_node(expr.hir_id),
+              rustc_hir::Node::Expr(p) if matches!(p.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)));
+            for arg in args.iter() {
+              self.visit_expr(arg);
+              let arg_ty = typeck.node_type(arg.hir_id);
+              if !arg_ty.is_ref() {
+                self.match_arg(arg, name.clone());
+              } else if !to_call && matches!(arg.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+                // A reference variable put into the value: its copy
+                // (or move, for `&mut`) goes where the value goes, and
+                // is drawn there once that's known (#768).
+                let from = self.rap_or_field_through_ref(arg);
+                let line = expr_to_line(arg, &self.tcx);
+                if let (ResourceTy::Value(rap) | ResourceTy::Deref(rap), Some(to)) = (&from, self.raps.get(&fn_key(&name))) {
+                  let (rap, to) = (rap.to_owned(), ResourceTy::Value(to.rap.to_owned()));
+                  self.update_rap(&rap, line);
+                  let evt = if arg_ty.ref_mutability() == Some(Mutability::Mut) { Evt::Move } else { Evt::Copy };
+                  self.add_ev(line, evt, to, from, false);
+                }
+              }
+            }
+            self.ctor_arg_ids.insert(expr.hir_id, (lo, *self.unique_id));
+            return;
+          }
+        }
+
         // need to specifically handle println! macro because it's common
         // note that other macros will need to be resolved similarly (vec![], assert!, etc)
         // Need to match through all the desugaring and onto the args to the format ({}) function
@@ -4003,14 +4048,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let mut res = Vec::new();
             let mut res_ty = Vec::new();
             for field in fields.iter() {
-              res.push(self.rap_or_field_through_ref(&field));
+              res.push(self.scrutinee_rap(&field));
               res_ty.push(typeck_res.node_type(field.hir_id));
             }
             (res, res_ty)
           }
           _ => {
             // `match self.kind` with self a reference (#266).
-            (vec![self.rap_or_field_through_ref(&guard_expr)], vec![typeck_res.node_type(guard_expr.hir_id)])
+            (vec![self.scrutinee_rap(&guard_expr)], vec![typeck_res.node_type(guard_expr.hir_id)])
           }
         };
         let typeck_res = self.tcx.typeck(guard_expr.hir_id.owner);
@@ -7897,7 +7942,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
 /// True iff `callee` names a tuple struct / variant constructor
 /// (`Some`, `Wrapper`).
-fn is_ctor_path<'tcx>(callee: &Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'tcx>) -> bool {
+pub(crate) fn is_ctor_path<'tcx>(callee: &Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'tcx>) -> bool {
   match callee.kind {
     ExprKind::Path(ref qpath) => matches!(typeck.qpath_res(qpath, callee.hir_id), Res::Def(DefKind::Ctor(..), _)),
     _ => false,
@@ -8357,5 +8402,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       });
       *self.unique_id += 1;
     }
+  }
+}
+
+/// A constructor applied to literals only (`Some(5)`, `Ok(1)`,
+/// `Some((1, "a"))`, `None`): a value of the type with nothing in it
+/// that came from a variable (#768).
+pub(crate) fn is_literal_value<'tcx>(e: &Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'tcx>) -> bool {
+  match e.kind {
+    ExprKind::Lit(_) => true,
+    ExprKind::Unary(rustc_hir::UnOp::Neg, inner) => is_literal_value(inner, typeck),
+    ExprKind::Tup(elems) => elems.iter().all(|x| is_literal_value(x, typeck)),
+    ExprKind::Path(ref qpath) => matches!(
+      typeck.qpath_res(qpath, e.hir_id),
+      Res::Def(DefKind::Ctor(_, rustc_hir::def::CtorKind::Const), _)
+    ),
+    ExprKind::Call(callee, args) => {
+      !e.span.from_expansion() && is_ctor_path(callee, typeck)
+        && args.iter().all(|x| is_literal_value(x, typeck))
+    }
+    _ => false,
   }
 }
