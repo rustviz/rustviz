@@ -557,6 +557,15 @@ pub fn event_dot_unbound_temporary_takes(from_name: &String) -> String {
     )
 }
 
+// A call's result moved into the value a constructor builds (`Some(make());`)
+// and nothing binds that value (#783).
+pub fn event_dot_unbound_temporary_takes_result(from_name: &String) -> String {
+    format!(
+        "This temporary takes the value that {0}, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+        temporary_source(from_name)
+    )
+}
+
 // The drop of a temporary that a `let` borrowed (#400): its column has
 // the same label as an unbound temporary's, so the tooltip says why it
 // is dropped here and not at the end of its statement.

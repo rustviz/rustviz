@@ -1247,6 +1247,9 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_read_in_arm_repoint_else",
     // #803: a dot that ends two of a reference's loans names each lender.
     "borrow_end_two_loans_mut",
+    // A call's result inside a returned constructor goes to the caller; a
+    // temporary constructor takes the call's result (#783).
+    "ctor_call_result_783",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6581,16 +6584,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from make to (temporary 2)",
             "Move from make to (temporary 3)",
             "Move from String::from to (temporary 4)",
-            "Move from Some to (temporary 5)",
+            "Move from String::from to (temporary 5)",
             "Move from make to (temporary 6)",
             "Move from make to (temporary 7)",
             "Move from make to (temporary 8)",
             "Move from String::from to (temporary 9)",
-            "Move from Some to (temporary 10)",
+            "Move from make to (temporary 10)",
             "Move from make to (temporary 11)",
             "A temporary holds the value that make returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
             "A temporary holds the value that String::from returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-            "A temporary holds the value that Some returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            // `Some(make())`: the temporary takes what the call returned
+            // (#783), not "the value that Some returns".
+            "This temporary takes the value that String::from returns, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+            "This temporary takes the value that make returns, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
             "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary String is dropped at the end of the condition: nothing bound it to a variable or moved it on. Its resource is dropped",
@@ -6601,6 +6607,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from make to (temporary 12)",
             "Move from Some to (temporary 12)",
             "Move from String::from to (temporary 12)",
+            "Move from Some to",
+            "A temporary holds the value that Some returns",
         ],
     },
     TooltipExpect {
@@ -6992,12 +7000,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Used to panic (#459). `c` is moved into the temporary on the
         // `match` line, whatever the arm.
         must_contain: &[
-            "c's resource is moved",
+            "c's resource is moved into a temporary that is dropped at the end of this statement",
             "c goes out of scope. No resource is dropped.",
-            "d's resource is moved",
+            "d's resource is moved into a temporary that is dropped at the end of this statement",
             "d goes out of scope. No resource is dropped.",
+            // The variable goes into the temporary, not into `Some` (#783).
+            "Move from c to (temporary)",
+            "Move from d to (temporary 2)",
         ],
         must_not_contain: &[
+            "Move from c to Some",
+            "Move from Some to (temporary",
             "c is live in a conditional expression ",
             "c goes out of scope. Its resource is dropped.",
             "d goes out of scope. Its resource is dropped.",
@@ -7008,7 +7021,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Used to panic (#459).
         must_contain: &[
             "a's resource is moved",
-            "b's resource is moved",
+            "b's resource is moved into a temporary that is dropped at the end of this statement",
             "c's resource is moved",
             "d's resource is moved",
             "x's resource is moved into drop, which drops it",
@@ -7017,6 +7030,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
+            "Move from b to Some",
             "a goes out of scope. Its resource is dropped.",
             "b goes out of scope. Its resource is dropped.",
             "c goes out of scope. Its resource is dropped.",
@@ -11110,9 +11124,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `for` makes from its head (`make_vec()`, `v`) to the end of
         // the loop; `make().chars()` keeps its String that long too.
         must_contain: &[
-            "Move from Some to (temporary)",
-            "Move from Some to (temporary 2)",
-            "Move from Some to (temporary 3)",
+            "Move from make to (temporary)",
+            "Move from make to (temporary 2)",
+            "Move from make to (temporary 3)",
             "Move from into_iter to (temporary 4)",
             "Move from into_iter to (temporary 5)",
             "Move from make to (temporary 6)",
@@ -11124,6 +11138,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that into_iter returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
         ],
         must_not_contain: &[
+            "Move from Some to",
             "This temporary Option<String> is dropped at the end of the condition",
             "This temporary Option<String> is dropped at the end of this statement",
             "Move from make to (temporary 7)",
@@ -14273,6 +14288,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c's mutable borrow of b ends",
         ],
         must_not_contain: &[],
+    },
+    // #783: `return Err(String::from(..))` / a tail `Some(make())` drew
+    // nothing for the returned value; now the call's result goes to the
+    // caller. `Some(make());` read "Move from Some to (temporary)" (a
+    // constructor acting, and a temporary holding "the value that Some
+    // returns"); the temporary now takes what `make` returned.
+    TooltipExpect {
+        name: "ctor_call_result_783",
+        must_contain: &[
+            "Move from String::from to the caller",
+            "Move from make to the caller",
+            "Move from Box::new to the caller",
+            "Move from make to (temporary)",
+            "This temporary takes the value that make returns, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+        ],
+        must_not_contain: &[
+            "Move from Some to",
+            "Move from Err to",
+            "Move from Ok to",
+            "A temporary holds the value that Some returns",
+            "to Some",
+            // No dot without a tooltip.
+            "=",
+        ],
     },
 ];
 

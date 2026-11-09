@@ -772,9 +772,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c9_05_early_err_return",
-        status: Missing,
-        note: "`return Err(..)` is not shown as returned to the caller (the tail `Ok(x)` is, since #768: no arrow into `Ok`)",
-        must_contain: &["x's value is copied to the caller", "Move from check to r", "r goes out of scope. Its resource is dropped (including the String it holds, if any)."],
+        must_contain: &[
+            "x's value is copied to the caller",
+            // `return Err(String::from(..))`: the call's result goes to the caller (#783).
+            "Move from String::from to the caller",
+            "Move from check to r",
+            "r goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &["Move from Err to", "to Err"],
         ..E
     },
     Snippet {

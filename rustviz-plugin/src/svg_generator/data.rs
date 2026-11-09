@@ -208,6 +208,10 @@ pub struct Owner {
     /// it is dropped (`make_p().name`, a `match` scrutinee whose pattern
     /// binds by value): what that is; the rest is dropped with it (#469).
     pub temp_part: Option<TempPart>,
+    /// True iff this unbound temporary is a tuple struct / variant
+    /// constructor's value (`Some(make());`): what the constructor was
+    /// given is moved into it (#783).
+    pub ctor_temp: bool,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
     /// True iff this owner isn't a reference but its value holds a
@@ -3069,6 +3073,12 @@ impl Event {
                     // `vec![s];`: s is moved into the temporary (#570).
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
                     hover_messages::event_dot_unbound_temporary_takes(&from_name)
+                } else if matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, .. })))
+                    && matches!(from, ResourceTy::Value(ResourceAccessPoint::Function(f))
+                        if !f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase()))) {
+                    // `Some(make());`: what `make` returned is moved into
+                    // the value the constructor builds (#783).
+                    hover_messages::event_dot_unbound_temporary_takes_result(&from.name())
                 } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, temp_part: Some(part), .. })) = is {
                     // `make_p().name`, `match make() { Some(s) => .. }`:
                     // part of the value is moved out (#469).

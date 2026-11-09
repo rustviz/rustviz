@@ -191,7 +191,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (a constructor never receives anything, #768).
     let ctor_value = !e.span.from_expansion()
       && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
-        && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))))
+        && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
+          // A call's result put into the value goes to the caller too (#783).
+          || (!a.span.from_expansion() && matches!(a.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+              && !tycheck_results.node_type(a.hir_id).is_ref())))
       && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
       || ctor_value
@@ -2515,6 +2518,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
             }
             self.ctor_arg_ids.insert(expr.hir_id, (lo, *self.unique_id));
+            // An unbound temporary (`Some(make());`) takes what the
+            // arguments moved in, not the constructor (#783).
+            if let Some((tmp, id)) = self.ctor_temps.remove(&expr.hir_id) {
+              if self.retarget_ctor_arg_events(expr, ResourceTy::Value(tmp)) {
+                self.preprocessed_events.retain(|(_, e)| e.get_id() != id);
+              }
+            }
             return;
           }
         }
@@ -5820,10 +5830,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
       o.unbound_temp = true;
       o.temp_part = part.clone();
+      o.ctor_temp = part.is_none() && !expr.span.from_expansion()
+        && matches!(expr.kind, ExprKind::Call(callee, _) if is_ctor_path(callee, self.tcx.typeck(expr.hir_id.owner)));
     }
     self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let line = expr_to_line(expr, &self.tcx);
+    // `Some(make());`: a constructor isn't an actor (#768); once its
+    // arguments are visited, what was moved into it (a call's result, a
+    // variable) is redrawn into the temporary instead (#783).
+    if matches!(&tmp, ResourceAccessPoint::Owner(Owner { ctor_temp: true, .. })) {
+      self.ctor_temps.insert(expr.hir_id, (tmp.clone(), *self.unique_id));
+    }
     self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
     // Variables moved into the temporary (`vec![s];`, #570; the fields
     // `P { n: 1, ..p }` takes from p, #574).
