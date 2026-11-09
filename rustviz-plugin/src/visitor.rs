@@ -2769,7 +2769,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.add_ev(end_line, die, to_ro, place, false);
               }
               else {
-                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
+                // `o = &q;` ends the old loan where the borrow checker
+                // does: `o` is dead until the write, so that can be
+                // earlier than the write itself (#745). (A loan
+                // `*w = &c` made through a reference ends the same
+                // way.)
+                let end_line = self.loan_end(&ref_data)
+                  .filter(|&end| end < line_num && end >= ref_data.assigned_at)
+                  .unwrap_or(line_num);
+                self.add_borrow_end_ev(end_line, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
                 // ...and to each further lender (#171).
                 for co in ref_data.co_lenders.iter() {
                   let evt = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
@@ -4781,6 +4789,27 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut loop_decls);
                 // Not where every path breaks or continues first (#631).
                 let loop_decls = &loop_decls - &Self::left_at_exits(self.ends_at_exits(body_expr, false), &loop_decls);
+                // The loop's iterator holds the loan the head made
+                // (`&mut m`, `&pairs`) until the loop ends, so the
+                // lender is borrowed through the whole body, not just
+                // to the last use of the binding: `m.len()` after
+                // `s`'s last use is still E0499/E0502 (#739). (A
+                // `break` / `return` in the body ends it in its own
+                // branch, drawn there.)
+                // (the loop's own desugared `None => break` is the one)
+                let runs_to_the_end = arms.first().is_some_and(|a| breaks_out_of(a.body) <= 1)
+                  && !body_returns(body_expr);
+                let mut pat_decls = HashSet::new();
+                collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
+                #[expect(clippy::disallowed_methods, reason = "each binding's floor is raised on its own")]
+                for decl in pat_decls.iter().filter(|_| runs_to_the_end) {
+                  let lent = self.borrow_map.get(decl.name())
+                    .is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous));
+                  if lent {
+                    let floor = self.borrow_floor.entry(decl.name().to_owned()).or_insert(body_end);
+                    *floor = (*floor).max(body_end);
+                  }
+                }
                 self.emit_scope_end(loop_decls, body_end);
                 // `break`s in the body target the desugared `loop`
                 // (the outer arm's body), which also ends when the
@@ -7562,6 +7591,25 @@ fn moved_out_of_outer(
     }
   }
   out
+}
+
+/// Whether `e` (outside any closure) contains a `return`, or a `?`,
+/// which returns on its error path.
+fn body_returns(e: &Expr<'_>) -> bool {
+  struct Find(bool);
+  impl<'tcx> Visitor<'tcx> for Find {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      match e.kind {
+        ExprKind::Closure(..) => return,
+        ExprKind::Ret(_) => self.0 = true,
+        _ => {}
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find(false);
+  intravisit::walk_expr(&mut f, e);
+  f.0
 }
 
 /// How many `break`s inside `loop_expr` target it.

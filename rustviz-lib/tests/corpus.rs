@@ -1159,6 +1159,9 @@ const EXPECTED_OK: &[&str] = &[
     // binds parts of it by value: the rest is dropped with it (#469).
     "temporary_field_moved_out",
     "temporary_scrutinee_partly_moved",
+    // A for loop's loan ends with the loop; a reassigned reference's old
+    // loan ends at its last use (#739, #745).
+    "borrow_end_nll_loop",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -16789,7 +16792,6 @@ fn reference_column_reaches_its_last_use() {
             || t.contains("temporary")
     });
     for name in [
-        "advanced_deref",
         "basic_if7",
         "basic_if12",
         "basic_while",
@@ -16810,7 +16812,21 @@ fn reference_column_reaches_its_last_use() {
     // reborrowed (`m = n;` lends n to m): like any lender's column, it
     // draws no line while `&mut`-borrowed (#722's first group), and the
     // reborrow's end is its last use. Check the uses after a reassignment.
+    //
+    // advanced_deref's y is like that too, and its old borrow ends on the
+    // dot where z's `&mut` borrow of it ends (`println!("c value {}",
+    // **z);`): rustc ends z's loan of y and the loan of c that `*z = &c;`
+    // put in y both there (`c += 1;` right after compiles), and y is
+    // dead until `y = &x;` gives it a new reference (#745). That dot,
+    // "y is no longer mutably borrowed • y's immutable borrow ends",
+    // ends two different loans, and no line reaches it: none is drawn
+    // while z borrows y, and none after (#700 listed advanced_deref in
+    // the first list when its old borrow ended at `y = &x;`).
     for (name, uses) in [
+        ("advanced_deref", &[
+            "y immutably borrows a value",
+            "println! no longer borrows the value y points to",
+        ][..]),
         ("aliasing2", &["println! no longer borrows the resource b points to"][..]),
         ("ref_reassign_wording", &[
             "println! no longer borrows the value r points to",
@@ -16830,26 +16846,61 @@ fn reference_column_reaches_its_last_use() {
 }
 
 /// #700: when a reference gets a new reference on a row where its old
-/// borrow ends, the row's dot lists the end first: "y's immutable borrow
-/// ends • y immutably borrows a value". Main listed the new borrow first,
+/// borrow ends, the row's dot lists the end first: "w's immutable borrow
+/// ends • w immutably borrows a value". Main listed the new borrow first,
 /// which reads as if the new borrow ended at once.
+///
+/// #745: the old borrow only ends on the write's row when the old
+/// reference is live up to the write (`w = pick(w, &q);` reads it there;
+/// a whole struct overwritten, #538). A reference that isn't read again
+/// before it is given a new one is dead until then, so rustc ends its old
+/// loan at its last use, and the write's row has only the new borrow.
+/// (#700 listed advanced_deref, advanced_deref2, basic_if12's `c = &z;`
+/// and `c = &s;`, and ref_reassign_wording's `r = s;` and `m = n;` here;
+/// rustc ends each of those old loans before the write, as the second
+/// list below checks.)
 #[test]
 fn reassigned_reference_ends_its_old_borrow_first() {
     for (name, end, start) in [
-        ("advanced_deref", "y's immutable borrow ends", "y immutably borrows a value"),
-        ("advanced_deref2", "y's mutable borrow ends", "y mutably borrows a value"),
-        ("basic_if12", "c's immutable borrow ends", "c immutably borrows a value"),
         ("borrow_struct_overwrite_whole", "hold.r's immutable borrow ends", "hold.r immutably borrows a resource"),
         ("borrow_struct_overwrite_whole", "p.a's immutable borrow ends", "p.a immutably borrows a resource"),
-        ("ref_reassign_wording", "r's immutable borrow ends", "r is assigned a copy of s's reference"),
-        ("ref_reassign_wording", "m's mutable borrow ends", "m mutably borrows a resource"),
+        ("borrow_end_nll_loop", "w's immutable borrow ends", "w immutably borrows a value"),
     ] {
         let timeline = run_with_local_backend(name).timeline_panel_string();
-        let in_order = dots_where(&timeline, |l| l == [end, start]);
-        let reversed = dots_where(&timeline, |l| l == [start, end]);
+        let at = |l: &[String], t: &str| l.iter().position(|x| x == t);
+        let in_order = dots_where(&timeline, |l| matches!((at(l, end), at(l, start)), (Some(e), Some(s)) if e < s));
+        let reversed = dots_where(&timeline, |l| matches!((at(l, end), at(l, start)), (Some(e), Some(s)) if s < e));
         assert!(!in_order.is_empty() && reversed.is_empty(),
-            "{}: want a dot \"{} • {}\" (got {:?} in that order, {:?} reversed)",
+            "{}: want a dot listing \"{}\" before \"{}\" (got {:?} in that order, {:?} reversed)",
             name, end, start, in_order, reversed);
+    }
+    // The old loan's last use comes before the write (rustc accepts a
+    // write to the old lender in between, e.g. `c += 1;` after
+    // advanced_deref's `println!("c value {}", **z);`): the old borrow
+    // ends on a row from that last use (`nth` occurrence of `used`) to
+    // above the write, and the write's dot has only the new borrow.
+    for (name, used, nth, write, end, start) in [
+        ("advanced_deref", "println!(\"c value {}\", **z);", 0, "y = &x;", "y's immutable borrow ends", "y immutably borrows a value"),
+        ("advanced_deref2", "let mut y = & mut x;", 0, "y = &mut c;", "y's mutable borrow ends", "y mutably borrows a value"),
+        ("basic_if12", "c = &y; // c -> y {x} // (returns x)", 0, "c = &z; // c -> z {y, x} (returns y)", "c's immutable borrow ends", "c immutably borrows a value"),
+        ("basic_if12", "c = &z; // c -> z {y, x} (returns y)", 0, "c = &s; // c -> s (returns y)", "c's immutable borrow ends", "c immutably borrows a value"),
+        ("ref_reassign_wording", "println!(\"{}\", r);", 1, "r = s;", "r's immutable borrow ends", "r is assigned a copy of s's reference"),
+        ("ref_reassign_wording", "m.push('1');", 0, "m = n;", "m's mutable borrow ends", "m mutably borrows a resource"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let (used_y, write_y) = (code_rows_y(&code, used)[nth], code_row_y(&code, write));
+        // (basic_if12's `c = &y;` keeps such a dot: x's loan lives on the
+        // path that skips the `if`, #770.)
+        let combined: Vec<f64> = dots_where(&timeline, |l| l == [end, start]).into_iter().map(|d| d.1).collect();
+        assert!(!combined.contains(&write_y),
+            "{}: `{}` has a dot \"{} • {}\", but the old borrow ended earlier", name, write, end, start);
+        let starts: Vec<f64> = dots_listing_tooltip(&timeline, start).into_iter().map(|d| d.1).collect();
+        assert!(starts.contains(&write_y), "{}: no dot on `{}` lists {:?}: {:?}", name, write, start, starts);
+        let ends: Vec<f64> = dots_listing_tooltip(&timeline, end).into_iter().map(|d| d.1).collect();
+        assert!(!ends.contains(&write_y), "{}: the dot on `{}` lists {:?}", name, write, end);
+        assert!(ends.iter().any(|&y| used_y <= y && y < write_y),
+            "{}: no {:?} from `{}` (y={}) to above `{}` (y={}): {:?}", name, end, used, used_y, write, write_y, ends);
     }
 }
 
@@ -17546,5 +17597,29 @@ fn loop_call_arg_unbranched_call_and_borrow_end_share_a_row() {
             "{lender}'s borrow should end on the call's row (call dots {:?}), below `{brk}` (y={brk_row}), found y={}",
             calls, back
         );
+    }
+}
+
+/// #739, #745: a borrow ends on the row where rustc's borrow checker
+/// ends it. (On main, the for loops' loans ended at the binding's last
+/// use, inside the body, and the old loans of `r` and `*z = &c` at the
+/// write that replaced them: one row early / one row late.)
+#[test]
+fn borrow_ends_at_rustcs_end_for_loops_and_reassigned_refs() {
+    let rv = run_with_local_backend("borrow_end_nll_loop");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (text, line) in [
+        // The iterator holds the loan until the loop ends.
+        ("m's resource is no longer mutably borrowed", "} // end of mut_loop's for"),
+        ("pairs's resource is no longer immutably borrowed", "} // end of shared_loop's for"),
+        // `r` is overwritten before it is used again: a is free after
+        // the println!.
+        ("a's value is no longer immutably borrowed", "println!(\"{}\", r);"),
+        // c's loan, made through `*z`, ends after the println!.
+        ("c's value is no longer immutably borrowed", "println!(\"c value {}\", **z);"),
+    ] {
+        let ends = dots_with_tooltip(&svg, text);
+        assert_eq!(ends.len(), 1, "{}: {:?}", text, ends);
+        assert_eq!(ends[0].1, code_row_y(&code, line), "{:?} should be on the row of `{}`: {:?}", text, line, ends);
     }
 }
