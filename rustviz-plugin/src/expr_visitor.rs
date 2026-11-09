@@ -6675,6 +6675,7 @@ pub fn print_out_of_scope(&mut self){
     for (line, ev) in std::mem::take(&mut self.late_old_ends) {
       self.add_external_event(line, ev);
     }
+    hoist_ends_on_other_arms_lines(self.preprocessed_events);
     self.nest_borrow_ends_in_arms();
     end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.unique_id);
     self.end_outer_borrows_in_arms();
@@ -6802,6 +6803,51 @@ pub fn print_out_of_scope(&mut self){
       end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), stacked, self.unique_id);
     }
   }
+}
+
+/// The end of the borrow a reference declared before an `if` / `match`
+/// held, added while an arm was visited (`c = &y;` in the `else` arm
+/// ends `c`'s old loan), but on a line of *another* arm (the loan's last
+/// use on the paths through the `if` arm, #801): the event is drawn in
+/// the arm that visited it, at a row of the other arm's lines, and the
+/// arm that holds that line gets no end at all. Move it back to the
+/// top level, where `end_outer_borrows_in_arms` puts it in the arm that
+/// holds its line and ends the borrow in the other arms. Top-level
+/// conditionals only.
+fn hoist_ends_on_other_arms_lines(events: &mut Vec<(usize, ExternalEvent)>) {
+  let mut hoisted: Vec<(usize, ExternalEvent)> = Vec::new();
+  for (_, ev) in events.iter_mut() {
+    let ExternalEvent::Branch { branches, live_vars, branch_type, .. } = ev else { continue };
+    if matches!(branch_type, BranchType::Loop(..)) {
+      continue;
+    }
+    let ranges: Vec<(usize, usize)> = (0..branches.len()).map(|a| branch_type.get_start_end(a)).collect();
+    for b in 0..branches.len() {
+      let mut take: Vec<usize> = Vec::new();
+      for (i, (line, e)) in branches[b].e_data.iter().enumerate() {
+        let (ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+          | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }) = e else { continue };
+        // (The implicit empty `else` of an `if` has no lines of its own.)
+        if ranges[b].0 > ranges[b].1 {
+          continue;
+        }
+        let own = ranges[b].0 <= *line && *line <= ranges[b].1;
+        let other = ranges.iter().enumerate().any(|(o, (s, t))| o != b && *s <= *line && *line <= *t);
+        if !own && other && live_vars.contains(r) && !branches.iter().any(|x| x.decl_vars.contains(r)) {
+          take.push(i);
+        }
+      }
+      for &i in take.iter().rev() {
+        let (line, e) = branches[b].e_data.remove(i);
+        let id = e.get_id();
+        for v in branches[b].line_map.values_mut() {
+          v.retain(|x| x.get_id() != id);
+        }
+        hoisted.push((line, e));
+      }
+    }
+  }
+  events.extend(hoisted);
 }
 
 /// The `if` / `match` among `events` that `r` is live in (declared
