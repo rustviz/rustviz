@@ -1395,7 +1395,7 @@ fn render_dot(
                             hash: *hash as u64,
                             dot_x: cx,
                             dot_y: cy,
-                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), moved_by_chain_condition(history) || maybe_moved_by_let(history)),
+                            title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), moved_by_chain_condition(history) || maybe_moved_by_let(history), ro.box_contents_moved()),
                             p1x: cx - 3, p1y: cy - 1,
                             p2x: cx + 3, p2y: cy - 1,
                             p3x: cx,     p3y: cy + 3,
@@ -3176,6 +3176,26 @@ fn render_arrow (
             } else {
                 format!("{} to {}", title, styled_to_string)
             };
+            // A Copy-typed value a call returns (`let n = v.len();`): the
+            // source is the call's result, not a variable (or anything)
+            // named like the callee (#737). Constructors (`Some(5)`) and
+            // macros keep the plain label.
+            if let (ExternalEvent::Copy { into_closure: false, .. }, ResourceTy::Value(f @ ResourceAccessPoint::Function(_))) = (external_event, from) {
+                let callee = f.name();
+                let last = callee.rsplit("::").next().unwrap_or(&callee);
+                if !last.starts_with(|c: char| c.is_uppercase()) && !callee.ends_with('!') && title.starts_with("Copy from ") {
+                    // When `to` gets only part of the result (a pattern or
+                    // `?`), mirror the dot's wording (#733): never claim the
+                    // call returns the copied value itself.
+                    let inside = match from { ResourceTy::Value(ResourceAccessPoint::Function(f)) => f.inside.as_deref(), _ => None };
+                    title = match inside {
+                        None => format!("Copy of the value {}() returns to {}", styled_from_string, styled_to_string),
+                        Some("") => format!("Copy to {}", styled_to_string),
+                        Some(w @ ("Ok" | "Some")) => format!("Copy of the value inside the {} that {}() returns to {}", w, styled_from_string, styled_to_string),
+                        Some(w) => format!("Copy of the value inside the {} {}() returns to {}", w, styled_from_string, styled_to_string),
+                    };
+                }
+            }
             // `Rc::clone(&a)` / `a.clone()` / `Rc::downgrade(&a)` make
             // another owner of the same value; the value isn't moved
             // or copied (#373).

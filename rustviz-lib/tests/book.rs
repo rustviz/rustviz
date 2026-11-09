@@ -155,7 +155,7 @@ const BOOK: &[Snippet] = &[
             "s is an immutable borrow from the caller",
             "L2 Immutable borrow from s to bytes: as_bytes's signature gives the reference it returns the same lifetime as the value it was called on",
             "L3 Return immutably borrowed resource from bytes to s",
-            "Copy from first_word to word",
+            "Copy of the value first_word() returns to word",
         ],
         must_not_contain: &[
             "bytes is the owner of the resource",
@@ -268,7 +268,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "x's value is copied to the caller",
             "Copy from a to add_one",
-            "Copy from add_one to b",
+            "Copy of the value add_one() returns to b",
         ],
         must_not_contain: &["x's resource is moved to the caller", "x's resource is copied to the caller"],
         ..E
@@ -401,7 +401,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "self is an immutable borrow from the caller",
             "get reads from c (implicitly borrowed)",
-            "Copy from get to v",
+            "Copy of the value get() returns to v",
         ],
         must_not_contain: &["self is the owner of the resource"],
         ..E
@@ -453,7 +453,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from c to value_in_cents",
             "coin goes out of scope",
-            "Copy from value_in_cents to v",
+            "Copy of the value value_in_cents() returns to v",
             "c goes out of scope",
         ],
         must_not_contain: &[
@@ -464,7 +464,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_03_plus_one",
-        must_contain: &["Partial copy from x to i", "Copy from five to plus_one", "Copy from plus_one to six"],
+        must_contain: &["Partial copy from x to i", "Copy from five to plus_one", "Copy of the value plus_one() returns to six"],
         ..E
     },
     Snippet {
@@ -513,7 +513,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_09_option_unwrap_or",
-        must_contain: &["Copy from unwrap_or to y", "is_some reads from x (implicitly borrowed)"],
+        must_contain: &["Copy of the value unwrap_or() returns to y", "is_some reads from x (implicitly borrowed)"],
         ..E
     },
     Snippet {
@@ -668,7 +668,7 @@ const BOOK: &[Snippet] = &[
             "insert reads from/writes to scores (implicitly mutably borrowed)",
             "get reads from scores (implicitly borrowed)",
             "get reads from team_name",
-            "Copy from unwrap_or to score",
+            "Copy of the value unwrap_or() returns to score",
         ],
         ..E
     },
@@ -735,7 +735,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c9_02_parse_unwrap",
-        must_contain: &["Copy from unwrap to n"],
+        must_contain: &["Copy of the value unwrap() returns to n"],
         ..E
     },
     Snippet {
@@ -800,7 +800,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from Err to r",
             "Move from r to unwrap_or_else",
-            "Copy from unwrap_or_else to n",
+            "Copy of the value unwrap_or_else() returns to n",
             "r goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
@@ -923,7 +923,7 @@ const BOOK: &[Snippet] = &[
         must_not_contain: &["add_one's resource is copied"],
         known_wrong: &[
             "y is initialized with the value add_one() returns",
-            "Copy from add_one to y",
+            "Copy of the value add_one() returns to y",
         ],
         ..E
     },
@@ -966,7 +966,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "f acquires ownership from the caller",
             "f goes out of scope. Its resource is dropped.",
-            "Copy from apply to r",
+            "Copy of the value apply() returns to r",
         ],
         must_not_contain: &["f is initialized with a copy of Anonymous resource"],
         ..E
@@ -1003,7 +1003,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_09_iter_sum",
-        must_contain: &["iter reads from v1 (implicitly borrowed)", "Copy from sum to total"],
+        must_contain: &["iter reads from v1 (implicitly borrowed)", "Copy of the value sum() returns to total"],
         ..E
     },
     Snippet {
@@ -1204,7 +1204,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_05_while_let_pop",
-        must_contain: &["pop reads from/writes to stack (implicitly mutably borrowed)", "Copy from pop to top", "stack goes out of scope. Its resource is dropped."],
+        must_contain: &["pop reads from/writes to stack (implicitly mutably borrowed)", "Copy of the value inside the Option pop() returns to top", "stack goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -1255,7 +1255,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_12_method_chain_trim_len",
-        must_contain: &["trim reads from s (implicitly borrowed)", "Copy from len to n"],
+        must_contain: &["trim reads from s (implicitly borrowed)", "Copy of the value len() returns to n"],
         ..E
     },
     Snippet {
@@ -1419,7 +1419,7 @@ const BOOK: &[Snippet] = &[
         id: "x10_existing_question_mark",
         status: Missing,
         note: "copy of tests/question_mark.rs; renders since #155. The tail `Ok(n)` is not shown as returned",
-        must_contain: &["Copy from parse to n", "Copy from n to Ok"],
+        must_contain: &["Copy of the value inside the Ok that parse() returns to n", "Copy from n to Ok"],
         ..E
     },
     Snippet {
@@ -1447,7 +1447,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x13_nested_same_fn_call",
-        must_contain: &["Copy from add to x"],
+        must_contain: &["Copy of the value add() returns to x"],
         ..E
     },
     Snippet {

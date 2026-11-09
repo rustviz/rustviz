@@ -1567,8 +1567,16 @@ pub fn event_dot_copy_from(my_name: &String, target_name: &String) -> String {
 // the variable's value. An unknown wrapper falls back to the neutral
 // "bound to a copyable value".
 pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Option<&str>, inside: Option<&str>) -> String {
+    let ctor = callee.rsplit("::").next().unwrap_or(callee).starts_with(|c: char| c.is_uppercase());
     match inside {
         Some("") => return event_dot_acquire_copyable(my_name, &String::new()),
+        // A constructor written in the pattern's scrutinee (`Some(5)`)
+        // isn't a call that "returns" (#758).
+        Some(_) if ctor => {
+            let last = callee.rsplit("::").next().unwrap_or(callee);
+            let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
+            return format!("{0} is initialized with the value inside {2} {1} value", my_name, last, article);
+        }
         Some(w @ ("Ok" | "Some")) => return format!("{0} is initialized with the value inside the {2} that {1}() returns", my_name, callee, w),
         Some(w) => return format!("{0} is initialized with the value inside the {2} {1}() returns", my_name, callee, w),
         None => {}
@@ -2745,12 +2753,17 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String 
 // Scope end of a variable that was moved on some paths of a conditional
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).
-pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool) -> String {
+//
+// `boxed` (#736): a `Box` whose contents (`*b`) are moved out on some
+// path. The drop flag decides only whether the contents are dropped;
+// the Box's own heap allocation is freed either way.
+pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool, boxed: bool) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it \
-         (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), holds, rest, moved_above(by_cond)
+         (Rust tracks this with a runtime drop flag).{4}",
+        fmt_style(my_name), holds, rest, moved_above(by_cond),
+        if boxed { " The Box's heap allocation is freed either way." } else { "" }
     )
 }
 
