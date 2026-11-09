@@ -959,8 +959,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // Adds an owner RAP that binds a closure literal. Routed through
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
-  pub fn add_closure_owner(&mut self, name: String, mutability: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value: false, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+  pub fn add_closure_owner(&mut self, name: String, mutability: bool, is_plain_value: bool, scope: usize, is_global: bool) {
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -3523,7 +3523,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // capture-flavoured wording for moves/borrows into `name` and
       // for `name`'s scope-end. The `match_rhs` ExprKind::Closure
       // arm emits the actual capture events on top of this RAP.
-      self.add_closure_owner(name, mutability, self.current_scope, !self.inside_branch);
+      // A closure that holds only references (or Copy captures) has
+      // nothing to drop: what it holds is a "value", not a "resource"
+      // (#484, #791).
+      let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+      let plain = !ty.needs_drop(self.tcx, env);
+      self.add_closure_owner(name, mutability, plain, self.current_scope, !self.inside_branch);
     }
     else {
       // Plain values, including a function item or function pointer
