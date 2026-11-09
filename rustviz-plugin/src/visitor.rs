@@ -1757,9 +1757,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// A `break 'outer` out of an inner `for` loop leaves it too (#592):
-  /// the iterator variables the loops inside the target took (`for s in
-  /// it`) are dropped at the `break`, on their own columns, where
+  /// A `break 'outer` / `continue 'outer` out of an inner `for` loop
+  /// leaves it too (#592, #600): the iterator variables the loops inside
+  /// the target took (`for s in it`) are dropped there, on their own
+  /// columns, where
   /// `drop_locals_on_exit` draws the exit's other drops (in a branch
   /// inside the target loop). A labeled `break` leaves the target `for`
   /// loop too, so its own iterator variable is dropped here as well
@@ -4871,6 +4872,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       ExprKind::Continue(dest) => {
         if let Ok(target) = dest.target_id {
           self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), None, Some(target), false, "continue");
+          // `continue 'outer` leaves the inner `for` loops the same way,
+          // then goes on to the next iteration of `'outer` (#600).
+          self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, false, LoopLeft::Continue);
         }
       }
       // `P { .. }`, `(a, b)`, `[a, b]` written by the user: a value

@@ -1162,6 +1162,8 @@ const EXPECTED_OK: &[&str] = &[
     // A for loop's loan ends with the loop; a reassigned reference's old
     // loan ends at its last use (#739, #745).
     "borrow_end_nll_loop",
+    // `continue 'outer` drops the inner loops' iterators (#600).
+    "for_iterator_continue_outer",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13112,6 +13114,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary 5)",
         ],
     },
+    TooltipExpect {
+        name: "for_iterator_continue_outer",
+        // #600: `continue 'outer` leaves the inner `for` loop (and goes on
+        // to the outer loop's next iteration), so the inner iterator is
+        // dropped at the `continue`: the `(temporary 2)` column of `for s
+        // in row`, and the variable iterator `it` of `named`. An unlabeled
+        // `continue` stays in the inner loop: no drop (inner_continue).
+        must_contain: &[
+            "This temporary IntoIter<String> is dropped here, where `continue` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "it's former resource, the `for` loop's iterator, is dropped here: this `continue` leaves the `for` loop and goes on to the next iteration of the outer loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
+        ],
+        must_not_contain: &[
+            "the function returns from inside the loop",
+            "this `break` leaves the `for` loop",
+            // Stated once, with #410's wording.
+            "is left early, while this temporary is still alive",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -16319,6 +16340,25 @@ fn break_outer_iterator_drops_sit_on_the_break() {
         assert_eq!(ys.len(), 1, "one dot {:?}: {:?}", text, ys);
         assert_eq!(ys[0].1, row, "{:?} isn't on its `break 'outer;` row", text);
     }
+}
+
+/// #600: the drops at a `continue 'outer` sit on the `continue`'s row; an
+/// unlabeled `continue` (stays in the inner loop) draws none.
+#[test]
+fn continue_outer_iterator_drops_sit_on_the_continue() {
+    let rv = run_with_local_backend("for_iterator_continue_outer");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (text, row) in [
+        ("This temporary IntoIter<String> is dropped here, where `continue` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", "continue 'outer;"),
+        ("it's former resource, the `for` loop's iterator, is dropped here: this `continue` leaves the `for` loop and goes on to the next iteration of the outer loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", "continue 'scan;"),
+    ] {
+        let ys = dots_with_tooltip(&timeline, text);
+        assert_eq!(ys.len(), 1, "one dot {:?}: {:?}", text, ys);
+        assert_eq!(ys[0].1, code_row_y(&code, row), "{:?} isn't on the `{}` row", text, row);
+    }
+    // inner_continue's `continue;` leaves nothing: the only "leaves
+    // early" dot is main's `continue 'outer;` (#410's wording).
+    assert_eq!(timeline.matches("leaves early").count(), 1);
 }
 
 /// cy of every timeline dot whose tooltip contains `needle` (the dot
