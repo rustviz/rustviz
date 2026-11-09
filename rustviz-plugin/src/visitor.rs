@@ -4806,7 +4806,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     }
                     self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
                   } else if let Some(e) = iterand_evt {
-                    if iterator_needs_drop {
+                    // `for n in a` moving a collection of Copy elements
+                    // (`Vec<i32>`): `a` is moved into the loop's
+                    // iterator, and each `n` is a copy `next()` hands
+                    // out, not something moved from `a` (#772). Draw the
+                    // move on the head and give `n` a plain binding.
+                    let elem_copy = matches!(e, Evt::Move) && !pat_ty.is_ref() && self.tcx.type_is_copy_modulo_regions(
+                      rustc_middle::ty::TypingEnv::post_analysis(self.tcx, user_pat.hir_id.owner),
+                      pat_ty);
+                    if elem_copy {
+                      if iterator_needs_drop {
+                        self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Collection);
+                      } else {
+                        self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+                      }
+                      self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+                    } else if iterator_needs_drop {
                       self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::Collection);
                     } else {
                       self.add_ev(for_line, e, to_rty, head_rty, false);
