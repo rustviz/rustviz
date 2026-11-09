@@ -1177,6 +1177,8 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_nested_fields",
     "or_pattern_nested_two",
     "or_pattern_nested_ref",
+    // The return arrow of `for x in v.iter_mut()` names `v` (#749).
+    "for_method_head_label",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13384,6 +13386,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Partial immutable borrow from t.1 to x",
             "Move from t.1 to x",
         ],
+    },
+    // `for x in v.iter_mut()` / `w.iter()`: the borrow comes back to the
+    // variable it was lent from, not to the method (#749).
+    TooltipExpect {
+        name: "for_method_head_label",
+        must_contain: &[
+            "Return mutably borrowed resource from x to v",
+            "Return immutably borrowed resource from s to w",
+        ],
+        must_not_contain: &["to iter_mut", "=Return immutably borrowed resource from s to iter"],
     },
 ];
 
