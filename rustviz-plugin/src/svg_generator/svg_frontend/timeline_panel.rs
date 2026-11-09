@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, string_of_external_event, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, string_of_external_event, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1233,8 +1233,11 @@ fn render_dot(
                     // (An assignment on every path: it comes before
                     // the scope end.)
                     let reassigned_next = after.iter()
-                        .any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_init: true, .. }));
-                    let reassigned_later = after.iter().any(|(_, e)| reassigns_maybe_init(e));
+                        .any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. }));
+                    // In a loop body that assigns s (#786), the next
+                    // time round assigns it again.
+                    let reassigned_later = after.iter().any(|(_, e)| reassigns_maybe_init(e))
+                        || full.iter().any(|(_, e)| reassigns_in_loop(e));
                     Some(if reassigned_next {
                         hover_messages::event_dot_branch_merge_maybe_init_then_reassigned(&is.real_name(), false, moved)
                     } else if reassigned_later {
@@ -1418,10 +1421,29 @@ fn render_dot(
                         };
                         append_drop_dot(drop_data, timeline_data, dots);
                         continue;
-                    } else if !resource_hold && init_at_end(history) == Some(InitJoin::AllMoved) {
+                    // (`init_at_end` is `Some` only if nothing assigned
+                    // the column since: it holds no definite value,
+                    // whatever the merged states say.)
+                    } else if !ro.holds_value() && init_at_end(history) == Some(InitJoin::AllMoved) {
                         // Every branch that assigned it moved it (#244).
                         data.title = hover_messages::event_dot_go_out_of_scope_init_all_moved(&name);
-                    } else if let (false, Some(InitJoin::Maybe { moved })) = (resource_hold, init_at_end(history)) {
+                    } else if let (false, Some(InitJoin::Loop)) = (ro.holds_value(), init_at_end(history)) {
+                        // A loop above may have ended before assigning
+                        // it (#786): the drop flag decides here.
+                        let cx = timeline_data.x_val;
+                        let cy = event_y;
+                        let drop_data = DropDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title: hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note()),
+                            p1x: cx - 3, p1y: cy - 1,
+                            p2x: cx + 3, p2y: cy - 1,
+                            p3x: cx,     p3y: cy + 3,
+                        };
+                        append_drop_dot(drop_data, timeline_data, dots);
+                        continue;
+                    } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value(), init_at_end(history)) {
                         // Assigned in some branches of a conditional but
                         // not others (#244): the drop flag decides here.
                         let cx = timeline_data.x_val;
@@ -1582,10 +1604,17 @@ fn render_dot(
                     let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
-                    let title = if let Event::OwnerDropAtReassign { maybe_init: true, maybe_moved, .. } = event {
+                    let title = if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch), maybe_moved, .. } = event {
                         // A `let s;` local only some branches above
                         // assigned (#244), and maybe moved after that.
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_init(&name, &note, *maybe_moved)
+                    } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Loop), .. } = event {
+                        // A loop above may have ended before assigning
+                        // it (#786).
+                        hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note)
+                    } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), .. } = event {
+                        // Its first assignment, in a loop body (#786).
+                        hover_messages::event_dot_init_drops_earlier_iteration(&name)
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false, .. })
                         // (Before the new value's Acquire on this line.)
                         && maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)) {
@@ -1615,6 +1644,23 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
+                Event::LoopMaybeInit => {
+                    // A loop above may have ended before assigning it
+                    // (#786): like a conditional's maybe-initialized
+                    // join, say when its value, if any, is dropped.
+                    let rap = &visualization_data.timelines[hash].resource_access_point;
+                    let later = &history[i + 1..];
+                    let reassigned = if later.iter().any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })) {
+                        Some(true)
+                    } else if later.iter().any(|(_, e)| reassigns_maybe_init(e)) {
+                        // Only in a branch of a later conditional.
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    data.title = hover_messages::event_dot_loop_maybe_init(
+                        &name, rap.holds_value() || rap.is_ref(), rap.is_mut(), reassigned);
+                }
                 _ => {
                     // Closure Bind-Acquire: aggregate every capture
                     // event landing at the same line into a single
@@ -1843,6 +1889,8 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             // Assigned in some branches only, not moved (#244).
             Event::Branch { branch_history, maybe_init, .. }
                 if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => maybe = false,
+            // Or by a loop that may have ended before assigning it (#786).
+            Event::LoopMaybeInit => maybe = false,
             Event::Branch { branch_history, ty, .. } => {
                 let (mixed, all_moved) = merge_move_kind(branch_history, ty);
                 if mixed {
@@ -1875,9 +1923,20 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
 // also one in a branch of a later conditional.
 fn reassigns_maybe_init(e: &Event) -> bool {
     match e {
-        Event::OwnerDropAtReassign { maybe_init, .. } => *maybe_init,
+        Event::OwnerDropAtReassign { maybe_init, .. } => matches!(maybe_init, Some(InitBy::Branch | InitBy::Loop)),
         Event::Branch { branch_history, .. } =>
             branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| reassigns_maybe_init(e))),
+        _ => false,
+    }
+}
+
+// An assignment in a loop body to a `let x;` local that had no value
+// before the loop (#786), also one in a branch.
+fn reassigns_in_loop(e: &Event) -> bool {
+    match e {
+        Event::OwnerDropAtReassign { maybe_init, .. } => *maybe_init == Some(InitBy::EarlierIteration),
+        Event::Branch { branch_history, .. } =>
+            branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| reassigns_in_loop(e))),
         _ => false,
     }
 }
@@ -1905,6 +1964,7 @@ fn init_after(start: Option<InitJoin>, history: &[(usize, Event)]) -> Option<Ini
             Event::Branch { branch_history, maybe_init, .. } => {
                 init = init_join(*maybe_init, reaching_end_states(branch_history));
             }
+            Event::LoopMaybeInit => init = Some(InitJoin::Loop),
             e if holds_value_after(false, e) => init = None,
             _ => {}
         }
@@ -2708,6 +2768,8 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         // next one's first event initializes a new variable; it isn't an
         // assignment to the one that ended.
         Event::OwnerGoOutOfScope | Event::RefGoOutOfScope => false,
+        // May have no value after a loop (#786).
+        Event::LoopMaybeInit => false,
         Event::Branch { branch_history, .. } => {
             held || branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| holds_value_after(false, e)))
         }
@@ -4146,7 +4208,7 @@ fn render_branches(
         // arm hasn't assigned s yet, s may or may not hold a value.
         let entry_maybe_init = matches!(
             init_after(maybe_init.then_some(InitJoin::Maybe { moved: false }), &history[..k]),
-            Some(InitJoin::Maybe { .. }));
+            Some(InitJoin::Maybe { .. } | InitJoin::Loop));
 
         let parent_x = timeline_data.x_val as f64;
         // Branches that share lines (`let s = if c { a } else { b };`)
