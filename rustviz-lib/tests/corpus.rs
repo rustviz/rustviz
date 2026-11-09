@@ -1220,6 +1220,8 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_end_other_path",
     "borrow_end_two_lenders",
     "ref_reassign_reads_rhs_first",
+    "return_tail_tied_params",
+    "return_tail_untied_param",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13960,6 +13962,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             // (the order of the bullets is pinned by a row test)
             "r immutably borrows a value• *r's value is copied",
+        ],
+    },
+    // #775: a reference parameter a tail `if` / `match` doesn't return
+    // on a path, but whose lifetime `'a` the signature ties to the
+    // result: its borrow lasts as long as the result in the caller (rustc
+    // keeps it borrowed there), so a dot says so and no "borrow ends" is
+    // drawn. (Main drew nothing there; the must_not_contain lines guard
+    // against fixing that with a false end.)
+    TooltipExpect {
+        name: "return_tail_tied_params",
+        must_contain: &[
+            "x isn't returned on this path, but its borrow lasts as long as the result (same lifetime 'a)",
+            "y isn't returned on this path, but its borrow lasts as long as the result (same lifetime 'a)",
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "a reference from y is returned to the caller; the data it points to is not copied",
+        ],
+        must_not_contain: &[
+            "x's immutable borrow ends",
+            "y's immutable borrow ends",
+        ],
+    },
+    // #775: `y` has a lifetime of its own, unrelated to the result's, so
+    // its borrow really ends: drawn as usual, with no "same lifetime" dot.
+    TooltipExpect {
+        name: "return_tail_untied_param",
+        must_contain: &[
+            "y's immutable borrow ends",
+            "a reference from x is returned to the caller; the data it points to is not copied",
+        ],
+        must_not_contain: &[
+            "same lifetime 'a)",
+            "y isn't returned on this path",
         ],
     },
 ];

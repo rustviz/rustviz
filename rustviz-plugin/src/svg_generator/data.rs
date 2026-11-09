@@ -1678,6 +1678,15 @@ pub enum ExternalEvent {
         no_else: bool,
         id: usize
     },
+    // A reference parameter a returned `if` / `match` doesn't return on
+    // this path, whose lifetime the signature ties to the result's
+    // (#775): its borrow lasts as long as the result in the caller, so
+    // nothing ends here. A dot; the state is unchanged.
+    TiedParamNote {
+        ro: ResourceAccessPoint,
+        lifetime: String,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -1790,6 +1799,7 @@ impl ExternalEvent {
             &ExternalEvent::OrAltBorrow { id, .. } |
             &ExternalEvent::ChainFailAssign { id, .. } |
             &ExternalEvent::ChainFailUse { id, .. } |
+            &ExternalEvent::TiedParamNote { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -1999,6 +2009,8 @@ pub enum Event {
     // See ExternalEvent::ChainFailUse. `is_ref`: the column is a
     // reference, so what was lent is the resource it points to.
     ChainFailUse { uses: Vec<ChainUse>, definite: bool, no_else: bool, is_ref: bool },
+    // See ExternalEvent::TiedParamNote.
+    TiedParamNote { lifetime: String },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -2480,6 +2492,9 @@ impl Display for Event {
             Event::ChainFailUse { .. } => {
                 write!(f, "May have been borrowed by the condition")
             },
+            Event::TiedParamNote { .. } => {
+                write!(f, "Not returned on this path; its borrow lasts as long as the result")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -2633,6 +2648,9 @@ impl Event {
             }
             Event::ChainFailUse { uses, definite, no_else, is_ref } => {
                 hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *no_else, *is_ref)
+            }
+            Event::TiedParamNote { lifetime, .. } => {
+                hover_messages::event_dot_tied_param_note(my_name, lifetime)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -3627,6 +3645,7 @@ impl Visualizable for VisualizationData {
             (_, Event::ChainFailAssign { .. }) => (*previous_state).clone(),
             // The borrows have ended (#688): no change.
             (_, Event::ChainFailUse { .. }) => (*previous_state).clone(),
+            (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
 
 
             (_, _) => State::Invalid,
@@ -4081,6 +4100,9 @@ impl Visualizable for VisualizationData {
           let rc = if place.is_some() { None } else { ro.rc_drop() };
           vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, no_else: *no_else })]
         },
+        ExternalEvent::TiedParamNote{ lifetime, .. } => {
+          vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
+        },
         ExternalEvent::ChainFailUse{ro, uses, definite, no_else, ..} => {
           vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, no_else: *no_else, is_ref: ro.is_ref() })]
         },
@@ -4126,7 +4148,7 @@ impl Visualizable for VisualizationData {
                 }
             }
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
-            | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } => {
+            | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
                 }
@@ -4441,6 +4463,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ChainFailAssign{ro, place, drops_old, no_else, ..} => {
                 let rc = if place.is_some() { None } else { ro.rc_drop() };
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { place, drops_old, rc, no_else }, line_number);
+            },
+            ExternalEvent::TiedParamNote{ro, lifetime, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime }, line_number);
             },
             ExternalEvent::ChainFailUse{ro, uses, definite, no_else, ..} => {
                 let is_ref = ro.is_ref();

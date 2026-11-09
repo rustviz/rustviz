@@ -301,6 +301,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               try_move: None,
               try_moves: HashMap::new(),
               tail_values: HashSet::new(),
+              tail_plain: HashSet::new(),
               exit_scopes: HashMap::new(),
             };
             visitor.visit_body(hir_body);
@@ -421,6 +422,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           try_move: None,
           try_moves: HashMap::new(),
           tail_values: HashSet::new(),
+          tail_plain: HashSet::new(),
           exit_scopes: HashMap::new(),
         };
         visitor.visit_body(hir_body);
