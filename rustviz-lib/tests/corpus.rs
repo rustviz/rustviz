@@ -1233,6 +1233,9 @@ const EXPECTED_OK: &[&str] = &[
     "deferred_init_loop_break",
     // A Copy value's scope end never mentions a drop (#793).
     "copy_scope_end_uniform",
+    // A closure holding only references is a value, not a resource (#791).
+    "closure_value_not_resource",
+    "closure_owning_still_resource",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14152,6 +14155,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. No resource is dropped.",
             // No dot without a tooltip.
             "=",
+        ],
+    },
+    // A closure that owns something with a destructor is still a resource
+    // (#791); `eat`/`own` keep their "captured resource" wording.
+    TooltipExpect {
+        name: "closure_owning_still_resource",
+        must_contain: &[
+            "own owns a closure which owns 1 resource via capture",
+            "own goes out of scope. Its 1 captured resource is dropped.",
+            "eat is moved into the call (an FnOnce closure can only be called once). u, which eat captured, is dropped during the call",
+            "t's resource is captured (moved) by closure own",
+        ],
+        must_not_contain: &[
+            "own's value",
+            "eat's value",
+        ],
+    },
+    // #791: a closure that holds only references has nothing to drop, so it
+    // is a "value" (#484), not a "resource". `f` and `pr` hold `&String`
+    // (they're Copy), `push` holds `&mut Vec<i32>`.
+    TooltipExpect {
+        name: "closure_value_not_resource",
+        must_contain: &[
+            "f's value is captured (immutably borrowed) by closure g",
+            "f's value is being shared by one or more variables",
+            "f's value is no longer immutably borrowed",
+            "Return immutably borrowed value from g to f",
+            "pr's value is immutably borrowed by apply; pr is read-only while the borrow is live",
+            "pr's value is no longer immutably borrowed",
+            "push's value is mutably borrowed by the closure passed to map; push can't be used while the borrow is live",
+            "push's value is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "f's resource",
+            "pr's resource",
+            "push's resource",
+            "=Return immutably borrowed resource from g to f",
         ],
     },
 ];
