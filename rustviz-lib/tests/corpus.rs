@@ -18770,3 +18770,32 @@ fn borrow_ends_at_rustcs_end_for_loops_and_reassigned_refs() {
         assert_eq!(ends[0].1, code_row_y(&code, line), "{:?} should be on the row of `{}`: {:?}", text, line, ends);
     }
 }
+
+/// #781: `match (g, (h, k)) { (r, z) => println!("{} {}", r, z.0) }`
+/// moves `h` and `k` into `z` on the arm's line, and `z.0` / `z.1` take
+/// their parts with it. Their acquire dots sat on the last row the
+/// line's stacked arrows add, with every other event of the column, so
+/// each column was a single dot with no lifeline. Each must have a state
+/// line, from the row `z` is bound on down to where `z.0` / `z.1` are
+/// dropped.
+#[test]
+fn nested_tuple_binding_member_columns_have_lifelines() {
+    let t = run_with_local_backend("tuple_scrutinee_nested").timeline_panel_string();
+    let mut checked = Vec::new();
+    for x in t.split("<text ").skip(1) {
+        let Some((tag, rest)) = x.split_once('>') else { continue };
+        let label = rest.split('<').next().unwrap_or("");
+        if !tag.contains("class=\"label") || !matches!(label, "z" | "z.0" | "z.1") {
+            continue;
+        }
+        let hash = attr(tag, "data-hash").expect("a label has a data-hash");
+        let bars: Vec<(f64, f64)> = start_tags(&t, "line")
+            .into_iter()
+            .filter(|l| attr(l, "data-hash") == Some(hash) && attr(l, "class").is_some_and(|c| c.starts_with("hollow") || c.starts_with("solid")))
+            .filter_map(|l| Some((attr(l, "y1")?.parse().ok()?, attr(l, "y2")?.parse().ok()?)))
+            .collect();
+        assert!(bars.iter().any(|(a, b)| b > a), "{}'s column has no lifeline: {:?}", label, bars);
+        checked.push(label);
+    }
+    assert_eq!(checked, ["z", "z.0", "z.1"]);
+}
