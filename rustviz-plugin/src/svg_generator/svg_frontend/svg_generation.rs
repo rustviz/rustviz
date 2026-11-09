@@ -89,6 +89,17 @@ fn ends_after_line_uses(e: &ExternalEvent, group: &[ExternalEvent], rest: &[Exte
     group.iter().chain(rest).filter(|o| o.get_id() != e.get_id()).any(|o| uses_rap(o, r))
 }
 
+/// Whether `die` is the end (`RefDie`) of the borrow of the reference
+/// that the arrow `arrow` copies or moves a new value into.
+fn ref_die_before_arrow(die: &ExternalEvent, arrow: &ExternalEvent) -> bool {
+    let ExternalEvent::RefDie { from, .. } = die else { return false };
+    if !matches!(arrow, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }) {
+        return false;
+    }
+    let (Some(r), Some(dest)) = (from.extract_rap(), ResourceAccessPoint_extract(arrow).1.extract_rap()) else { return false };
+    r.hash() == dest.hash()
+}
+
 /// The hash of the reference whose borrow `e` ends, if it is a
 /// StaticDie / MutableDie.
 fn ended_ref(e: &ExternalEvent) -> Option<u64> {
@@ -844,6 +855,16 @@ pub fn render_svg(
                     }
                     for (e, row) in front.iter().map(|e| (e, final_line_num))
                         .chain(back.iter().map(|e| (e, back_row))) {
+                        // A reference this arrow gives a new value, whose
+                        // old borrow ends on this line (`r2` in `(r1, r2)
+                        // = (r2, r1);`, #751): the end comes before the
+                        // new value, on the arrow's row. Left in the
+                        // line's sequence it was appended after the rows
+                        // inserted for the stack, below the swap.
+                        for d in rest_of_line.iter().filter(|d| ref_die_before_arrow(d, e)) {
+                            visualization_data.append_processed_external_event(d.clone(), row);
+                            skippable_ev.insert(d.get_id());
+                        }
                         // append all the events in the line map on the same line
                         if ends_after_line_uses(e, &ev, &rest_of_line) {
                             deferred_ends.push((line_num, e.clone(), row));
