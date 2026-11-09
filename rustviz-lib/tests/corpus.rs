@@ -18147,7 +18147,8 @@ fn old_loan_ends_on_the_path_that_reaches_the_write() {
     }
 }
 
-/// #778: a reference reassigned on one branch only. The old lender stays
+/// #778: a reference reassigned on one branch only (`borrow_end_join_else`, where the other arm reads it, is
+/// `old_lender_ends_on_each_arm_where_it_is_borrowed_no_longer`). The old lender stays
 /// borrowed until the latest end over the paths that meet after the `if`:
 /// rustc rejects a write to it before that row (`x += 1;` above the
 /// `println!` is E0506, checked), and accepts it right below. The end is
@@ -18157,7 +18158,6 @@ fn old_loan_ends_on_the_path_that_reaches_the_write() {
 fn old_lender_stays_borrowed_until_the_latest_end_over_the_paths() {
     for (name, end, used, write) in [
         ("borrow_end_join_one_branch", "x's value is no longer immutably borrowed", "println!(\"{}\", c);", "x += 1;"),
-        ("borrow_end_join_else", "x's value is no longer immutably borrowed", "println!(\"{}\", c);", "x += 1;"),
         ("borrow_end_other_path", "x's value is no longer immutably borrowed", "println!(\"{}\", c);", "x += 1;"),
         ("basic_if12", "x's value is no longer immutably borrowed", "println!(\"c {}\", *c);", "y += 9;"),
     ] {
@@ -18168,12 +18168,42 @@ fn old_lender_stays_borrowed_until_the_latest_end_over_the_paths() {
         assert!(!ends.is_empty(), "{}: no {:?}", name, end);
         assert!(ends.iter().all(|&y| y >= used_y),
             "{}: {:?} is drawn above `{}` (y={}), though the path that skips the reassignment still borrows: {:?}", name, end, used, used_y, ends);
-        if name.starts_with("borrow_end_join") {
+        if name == "borrow_end_join_one_branch" {
             let write_y = *code_rows_y(&code, write).last().unwrap();
             assert!(ends.iter().all(|&y| y < write_y),
                 "{}: {:?} is drawn on or below `{}` (y={}): {:?}", name, end, write, write_y, ends);
         }
     }
+}
+
+/// #778: with the read in the `else` arm, each end is drawn on the arm and
+/// row where it is true. On the path through the `then` arm `c` is
+/// overwritten, so `x`'s borrow ends at `c = &y;` there; on the `else`
+/// path `c` is read at the `println!`, so it ends there, on the `else`
+/// sub-column, and `c`'s `then` column doesn't end a borrow again on that
+/// row (the old head drew `x`'s only end on the `then` sub-column at the
+/// `println!` row, and a second "c's immutable borrow ends" there).
+#[test]
+fn old_lender_ends_on_each_arm_where_it_is_borrowed_no_longer() {
+    let rv = run_with_local_backend("borrow_end_join_else");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let write_y = code_row_y(&code, "c = &y;");
+    let read_y = code_row_y(&code, "println!(\"{}\", c);");
+    let mut ends = dots_listing_tooltip(&timeline, "x's value is no longer immutably borrowed");
+    ends.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    assert_eq!(ends.len(), 2, "x's borrow should end once per arm: {:?}", ends);
+    let (then_end, else_end) = (ends[0], ends[1]);
+    assert!((then_end.1 - write_y).abs() < 10.0,
+        "x's borrow on the `then` arm ends at `c = &y;` (y={}), not at {:?}", write_y, then_end);
+    assert!((else_end.1 - read_y).abs() < 10.0,
+        "x's borrow on the `else` arm ends at the `println!` (y={}), not at {:?}", read_y, else_end);
+    // `c`'s `then` column (left of c's own column, whose dot is the
+    // first "c immutably borrows a value") doesn't end a borrow on the
+    // `println!` row.
+    let c_col = dots_listing_tooltip(&timeline, "c immutably borrows a value")[0].0;
+    let c_ends = dots_where(&timeline, |l| l.iter().any(|t| t == "c's immutable borrow ends"));
+    assert!(c_ends.iter().all(|d| (d.1 - read_y).abs() >= 10.0 || d.0 >= c_col),
+        "a second \"c's immutable borrow ends\" on the `println!` row of the `then` arm: {:?}", c_ends);
 }
 
 /// #771: `r = if *r > 0 { &b } else { &c };` reads `*r` first, so the

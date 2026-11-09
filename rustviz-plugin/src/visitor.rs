@@ -2972,12 +2972,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   Some(end) => end,
                   None => end_of(self, &ref_data.lender),
                 };
+                // An end past the write (#778) is added once the whole
+                // body is visited, at the top level (`late_old_ends`).
+                self.defer_old_ends = end_line > line_num;
                 self.add_borrow_end_ev(end_line, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
+                self.defer_old_ends = false;
                 // ...and to each further lender (#171).
                 for co in ref_data.co_lenders.iter() {
                   let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
                   let co_end = end_of(self, co);
+                  self.defer_old_ends = co_end > line_num;
                   self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
+                  self.defer_old_ends = false;
                 }
               }
 
