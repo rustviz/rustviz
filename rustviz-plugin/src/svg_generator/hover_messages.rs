@@ -1572,6 +1572,22 @@ pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, poi
 // `*r` returned with r a reference (`r: &i32`): the caller gets a copy
 // of the value r points to, not a reference to it (#670). `**y` reads
 // the value behind the reference y points to.
+// `&self.s` / `&mut p.items[0]` returned (#784): a new reference to a
+// place reached through the reference `r`. `place` is the expression as
+// written, with its `&` / `&mut`. The data isn't copied, and `r`'s
+// borrow goes on with the reference.
+pub fn event_dot_reborrow_to_caller(ref_name: &String, place: &String) -> String {
+    let (what, target) = match place.strip_prefix("&mut ") {
+        Some(t) => ("a mutable reference", t),
+        None => ("a reference", place.strip_prefix('&').unwrap_or(place)),
+    };
+    format!(
+        "{what} to {0}, reborrowed through {1}, is returned to the caller; the data it points to is not copied",
+        fmt_style(&target.trim().to_owned()),
+        fmt_style(ref_name)
+    )
+}
+
 pub fn event_dot_copy_deref_to_caller(ref_name: &String, place: &String) -> String {
     let depth = place.chars().take_while(|c| *c == '*').count();
     match depth {
