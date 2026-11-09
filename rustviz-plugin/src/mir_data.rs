@@ -237,6 +237,61 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ends
     }
 
+    /// The last line, before `write_line`, where rustc's borrow checker
+    /// has the loan `borrow_idx` in scope on a path that reaches
+    /// `write_line`: where the loan ends for the code that writes there.
+    /// `nll_loan_end_lines` gives the last line over all paths, which can
+    /// be on another path (#770): in `if c { x += 1; r = &y; }` the loan
+    /// of `x` that `r` holds is dead on the way to `r = &y;` (`r` is
+    /// overwritten before it is read), though it lives on to a later read
+    /// of `r` on the path that skips the `if`. None when the loan is in
+    /// scope at `write_line` itself or later on a path back to it (a
+    /// loop), or never before it.
+    pub fn loan_end_on_path_to(&self, borrow_idx: usize, write_line: usize) -> Option<usize> {
+        let body_with_facts = self.bwf;
+        let body = &body_with_facts.body;
+        let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        let mut in_scope: Vec<(Location, usize)> = Vec::new();
+        let mut targets: Vec<Location> = Vec::new();
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for statement_index in 0..=data.statements.len() {
+                let location = Location { block, statement_index };
+                let line = self.location_to_line(location, body_with_facts);
+                if line == write_line {
+                    targets.push(location);
+                }
+                cursor.seek_before_primary_effect(location);
+                if cursor.get().iter().any(|b| b.index() == borrow_idx) {
+                    in_scope.push((location, line));
+                }
+            }
+        }
+        // The locations from which the write is reachable.
+        let preds = body.basic_blocks.predecessors();
+        let mut reaches: std::collections::HashSet<Location> = targets.iter().copied().collect();
+        let mut work = targets;
+        while let Some(l) = work.pop() {
+            let before: Vec<Location> = if l.statement_index > 0 {
+                vec![Location { block: l.block, statement_index: l.statement_index - 1 }]
+            } else {
+                preds[l.block].iter()
+                    .map(|&p| Location { block: p, statement_index: body.basic_blocks[p].statements.len() })
+                    .collect()
+            };
+            for b in before {
+                if reaches.insert(b) {
+                    work.push(b);
+                }
+            }
+        }
+        in_scope.into_iter()
+            .filter(|(l, _)| reaches.contains(l))
+            .map(|(_, line)| line)
+            .max()
+            .filter(|&end| end < write_line)
+    }
+
     // To get this to really work we would need to do a dataflow analysis to establish which temporaries 
     // refer to the same piece of data. Since the way the MIR is SSA.
     // For example:

@@ -2868,14 +2868,23 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // earlier than the write itself (#745). (A loan
                 // `*w = &c` made through a reference ends the same
                 // way.)
-                let end_line = self.loan_end(&ref_data)
-                  .filter(|&end| end < line_num && end >= ref_data.assigned_at)
-                  .unwrap_or(line_num);
+                //
+                // The loan's end on the paths that reach the write, if
+                // it lives on another one (`if c { x += 1; r = &y; }`
+                // with `r` read after the `if`), and for each lender
+                // of a reference that borrows from either of two
+                // (#770).
+                let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num).unwrap_or(line_num);
+                let end_line = match self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
+                  Some(end) => end,
+                  None => end_of(self, &ref_data.lender),
+                };
                 self.add_borrow_end_ev(end_line, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
                 // ...and to each further lender (#171).
                 for co in ref_data.co_lenders.iter() {
                   let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
-                  self.add_ev(line_num, evt, co.clone(), lhs_rty.clone(), false);
+                  let co_end = end_of(self, co);
+                  self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
                 }
               }
 

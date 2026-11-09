@@ -3342,6 +3342,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// The line rustc's borrow checker ends the loan `rd` holds on
+  /// `lender` (`rd`'s lender or one of its co-lenders), for the write
+  /// at `write_line` that gives the reference a new value: the loan's
+  /// last line when that is before the write; else its end on the paths
+  /// that reach the write (#770), as the loan can be live on another
+  /// path, or past the write for a read of the old reference there is
+  /// none; None when it is live up to the write.
+  pub fn old_loan_end(&self, rd: &RefData, lender: &ResourceTy, write_line: usize) -> Option<usize> {
+    let ResourceTy::Value(lender_rap) = lender else { return None };
+    if lender_rap.is_fn() {
+      return None;
+    }
+    let root = lender_rap.name().split('.').next().unwrap_or(lender_rap.name()).to_owned();
+    let loans = self.gather_borrow_data(self.bwf);
+    let own = match rd.loan() {
+      Some(LoanId::Span(sp)) if *lender == rd.lender => loans.iter().find(|b| b.span == sp),
+      Some(LoanId::Line(l)) if *lender == rd.lender =>
+        loans.iter().find(|b| b.region.0 == l && b.borrowed_place.as_deref() == Some(root.as_str())),
+      // A co-lender, or a reference with several lenders (#171): the
+      // first loan of that lender made from where the reference was
+      // given its value.
+      _ => loans.iter()
+        .filter(|b| b.borrowed_place.as_deref() == Some(root.as_str())
+          && b.region.0 >= rd.assigned_at && b.region.0 <= write_line)
+        .min_by_key(|b| (b.region.0, b.borrow_idx)),
+    }?;
+    let in_range = |end: usize| end < write_line && end >= rd.assigned_at;
+    Some(own.region.1).filter(|&end| in_range(end))
+      .or_else(|| self.loan_end_on_path_to(own.borrow_idx, write_line).filter(|&end| in_range(end)))
+  }
+
   /// `src` (its old data `old`) is being given a new value: the
   /// references that took its loan keep it, and the borrow checker
   /// ends it where it ends the loan (see `ref_carriers`).

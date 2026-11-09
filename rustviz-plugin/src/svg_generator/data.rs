@@ -2351,9 +2351,25 @@ fn old_borrow_ends_first(history: &mut [(usize, Event)]) {
                     || new_lenders.as_ref().zip(lender(to)).is_some_and(|(ls, l)| !ls.contains(&l)),
                 _ => false,
             };
-            let (ends, rest): (Vec<_>, Vec<_>) = history[first_start..j].iter().cloned()
+            // A read of the old value that the new one's right-hand
+            // side makes (`r = if *r > 0 { &b } else { &c };` copies
+            // `*r`), recorded after the new borrows because the row's
+            // arrows were appended first (#771): evaluated first, so it
+            // goes before the end too. Its id is older than the new
+            // reference's.
+            let first_id = history[first_start..j].iter()
+                .filter(|(_, e)| starts_reference(e))
+                .map(|(_, e)| e.get_id())
+                .min()
+                .unwrap_or(0);
+            let is_read = |e: &Event| matches!(e,
+                Event::Duplicate { .. } | Event::StaticLend { .. } | Event::MutableLend { .. } | Event::Move { .. })
+                && e.get_id() < first_id;
+            let (reads, others): (Vec<_>, Vec<_>) = history[first_start..j].iter().cloned()
+                .partition(|(_, e)| is_read(e));
+            let (ends, rest): (Vec<_>, Vec<_>) = others.into_iter()
                 .partition(|(_, e)| old_end(e));
-            for (slot, ev) in history[first_start..j].iter_mut().zip(ends.into_iter().chain(rest)) {
+            for (slot, ev) in history[first_start..j].iter_mut().zip(reads.into_iter().chain(ends).chain(rest)) {
                 *slot = ev;
             }
         }
