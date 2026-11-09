@@ -1208,6 +1208,8 @@ const EXPECTED_OK: &[&str] = &[
     "return_ref_param_whole",
     "return_ref_param_explicit",
     "return_ref_param_reborrow",
+    // `for n in a` over Copy elements draws no move into `n` (#772).
+    "for_copy_arrow",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -6430,7 +6432,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x₂ is initialized with the value inside the Option next() returns",
             "x is bound to a copyable value",
             // for_outer
-            "Move from ys to y₂",
+            // `y₂` is an i32 copied out of the iterator (#772), so no
+            // arrow says it was moved from `ys`.
+            "ys's resource is moved into the `for` loop's iterator",
+            "y₂ is bound to a copyable value",
             "y goes out of scope. Its resource is dropped.",
             // else_if_let
             "z is initialized with a copy of a",
@@ -6450,6 +6455,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w₂ is initialized with a copy of b",
         ],
         must_not_contain: &[
+            "Move from ys to y₂",
             "x₂ is initialized with the value next() returns",
             "z₂",
             "z is assigned a copy of b",
@@ -13799,6 +13805,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "list's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "for_copy_arrow",
+        // #772: `a` is moved into the loop's iterator; each `n` / `p` is
+        // an i32 / (i32, i32) copied out of it, so no arrow says it was
+        // moved from `a`. A String is moved out of the iterator into `s`.
+        must_contain: &[
+            "a's resource is moved into the `for` loop's iterator",
+            "pts's resource is moved into the `for` loop's iterator",
+            "n is bound to a copyable value",
+            "p is bound to a copyable value",
+            "Move from names to s",
+        ],
+        must_not_contain: &[
+            "Move from a to n",
+            "Move from pts to p",
         ],
     },
 ];
