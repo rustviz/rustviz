@@ -231,6 +231,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // what is still uninitialized at the end of each branch, so after
   // `if c { s = a } else { s = b }` a later `s = …` is a reassignment.
   pub uninit_locals: HashMap<rustc_hir::HirId, DeferredLet>,
+  // `let x;` locals that are initialized on some paths to this point
+  // and not on others (#244): `let mut s; if c { s = a; }` leaves s
+  // maybe-initialized after the `if`. Rust can't read s there (E0381),
+  // and keeps a runtime drop flag for it: a later `s = …` drops the old
+  // value only if there is one, and so does s's scope end. Set where
+  // branches join (`join_uninit_locals`); an assignment takes x out.
+  pub maybe_init_locals: HashSet<rustc_hir::HirId>,
 
   // For `let x = if … { a } else { b };` (and `match`), the events that
   // pair each branch's value with `x` are emitted before the branches
@@ -7146,7 +7153,9 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
           Some(Ownership::Maybe)
         } else if ends.iter().any(holds) {
           // Initialized on some paths only (`let mut s; if c { s = …
-          // }`, #234): treated as held, as before; README Limitations.
+          // }`, #234): there may be a value to drop. The visitor's
+          // `maybe_init_locals` says the drop is the drop flag's to
+          // decide (#244).
           Some(Ownership::Held)
         } else {
           // Moved, or never initialized, on every path.

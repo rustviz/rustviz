@@ -266,10 +266,6 @@ const Description: React.FC = () => (
     <p><strong>Some of what&apos;s drawn is wrong</strong>, so don&apos;t rely on it for:</p>
     <ul>
       <li>
-        A variable assigned in only some branches of an <code>if</code> is drawn
-        as owning a value afterwards; Rust treats it as possibly uninitialized.
-      </li>
-      <li>
         <code>Rc</code>/<code>Arc</code> reference counts aren&apos;t tracked: each
         clone is drawn as its own owner, and its drop says only that it lowers
         the count (which clone frees the value isn&apos;t shown).

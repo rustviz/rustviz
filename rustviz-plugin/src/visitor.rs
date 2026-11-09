@@ -2787,13 +2787,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         }
 
         // `x = rhs` where x came from `let x;` and is still
-        // uninitialized here: this initializes x (#234).
+        // uninitialized here: this initializes x (#234). If only some
+        // paths to here initialized x (#244), it is a reassignment that
+        // drops x's old value only if there is one, and x has a value
+        // from here on.
+        let mut maybe_init = false;
         if let (ExprKind::Assign(..), ExprKind::Path(QPath::Resolved(None, path))) = (expr.kind, lhs_expr.kind) {
           if let Res::Local(hirid) = path.res {
             if let Some(decl) = self.uninit_locals.remove(&hirid) {
               self.init_deferred_local(hirid, decl, rhs_expr);
               return;
             }
+            maybe_init = self.maybe_init_locals.remove(&hirid);
           }
         }
 
@@ -3286,6 +3291,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             maybe_moved,
             by_cond,
             parts,
+            maybe_init,
           });
           *self.unique_id += 1;
         }
@@ -3539,6 +3545,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // Both branches start from the same set of uninitialized
         // `let x;` locals (#234); see join_uninit_locals.
         let uninit_before = self.uninit_locals.clone();
+        let maybe_init_before = self.maybe_init_locals.clone();
         // An exit in a branch sees neither the other branch's events
         // nor the binding of the `if`'s value to a `let` (#410).
         let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
@@ -3586,6 +3593,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         let if_inner = self.raps_declared_since(if_hash_lo, &uninit_before);
         let else_hash_lo = self.rap_hashes;
         let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
+        let maybe_init_after_if = std::mem::replace(&mut self.maybe_init_locals, maybe_init_before.clone());
         let if_ids = if_lo..*self.unique_id;
         // A let-chain condition that moved a variable before a part
         // that then failed (#281): the else branch (or the implicit
@@ -3660,7 +3668,24 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           else_inner = &else_inner | &else_if_let_bindings(e, &self.tcx, &self.raps);
         }
         let uninit_after_else = std::mem::take(&mut self.uninit_locals);
-        self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if), (else_expr, uninit_after_else)]);
+        let maybe_init_after_else = std::mem::take(&mut self.maybe_init_locals);
+        #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+        let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
+        // The `let x;` locals the if branch surely assigned (only
+        // tested with `any` below: order doesn't matter).
+        #[expect(clippy::disallowed_methods, reason = "only tested with any; order doesn't matter")]
+        let assigned_in_if: Vec<HirId> = known.iter()
+          .filter(|id| !uninit_after_if.contains_key(id) && !maybe_init_after_if.contains(id))
+          .copied().collect();
+        let maybe_init = self.join_uninit_locals(vec![
+          (Some(if_expr), uninit_after_if, maybe_init_after_if),
+          (else_expr, uninit_after_else, maybe_init_after_else),
+        ], &known);
+        // A `let x;` local the if branch assigned that may still have
+        // no value after the `if` (#244). (Not a reference: it owns
+        // nothing a drop flag could drop.)
+        let assigns_maybe_init = assigned_in_if.iter().any(|id| self.maybe_init_locals.contains(id)
+          && !self.tcx.typeck(id.owner).node_type(*id).is_ref());
         let else_ids = if_ids.end..*self.unique_id;
         self.exit_frames.pop();
         // The `if let` bindings go out of scope with the `if`.
@@ -3734,7 +3759,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // a branch.
             let always_runs = matches!(guard_expr.kind, ExprKind::Let(l)
               if pat_is_irrefutable(l.pat, self.tcx.typeck(l.pat.hir_id.owner)));
-            let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch;
+            // A body that assigns a `let x;` local is drawn as a branch
+            // too when x may have no value on the implicit `else` path
+            // (#244): the join says so.
+            let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch
+              || assigns_maybe_init;
             // A tuple scrutinee's variables are moved whether or not the
             // body runs (#327), so that's a second path as well.
             if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {
@@ -3960,6 +3989,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             branch_type: b_ty,
             split_point: split,
             merge_point: merge,
+            maybe_init,
             id: *self.unique_id });
             *self.unique_id += 1;
         // Both branches leave the function: nothing after the `if` runs.
@@ -4168,6 +4198,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // Every arm starts from the same uninitialized `let x;`
             // locals (#234); see join_uninit_locals.
             let uninit_before = self.uninit_locals.clone();
+            let maybe_init_before = self.maybe_init_locals.clone();
             let mut uninit_ends = Vec::new();
             // An exit in an arm doesn't see the binding of any arm's
             // value to a `let` (#410): it happens after the match. The
@@ -4503,6 +4534,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               let prev_inside_branch = self.inside_branch;
               self.inside_branch = true;
               self.uninit_locals = uninit_before.clone();
+              self.maybe_init_locals = maybe_init_before.clone();
               let body_lo = *self.unique_id;
               // An exit in the arm drops the tuple scrutinee (#327).
               let live = !scrutinee_moves.is_empty();
@@ -4530,7 +4562,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 b.clear();
               }
               let body_ids = body_lo..*self.unique_id;
-              uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals)));
+              uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals), std::mem::take(&mut self.maybe_init_locals)));
               self.inside_branch = prev_inside_branch;
 
               all_pat_decls = &all_pat_decls | &pat_decls;
@@ -4668,7 +4700,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
               }
             }
-            self.join_uninit_locals(uninit_ends);
+            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+            let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
+            let maybe_init = self.join_uninit_locals(uninit_ends, &known);
             self.exit_frames.pop();
             self.in_scope.truncate(entry_len);
             // Single-arm: events already routed through
@@ -4701,6 +4735,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               branch_type: BranchType::Match(b_ty_names, b_slices),
               split_point: split,
               merge_point: merge,
+              maybe_init,
               id: *self.unique_id });
             *self.unique_id += 1;
           }
@@ -7537,23 +7572,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// Set the uninitialized-locals state after a branch construct from
   /// the state at the end of each branch (`None` = the implicit empty
-  /// else of an `if`). A `let x;` local is still definitely
-  /// uninitialized after the join iff it is so at the end of every
-  /// branch that reaches the join; branches of type `!` (`return`,
-  /// `panic!()`) don't. If x is initialized on only some paths, a later
-  /// `x = …` is treated as a reassignment.
-  fn join_uninit_locals(&mut self, ends: Vec<(Option<&'tcx Expr<'tcx>>, HashMap<HirId, DeferredLet>)>) {
+  /// else of an `if`): its definitely and its maybe uninitialized
+  /// `let x;` locals. Only branches that reach the join count;
+  /// branches of type `!` (`return`, `panic!()`) don't. A `let x;` local
+  /// is still definitely uninitialized after the join iff it is so at
+  /// the end of every such branch. If it is initialized at the end of
+  /// some and not of others, it is maybe-initialized (#244): a later
+  /// `x = …` is a reassignment whose old value a drop flag drops. If
+  /// every branch that gets here initialized it, it is initialized.
+  /// `known`: the locals declared before the construct (definitely or
+  /// maybe uninitialized there); one declared inside a branch is gone
+  /// after it. Returns the maybe-initialized locals that have a column,
+  /// for the conditional's Branch event.
+  fn join_uninit_locals(
+    &mut self,
+    ends: Vec<(Option<&'tcx Expr<'tcx>>, HashMap<HirId, DeferredLet>, HashSet<HirId>)>,
+    known: &HashSet<HirId>,
+  ) -> HashSet<ResourceAccessPoint> {
     let diverges = |e: &Option<&'tcx Expr<'tcx>>| {
       e.is_some_and(|e| self.expr_diverges(e))
     };
-    let mut reaching: Vec<HashMap<HirId, DeferredLet>> =
-      ends.iter().filter(|(e, _)| !diverges(e)).map(|(_, m)| m.clone()).collect();
+    let mut reaching: Vec<(HashMap<HirId, DeferredLet>, HashSet<HirId>)> =
+      ends.iter().filter(|(e, _, _)| !diverges(e)).map(|(_, m, s)| (m.clone(), s.clone())).collect();
     if reaching.is_empty() {
-      reaching = ends.into_iter().map(|(_, m)| m).collect();
+      reaching = ends.into_iter().map(|(_, m, s)| (m, s)).collect();
     }
-    let mut joined = reaching.pop().unwrap_or_default();
-    joined.retain(|id, _| reaching.iter().all(|m| m.contains_key(id)));
+    let mut joined = reaching.first().map(|(m, _)| m.clone()).unwrap_or_default();
+    joined.retain(|id, _| reaching.iter().all(|(m, _)| m.contains_key(id)));
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let maybe: HashSet<HirId> = reaching.iter()
+      .flat_map(|(m, s)| m.keys().chain(s.iter()).copied())
+      .filter(|id| known.contains(id) && !joined.contains_key(id))
+      .collect();
     self.uninit_locals = joined;
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let cols = maybe.iter()
+      .filter_map(|id| self.raps.get(&binding_name(&self.tcx, *id)).map(|rd| rd.rap.clone()))
+      .collect();
+    self.maybe_init_locals = maybe;
+    // A struct's field columns (`p.name`) got their values with it.
+    self.with_struct_members(&cols)
   }
 
   /// The first assignment `x = rhs` to a `let x;` binding (#234). It
