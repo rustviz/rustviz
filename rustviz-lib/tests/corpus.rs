@@ -121,6 +121,7 @@ const EXPECTED_OK: &[&str] = &[
     "deep_nested_if",
     "match_three_arms",
     "if_let_no_else",
+    "edition2024/temporary_drop_if_let_no_else",
     "match_one_arm",
     "match_tuple_destructure",
     // — Conditionals composed with iteration / capture. Verifies
@@ -11057,6 +11058,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from into_iter to (temporary 4)",
             "Move from into_iter to (temporary 5)",
             "Move from make to (temporary 6)",
+            "This temporary Option<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Option<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
@@ -13229,7 +13231,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that make_p returns, for the match to inspect its field name. The pattern of the arm that runs can move that field, or parts of it, into its bindings; what is left in the temporary is dropped with it after the match",
             "This temporary P is dropped when the match ends, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field name",
             "Move from make_o to (temporary 7)",
-            "This temporary O is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it everything in it but what the pattern moved out of its field opt (all of it, if the pattern didn't match)",
+            "This temporary O is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it everything in it but what the pattern moved out of its field opt (all of it, if the pattern didn't match)",
             "q.tag goes out of scope. Its resource is dropped.",
             "Move from make_w to (temporary 8)",
             "A temporary holds the value that make_w returns, for the `let` pattern to take its field pair apart. The pattern moves parts of that field into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
@@ -13273,7 +13275,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that res returns, for the `let` in this let chain to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
             "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "Move from pair to (temporary 2)",
-            "This temporary (String, String) is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "This temporary (String, String) is dropped when the condition of this `if` fails (before the code after the `if` runs), or when the block its let chain matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "Move from res to (temporary 3)",
             "This temporary Result<String, String> is dropped at the end of each iteration of this `while let` loop, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
         ],
@@ -13822,6 +13824,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "Move from a to n",
             "Move from pts to p",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/temporary_drop_if_let_no_else",
+        // #776: with no `else` the scrutinee temporary of an `if let` /
+        // let chain drops when the pattern (condition) fails, before the
+        // code after the `if`, or when the matched block ends (edition
+        // 2024; checked with a Drop-printing program). With an `else`,
+        // the `else` wording stays.
+        must_contain: &[
+            "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<Box<i32>> is dropped when the condition of this `if` fails (before the code after the `if` runs), or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<Box<f64>> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            // No `else` exists for these two.
+            "This temporary Vec<String> is dropped before the `else` block",
+            "This temporary Option<Box<i32>> is dropped before the `else` block",
         ],
     },
 ];
