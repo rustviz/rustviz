@@ -1200,6 +1200,11 @@ const EXPECTED_OK: &[&str] = &[
     // The Copy arrow from a call doesn't claim the call returns a value
     // the variable only got part of (#762).
     "copy_arrow_partial_result",
+    "tuple_scrutinee_nested",
+    "tuple_scrutinee_part_columns",
+    "or_pattern_tuple_scrutinee_nested",
+    "or_pattern_tuple_scrutinee_struct",
+    "reassign_partly_moved",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13598,6 +13603,165 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy of the value map() returns to d",
         ],
     },
+    TooltipExpect {
+        name: "tuple_scrutinee_nested",
+        // A tuple literal nested in the scrutinee (#627): `match (a, (b,
+        // c))` moves `b` and `c` into the temporary too. `x` takes b's
+        // String (the old plugin gave `x` no acquire and said "x goes
+        // out of scope. No resource is dropped."), and c's is dropped
+        // with the temporary at the end of the match, not at c's scope
+        // end. The same in `if let`, and for `z` bound from the whole
+        // inner tuple.
+        must_contain: &[
+            "Move from b to x",
+            "x acquires ownership of a resource",
+            "c's resource is moved into the temporary tuple (a, (b, c))",
+            "The temporary tuple (a, (b, c)) is dropped here, at the end of the match, and with it c's resource",
+            "b goes out of scope. No resource is dropped.",
+            "c goes out of scope. No resource is dropped.",
+            "Move from e to y",
+            "The temporary tuple (d, (e, f)) is dropped here, at the end of the if branch, and with it f's resource",
+            "The pattern didn't match, so the temporary tuple (d, (e, f)) is dropped here, and with it d's, e's and f's resources",
+            "e goes out of scope. No resource is dropped: e was moved or dropped in every branch above.",
+            "Move from h to z",
+            "Move from k to z",
+            "z goes out of scope. Its resource is dropped.",
+            // `(.., z3)` pairs `z3` with the last element (the old plugin
+            // drew `Move from a3 to z3`).
+            "Move from c3 to z3",
+            "a3's resource is moved into the temporary tuple (a3, b3, c3)",
+        ],
+        must_not_contain: &[
+            "Move from a3 to z3",
+            "=b goes out of scope. Its resource is dropped.",
+            "=c goes out of scope. Its resource is dropped.",
+            "=x goes out of scope. No resource is dropped.",
+            "=e goes out of scope. Its resource is dropped.",
+            "=f goes out of scope. Its resource is dropped.",
+            "and with it d's resource",
+            "=h goes out of scope. Its resource is dropped.",
+            "=k goes out of scope. Its resource is dropped.",
+            "=z goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_part_columns",
+        // A tuple or struct variable with part columns in a tuple
+        // scrutinee (#627): `match (s, u)` moves `u` into the temporary
+        // tuple, so what the pattern doesn't take of it is dropped with
+        // the temporary when the match (or the if branch) ends. The old
+        // plugin drew `u` as never moved and dropped `u.1` / `w.b` /
+        // `m.1` at their scope end (`m.1` by a drop flag, as if the
+        // else branch had left it in `m`).
+        must_contain: &[
+            "u's resource is moved into the temporary tuple (s, u)",
+            "The temporary tuple (s, u) is dropped here, at the end of the match, and with it u's resource",
+            "u.0 goes out of scope. No resource is dropped.",
+            "u.1 goes out of scope. No resource is dropped.",
+            "Move from v.0 to x2",
+            "v's resource is moved into the temporary tuple (s2, v)",
+            "v.1's resource is moved into the temporary tuple (s2, v)",
+            "The temporary tuple (s2, v) is dropped here, at the end of the match, and with it v.1's resource",
+            "v.1 goes out of scope. No resource is dropped.",
+            "Move from w.a to a",
+            "The temporary tuple (s3, w) is dropped here, at the end of the match, and with it w.b's resource",
+            "w.b goes out of scope. No resource is dropped.",
+            "The temporary tuple (s4, m) is dropped here, at the end of the if branch, and with it m.1's resource",
+            "The pattern didn't match, so the temporary tuple (s4, m) is dropped here, and with it s4's and m's resources",
+            "m goes out of scope. No resource is dropped: m was moved or dropped in every branch above.",
+            "m.0 goes out of scope. No resource is dropped: m.0 was moved or dropped in every branch above.",
+            "m.1 goes out of scope. No resource is dropped: m.1 was moved or dropped in every branch above.",
+        ],
+        must_not_contain: &[
+            "=u goes out of scope. Its resource is dropped.",
+            "=u.0 goes out of scope. Its resource is dropped.",
+            "=u.1 goes out of scope. Its resource is dropped.",
+            "only v.1 is dropped",
+            "=v.1 goes out of scope. Its resource is dropped.",
+            "only w.b is dropped",
+            "=w.b goes out of scope. Its resource is dropped.",
+            "and with it s4's resource",
+            "m.1 is dropped.",
+            "=m.1 goes out of scope. Its resource is dropped.",
+            "=m.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_tuple_scrutinee_nested",
+        // An or-pattern binding a name from different parts of what a
+        // tuple scrutinee moves into its temporary (#627): `u` (or the
+        // inner literal's `b` / `c`) is moved into the temporary, `x`
+        // takes one part out of it, and whatever `x` doesn't take is
+        // dropped with the temporary at the end of the match. #612's
+        // plugin refused this ("or-patterns that bind `x` from different
+        // parts of `u`, which the tuple or struct being matched moves
+        // into a temporary").
+        must_contain: &[
+            "u's resource is moved into the temporary tuple (s, u)",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved out of the temporary tuple (s, u) into x here; otherwise it stays in the tuple",
+            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved out of the temporary tuple (s, u) into x here; otherwise it stays in the tuple",
+            "The temporary tuple (s, u) is dropped here, at the end of the match, and with it whatever of u.0's and u.1's resources x didn't take",
+            "u.0 goes out of scope. No resource is dropped.",
+            "u.1 goes out of scope. No resource is dropped.",
+            "y is bound from b or c, whichever alternative of the pattern matches. If it's the alternative that binds y from c, c's resource is moved out of the temporary tuple (a, (b, c)) into y here; otherwise it stays in the tuple",
+            "The temporary tuple (a, (b, c)) is dropped here, at the end of the match, and with it whatever of b's and c's resources y didn't take",
+            "c goes out of scope. No resource is dropped.",
+            "The temporary tuple (s2, v) is dropped here, at the end of the match, and with it whatever of v.0's and v.1's resources z didn't take",
+            "The temporary tuple (s3, w) is dropped here, at the end of the if branch, and with it whatever of w.0's and w.1's resources n didn't take",
+            "w.1 goes out of scope. No resource is dropped: w.1 was moved or dropped in every branch above.",
+        ],
+        must_not_contain: &[
+            "otherwise u.0 still owns it",
+            "otherwise b still owns it",
+            "=u.0 goes out of scope. Its resource is dropped.",
+            "=c goes out of scope. Its resource is dropped.",
+            "Move from b to y",
+        ],
+    },
+    TooltipExpect {
+        name: "reassign_partly_moved",
+        // Reassigning a tuple some of whose parts were moved out before
+        // (#628): only the parts still there are dropped, those moved on
+        // some paths only by their drop flags ("no branch above" after a
+        // match, "nothing above" after a `let`). The old plugin said on
+        // the tuple's own dot that its whole previous value is dropped.
+        must_contain: &[
+            "t acquires ownership of a new resource. Its previous t.0 and t.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "u acquires ownership of a new resource. Its previous u.0 and u.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+            "u.0 acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "v.1 acquires ownership of a new resource. Its previous v.1.0 and v.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "w acquires ownership of a new resource. Its previous w.0 was moved out earlier, so only its previous w.1 and w.2 are dropped.",
+        ],
+        must_not_contain: &[
+            "=t acquires ownership of a new resource; its previous resource is dropped",
+            "=u acquires ownership of a new resource; its previous resource is dropped",
+            "=v.1 acquires ownership of a new resource; its previous resource is dropped",
+            "=w acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_tuple_scrutinee_struct",
+        // `match (a, b) { (x, _) | (_, x) => .. }` with `a`, `b` structs:
+        // the tuple literal moves a, b and their fields into the temporary
+        // tuple, x takes one of them out, and the tuple's drop takes the
+        // rest. #580 refused this (a struct's part columns weren't drawn
+        // moving into the tuple); #627 draws them.
+        must_contain: &[
+            "a's resource is moved into the temporary tuple (a, b)",
+            "a.n's resource is moved into the temporary tuple (a, b)",
+            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a.n's resource is moved out of the temporary tuple (a, b) into x.n here; otherwise it stays in the tuple",
+            "The temporary tuple (a, b) is dropped here, at the end of the match, and with it whatever of a.n's and b.n's resources x didn't take",
+            "a goes out of scope. No resource is dropped.",
+            "a.n goes out of scope. No resource is dropped.",
+            "x.n goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Move from a to x",
+            "Move from a.n to x.n",
+            "=a.n goes out of scope. Its resource is dropped.",
+            "=b.n goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -16050,10 +16214,6 @@ fn or_pattern_binding_from_different_places_refusals() {
          "or-patterns that bind `x` through different references being matched"),
         ("fn main() {\n    let mut a = String::from(\"a\");\n    let mut b = String::from(\"b\");\n    let t = (Some(&mut a), Some(&mut b));\n    match t {\n        (Some(x), _) | (_, Some(x)) => x.push('!'),\n        _ => {}\n    }\n}\n",
          "or-patterns that bind the mutable reference `x` from different places in the value being matched"),
-        // A struct moved into the tuple being matched: the tuple isn't
-        // drawn for it (#327), so x would look taken from a itself.
-        ("struct P { n: String }\nfn main() {\n    let a = P { n: String::from(\"a\") };\n    let b = P { n: String::from(\"b\") };\n    match (a, b) {\n        (x, _) | (_, x) => println!(\"{}\", x.n),\n    }\n}\n",
-         "or-patterns that bind `x` from different values of a tuple being matched, when a value is a struct or tuple"),
     ] {
         let err = Rustviz::new(src).expect_err("an or-pattern binding of this kind must not render");
         let msg = err.to_string();
@@ -16083,29 +16243,23 @@ fn or_pattern_let_binding_a_reference_or_struct_from_different_places_is_refused
     }
 }
 
-/// An or-pattern nested inside another pattern (#612) is refused when the
-/// places are parts of a variable that a tuple literal being matched moved
-/// into a temporary (`match (s, u) { (p, (x, _) | (_, x)) => … }`): what
-/// `x` doesn't take of `u` is dropped with the temporary at the end of the
-/// match / `let`, not by a drop flag at `u`'s scope end, which is what
-/// drawing `u.0` / `u.1` as maybe-moved would say. (A nested `ref x` is no
-/// longer refused: it's drawn as a borrow, like a top-level one, #565; see
-/// `or_pattern_nested_ref`.) In a `match` and an `if let` the refusal is
-/// the one for a tuple value that is a struct or tuple (#580), which
-/// comes first.
+/// An or-pattern nested inside another pattern (#612) is refused in a `let`
+/// when the places are parts of a variable that a tuple literal moved into
+/// a temporary (`let (p, (x, _) | (_, x)) = (s, u);`): what `x` doesn't
+/// take of `u` is dropped with the temporary at the end of the `let`, not
+/// by a drop flag at `u`'s scope end, which is what drawing `u.0` / `u.1`
+/// as maybe-moved would say. The same pattern in a `match` or `if let` is
+/// drawn (#627, `or_pattern_tuple_scrutinee_nested`). (A nested `ref x` is
+/// no longer refused: it's drawn as a borrow, like a top-level one, #565;
+/// see `or_pattern_nested_ref`.)
 #[test]
 fn nested_or_pattern_that_cant_be_drawn_is_refused() {
     env::set_var("RV_RUNNER", "local");
     let u = "    let s = String::from(\"s\");\n    let u = (String::from(\"b\"), String::from(\"c\"));\n";
     let temporary = "or-patterns that bind `x` from different parts of `u`, which the tuple or struct being matched moves into a temporary";
-    let tuple_value = "or-patterns that bind `x` from different values of a tuple being matched, when a value is a struct or tuple or is copied into it";
+    // Only the `let` form is still refused (#439 / #445 draw what a
+    // `let` leaves in its literal's temporary).
     for (src, expected) in [
-        (format!("fn main() {{\n{u}    match (s, u) {{\n        (p, (x, _) | (_, x)) => println!(\"{{}} {{}}\", p, x),\n    }}\n}}\n"),
-         tuple_value),
-        (format!("fn main() {{\n{u}    match (s, u) {{\n        (p, (x, _)) | (p, (_, x)) => println!(\"{{}} {{}}\", p, x),\n    }}\n}}\n"),
-         tuple_value),
-        (format!("fn main() {{\n{u}    if let (p, (x, _) | (_, x)) = (s, u) {{\n        println!(\"{{}} {{}}\", p, x);\n    }}\n}}\n"),
-         tuple_value),
         (format!("fn main() {{\n{u}    let (p, (x, _) | (_, x)) = (s, u);\n    println!(\"{{}} {{}}\", p, x);\n}}\n"),
          temporary),
     ] {
@@ -16113,6 +16267,31 @@ fn nested_or_pattern_that_cant_be_drawn_is_refused() {
         let msg = err.to_string();
         assert!(msg.contains(expected), "expected the or-pattern refusal for\n{}\ngot:\n{}", src, msg);
     }
+}
+
+/// A reassignment that drops what's left of a partly moved tuple says so
+/// once per part column (#628): the part's "acquires ownership of a new
+/// resource. Its previous resource is dropped here only if …" already
+/// says it acquires, so "acquires ownership of a resource" isn't repeated
+/// on the same dot (the old plugin showed both, which reads like a fresh
+/// first value).
+#[test]
+fn reassign_of_partly_moved_tuple_does_not_repeat_acquire() {
+    let rv = run_with_local_backend("reassign_partly_moved");
+    let groups = tooltip_lines(&rv.timeline_panel_string());
+    let mut checked = 0;
+    for lines in &groups {
+        for l in lines {
+            let Some(name) = l.strip_suffix(" acquires ownership of a resource") else { continue };
+            let again = format!("{} acquires ownership of a new resource", name);
+            assert!(
+                !lines.iter().any(|o| o.starts_with(&again)),
+                "one dot says both {:?} and a reassignment of {}: {:?}", l, name, lines
+            );
+        }
+        checked += lines.iter().filter(|l| l.contains("acquires ownership of a new resource. Its previous resource is dropped here only if")).count();
+    }
+    assert!(checked >= 6, "expected the parts' maybe-moved reassignment dots, got {:?}", groups);
 }
 
 /// A `return` inside a branch drops every value the function still owns

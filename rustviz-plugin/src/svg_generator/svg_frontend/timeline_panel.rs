@@ -1528,15 +1528,15 @@ fn render_dot(
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
+                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
-                    let title = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false })
+                    let title = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false, .. })
                         // (Before the new value's Acquire on this line.)
                         && maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)) {
                         // A `let` or-pattern, not a branch, may have moved it (#597).
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, true)
-                    } else if let Event::OwnerDropAtReassign { maybe_moved: true, by_cond } = event {
+                    } else if let Event::OwnerDropAtReassign { maybe_moved: true, by_cond, .. } = event {
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
                     } else if matches!(event, Event::OwnerDropUnlessReturned) {
                         let value = visualization_data.timelines[hash].resource_access_point.holds_value();

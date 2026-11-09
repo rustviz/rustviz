@@ -383,6 +383,58 @@ pub fn moved_above(by_cond: bool) -> &'static str {
     if by_cond { "nothing above" } else { "no branch above" }
 }
 
+// Reassigning a struct or tuple some of whose parts were moved out
+// before (#628): like its scope end (`event_dot_struct_partial_go_out_of_scope`),
+// only the parts still there are dropped, those moved on some paths
+// only by a drop flag ("nothing above" after a `let`'s or-pattern,
+// "no branch above" after a branch, #597). "Its previous t.0" names
+// the old value's part, not the new one.
+pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate::svg_generator::data::ReassignParts) -> String {
+    fn join(names: &[String]) -> (String, bool) {
+        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        let s = match fmt.len() {
+            0 | 1 => fmt.concat(),
+            n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+        };
+        (s, names.len() > 1)
+    }
+    let mut out = format!("{} acquires ownership of a new resource.", fmt_style(my_name));
+    let (moved_s, moved_plural) = join(&parts.moved);
+    let (dropped_s, dropped_plural) = join(&parts.dropped);
+    if parts.maybe_moved.is_empty() {
+        let rest = if parts.dropped.is_empty() {
+            String::from("nothing of it is dropped")
+        } else {
+            format!("only its previous {} {} dropped", dropped_s, if dropped_plural { "are" } else { "is" })
+        };
+        out.push_str(&format!(" Its previous {} {} moved out earlier, so {}.",
+            moved_s, if moved_plural { "were" } else { "was" }, rest));
+        return out;
+    }
+    if !parts.moved.is_empty() {
+        out.push_str(&format!(" Its previous {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
+    }
+    let (maybe_s, maybe_plural) = join(&parts.maybe_moved);
+    out.push_str(&match (parts.by_cond, maybe_plural) {
+        (true, true) => format!(
+            " Its previous {} may have been moved out above, so each is dropped here only if nothing above \
+             moved it (Rust tracks this with runtime drop flags).", maybe_s),
+        (true, false) => format!(
+            " Its previous {} may have been moved out above, so it's dropped here only if nothing above \
+             moved it (Rust tracks this with a runtime drop flag).", maybe_s),
+        (false, true) => format!(
+            " Its previous {} were moved out in some of the branches above; each is dropped here only if no \
+             branch above moved it (Rust tracks this with runtime drop flags).", maybe_s),
+        (false, false) => format!(
+            " Its previous {} was moved out in at least one branch above, so it's dropped here only if no \
+             branch above moved it (Rust tracks this with a runtime drop flag).", maybe_s),
+    });
+    if !parts.dropped.is_empty() {
+        out.push_str(&format!(" Its previous {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
+    }
+    out
+}
+
 // A call's result that nothing takes ownership of is a temporary; Rust
 // drops it when its statement (or other temporary scope) ends (#457).
 // The two dots of its column: where it comes into being, and the drop.
@@ -592,14 +644,23 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
 /// that `reassign` (`event_dot_owner_drop_at_reassign`) already says, for
 /// the same variable, with more (#506, #519).
 pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
-    const INFIX: &str = " acquires ownership of a new resource; its previous resource";
-    // (a holds note, #542, sits before "is dropped" and an Rc / Arc /
-    // Weak's drop note after it, #373)
-    reassign.split_once(INFIX)
-        .is_some_and(|(name, tail)| (tail.starts_with(" is dropped") || tail.starts_with(" (including "))
-            && (acquire.strip_suffix(" acquires ownership of a resource") == Some(name)
-                // `s = r?;` (#652): r's dot says s gets what's inside it.
-                || acquire.strip_prefix(name).is_some_and(|rest| rest.starts_with(" acquires ownership of the resource the `?` takes out of "))))
+    // "…; its previous resource is dropped" (a holds note, #542, sits
+    // before "is dropped" and an Rc / Arc / Weak's drop note after it,
+    // #373), or ". Its previous t.0 …" / ". Its previous resource is
+    // dropped here only if …" (#335, #628).
+    let Some(name) = acquire.strip_suffix(" acquires ownership of a resource") else {
+        // `s = r?;` (#652): r's dot says s gets what's inside it.
+        return reassign.split_once(" acquires ownership of a new resource; its previous resource")
+            .is_some_and(|(name, tail)| (tail.starts_with(" is dropped") || tail.starts_with(" (including "))
+                && acquire.strip_prefix(name).is_some_and(|rest| rest.starts_with(" acquires ownership of the resource the `?` takes out of ")));
+    };
+    reassign.strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix(" acquires ownership of a new resource"))
+        .is_some_and(|rest| {
+            rest.strip_prefix("; its previous resource")
+                .is_some_and(|tail| tail.starts_with(" is dropped") || tail.starts_with(" (including "))
+                || rest.starts_with(". Its previous ")
+        })
 }
 
 /// `r = loop { if c { break a; } else { break b; } };` (#561, #586):

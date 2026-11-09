@@ -1049,10 +1049,10 @@ fn binding_pats<'tcx>(pat: &'tcx Pat<'tcx>, out: &mut Vec<&'tcx Pat<'tcx>>) {
 }
 
 /// Refuse an or-pattern that binds `name` from different parts of the
-/// variable `whole`, which a tuple (or struct) literal being matched
-/// moved into a temporary (`match (s, u) { (p, (x, _) | (_, x)) => … }`,
-/// `let (p, (x, _) | (_, x)) = (s, u);`): what `x` doesn't take of `u`
-/// is dropped with the temporary, which `u`'s parts don't show (#612).
+/// variable `whole`, which a tuple (or struct) literal a `let` matches
+/// moved into a temporary (`let (p, (x, _) | (_, x)) = (s, u);`): what
+/// `x` doesn't take of `u` is dropped with the temporary, which `u`'s
+/// parts don't show (#612). (`match` and `if let` draw it, #627.)
 fn or_refuse_temporary_parts(name: &str, whole: &str, line: usize) -> ! {
   panic!("or-patterns that bind `{}` from different parts of `{}`, which the tuple or struct being matched \
           moves into a temporary (line {}), aren't supported yet", name, whole, line)
@@ -3065,6 +3065,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
             && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
           .collect();
+        // A struct or tuple some of whose parts were moved out before
+        // (on every path, or some only): only the parts still there are
+        // dropped (#628).
+        let parts: Vec<Option<ReassignParts>> = drop_target.iter().chain(field_drop_targets.iter())
+          .zip(maybe_moved.iter())
+          .map(|(rap, maybe)| match rap {
+            ResourceAccessPoint::Struct(_) if !maybe && matches!(lhs_rty, ResourceTy::Value(_)) => self.reassign_parts(rap.name()),
+            _ => None,
+          })
+          .collect();
 
         // `it = b.iter();` where `it` holds a borrow (#336).
         if let ResourceTy::Value(rap) = &lhs_rty {
@@ -3149,13 +3159,14 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         }
 
         let n_before_drops = self.preprocessed_events.len();
-        for (rap, maybe_moved) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved) {
+        for ((rap, maybe_moved), parts) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts) {
           let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
           self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
             ro: rap,
             id: *self.unique_id,
             maybe_moved,
             by_cond,
+            parts,
           });
           *self.unique_id += 1;
         }
@@ -3711,7 +3722,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             _ => String::new(),
           };
           let mut front: Vec<(usize, ExternalEvent)> = Vec::new();
-          for r in &scrutinee_moves {
+          // (A struct or tuple variable's part columns too, #627.)
+          let unbound: Vec<ResourceAccessPoint> = scrutinee_moves.iter()
+            .flat_map(|v| self.tuple_scrutinee_unbound(v, &[])).collect();
+          for r in &unbound {
             front.push((if_end, ExternalEvent::Move {
               from: ResourceTy::Value(r.clone()),
               to: self.tuple_scrutinee_target(let_expr.init),
@@ -4094,7 +4108,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // via `add_external_event` (single-arm inline: events
               // join the global timeline before `visit_expr` so they
               // appear in source order with the body).
-              let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, pat_line, typeck_res, &scrutinee_moves);
+              let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
               // The OrAltMove dots of the names `or_conflicts` lists,
               // added after the moves into the scrutinee tuple below
               // (the tuple holds the values they may take).
@@ -4133,18 +4147,40 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   // borrows (#391) follow all the bindings, as in
                   // `register_iflet_let_bindings`.
                   let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
-                  for (i, p) in pat_list.iter().enumerate() {
-                    let parent_idx = if same_arity { i } else { 0 };
-                    let (parent, parent_ty) = match part_parents.as_ref().and_then(|v| v[i].1.clone()) {
-                      Some(pp) => pp,
-                      None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
-                    };
+                  // Each sub-pattern, the parent it destructures, and the
+                  // expression that is (the scrutinee, or its element).
+                  let mut subs: Vec<(&'tcx rustc_hir::Pat<'tcx>, ResourceTy, rustc_middle::ty::Ty<'tcx>, &'tcx Expr<'tcx>)> = Vec::new();
+                  // Whether each sub-pattern destructures a part of a
+                  // variable (parallel to `subs`).
+                  let mut sub_is_part: Vec<bool> = Vec::new();
+                  if matches!((arm_pat.kind, guard_expr.kind), (PatKind::Tuple(..), ExprKind::Tup(_))) && !guard_expr.span.from_expansion() {
+                    // `match (a, (b, c)) { (p, (x, _)) => … }`: each
+                    // sub-pattern with its element, through nested tuple
+                    // literals and `..` (#627).
+                    subs = self.literal_pat_parents(arm_pat, guard_expr);
+                    sub_is_part = vec![false; subs.len()];
+                  } else {
+                    for (i, p) in pat_list.iter().enumerate() {
+                      let parent_idx = if same_arity { i } else { 0 };
+                      let (parent, parent_ty) = match part_parents.as_ref().and_then(|v| v[i].1.clone()) {
+                        Some(pp) => pp,
+                        None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
+                      };
+                      let scrutinee = match guard_expr.kind {
+                        ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
+                        _ => guard_expr,
+                      };
+                      subs.push((p, parent, parent_ty, scrutinee));
+                      sub_is_part.push(part_parents.as_ref().is_some_and(|v| v[i].1.is_some()));
+                    }
+                  }
+                  for (sub_idx, (p, parent, parent_ty, scrutinee)) in subs.into_iter().enumerate() {
                     let mut associated_ro = Vec::new();
                     self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
                     // `(p, q)` on `pair = (&c, &d)` copies the references
                     // in `pair.0` / `pair.1`: `p` borrows what `pair.0`
                     // borrows, as in `let (p, q) = pair;` (#756).
-                    if part_parents.as_ref().is_some_and(|v| v[i].1.is_some()) && parent_ty.is_ref() {
+                    if sub_is_part[sub_idx] && parent_ty.is_ref() {
                       for (r, _, _, _) in associated_ro.iter() {
                         self.adopt_part_borrow(r.name(), &parent.name());
                       }
@@ -4172,10 +4208,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                       let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
                       // A reference copied out of a value that holds a
                       // borrow also borrows what that value borrows (#391).
-                      let scrutinee = match guard_expr.kind {
-                        ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
-                        _ => guard_expr,
-                      };
                       pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
                       // add_external_event gives a struct's fields their
                       // part of a whole (non-partial) move; otherwise
@@ -4267,17 +4299,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // pattern doesn't move out (`_ => …`, `(Some(_), b)`): it
               // was still moved into the tuple, and isn't usable after
               // the match (#327).
-              for r in scrutinee_moves.iter() {
-                if arm_moved.contains(&ResourceTy::Value(r.clone())) {
-                  continue;
-                }
-                let id = *self.unique_id;
-                *self.unique_id += 1;
-                let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r.clone()), id, false);
-                if inline {
-                  self.add_external_event(pat_line, ext_ev);
-                } else {
-                  branch_e_data.push((pat_line, ext_ev));
+              // (A struct or tuple variable's part columns too, but not
+              // the ones the pattern took, #627.)
+              for v in scrutinee_moves.iter() {
+                for r in self.tuple_scrutinee_unbound(v, &arm_moved) {
+                  let id = *self.unique_id;
+                  *self.unique_id += 1;
+                  let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), id, false);
+                  if inline {
+                    self.add_external_event(pat_line, ext_ev);
+                  } else {
+                    branch_e_data.push((pat_line, ext_ev));
+                  }
                 }
               }
               for ev in or_events {
@@ -6393,7 +6426,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         } else {
           let parent = ResourceTy::Value(self.raps.get(&place).unwrap().rap.to_owned());
           let line = span_to_line(&pat.span, &self.tcx);
-          self.or_arm_stand_in(pat, std::slice::from_ref(&parent), &[ty], line, typeck, &[]).1
+          self.or_arm_stand_in(pat, std::slice::from_ref(&parent), &[ty], None, line, typeck, &[]).1
         };
         self.bind_pat_from_member(pat, &place, ty, init, is_skipped, &conflicts);
       }
@@ -6411,7 +6444,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let ty = typeck.node_type(init.hir_id);
         let parent = ResourceTy::Value(self.raps.get(&place).unwrap().rap.to_owned());
         let line = span_to_line(&pat.span, &self.tcx);
-        let (first, conflicts) = self.or_arm_stand_in(pat, std::slice::from_ref(&parent), &[ty], line, typeck, &[]);
+        let (first, conflicts) = self.or_arm_stand_in(pat, std::slice::from_ref(&parent), &[ty], None, line, typeck, &[]);
         if conflicts.is_empty() {
           self.bind_walk(pat, init, is_skipped);
         } else {
@@ -6481,7 +6514,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let typeck = self.tcx.typeck(elem.hir_id.owner);
     let parent = ResourceTy::Value(self.raps.get(&place).unwrap().rap.to_owned());
     let line = span_to_line(&sub_pat.span, &self.tcx);
-    let (_, conflicts) = self.or_arm_stand_in(sub_pat, std::slice::from_ref(&parent), &[typeck.node_type(elem.hir_id)], line, typeck, &[]);
+    let (_, conflicts) = self.or_arm_stand_in(sub_pat, std::slice::from_ref(&parent), &[typeck.node_type(elem.hir_id)], None, line, typeck, &[]);
     if let Some(c) = conflicts.first() {
       or_refuse_temporary_parts(&c.name, &place, line);
     }
@@ -6953,6 +6986,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     pat: &'tcx Pat<'tcx>,
     parents: &[ResourceTy],
     parents_ty: &[rustc_middle::ty::Ty<'tcx>],
+    scrutinee: Option<&'tcx Expr<'tcx>>,
     line: usize,
     typeck_res: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
     tuple_vars: &[ResourceAccessPoint],
@@ -6964,7 +6998,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !pat_has_or(pat) {
       return (pat, Vec::new());
     }
-    let sources = self.or_alt_sources(pat, parents, parents_ty);
+    // A tuple-literal scrutinee (`match (a, (b, c))`): its elements,
+    // through nested tuple literals (#627).
+    let from_literal = matches!(scrutinee, Some(e) if matches!(e.kind, ExprKind::Tup(_)) && !e.span.from_expansion());
+    let sources = match scrutinee {
+      Some(e) if from_literal => self.literal_sources(pat, e, ""),
+      _ => self.or_alt_sources(pat, parents, parents_ty),
+    };
     let mut conflicts = Vec::new();
     let Some(first) = sources.first() else { return (stand_in, conflicts) };
     for name in first.keys() {
@@ -6992,11 +7032,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ));
       let ty = binding.map(|b| typeck_res.node_type(b.hir_id));
       // `match (a, b)` moves `a` and `b` into a temporary tuple, which
-      // is drawn only for variables without part columns (#327): with a
+      // was drawn only for variables without part columns (#327): with a
       // struct or tuple `a`, what `x` takes or borrows would be drawn as
-      // taken from `a` itself, which no longer has it.
+      // taken from `a` itself, which no longer has it. A tuple literal
+      // scrutinee moves each part column into the tuple too now (#627),
+      // so `literal_sources` names the part `x` comes from.
       let copied = !by_ref && ty.is_some_and(|t| self.ty_is_copy(t, pat.hir_id.owner));
-      if parents.len() > 1 && !copied {
+      if parents.len() > 1 && !copied && !from_literal {
         let untracked = sources.iter().filter_map(|m| m.get(name)).any(|(k, _)| {
           k.split_once(':').and_then(|(i, _)| i.parse::<usize>().ok()).is_some_and(|i| {
             parents_ty.get(i).is_some_and(|t| !t.is_ref())
@@ -7041,20 +7083,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             name, line),
           Some(rap) => raps.push(rap.clone()),
           None => refuse("the name"),
-        }
-      }
-      // `match (s, u) { (p, (x, _) | (_, x)) => … }`: `u` was moved into
-      // the temporary tuple, so what `x` doesn't take of it is dropped
-      // with that tuple, not by a drop flag at `u`'s scope end. Only the
-      // tuple's own elements (`a`, `b` in `match (a, b)`) are drawn that
-      // way (#612).
-      if parents.len() > 1 {
-        let parent_raps: Vec<&ResourceAccessPoint> = parents.iter().filter_map(|p| p.extract_rap()).collect();
-        if let Some(part) = raps.iter().find(|r| !parent_raps.contains(r)) {
-          let whole = parent_raps.iter()
-            .find(|p| part.name().starts_with(&format!("{}.", p.name())))
-            .map_or_else(|| part.name().to_string(), |p| p.name().to_string());
-          or_refuse_temporary_parts(name, &whole, line);
         }
       }
       conflicts.push(OrConflict { name: name.clone(), places: raps });
@@ -7161,7 +7189,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for place in &c.places {
               let id = *self.unique_id;
               *self.unique_id += 1;
-              let in_tuple = tuple_vars.contains(place).then(|| tuple.to_owned());
+              let in_tuple = Self::in_scrutinee_tuple(tuple_vars, place).then(|| tuple.to_owned());
               out.start.push(ExternalEvent::OrAltMove {
                 ro: place.clone(), into: xname.clone(), from: names.clone(), tuple: in_tuple.clone(), part_of: None, in_let: false, id,
               });
@@ -7253,6 +7281,60 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         for b in bs {
           if let PatKind::Binding(_, _, ident, _) = b.kind {
             out.insert(ident.to_string(), ("*".to_owned(), None));
+          }
+        }
+        vec![out]
+      }
+    }
+  }
+
+  /// `or_alt_sources` for a pattern matched against the tuple literal
+  /// `e` (`match (a, (b, c))`): each sub-pattern against its element,
+  /// through nested tuple literals (#627), and an element that isn't a
+  /// tuple literal the way `pat_sources` does (a variable's parts).
+  fn literal_sources(
+    &self,
+    pat: &'tcx Pat<'tcx>,
+    e: &'tcx Expr<'tcx>,
+    prefix: &str,
+  ) -> Vec<BTreeMap<String, (String, Option<ResourceTy>)>> {
+    let ExprKind::Tup(elems) = e.kind else {
+      let typeck = self.tcx.typeck(e.hir_id.owner);
+      return self.pat_sources(pat, &self.rap_or_field_through_ref(e), typeck.node_type(e.hir_id), prefix);
+    };
+    match pat.kind {
+      PatKind::Or(alts) => {
+        let mut out = Vec::new();
+        for alt in alts {
+          for m in self.literal_sources(alt, e, prefix) {
+            if !out.contains(&m) {
+              out.push(m);
+            }
+          }
+        }
+        out
+      }
+      PatKind::Tuple(ps, dd) => {
+        let gap = elems.len().saturating_sub(ps.len());
+        let mut out = vec![BTreeMap::new()];
+        for (k, p) in ps.iter().enumerate() {
+          let i = match dd.as_opt_usize() {
+            Some(d) if k >= d => k + gap,
+            _ => k,
+          };
+          let Some(el) = elems.get(i) else { continue };
+          out = or_sources_product(out, self.literal_sources(p, el, &format!("{}{}:", prefix, i)));
+        }
+        out
+      }
+      // A name (or `_`) matching the whole literal: it has no column.
+      _ => {
+        let mut out = BTreeMap::new();
+        let mut bs = Vec::new();
+        binding_pats(pat, &mut bs);
+        for b in bs {
+          if let PatKind::Binding(_, _, ident, _) = b.kind {
+            out.insert(ident.to_string(), (format!("{}*", prefix), None));
           }
         }
         vec![out]

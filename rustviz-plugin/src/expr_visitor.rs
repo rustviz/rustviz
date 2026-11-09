@@ -1502,6 +1502,58 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     any(self.preprocessed_events, name)
   }
 
+  /// What reassigning the struct or tuple `parent` drops of its
+  /// previous value, when some of its parts were moved out before, on
+  /// every path or on some only (#628): `None` when none were.
+  pub fn reassign_parts(&self, parent: &str) -> Option<ReassignParts> {
+    let mut out = ReassignParts::default();
+    self.collect_reassign_parts(parent, &mut out);
+    (!out.moved.is_empty() || !out.maybe_moved.is_empty()).then_some(out)
+  }
+
+  fn collect_reassign_parts(&self, parent: &str, out: &mut ReassignParts) {
+    for c in self.struct_children(parent) {
+      if c.is_copy() || c.is_plain_value() {
+        continue;
+      }
+      let name = c.name().clone();
+      match self.rap_ownership_now(&name) {
+        Ownership::None => out.moved.push(name),
+        Ownership::Maybe => {
+          out.by_cond |= self.maybe_moved_by_let_now(&name) || self.moved_by_chain_condition(&name);
+          out.maybe_moved.push(name);
+        }
+        Ownership::Held => {
+          if self.struct_children(&name).is_empty() {
+            out.dropped.push(name);
+          } else {
+            self.collect_reassign_parts(&name, out);
+          }
+        }
+      }
+    }
+  }
+
+  /// Whether `name`, maybe-moved now (`Ownership::Maybe`), is so because
+  /// of a `let` whose or-pattern binds a name from different places
+  /// (`let ((x, _) | (_, x)) = t;`, #597) rather than a branch: the
+  /// timeline's `maybe_moved_by_let`, on the events so far.
+  pub fn maybe_moved_by_let_now(&self, name: &str) -> bool {
+    let is = |r: &ResourceTy| r.extract_rap().is_some_and(|r| r.name() == name);
+    for (_, ev) in self.preprocessed_events.iter().rev() {
+      match ev {
+        ExternalEvent::OrAltMove { ro, tuple: None, in_let, .. } if ro.name() == name => return *in_let,
+        ExternalEvent::LoopExitMove { ro, .. } if ro.name() == name => return false,
+        ExternalEvent::Move { from, to, .. } if is(from) || is(to) => return false,
+        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is(to) => return false,
+        ExternalEvent::Branch { branches, .. }
+          if branches.iter().any(|b| ownership_after(&b.e_data, name, Some(Ownership::Held)) != Some(Ownership::Held)) => return false,
+        _ => {}
+      }
+    }
+    false
+  }
+
   /// True iff `name` is a reference whose value was moved, since it was
   /// last assigned, into something that carries the borrow on and ends
   /// it itself: another reference (`let r2 = r;`, `Holder { r }`) or the
@@ -4242,22 +4294,15 @@ pub fn register_iflet_let_bindings(
         _ => (vec![parent.clone()], vec![scrutinee_ty]),
     };
     let moved_into_scrutinee = self.tuple_scrutinee_moves(scrutinee);
-    let (pat, or_conflicts) = self.or_arm_stand_in(let_expr.pat, &or_parents, &or_parents_ty, let_line, typeck_res, &moved_into_scrutinee);
+    let (pat, or_conflicts) = self.or_arm_stand_in(let_expr.pat, &or_parents, &or_parents_ty, Some(scrutinee), let_line, typeck_res, &moved_into_scrutinee);
 
     // `if let (Some(a), Some(b)) = (x, y)`: like `match (x, y)`, each
     // sub-pattern destructures its own element of the tuple literal
-    // (#327). Otherwise the whole pattern matches the scrutinee.
+    // (#327), also of a tuple literal nested in it (#627). Otherwise
+    // the whole pattern matches the scrutinee.
     let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (pat.kind, scrutinee.kind) {
-        (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(elems)) if !scrutinee.span.from_expansion() => {
-            let gap = elems.len().saturating_sub(sub_pats.len());
-            sub_pats.iter().enumerate().map(|(k, sp)| {
-                let i = match ddpos.as_opt_usize() {
-                    Some(d) if k >= d => k + gap,
-                    _ => k,
-                };
-                let elem = &elems[i];
-                (sp, crate::expr_visitor_utils::get_rap(elem, &self.tcx, &self.raps), typeck_res.node_type(elem.hir_id))
-            }).collect()
+        (PatKind::Tuple(..), ExprKind::Tup(_)) if !scrutinee.span.from_expansion() => {
+            self.literal_pat_parents(pat, scrutinee).into_iter().map(|(sp, parent, ty, _)| (sp, parent, ty)).collect()
         }
         _ => vec![(pat, parent.clone(), scrutinee_ty)],
     };
@@ -4350,8 +4395,10 @@ pub fn register_iflet_let_bindings(
     // didn't move out itself (`Some(_)`, `_`) as moved too.
     let end_of_bindings = first_other.unwrap_or(*self.unique_id);
     let into_tuple = self.tuple_scrutinee_target(scrutinee);
-    for r in moved_into_scrutinee {
-        if !moved_by_pattern.contains(&ResourceTy::Value(r.clone())) {
+    // (A struct or tuple variable's part columns too, but not the ones
+    // the pattern took, #627.)
+    for v in moved_into_scrutinee {
+        for r in self.tuple_scrutinee_unbound(&v, &moved_by_pattern) {
             let event = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), *self.unique_id, false);
             *self.unique_id += 1;
             self.add_external_event(let_line, event);
@@ -4698,32 +4745,77 @@ pub fn mark_branch_results_kept(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
 
 /// The variables a tuple-literal scrutinee (`if let … = (x, y)`,
 /// `match (x, y) { … }`) moves into the tuple it builds: each element
-/// that names a variable of a non-Copy, non-reference type. They are
-/// moved whether or not the pattern then matches, and whether or not it
-/// binds anything from them, so `x` can't be used afterwards (#327).
-/// Variables whose parts have columns of their own (a struct or tuple
-/// variable) are left out: marking only the whole as moved would leave
-/// their part columns claiming a drop.
+/// that names a variable of a non-Copy, non-reference type, also inside
+/// a tuple literal nested in it (`b` and `c` in `(a, (b, c))`, #627).
+/// They are moved whether or not the pattern then matches, and whether
+/// or not it binds anything from them, so `x` can't be used afterwards
+/// (#327). A struct or tuple variable whose parts have columns of their
+/// own (`u` in `(s, u)`) is moved too: see `tuple_scrutinee_unbound`
+/// for how its parts are drawn.
 pub fn tuple_scrutinee_moves(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<ResourceAccessPoint> {
-    let ExprKind::Tup(elems) = scrutinee.kind else { return Vec::new() };
-    if scrutinee.span.from_expansion() {
+    self.tuple_scrutinee_vars(scrutinee).into_iter().map(|(r, _, _)| r).collect()
+}
+
+/// `tuple_scrutinee_moves`, each with its field path from the scrutinee
+/// (`["1", "0"]` for `b` in `(a, (b, c))`) and its type.
+fn tuple_scrutinee_vars(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<(ResourceAccessPoint, Vec<String>, Ty<'tcx>)> {
+    let mut out = Vec::new();
+    if matches!(scrutinee.kind, ExprKind::Tup(_)) && !scrutinee.span.from_expansion() {
+        let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
+        self.tuple_literal_vars(scrutinee, &mut Vec::new(), typeck, &mut out);
+    }
+    out
+}
+
+fn tuple_literal_vars(&self, e: &'tcx Expr<'tcx>, path: &mut Vec<String>,
+  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, out: &mut Vec<(ResourceAccessPoint, Vec<String>, Ty<'tcx>)>) {
+    match e.kind {
+        ExprKind::Tup(elems) if !e.span.from_expansion() => {
+            for (i, el) in elems.iter().enumerate() {
+                path.push(i.to_string());
+                self.tuple_literal_vars(el, path, typeck, out);
+                path.pop();
+            }
+        }
+        ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, Res::Local(_)) => {
+            let ty = typeck.node_type(e.hir_id);
+            if ty.is_ref() || self.ty_is_copy(ty, e.hir_id.owner) {
+                return;
+            }
+            match crate::expr_visitor_utils::get_rap(e, &self.tcx, &self.raps) {
+                ResourceTy::Value(rap @ (ResourceAccessPoint::Owner(_)
+                    | ResourceAccessPoint::Struct(Struct { is_member: false, .. }))) => out.push((rap, path.clone(), ty)),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `place` is one of `vars` (`tuple_scrutinee_moves`) or a part
+/// of one (`u.0` of `u`): its value went into the temporary tuple.
+pub fn in_scrutinee_tuple(vars: &[ResourceAccessPoint], place: &ResourceAccessPoint) -> bool {
+    vars.iter().any(|v| v == place || place.name().starts_with(&format!("{}.", v.name())))
+}
+
+/// What the tuple-literal scrutinee moved into its temporary of `var`
+/// (one of `tuple_scrutinee_moves`) that the pattern didn't move out
+/// itself (`taken`), each drawn as moved into the temporary: `var`, and
+/// for a struct or tuple variable each of its part columns (#627). The
+/// literal moves `var` whole, so it's listed even when the pattern took
+/// some of its parts (`u` and `u.1` when `(p, (x, _))` moved `u.0` out
+/// of `(s, u)`). Copy parts, which have nothing to move, are left out.
+pub fn tuple_scrutinee_unbound(&self, var: &ResourceAccessPoint, taken: &[ResourceTy]) -> Vec<ResourceAccessPoint> {
+    if taken.contains(&ResourceTy::Value(var.clone())) {
         return Vec::new();
     }
-    let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
-    elems.iter().filter_map(|e| {
-        let ExprKind::Path(QPath::Resolved(_, path)) = e.kind else { return None };
-        if !matches!(path.res, Res::Local(_)) {
-            return None;
+    let mut out = vec![var.clone()];
+    for c in self.struct_children(var.name()) {
+        if !c.is_copy() {
+            out.extend(self.tuple_scrutinee_unbound(&c, taken));
         }
-        let ty = typeck.node_type(e.hir_id);
-        if ty.is_ref() || self.ty_is_copy(ty, e.hir_id.owner) {
-            return None;
-        }
-        match crate::expr_visitor_utils::get_rap(e, &self.tcx, &self.raps) {
-            ResourceTy::Value(rap @ ResourceAccessPoint::Owner(_)) => Some(rap),
-            _ => None,
-        }
-    }).collect()
+    }
+    out
 }
 
 /// A `ref` / `ref mut` binding out of a tuple-literal scrutinee's
@@ -4734,7 +4826,7 @@ pub fn tuple_scrutinee_moves(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<Resource
 pub fn tuple_elem_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: ResourceTy) -> ResourceTy {
   if matches!(evt, Evt::SBorrow | Evt::MBorrow) {
     if let ResourceTy::Value(r) = &from {
-      if self.tuple_scrutinee_moves(scrutinee).contains(r) {
+      if Self::in_scrutinee_tuple(&self.tuple_scrutinee_moves(scrutinee), r) {
         return ResourceTy::Anonymous;
       }
     }
@@ -4773,99 +4865,233 @@ pub fn tuple_scrutinee_target(&self, scrutinee: &'tcx Expr<'tcx>) -> ResourceTy 
 /// whose value, or part of it, is still in the tuple after `pat`
 /// matched (`None`: the pattern didn't match, so all of it), and is
 /// dropped with the tuple (#327). Only types that need drop: the
-/// others have nothing to drop.
+/// others have nothing to drop. A struct or tuple variable with part
+/// columns is listed whole when all of it is left, otherwise by the
+/// parts that are (#627).
 pub fn tuple_scrutinee_left(&self, scrutinee: &'tcx Expr<'tcx>, pat: Option<&'tcx Pat<'tcx>>) -> Vec<(ResourceAccessPoint, TupleLeft)> {
-  let ExprKind::Tup(elems) = scrutinee.kind else { return Vec::new() };
-  let moved = self.tuple_scrutinee_moves(scrutinee);
   let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
   let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, scrutinee.hir_id.owner);
   let mut out = Vec::new();
-  for (i, e) in elems.iter().enumerate() {
-    let rap = match crate::expr_visitor_utils::get_rap(e, &self.tcx, &self.raps) {
-      ResourceTy::Value(r) if moved.contains(&r) => r,
-      _ => continue,
-    };
-    if !typeck.node_type(e.hir_id).needs_drop(self.tcx, env) {
+  for (var, path, ty) in self.tuple_scrutinee_vars(scrutinee) {
+    if !ty.needs_drop(self.tcx, env) {
       continue;
     }
-    let left = match pat {
-      None => Some(false),
-      Some(p) => self.tuple_elem_left(p, i, elems.len(), typeck, env),
+    // The places that need drop: the variable, or its leaf parts.
+    let places: Vec<(ResourceAccessPoint, Vec<String>)> = if matches!(var, ResourceAccessPoint::Struct(_)) {
+      let parts: Vec<ResourceAccessPoint> = self.struct_members_deep(var.name());
+      parts.iter()
+        .filter(|p| !p.is_copy() && !p.is_plain_value())
+        .filter(|p| !parts.iter().any(|q| q.name().starts_with(&format!("{}.", p.name()))))
+        .map(|p| {
+          let mut full = path.clone();
+          full.extend(p.name()[var.name().len() + 1..].split('.').map(str::to_owned));
+          (p.clone(), full)
+        })
+        .collect()
+    } else {
+      Vec::new()
     };
-    if let Some(rest) = left {
-      let takers = match pat {
-        Some(p) => self.tuple_elem_takers(p, i, elems.len(), typeck),
-        None => Vec::new(),
+    let whole = places.is_empty();
+    let places = if whole { vec![(var.clone(), path)] } else { places };
+    let mut entries = Vec::new();
+    for (place, full) in &places {
+      let left = match pat {
+        None => Some(false),
+        Some(p) => self.path_left(p, full, typeck, env),
       };
-      out.push((rap.clone(), TupleLeft { name: rap.name().clone(), rest, rc: rap.rc_drop(), takers }));
+      if let Some(rest) = left {
+        let takers = match pat {
+          Some(p) => self.path_takers(p, full, typeck),
+          None => Vec::new(),
+        };
+        entries.push((place.clone(), TupleLeft { name: place.name().clone(), rest, rc: place.rc_drop(), takers }));
+      }
+    }
+    if !whole && entries.len() == places.len() && entries.iter().all(|(_, l)| !l.rest && l.takers.is_empty()) {
+      out.push((var.clone(), TupleLeft { name: var.name().clone(), rest: false, rc: var.rc_drop(), takers: Vec::new() }));
+    } else {
+      out.extend(entries);
     }
   }
   out
 }
 
-/// What `pat`, matched against a tuple literal of `n` elements, leaves
-/// of element `i` in the tuple: all of it (`Some(false)`), part of it
-/// (`Some(true)`) or nothing (`None`).
-fn tuple_elem_left(&self, pat: &'tcx Pat<'tcx>, i: usize, n: usize,
-  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> Option<bool> {
+/// The sub-pattern of the tuple or struct pattern `pat` that matches
+/// its field `step` (an index for a tuple pattern), and whether there
+/// is one: `Err(())` when `pat` isn't a tuple or struct pattern,
+/// `Ok(None)` when the field is skipped by `..` (or not named).
+fn sub_pat_at(&self, pat: &'tcx Pat<'tcx>, step: &str,
+  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> Result<Option<&'tcx Pat<'tcx>>, ()> {
+  use rustc_middle::ty::TyKind;
   match pat.kind {
-    PatKind::Tuple(subs, dd) => {
+    PatKind::Tuple(subs, dd) | PatKind::TupleStruct(_, subs, dd) => {
+      let Ok(i) = step.parse::<usize>() else { return Err(()) };
+      let n = match typeck.pat_ty(pat).kind() {
+        TyKind::Tuple(tys) => tys.len(),
+        TyKind::Adt(adt, _) => match pat.kind {
+          PatKind::TupleStruct(ref qpath, ..) => adt.variant_of_res(typeck.qpath_res(qpath, pat.hir_id)).fields.len(),
+          _ => return Err(()),
+        },
+        _ => return Err(()),
+      };
       let gap = n.saturating_sub(subs.len());
       let k = match dd.as_opt_usize() {
-        Some(d) if i >= d && i < d + gap => return Some(false),
+        Some(d) if i >= d && i < d + gap => return Ok(None),
         Some(d) if i >= d + gap => i - gap,
         _ => i,
       };
-      subs.get(k).and_then(|sp| self.pat_leaves(sp, typeck, env))
+      Ok(subs.get(k))
     }
+    PatKind::Struct(_, fields, _) => Ok(fields.iter().find(|f| f.ident.as_str() == step).map(|f| f.pat)),
+    _ => Err(()),
+  }
+}
+
+/// What `pat`, matched against the scrutinee, leaves in the tuple of
+/// the place at field path `path` in it (#627: through nested tuple
+/// literals and a variable's parts): all of it (`Some(false)`), part of
+/// it (`Some(true)`) or nothing (`None`).
+fn path_left(&self, pat: &'tcx Pat<'tcx>, path: &[String],
+  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> Option<bool> {
+  let Some((step, rest)) = path.split_first() else { return self.pat_leaves(pat, typeck, env) };
+  match pat.kind {
     // `(Some(a), _) | (_, Some(a))`: which alternative matched decides.
     // When they differ, "the rest of" covers both (all of it, or
     // what's left after the move).
     PatKind::Or(alts) => {
-      let each: Vec<Option<bool>> = alts.iter().map(|a| self.tuple_elem_left(a, i, n, typeck, env)).collect();
+      let each: Vec<Option<bool>> = alts.iter().map(|a| self.path_left(a, path, typeck, env)).collect();
       if each.iter().all(|l| *l == each[0]) { each[0] } else { Some(true) }
     }
-    // `t => …` takes the whole tuple; `_`, `ref t` leave it.
-    _ => self.pat_leaves(pat, typeck, env),
+    _ => match self.sub_pat_at(pat, step, typeck) {
+      Ok(Some(sp)) => self.path_left(sp, rest, typeck, env),
+      // Skipped by `..`: all of it stays.
+      Ok(None) => Some(false),
+      // `t => …` takes the whole of it; `_`, `ref t` leave it.
+      Err(()) => self.pat_leaves(pat, typeck, env),
+    },
   }
 }
 
 /// For an or-pattern whose alternatives leave different amounts of
-/// element `i` of a tuple literal of `n` elements in the tuple (`(Some(x),
-/// _) | (_, Some(x))`, #533): the names that move some of it out in the
-/// alternatives that do, in order. What's left in the tuple then
-/// depends on which alternative matched at run time. Empty otherwise.
-fn tuple_elem_takers(&self, pat: &'tcx Pat<'tcx>, i: usize, n: usize,
+/// the place at `path` in the tuple (`(Some(x), _) | (_, Some(x))`,
+/// #533; also nested, `(p, (x, _) | (_, x))`, #627): the names that
+/// move some of it out in the alternatives that do, in order. What's
+/// left in the tuple then depends on which alternative matched at run
+/// time. Empty otherwise.
+fn path_takers(&self, pat: &'tcx Pat<'tcx>, path: &[String],
   typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> Vec<String> {
-  let PatKind::Or(alts) = pat.kind else { return Vec::new() };
   let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, pat.hir_id.owner);
-  let each: Vec<Option<bool>> = alts.iter().map(|a| self.tuple_elem_left(a, i, n, typeck, env)).collect();
-  if each.iter().all(|l| *l == each[0]) {
-    return Vec::new();
-  }
   let mut out: Vec<String> = Vec::new();
-  for alt in alts {
-    let PatKind::Tuple(subs, dd) = alt.kind else { continue };
-    let gap = n.saturating_sub(subs.len());
-    let k = match dd.as_opt_usize() {
-      Some(d) if i >= d && i < d + gap => continue,
-      Some(d) if i >= d + gap => i - gap,
-      _ => i,
-    };
-    let Some(sub) = subs.get(k) else { continue };
-    sub.walk_always(|p| {
-      if let PatKind::Binding(_, _, ident, _) = p.kind {
-        let by_ref = matches!(typeck.pat_binding_modes().get(p.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
-        let name = ident.to_string();
-        if !by_ref && !self.ty_is_copy(typeck.node_type(p.hir_id), p.hir_id.owner) && !out.contains(&name) {
-          out.push(name);
+  match pat.kind {
+    PatKind::Or(alts) => {
+      let each: Vec<Option<bool>> = alts.iter().map(|a| self.path_left(a, path, typeck, env)).collect();
+      if each.iter().all(|l| *l == each[0]) {
+        // An or-pattern further in may still decide.
+        for a in alts {
+          for n in self.path_takers(a, path, typeck) {
+            if !out.contains(&n) {
+              out.push(n);
+            }
+          }
         }
+        return out;
       }
-    });
+      for alt in alts {
+        let Some(sub) = self.pat_at_path(alt, path, typeck) else { continue };
+        sub.walk_always(|p| {
+          if let PatKind::Binding(_, _, ident, _) = p.kind {
+            let by_ref = matches!(typeck.pat_binding_modes().get(p.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
+            let name = ident.to_string();
+            if !by_ref && !self.ty_is_copy(typeck.node_type(p.hir_id), p.hir_id.owner) && !out.contains(&name) {
+              out.push(name);
+            }
+          }
+        });
+      }
+      out
+    }
+    _ => match path.split_first() {
+      Some((step, rest)) => match self.sub_pat_at(pat, step, typeck) {
+        Ok(Some(sp)) => self.path_takers(sp, rest, typeck),
+        _ => out,
+      },
+      None => out,
+    },
+  }
+}
+
+/// The part of `pat` that matches the place at `path`: as far down as
+/// the pattern goes (a name or `_` matching all of it, an or-pattern).
+/// `None` when it's skipped by `..`.
+fn pat_at_path(&self, pat: &'tcx Pat<'tcx>, path: &[String],
+  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> Option<&'tcx Pat<'tcx>> {
+  let Some((step, rest)) = path.split_first() else { return Some(pat) };
+  match self.sub_pat_at(pat, step, typeck) {
+    Ok(Some(sp)) => self.pat_at_path(sp, rest, typeck),
+    Ok(None) => None,
+    Err(()) => Some(pat),
+  }
+}
+
+/// `literal_pat_pairs` as (sub-pattern, parent, parent's type, the
+/// element): the parent is what the element names (`rap_or_field_through_ref`).
+/// A name bound from a whole nested tuple literal (`y` in `(p, y)` on
+/// `(a, (b, c))`) is bound from each element of it, as `match (b, c) {
+/// y => … }` binds `y` from `b` and `c`; the parent's type is the
+/// literal's, so it isn't drawn as a partial move.
+pub fn literal_pat_parents(&self, pat: &'tcx Pat<'tcx>, scrutinee: &'tcx Expr<'tcx>)
+  -> Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>, &'tcx Expr<'tcx>)> {
+  fn leaves<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+    match e.kind {
+      ExprKind::Tup(elems) if !e.span.from_expansion() => for el in elems { leaves(el, out) },
+      _ => out.push(e),
+    }
+  }
+  let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
+  let mut pairs = Vec::new();
+  self.literal_pat_pairs(pat, scrutinee, &mut pairs);
+  let mut out = Vec::new();
+  for (p, el) in pairs {
+    if matches!(el.kind, ExprKind::Tup(_)) && !el.span.from_expansion() && !std::ptr::eq(el, scrutinee) {
+      let mut ls = Vec::new();
+      leaves(el, &mut ls);
+      for l in ls {
+        out.push((p, self.rap_or_field_through_ref(l), typeck.node_type(el.hir_id), l));
+      }
+    } else {
+      out.push((p, self.rap_or_field_through_ref(el), typeck.node_type(el.hir_id), el));
+    }
   }
   out
 }
 
+/// Each sub-pattern of `pat` with the element of the tuple literal `e`
+/// it matches, through nested tuple literals (`(p, (x, _))` on `(a, (b,
+/// c))`: `p` with `a`, `x` with `b`, `_` with `c`; #627). An
+/// or-pattern's first alternative stands for it, as in
+/// `or_arm_stand_in`. A sub-pattern that isn't a tuple pattern, or an
+/// element that isn't a tuple literal, is one pair.
+pub fn literal_pat_pairs(&self, pat: &'tcx Pat<'tcx>, e: &'tcx Expr<'tcx>, out: &mut Vec<(&'tcx Pat<'tcx>, &'tcx Expr<'tcx>)>) {
+  let mut p = pat;
+  while let PatKind::Or(alts) = p.kind {
+    p = &alts[0];
+  }
+  match (p.kind, e.kind) {
+    (PatKind::Tuple(subs, dd), ExprKind::Tup(elems)) if !e.span.from_expansion() => {
+      let gap = elems.len().saturating_sub(subs.len());
+      for (k, sp) in subs.iter().enumerate() {
+        let i = match dd.as_opt_usize() {
+          Some(d) if k >= d => k + gap,
+          _ => k,
+        };
+        if let Some(el) = elems.get(i) {
+          self.literal_pat_pairs(sp, el, out);
+        }
+      }
+    }
+    _ => out.push((pat, e)),
+  }
+}
 /// What matching `pat` against an owned value leaves of it: all of it
 /// (`Some(false)`: nothing is moved out), part of it that needs drop
 /// (`Some(true)`), or nothing that needs drop (`None`).
