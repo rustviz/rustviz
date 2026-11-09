@@ -1492,16 +1492,20 @@ fn render_dot(
                         append_drop_dot(drop_data, timeline_data, dots);
                         continue;
                     } else if !resource_hold {
-                        // Resource was already moved out — same copy
-                        // for both Copy and non-Copy types: just note
-                        // there's nothing to drop here, and why, when a
+                        // Resource was already moved out: note there's
+                        // nothing to drop here, and why, when a
                         // conditional moved or dropped it in every branch
                         // (#694: that join has no dot of its own).
+                        // A Copy value never had a resource to move or
+                        // drop, so its scope end reads the same whatever
+                        // its borrow history was (#793).
                         data.title = event.print_message_with_name(& mut name);
-                        match all_moved_at_end(history) {
-                            Some(some_diverge) => data.title.push_str(
-                                &hover_messages::event_dot_go_out_of_scope_all_moved_suffix(&name, some_diverge)),
-                            None => data.title.push_str(". No resource is dropped."),
+                        if !is_copy {
+                            match all_moved_at_end(history) {
+                                Some(some_diverge) => data.title.push_str(
+                                    &hover_messages::event_dot_go_out_of_scope_all_moved_suffix(&name, some_diverge)),
+                                None => data.title.push_str(". No resource is dropped."),
+                            }
                         }
                     } else if let Some(split) = struct_partial_move_split(visualization_data, *hash) {
                         // Partially moved struct (#207): only the

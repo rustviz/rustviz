@@ -1231,6 +1231,8 @@ const EXPECTED_OK: &[&str] = &[
     // earlier value, and after the loop a drop flag decides (#786).
     "deferred_init_loop",
     "deferred_init_loop_break",
+    // A Copy value's scope end never mentions a drop (#793).
+    "copy_scope_end_uniform",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14128,6 +14130,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "earlier iteration gave t",
             "only if the loop above assigned t",
             "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #793: a Copy value's scope end reads "x goes out of scope" and
+    // nothing more, also for a Copy field of a struct or tuple that was
+    // moved whole (main said "No resource is dropped." there, as for the
+    // String fields, which do have a resource that was moved away).
+    TooltipExpect {
+        name: "copy_scope_end_uniform",
+        must_contain: &[
+            "x goes out of scope",
+            "c.n goes out of scope",
+            "d.n goes out of scope",
+            "pair.1 goes out of scope",
+            "c.data goes out of scope. No resource is dropped.",
+            "d.data goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "c.n goes out of scope. No resource is dropped.",
+            "pair.1 goes out of scope. No resource is dropped.",
+            "x goes out of scope. No resource is dropped.",
+            // No dot without a tooltip.
+            "=",
         ],
     },
 ];
