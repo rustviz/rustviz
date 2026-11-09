@@ -199,6 +199,64 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// On a path of a returned `if` / `match` that yields the reference
+  /// parameter `x` (or a literal), every other reference parameter
+  /// whose lifetime the signature ties to the result isn't returned,
+  /// but its borrow doesn't end here: it lasts as long as the result
+  /// in the caller (`fn pick<'a>(c: bool, x: &'a String, y: &'a String)
+  /// -> &'a String`). A dot on its column says so (#775). A parameter
+  /// with a lifetime of its own gets none: its borrow really ends.
+  fn note_tied_ref_params(&mut self, e: &'tcx Expr<'tcx>) {
+    use rustc_middle::ty;
+    let owner = e.hir_id.owner.def_id;
+    if !self.tail_plain.contains(&e.hir_id) || self.tcx.hir_enclosing_body_owner(e.hir_id) != owner || !self.tcx.def_kind(owner).is_fn_like() {
+      return;
+    }
+    let returned: Option<String> = match e.kind {
+      ExprKind::Path(QPath::Resolved(None, path)) if path.segments.len() == 1 => Some(path.segments[0].ident.name.to_string()),
+      ExprKind::Lit(_) => None,
+      _ => return,
+    };
+    let sig = self.tcx.liberate_late_bound_regions(owner.to_def_id(), self.tcx.fn_sig(owner).instantiate_identity().skip_norm_wip());
+    let out_regions: Vec<ty::Region<'tcx>> = sig.output().walk()
+      .filter_map(|g| match g.kind() { ty::GenericArgKind::Lifetime(r) if !r.is_static() => Some(r), _ => None })
+      .collect();
+    if out_regions.is_empty() {
+      return;
+    }
+    let body = self.tcx.hir_body_owned_by(owner);
+    // A returned parameter is itself one the result borrows through.
+    let mut tied: Vec<(String, String)> = Vec::new();
+    for (param, input) in body.params.iter().zip(sig.inputs().iter()) {
+      let PatKind::Binding(_, _, ident, None) = param.pat.kind else { continue };
+      let ty::Ref(r, _, _) = input.kind() else { continue };
+      let name = format!("{r}");
+      if !out_regions.contains(r)
+        || name == "'_"
+        || !name.starts_with('\'')
+        || !name[1..].chars().all(|c| c.is_alphanumeric() || c == '_') {
+        continue;
+      }
+      tied.push((ident.name.to_string(), name));
+    }
+    if let Some(r) = &returned {
+      if !tied.iter().any(|(n, _)| n == r) {
+        return;
+      }
+    }
+    let line = expr_to_line(e, &self.tcx);
+    for (name, lifetime) in tied {
+      if returned.as_deref() == Some(name.as_str()) {
+        continue;
+      }
+      let Some(rd) = self.raps.get(&name) else { continue };
+      let ro = rd.rap.to_owned();
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line, ExternalEvent::TiedParamNote { ro, lifetime, id });
+    }
+  }
+
   /// The values `e`, a returned value, can be: the value each branch
   /// of an `if` / `else` or `match` yields, through nested ones and
   /// blocks (`if b { s } else { t }` → `s`, `t`), or `e` itself.
@@ -244,6 +302,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut values = Vec::new();
     self.returned_values(e, &mut values);
     self.tail_values.extend(values.iter().map(|v| v.hir_id));
+    // A branch that reborrows a parameter (`&self.s`) keeps its
+    // borrow going on that path, so a note on the other branches would
+    // contradict what the fn's end says about it.
+    if values.iter().all(|v| matches!(v.kind, ExprKind::Lit(_) | ExprKind::Path(QPath::Resolved(None, _)))) {
+      self.tail_plain.extend(values.iter().map(|v| v.hir_id));
+    }
     true
   }
 
@@ -2342,6 +2406,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     if self.tail_values.remove(&expr.hir_id) {
       self.visit_expr(expr);
       self.return_to_caller(expr);
+      self.note_tied_ref_params(expr);
       return;
     }
     // Two complementary behaviours for synthesized HIR nodes (those

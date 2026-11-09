@@ -2849,6 +2849,16 @@ pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
     )
 }
 
+/// A reference parameter a returned `if` / `match` doesn't return on
+/// this path, tied to the result by the signature's lifetime (#775).
+pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
+    format!(
+        "{0} isn't returned on this path, but its borrow lasts as long as the result (same lifetime {1})",
+        fmt_style(my_name),
+        lifetime
+    )
+}
+
 // Merge dot for a variable that no branch above moved (#179; this used
 // to be an empty tooltip).
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {

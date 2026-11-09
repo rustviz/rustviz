@@ -438,6 +438,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // operand), by HirId: each goes to the caller when its branch runs,
   // drawn where `visit_expr` visits it, inside its branch (#674).
   pub tail_values: HashSet<rustc_hir::HirId>,
+  // Those of them, when every value the returned `if` / `match` yields
+  // is a variable or a literal (`note_tied_ref_params`, #775).
+  pub tail_plain: HashSet<rustc_hir::HirId>,
   // Where the arms of each if/else and match leave to when they exit
   // early, by the Branch event's id (see `end_borrows_at_exits`).
   pub exit_scopes: HashMap<usize, ExitScope>,
@@ -1115,6 +1118,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::OrAltMove { ro, .. }
       | ExternalEvent::ChainFailAssign { ro, .. }
       | ExternalEvent::ChainFailUse { ro, .. }
+      | ExternalEvent::TiedParamNote { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::OwnerDropUnlessReturned { ro, .. }
