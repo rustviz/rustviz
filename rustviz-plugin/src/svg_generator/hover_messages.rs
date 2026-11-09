@@ -1056,6 +1056,19 @@ pub fn event_dot_move_to_temporary(my_name: &String, extended: bool) -> String {
     )
 }
 
+// `match Some(c) { Some(_) => .., None => .. }`, `if let Some(_) = Some(c)`:
+// c is moved into the temporary the `match` / `if let` examines, and no
+// arm binds it by value, so it is dropped with the temporary, when the
+// scrutinee's scope ends (`when`, e.g. "when the `match` ends").
+pub fn event_dot_move_to_scrutinee_temporary(my_name: &String, what: &str, when: &str) -> String {
+    format!(
+        "{0}'s resource is moved into a temporary that this {1} examines; the temporary is dropped {2}",
+        fmt_style(my_name),
+        what,
+        when
+    )
+}
+
 // "the temporary tuple (p, q)", or just "the temporary tuple" when the
 // scrutinee is too long to quote.
 fn temporary_tuple(tuple: &String) -> String {

@@ -5797,6 +5797,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// When `expr` is directly the scrutinee of a `match`, `if let`,
+  /// `while let` or a let chain's `let`: what examines it, and when its
+  /// temporary is dropped (`when` is where its scope ends). A `match`
+  /// that ends a statement (or a 2024 block's final expression) drops it
+  /// when the `match` ends.
+  fn scrutinee_scope(&self, expr: &'tcx Expr<'tcx>, when: &str) -> Option<(String, String)> {
+    use rustc_hir::Node;
+    let Node::Expr(parent) = self.tcx.parent_hir_node(expr.hir_id) else { return None };
+    match parent.kind {
+      ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) if s.hir_id == expr.hir_id && !parent.span.from_expansion() => {
+        let ends_match = match self.tcx.parent_hir_node(parent.hir_id) {
+          Node::Stmt(_) | Node::LetStmt(_) => true,
+          Node::Block(b) => b.expr.is_some_and(|e| e.hir_id == parent.hir_id)
+            && expr.span.edition() >= rustc_span::edition::Edition::Edition2024,
+          _ => false,
+        };
+        let when = if ends_match { "when the `match` ends" } else { when };
+        Some(("`match`".to_owned(), when.to_owned()))
+      }
+      ExprKind::Let(l) if l.init.hir_id == expr.hir_id && !parent.span.from_expansion() => {
+        let what = match self.tcx.parent_hir_node(parent.hir_id) {
+          Node::Expr(i) if matches!(i.kind, ExprKind::If(..)) => {
+            if matches!(i.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) { "`while let`" } else { "`if let`" }
+          }
+          _ => "`let`",
+        };
+        Some((what.to_owned(), when.to_owned()))
+      }
+      _ => None,
+    }
+  }
+
   /// The `(temporary N)` column of a value nothing takes: it acquires
   /// `ty`'s value from `fn_name` where `expr` is, and is dropped by a
   /// `TemporaryDrop` at `end_line`.
@@ -5817,6 +5849,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return None;
     }
     self.temp_drops_noted.insert(expr.hir_id);
+    let scrutinee = self.scrutinee_scope(expr, when);
 
     // The temporary gets a short column: it acquires the call's result
     // here and is dropped where its scope ends.
@@ -5832,6 +5865,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       o.temp_part = part.clone();
       o.ctor_temp = part.is_none() && !expr.span.from_expansion()
         && matches!(expr.kind, ExprKind::Call(callee, _) if is_ctor_path(callee, self.tcx.typeck(expr.hir_id.owner)));
+      if part.is_none() {
+        o.scrutinee = scrutinee;
+      }
     }
     self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();

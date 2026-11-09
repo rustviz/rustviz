@@ -1250,6 +1250,7 @@ const EXPECTED_OK: &[&str] = &[
     // A call's result inside a returned constructor goes to the caller; a
     // temporary constructor takes the call's result (#783).
     "ctor_call_result_783",
+    "scrutinee_temp_wording_794",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -7000,9 +7001,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Used to panic (#459). `c` is moved into the temporary on the
         // `match` line, whatever the arm.
         must_contain: &[
-            "c's resource is moved into a temporary that is dropped at the end of this statement",
+            "c's resource is moved into a temporary that this `match` examines; the temporary is dropped when the `match` ends",
             "c goes out of scope. No resource is dropped.",
-            "d's resource is moved into a temporary that is dropped at the end of this statement",
+            "d's resource is moved into a temporary that this `match` examines; the temporary is dropped when the `match` ends",
             "d goes out of scope. No resource is dropped.",
             // The variable goes into the temporary, not into `Some` (#783).
             "Move from c to (temporary)",
@@ -7021,7 +7022,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Used to panic (#459).
         must_contain: &[
             "a's resource is moved",
-            "b's resource is moved into a temporary that is dropped at the end of this statement",
+            "b's resource is moved into a temporary that this `if let` examines; the temporary is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
             "c's resource is moved",
             "d's resource is moved",
             "x's resource is moved into drop, which drops it",
@@ -14311,6 +14312,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "to Some",
             // No dot without a tooltip.
             "=",
+        ],
+    },
+    // #783 review: the move into a `match` / `if let` scrutinee
+    // temporary said it is "dropped at the end of this statement", but
+    // the `match` may be a block's final expression. It names what
+    // examines the temporary and when it is dropped. An arm that binds the
+    // String by value moves it out of the temporary (no temporary
+    // column), so `f`'s dot makes no drop claim about a temporary.
+    TooltipExpect {
+        name: "scrutinee_temp_wording_794",
+        must_contain: &[
+            "c's resource is moved into a temporary that this `match` examines; the temporary is dropped when the `match` ends",
+            "d's resource is moved into a temporary that this `match` examines; the temporary is dropped when the `match` ends",
+            "e's resource is moved into a temporary that this `if let` examines; the temporary is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends",
+            "f's resource is moved",
+            "g's resource is moved",
+            "h's resource is moved",
+            "x's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &[
+            "c's resource is moved into a temporary that is dropped at the end of this statement",
+            "d's resource is moved into a temporary that is dropped at the end of this statement",
+            "e's resource is moved into a temporary that is dropped at the end of this statement",
+            "f's resource is moved into a temporary",
+            "g's resource is moved into a temporary",
+            "h's resource is moved into a temporary",
         ],
     },
 ];
