@@ -1996,7 +1996,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   ///
   /// Returns false if nothing was drawn, so the caller falls back to
   /// the plain argument handling.
-  fn match_closure_arg(&mut self, closure: &'tcx rustc_hir::Closure<'tcx>, arg: &'tcx Expr, to_ro: &ResourceTy, fn_name: &str) -> bool {
+  pub(crate) fn match_closure_arg(&mut self, closure: &'tcx rustc_hir::Closure<'tcx>, arg: &'tcx Expr, to_ro: &ResourceTy, fn_name: &str) -> bool {
     let line_num = expr_to_line(&arg, &self.tcx);
     let last_line = self.tcx.sess.source_map().lookup_char_pos(arg.span.hi()).line;
     let typeck = self.tcx.typeck(closure.def_id);

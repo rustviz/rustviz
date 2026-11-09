@@ -937,6 +937,24 @@ pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String, value:
     )
 }
 
+// Source dot for a by-value capture of a closure literal that the fn
+// returns (`move |x| s.len() + x` as the tail): the closure goes to the
+// caller carrying the captured value, so the value isn't dropped here.
+pub fn event_dot_move_into_returned_closure(my_name: &String, value: bool) -> String {
+    format!(
+        "{0}'s {1} is moved into the returned closure, which goes to the caller",
+        fmt_style(my_name),
+        held(value)
+    )
+}
+
+pub fn event_dot_copy_into_returned_closure(my_name: &String) -> String {
+    format!(
+        "{0}'s value is copied into the returned closure",
+        fmt_style(my_name)
+    )
+}
+
 pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> String {
     format!(
         "{0}'s value is copied into a closure passed to {1}",
