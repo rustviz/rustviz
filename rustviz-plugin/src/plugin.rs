@@ -224,6 +224,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               temp_drops_noted: HashSet::new(),
               unbranched_temps: HashSet::new(),
               loop_iterators: Vec::new(),
+              temp_cols: HashMap::new(),
               destructure_srcs: HashMap::new(),
               destructure_moved: HashSet::new(),
               destructure_swapped: Vec::new(),
@@ -341,6 +342,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               temp_drops_noted: HashSet::new(),
               unbranched_temps: HashSet::new(),
               loop_iterators: Vec::new(),
+              temp_cols: HashMap::new(),
           destructure_srcs: HashMap::new(),
           destructure_moved: HashSet::new(),
           destructure_swapped: Vec::new(),
@@ -419,7 +421,10 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
     }
   }
 
-  pre_events.sort_by_key(|k| k.0);
+  // A temporary's drop comes after what else happens on its line: a
+  // field moved out of it (`let t = make_q().a;`) is drawn after the
+  // temporary is made, but before it is dropped (#469).
+  pre_events.sort_by_key(|k| (k.0, matches!(k.1, ExternalEvent::TemporaryDrop { .. })));
 
   // Build the rap.hash() → fn_start_line map for the renderer.
   // Functions are excluded — they don't get columns and span the

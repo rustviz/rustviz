@@ -1155,6 +1155,10 @@ const EXPECTED_OK: &[&str] = &[
     // and a `panic!()` inside the loop (#740, #649).
     "for_break_drops",
     "for_iterator_try_panic",
+    // A field moved out of a temporary, and a scrutinee whose pattern
+    // binds parts of it by value: the rest is dropped with it (#469).
+    "temporary_field_moved_out",
+    "temporary_scrutinee_partly_moved",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13030,6 +13034,79 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "the function returns from inside the loop",
             "this `break` leaves the `for` loop",
+        ],
+    },
+    TooltipExpect {
+        name: "temporary_field_moved_out",
+        // `let t = make_q().a;`: a is moved out of the temporary Q, whose
+        // b is dropped with it at the end of the statement (checked with
+        // a Drop-printing program). The temporary isn't "unmoved", so
+        // #571's "nothing bound it ... or moved it on" would be false.
+        // Before, nothing was drawn, and t (which owns the String) was
+        // "out of scope. No resource is dropped."
+        // `let s = make_p().name;`: nothing that needs dropping is left
+        // (P's other field is an i32), so no column; s acquires the String.
+        // `make_q().a.len()` only borrows a: the whole Q is dropped.
+        must_contain: &[
+            "Move from make_q to (temporary)",
+            "Partial move from (temporary) to t",
+            "(temporary)'s field a is moved to t",
+            "A temporary holds the value that make_q returns. Its field a is moved out of it; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
+            "This temporary Q is dropped at the end of this statement, and with it everything in it but its field a, which was moved out of it",
+            "t acquires ownership of a resource",
+            "t goes out of scope. Its resource is dropped.",
+            "Move from (temporary 2) to take",
+            "(temporary 2)'s field b is moved to take",
+            "This temporary Q is dropped at the end of this statement, and with it everything in it but its field b, which was moved out of it",
+            "Partial move from (temporary 3) to first",
+            "This temporary (String, String) is dropped at the end of this statement, and with it everything in it but its field 0, which was moved out of it",
+            "first goes out of scope. Its resource is dropped.",
+            "Move from make_p to s",
+            "Move from make_q to (temporary 4)",
+            "This temporary Q is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "=t goes out of scope. No resource is dropped.",
+            "=first goes out of scope. No resource is dropped.",
+            "=s goes out of scope. No resource is dropped.",
+            "(temporary 5)",
+            "Move from make_p to (temporary",
+        ],
+    },
+    TooltipExpect {
+        name: "temporary_scrutinee_partly_moved",
+        // The scrutinee temporary of a `match` / `if let` / `while let`
+        // whose pattern binds parts of it by value: what the pattern
+        // leaves (the `_` String of `(a, _)`, the whole `Some(..)` that
+        // fails the guard and goes to `_`, the `Err(String)` that `Ok(u)`
+        // refuses) is dropped with it. Timing (edition 2024, checked with
+        // a Drop-printing program): after the arm, when the match ends;
+        // before the `else` runs or when the matched block ends; at the
+        // end of each `while let` iteration (and at the last test).
+        // `match make() { Some(t) => .., None => .. }` on an
+        // `Option<String>` can't leave anything that needs dropping: no
+        // column. The bindings are still drawn from the call.
+        must_contain: &[
+            "Move from pair to (temporary)",
+            "A temporary holds the value that pair returns, for the match to inspect. The pattern of the arm that runs can move parts of it into its bindings; what is left in it is dropped with the temporary after the match",
+            "This temporary (String, String) is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from make to (temporary 2)",
+            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from res to (temporary 3)",
+            "A temporary holds the value that res returns, for the `if let` to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
+            "This temporary Result<String, String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Move from res to (temporary 4)",
+            "A temporary holds the value that res returns, for the `while let` to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
+            "This temporary Result<String, String> is dropped at the end of each iteration of this `while let` loop, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Partial move from pair to a",
+            "Move from res to u",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            // #571's wording for a scrutinee nothing is moved out of.
+            "nothing bound it to a variable or moved it on",
+            "Nothing binds it to a variable or moves it on",
+            "(temporary 5)",
         ],
     },
 ];

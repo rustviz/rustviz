@@ -432,11 +432,13 @@ const Description: React.FC = () => (
         value that nothing binds or moves on (a call&apos;s result:{' '}
         <code>make();</code>, <code>make().len()</code>,{' '}
         <code>f(&amp;make())</code>; <code>vec![..];</code>; a struct, tuple or
-        array literal; an <code>if let</code> / <code>while let</code> scrutinee;
-        the iterator a <code>for</code> loop makes from its head) gets a short{' '}
-        <code>(temporary)</code> column too (numbered together), and so does the
-        literal in <code>let (ref a, ..) = (s, t);</code>, which <code>s</code>{' '}
-        and <code>t</code> are moved into (only variables are drawn moving in),
+        array literal; a <code>match</code> / <code>if let</code> /{' '}
+        <code>while let</code> scrutinee; the iterator a <code>for</code> loop
+        makes from its head; a temporary a field is moved out of,{' '}
+        <code>make().name</code>) gets a short <code>(temporary)</code> column
+        too (numbered together), and so does the literal in{' '}
+        <code>let (ref a, ..) = (s, t);</code>, which <code>s</code> and{' '}
+        <code>t</code> are moved into (only variables are drawn moving in),
         a <code>ref</code> binding of a value (
         <code>let ref t = String::from(&quot;a&quot;);</code>) borrows one, and
         so does a literal of only fresh values (
@@ -444,8 +446,10 @@ const Description: React.FC = () => (
         A variable moved into a <code>vec![..]</code> or literal that nothing
         binds (<code>vec![s];</code>, or by struct update,{' '}
         <code>P {'{'} n: 1, ..p {'}'};</code>) is drawn moving into the
-        temporary. Not drawn or mentioned: a field moved out of a temporary
-        (<code>make().name</code>) and a scrutinee that a pattern binds by value.
+        temporary. The bindings of a scrutinee&apos;s pattern are drawn from the call, not
+        from that column. Not drawn or mentioned: what a{' '}
+        <code>let</code>-<code>else</code> pattern refuses, and a temporary that
+        is a struct update&apos;s base (<code>..make()</code>).
         Where a tuple of variables matched by <code>if let</code> or{' '}
         <code>match</code> (<code>(x, y)</code>) is dropped is stated on{' '}
         <code>x</code>&apos;s and <code>y</code>&apos;s columns (not when a{' '}

@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint, IF_LET_ARM};
+use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -387,19 +387,54 @@ pub fn moved_above(by_cond: bool) -> &'static str {
 // drops it when its statement (or other temporary scope) ends (#457).
 // The two dots of its column: where it comes into being, and the drop.
 pub fn event_dot_unbound_temporary_acquire(_my_name: &String, from_name: &String) -> String {
-    // The column the value comes from is a fn's, a std macro's (`vec!`)
-    // or a literal's (`P { .. }`, `(..)`, `[..]`) (#469).
-    let source = if from_name.ends_with('!') {
+    format!(
+        "A temporary holds the value that {0}. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+        temporary_source(from_name)
+    )
+}
+
+// "make returns", "the vec! macro produces", "the literal P { .. }
+// builds": where an unbound temporary's value comes from. The column
+// it comes from is a fn's, a std macro's (`vec!`) or a literal's
+// (`P { .. }`, `(..)`, `[..]`) (#469).
+fn temporary_source(from_name: &String) -> String {
+    if from_name.ends_with('!') {
         format!("the {0} macro produces", fmt_style(from_name))
     } else if from_name.ends_with(" { .. }") || from_name == "(..)" || from_name == "[..]" {
         format!("the literal {0} builds", fmt_style(from_name))
     } else {
         format!("{0} returns", fmt_style(from_name))
-    };
-    format!(
-        "A temporary holds the value that {0}. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-        source
-    )
+    }
+}
+
+// An unbound temporary that something is moved out of before it is
+// dropped (#469): a field (`let s = make_p().name;`) or what a pattern
+// binds by value (`match make() { Some(s) => .. }`). Nothing takes the
+// rest, which is dropped with the temporary; the drop says when.
+pub fn event_dot_unbound_temporary_part_acquire(_my_name: &String, from_name: &String, part: &TempPart) -> String {
+    let source = temporary_source(from_name);
+    match part {
+        TempPart::Field(f) => format!(
+            "A temporary holds the value that {0}. Its field {1} is moved out of it; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
+            source, fmt_style(f)
+        ),
+        TempPart::Match => format!(
+            "A temporary holds the value that {0}, for the match to inspect. The pattern of the arm that runs can move parts of it into its bindings; what is left in it is dropped with the temporary after the match",
+            source
+        ),
+        TempPart::IfLet | TempPart::WhileLet => format!(
+            "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
+            source, if matches!(part, TempPart::IfLet) { "`if let`" } else { "`while let`" }
+        ),
+    }
+}
+
+// The move out of such a temporary, on its column.
+pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part: &TempPart) -> String {
+    match part {
+        TempPart::Field(f) => format!("{0}'s field {1} is moved to {2}", fmt_style(my_name), fmt_style(f), fmt_style(to_name)),
+        _ => format!("The pattern moves {0}'s value, or part of it, into {1}", fmt_style(my_name), fmt_style(to_name)),
+    }
 }
 
 // A variable moved into an unbound temporary (`vec![s];`, `let _ = P {
@@ -444,6 +479,27 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool) -> St
         "This temporary {0} is dropped {1}: nothing bound it to a variable or moved it on. Its resource is dropped",
         fmt_style(ty), when
     )
+}
+
+// The drop of an unbound temporary that something was moved out of
+// (#469): what is left in it goes with it. Whether anything that needs
+// dropping is left can depend on the path taken (the arm that ran), so
+// this doesn't claim a resource is dropped.
+pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart) -> String {
+    match part {
+        TempPart::Field(f) => format!(
+            "This temporary {0} is dropped {1}, and with it everything in it but its field {2}, which was moved out of it",
+            fmt_style(ty), when, fmt_style(f)
+        ),
+        TempPart::Match => format!(
+            "This temporary {0} is dropped {1}, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            fmt_style(ty), when
+        ),
+        TempPart::IfLet | TempPart::WhileLet => format!(
+            "This temporary {0} is dropped {1}, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            fmt_style(ty), when
+        ),
+    }
 }
 
 /// Whether `acquire` is the plain "acquires ownership of a resource" line

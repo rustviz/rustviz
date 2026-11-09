@@ -204,6 +204,10 @@ pub struct Owner {
     /// array literal on the right of a `let` builds (#439), which the
     /// variables in the literal are moved into.
     pub let_literal_temp: bool,
+    /// For an unbound temporary that something is moved out of before
+    /// it is dropped (`make_p().name`, a `match` scrutinee whose pattern
+    /// binds by value): what that is; the rest is dropped with it (#469).
+    pub temp_part: Option<TempPart>,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
     /// True iff this owner isn't a reference but its value holds a
@@ -228,6 +232,23 @@ pub struct Owner {
     /// isn't the box's, but its heap allocation is still freed at scope
     /// end.
     pub box_contents_moved: bool,
+}
+
+/// What is moved out of an unbound temporary before Rust drops it and
+/// what is left in it (#469).
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub enum TempPart {
+    /// `make_p().name`: this field (a path like `name` or `inner.name`)
+    /// is moved out.
+    Field(String),
+    /// The scrutinee of a `match` whose arms' patterns bind parts of it
+    /// by value.
+    Match,
+    /// The scrutinee of an `if let` whose pattern binds parts of it by
+    /// value.
+    IfLet,
+    /// The same for a `while let`.
+    WhileLet,
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std
@@ -668,6 +689,14 @@ impl ResourceAccessPoint {
     /// `let` builds (#439); see `Owner::let_literal_temp`.
     pub fn is_let_literal_temporary(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { let_literal_temp: true, .. }))
+    }
+
+    /// See `Owner::temp_part`.
+    pub fn temp_part(&self) -> Option<&TempPart> {
+        match self {
+            ResourceAccessPoint::Owner(Owner { temp_part, .. }) => temp_part.as_ref(),
+            _ => None,
+        }
     }
 
     /// True iff this RAP is a lifetime-extended temporary (see
@@ -1483,6 +1512,8 @@ pub enum ExternalEvent {
         when: String,
         literal: bool,
         early: bool,
+        /// See `Owner::temp_part`.
+        part: Option<TempPart>,
         id: usize
     },
     // `ro` was moved into a `for` loop as its iterator (`for s in it`,
@@ -1903,7 +1934,7 @@ pub enum Event {
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
-    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool },
+    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart> },
     // See ExternalEvent::LoopIteratorDrop.
     LoopIteratorDrop { left: LoopLeft },
     // See ExternalEvent::LoopExitMove.
@@ -2555,7 +2586,7 @@ impl Event {
             Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
                 hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
             }
-            Event::TemporaryDrop { ty: Some(ty), when, literal, .. } => {
+            Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, .. } => {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal)
             }
             Event::OwnerDropIfTryReturns => {
@@ -2572,6 +2603,9 @@ impl Event {
             }
             Event::LoopIteratorDrop { left } => {
                 hover_messages::event_dot_loop_iterator_drop(my_name, *left)
+            }
+            Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
+                hover_messages::event_dot_temporary_part_drop(ty, when, part)
             }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
@@ -2685,6 +2719,11 @@ impl Event {
             }
             Event::Move{ to, is, break_out: true, ..} => {
                 hover_messages::event_dot_break_out_move(&self.deref_name(my_name), &to.name(), is_plain(is))
+            }
+            // A field or a pattern's binding moved out of an unbound
+            // temporary, which keeps the rest (#469).
+            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(part), .. })), ..} => {
+                hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part)
             }
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
@@ -2826,6 +2865,10 @@ impl Event {
                     // `vec![s];`: s is moved into the temporary (#570).
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
                     hover_messages::event_dot_unbound_temporary_takes(&from_name)
+                } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, temp_part: Some(part), .. })) = is {
+                    // `make_p().name`, `match make() { Some(s) => .. }`:
+                    // part of the value is moved out (#469).
+                    hover_messages::event_dot_unbound_temporary_part_acquire(&self.deref_name(my_name), &from.name(), part)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
                     // `make();`, `make().len()`: nothing takes the value.
                     safe_message(hover_messages::event_dot_unbound_temporary_acquire, &self.deref_name(my_name), from)
@@ -3288,6 +3331,10 @@ impl Visualizable for VisualizationData {
                 }
             },
 
+            // A field or a pattern's binding moved out of an unbound
+            // temporary: it still holds the rest, until its drop (#469).
+            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Value(r), ..}) if r.temp_part().is_some() =>
+                (*previous_state).clone(),
             // The current RAP's resource is moved
             (State::FullPrivilege{..}, Event::Move{to: to_ro,..}) =>
                 State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
@@ -3941,8 +3988,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
         },
-        ExternalEvent::TemporaryDrop{ ty, when, literal, early, .. } => {
-          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early })]
+        ExternalEvent::TemporaryDrop{ ty, when, literal, early, part, .. } => {
+          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone() })]
         },
         ExternalEvent::LoopIteratorDrop{ left, .. } => {
           vec![(line_num, Event::LoopIteratorDrop { left: *left })]
@@ -4294,8 +4341,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
             },
-            ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early }, line_number);
+            ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, part, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early, part }, line_number);
             },
             ExternalEvent::LoopIteratorDrop{ro, left, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left }, line_number);

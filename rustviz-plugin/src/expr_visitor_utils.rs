@@ -1605,6 +1605,16 @@ pub fn field_rap(inner: &Expr, field: &str, tcx: &TyCtxt, raps: &HashMap<String,
   None
 }
 
+/// `make_p().name`, `v.pop().unwrap().0.name`: the call or method call
+/// whose result a field projection reads from, if that's what it is.
+pub fn field_call_root<'a, 'tcx>(expr: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
+  let ExprKind::Field(mut e, _) = expr.kind else { return None };
+  while let ExprKind::Field(base, _) = e.kind {
+    e = base;
+  }
+  matches!(e.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)).then_some(e)
+}
+
 // Almost the same as get_rap but we don't care about any anonymous owners
 // which is why we return a RAP instead of a ResourceTy
 pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Option<ResourceAccessPoint> {
