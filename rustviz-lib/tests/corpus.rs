@@ -13923,9 +13923,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's value is no longer immutably borrowed",
             "c's immutable borrow ends",
             "c immutably borrows a value",
+            // A written Copy lender's scope end reads like any Copy
+            // value's (a plain `let mut x = 8; let c = &x; ..; x += 1;`
+            // says the same); main's extra ". No resource is dropped."
+            // came from the write being drawn inside the borrowed span.
+            "x goes out of scope",
         ],
         must_not_contain: &[
             "c's immutable borrow ends• c immutably borrows a value",
+            "x goes out of scope. No resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -13936,8 +13942,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's value is no longer immutably borrowed",
             "b's value is no longer immutably borrowed",
             "r immutably borrows a value",
+            "a goes out of scope",
+            "b goes out of scope",
         ],
         must_not_contain: &[
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
             "r's immutable borrow ends• r immutably borrows a value",
         ],
     },
