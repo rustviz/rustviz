@@ -5863,14 +5863,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           // The scrutinee of an `if let` / `while let` (#469). Its
           // temporaries outlive the pattern match.
-          ExprKind::If(c, then, _) if c.hir_id == cur && matches!(c.kind, ExprKind::Let(_)) => {
+          ExprKind::If(c, then, els) if c.hir_id == cur && matches!(c.kind, ExprKind::Let(_)) => {
             if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) {
               return Some(("at the end of each iteration of this `while let` loop", end(e.span), None));
             }
             if expr.span.edition() >= rustc_span::edition::Edition::Edition2024 {
               // Edition 2024: dropped before the `else` block runs, or
               // when the matching block ends.
-              return Some(("before the `else` block of this `if let` runs, or when the block it matched ends", end(then.span), None));
+              // With no `else` there is no block to name (#776).
+              let w = if els.is_some() {
+                "before the `else` block of this `if let` runs, or when the block it matched ends"
+              } else {
+                "when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends"
+              };
+              return Some((w, end(then.span), None));
             }
             // Before edition 2024 they live to the end of the enclosing
             // statement, unless this is an `else if let`, whose whole
@@ -5884,11 +5890,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // A let chain (`if a && let Some(_) = make() { .. }`, edition
           // 2024): a `let`'s scrutinee lives like an `if let`'s, until the
           // block the chain matched ends or the `else` runs (#604).
-          ExprKind::If(c, then, _) if c.hir_id == cur && is_let_chain(c) => {
+          ExprKind::If(c, then, els) if c.hir_id == cur && is_let_chain(c) => {
             if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) {
               return Some(("at the end of each iteration of this `while let` loop", end(e.span), None));
             }
-            return Some(("before the `else` block of this `if` runs, or when the block its let chain matched ends", end(then.span), None));
+            let w = if els.is_some() {
+              "before the `else` block of this `if` runs, or when the block its let chain matched ends"
+            } else {
+              "when the condition of this `if` fails (before the code after the `if` runs), or when the block its let chain matched ends"
+            };
+            return Some((w, end(then.span), None));
           }
           // `if` / `while` conditions, and the operands of `&&` / `||`,
           // are scopes of their own.
