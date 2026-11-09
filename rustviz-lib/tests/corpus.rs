@@ -1179,6 +1179,12 @@ const EXPECTED_OK: &[&str] = &[
     "or_pattern_nested_ref",
     // The return arrow of `for x in v.iter_mut()` names `v` (#749).
     "for_method_head_label",
+    // References bound by a let-else, or by a match arm on a tuple of
+    // references, borrow what the value they came out of borrows
+    // (#718, #756).
+    "pattern_let_else_struct_ref",
+    "pattern_tuple_ref_elements",
+    "pattern_let_tuple_call_lenders",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13396,6 +13402,66 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from s to w",
         ],
         must_not_contain: &["to iter_mut", "=Return immutably borrowed resource from s to iter"],
+    },
+    // #718: `y.part` of the struct bound by `let Some(y) = o else {..}`
+    // borrows `s` (what `o` holds) and returns it at its last use; `r`
+    // copied out of `Some(&t)` does the same for `t`.
+    TooltipExpect {
+        name: "pattern_let_else_struct_ref",
+        must_contain: &[
+            "Immutable borrow from s to y.part: y.part is a reference that came with the value moved out of o into y",
+            "Return immutably borrowed resource from y.part to s",
+            "Return immutably borrowed resource from r to t",
+        ],
+        must_not_contain: &[
+            "y.part's immutable borrow ends (what it borrows from isn't shown)",
+            "y.part holds an immutable reference (it came with the value matched into y)",
+        ],
+    },
+    // #756: `p` and `q` bound by a match arm `(p, q)` on `pair2 = (&c, &d)`
+    // copy the references in `pair2.0` / `pair2.1`: p returns to c at its
+    // last use, q to d at its own (`c.push` / `d.push` compile only then).
+    // `let (x, y) = pair;` and `if let (u, v) = pair3` already did.
+    TooltipExpect {
+        name: "pattern_tuple_ref_elements",
+        must_contain: &[
+            "Return immutably borrowed resource from p to c",
+            "Return immutably borrowed resource from q to d",
+            "Return immutably borrowed resource from x to a",
+            "Return immutably borrowed resource from y to b",
+            "Return immutably borrowed resource from u to e",
+            "Return immutably borrowed resource from v to f",
+        ],
+        must_not_contain: &[
+            "p's immutable borrow ends (what it borrows from isn't shown)",
+            "q's immutable borrow ends (what it borrows from isn't shown)",
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "y's immutable borrow ends (what it borrows from isn't shown)",
+            // Each element has its own lender.
+            "Return immutably borrowed resource from p to d",
+            "Return immutably borrowed resource from q to c",
+            "Return immutably borrowed resource from x to b",
+            "Return immutably borrowed resource from y to a",
+        ],
+    },
+    // #756: `let (x, y) = two(&c, &d);` with `two` returning `(&'a T, &'b T)`:
+    // x borrows only c, y only d (`d.push` between their last uses
+    // compiles).
+    TooltipExpect {
+        name: "pattern_let_tuple_call_lenders",
+        must_contain: &[
+            "Immutable borrow from c to x: x is a reference copied out of the value two returned",
+            "Immutable borrow from d to y: y is a reference copied out of the value two returned",
+            "Return immutably borrowed resource from x to c",
+            "Return immutably borrowed resource from y to d",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from x to d",
+            "Return immutably borrowed resource from y to c",
+            "Immutable borrow from d to x",
+            "Immutable borrow from c to y",
+            "two's signature gives the reference it returns the same lifetime as both arguments",
+        ],
     },
 ];
 

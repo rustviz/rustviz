@@ -4419,8 +4419,13 @@ fn pattern_ref_borrows(
   }
   // Not yet given a lender: Anonymous for a binding, the `Caller`
   // placeholder for a struct binding's reference field (#352).
-  let placeholder = if in_field { ResourceTy::Caller } else { ResourceTy::Anonymous };
-  if self.borrow_map.get(&name).map(|rd| &rd.lender) != Some(&placeholder) {
+  // (A `let ... else` binds the struct's fields with `Anonymous`, #718.)
+  let unset = |l: Option<&ResourceTy>| match l {
+    Some(ResourceTy::Anonymous) => true,
+    Some(ResourceTy::Caller) => in_field,
+    _ => false,
+  };
+  if !unset(self.borrow_map.get(&name).map(|rd| &rd.lender)) {
     return Vec::new();
   }
   let mut lenders: Vec<ResourceTy> = Vec::new();
