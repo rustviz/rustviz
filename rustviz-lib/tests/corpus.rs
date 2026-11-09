@@ -1245,6 +1245,8 @@ const EXPECTED_OK: &[&str] = &[
     "borrow_end_join_else",
     // #801: read in the `if` arm, re-pointed in the `else` arm; one segment per row.
     "borrow_read_in_arm_repoint_else",
+    // #803: a dot that ends two of a reference's loans names each lender.
+    "borrow_end_two_loans_mut",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14251,6 +14253,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=",
         ],
     },
+    // #803: `c = &y;` ends c's loan of `x` and its unused new loan of `y`
+    // on one dot; the dot named neither and said "c's immutable borrow
+    // ends" twice. Each now names its lender. A lone end, and ends listed
+    // together (the other arm's dot, or a reference borrowing from two
+    // lenders), keep the plain wording.
+    TooltipExpect {
+        name: "borrow_end_join_else",
+        must_contain: &[
+            "c's immutable borrow of x ends",
+            "c's immutable borrow of y ends",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "borrow_end_two_loans_mut",
+        must_contain: &[
+            "c's mutable borrow of a ends",
+            "c's mutable borrow of b ends",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -18206,6 +18229,33 @@ fn old_lender_ends_on_each_arm_where_it_is_borrowed_no_longer() {
     let c_ends = dots_where(&timeline, |l| l.iter().any(|t| t == "c's immutable borrow ends"));
     assert!(c_ends.iter().all(|d| (d.1 - read_y).abs() >= 10.0 || d.0 >= c_col),
         "a second \"c's immutable borrow ends\" on the `println!` row of the `then` arm: {:?}", c_ends);
+}
+
+/// #803: `c = &y;` ends c's loan of `x` and its unused new loan of `y` on
+/// one dot, with the new borrow's own line between them. The dot listed
+/// "c's immutable borrow ends" twice (the same sentence for two different
+/// loans, which reads as a glitch); each end now names its lender, in
+/// order: the old loan's end, the new borrow, the new loan's end. The
+/// `else` arm's lone end keeps the plain wording.
+#[test]
+fn a_dot_ending_two_loans_names_each_lender() {
+    for (name, kind, new_borrow, lenders) in [
+        ("borrow_end_join_else", "immutable", "c immutably borrows a value", ("x", "y")),
+        ("borrow_end_two_loans_mut", "mutable", "c mutably borrows a value", ("a", "b")),
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        let plain = format!("c's {} borrow ends", kind);
+        let dots = tooltip_lines(&timeline);
+        let twice: Vec<_> = dots.iter().filter(|l| l.iter().filter(|t| **t == plain).count() > 1).collect();
+        assert!(twice.is_empty(), "{}: a dot says {:?} twice: {:?}", name, plain, twice);
+        let want = vec![
+            format!("c's {} borrow of {} ends", kind, lenders.0),
+            new_borrow.to_string(),
+            format!("c's {} borrow of {} ends", kind, lenders.1),
+        ];
+        assert!(dots.iter().any(|l| *l == want), "{}: no dot lists {:?}; dots: {:?}", name, want, dots);
+        assert!(dots.iter().any(|l| l.contains(&plain)), "{}: the other arm's lone end lost its plain wording", name);
+    }
 }
 
 /// #801: `c = &x` before an `if` that reads `c` in the `if` arm and

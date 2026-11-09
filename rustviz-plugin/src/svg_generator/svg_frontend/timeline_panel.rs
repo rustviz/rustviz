@@ -1710,6 +1710,8 @@ fn render_dot(
                         } else {
                             data.title = event.print_message_with_name(& mut name);
                         }
+                    } else if let Some(title) = ends_several_loans_title(event, history, *line_number, &mut name) {
+                        data.title = title;
                     } else if let Some(title) = kept_closure_lend_title(event, &name, visualization_data) {
                         data.title = title;
                     } else if let Some(title) = closure_reborrow_lend_title(event, visualization_data) {
@@ -1831,6 +1833,29 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
         }
     }
     (moved, acquired)
+}
+
+// A borrow's end on a line where the same reference's borrow of another
+// lender ends too, with the reference's new borrow in between (`c = &y;`
+// ends c's loan of `x` and its unused new loan of `y`, #803): the dot
+// would say "c's immutable borrow ends" twice, with the new borrow's
+// text between, so it names each lender. Ends listed together (a
+// reference that borrows from two lenders, `longest(&a, &b)`) already
+// read as one sentence, and a lone end keeps its plain wording.
+fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usize, name: &mut String) -> Option<String> {
+    let mine = event.borrow_end_lender_name()?;
+    let is_mut = matches!(event, Event::MutableDie { .. });
+    let row: Vec<&Event> = history.iter().filter(|(l, _)| *l == line).map(|(_, e)| e).collect();
+    let mut ends = row.iter().enumerate().filter(|(_, e)| e.borrow_end_lender_name().is_some());
+    let me = row.iter().position(|e| std::ptr::eq(*e, event))?;
+    let repeated = ends.any(|(j, e)| {
+        j != me
+            && matches!(e, Event::MutableDie { .. }) == is_mut
+            && e.borrow_end_lender_name().is_some_and(|other| other != mine)
+            // Something else on the dot between the two ends.
+            && row[j.min(me)..=j.max(me)].iter().any(|x| x.borrow_end_lender_name().is_none())
+    });
+    if repeated { event.borrow_end_naming_lender(name) } else { None }
 }
 
 // The first line where a reference's borrow ends in `history` (one
