@@ -1222,6 +1222,11 @@ const EXPECTED_OK: &[&str] = &[
     "ref_reassign_reads_rhs_first",
     "return_tail_tied_params",
     "return_tail_untied_param",
+    // A `let` assigned on only some paths is maybe-initialized after
+    // the conditional; a drop flag decides its drops (#244).
+    "deferred_init_maybe",
+    "deferred_init_two_ifs",
+    "deferred_init_then_moved",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -3482,15 +3487,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // s is assigned in the if branch only. On the else path it has
         // no value, so there is nothing to drop there and it wasn't
         // moved. `unused` is never assigned and gets no column.
+        // After the if, s may have no value (#244): its scope end drops
+        // the String only if the if branch ran (a drop flag). Before
+        // #244 the scope end said the String is dropped, and the join
+        // dot had an empty tooltip. s is immutable: it can't be assigned
+        // again (E0384), so no "until it's assigned again".
         must_contain: &[
             "Move from String::from to s",
             "s acquires ownership of a resource",
             "s has no value yet",
+            "s was assigned a value in only some of the branches above, so it can't be used after the branches. If the branch that ran assigned it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "s was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "s may have been moved (consumed in at least one branch above)",
             "unused goes out of scope",
+            "=s goes out of scope. Its resource is dropped.",
+            "until it's assigned again",
+            // No dot without a tooltip.
+            "=",
         ],
     },
     // `v.last_mut().unwrap().s = t`: the temporary `&mut P` has no
@@ -13994,6 +14010,73 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "same lifetime 'a)",
             "y isn't returned on this path",
+        ],
+    },
+    // #244: a `let` assigned on only some paths is maybe-initialized
+    // after the conditional. Before, s's reassignment said its previous
+    // resource is dropped (nothing is when c is false), t's scope end
+    // said its resource is dropped (nothing is when the `1` arm ran),
+    // and the joins' dots had empty tooltips. n is Copy: no drop claim.
+    TooltipExpect {
+        name: "deferred_init_maybe",
+        must_contain: &[
+            "s was assigned a value in only some of the branches above, so it can't be used after the branches until it's assigned again. If the branch that ran assigned it, its resource is dropped when s is assigned again.",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "n was assigned a value in only some of the branches above, so it can't be used after the branches (until it's assigned again).",
+            "n is assigned a new value",
+            // The `_` arm panics: it doesn't count.
+            "t was assigned a value in only some of the branches above, so it can't be used after the branches. If the branch that ran assigned it, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if t was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "=t goes out of scope. Its resource is dropped.",
+            // After the match (t's arm is one line, with no segment).
+            "t is the owner of the resource",
+            "its resource is dropped when n",
+            "n's resource",
+            "may have been moved",
+            // No dot without a tooltip.
+            "=",
+        ],
+    },
+    // #244: the second `if` assigns s, maybe-initialized by the first:
+    // that drops the old String only if a was true, and its implicit
+    // `else` path may still have no value. The last assignment is on
+    // every path, so nothing is left for the scope end.
+    TooltipExpect {
+        name: "deferred_init_two_ifs",
+        must_contain: &[
+            "s was assigned a value in only some of the branches above, so it can't be used after the branches until it's assigned again. If the branch that ran assigned it, its resource is dropped when s is assigned again.",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "s may have no value here: it was assigned in only some of the branches above",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "or, if it isn't, when it goes out of scope",
+            "=s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            // No dot without a tooltip.
+            "=",
+        ],
+    },
+    // #244: assigned on some paths and moved on some of those. Before,
+    // both scope ends said the resource is dropped "only if no branch
+    // above moved it": false for s (nothing is ever dropped) and for t
+    // on the `_` path (t was never assigned there).
+    TooltipExpect {
+        name: "deferred_init_then_moved",
+        must_contain: &[
+            "s was assigned a value in only some of the branches above, and each of them moved it away, so s holds nothing after the branches.",
+            "s goes out of scope. No resource is dropped: each branch above that assigned s moved it away.",
+            "t was assigned a value in only some of the branches above, so it can't be used after the branches. If the branch that ran assigned it and didn't move it, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if t was assigned in the branch that ran and wasn't moved there (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped",
+            "only if no branch above moved it",
+            // No dot without a tooltip.
+            "=",
         ],
     },
 ];

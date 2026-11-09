@@ -2416,6 +2416,16 @@ pub fn state_uninitialized(my_name: &String) -> String {
     )
 }
 
+// `state_uninitialized` in a conditional that comes after one that
+// assigned s in only some of its branches (#244): on the rows of an arm
+// that hasn't assigned s, s holds a value on some paths only.
+pub fn state_maybe_uninitialized(my_name: &String) -> String {
+    format!(
+        "{0} may have no value here: it was assigned in only some of the branches above",
+        fmt_style(my_name)
+    )
+}
+
 /// A dashed arm column: the rows belong to another arm, so this arm
 /// isn't running here; the tooltip says which branch the line belongs to (#626).
 /// `label` is the arm's label (see `BranchType`): "If" / "Else" /
@@ -2807,6 +2817,101 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String 
         "{0} was moved in at least one branch above, so it can't be used after the branches \
          until it's assigned again. If the branch that ran didn't move it, its resource is \
          dropped when {0} is assigned again.",
+        fmt_style(my_name)
+    )
+}
+
+// ── Maybe-initialized `let x;` locals (#244) ──────────────────────
+//
+// `let mut s; if c { s = String::from("a"); }`: after the `if`, s holds
+// a value on the path that assigned it and none on the other. rustc
+// rejects any read of s there (E0381, "possibly-uninitialized"), and
+// keeps a runtime drop flag for it, like for a maybe-moved variable: s's
+// next assignment, or else its scope end, drops the old value only if
+// there is one. The wording mirrors the maybe-moved messages above.
+
+// `moved` (all four): another branch assigned s and then moved its
+// value away, so the drop also needs s not to have been moved there.
+fn assigned_in_branch_that_ran(moved: bool) -> &'static str {
+    if moved { "assigned it and didn't move it" } else { "assigned it" }
+}
+
+// The join of the conditional. `value`: s holds a Copy value, a
+// reference or another value with nothing to drop, so nothing is ever
+// dropped. `mutable`: s can be assigned again (an immutable `let s;`
+// can't be: a second assignment is E0384).
+pub fn event_dot_branch_merge_maybe_init(my_name: &String, value: bool, mutable: bool, moved: bool, note: &str) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let mut out = format!(
+        "{0} was assigned a value in only some of the branches above, so it can't be used after \
+         the branches{1}.",
+        my_name_fmt,
+        if mutable { " (until it's assigned again)" } else { "" }
+    );
+    if !value {
+        let (holds, rest) = split_drop_note(note);
+        out.push_str(&format!(
+            " If the branch that ran {3}, its resource{1} is dropped{2} when {0} goes out of scope.",
+            my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
+        ));
+    }
+    out
+}
+
+// `event_dot_branch_merge_maybe_init` when s is assigned again before it
+// goes out of scope: the old value, if there is one, is dropped at that
+// assignment instead. `maybe`: the next assignment is in a branch of a
+// later conditional, so on the other paths it's dropped at scope end.
+pub fn event_dot_branch_merge_maybe_init_then_reassigned(my_name: &String, maybe: bool, moved: bool) -> String {
+    format!(
+        "{0} was assigned a value in only some of the branches above, so it can't be used after \
+         the branches until it's assigned again. If the branch that ran {2}, its resource \
+         is dropped when {0} is assigned again{1}.",
+        fmt_style(my_name),
+        if maybe { " (or, if it isn't, when it goes out of scope)" } else { "" },
+        assigned_in_branch_that_ran(moved)
+    )
+}
+
+// That next assignment (`event_dot_owner_drop_at_reassign_maybe_moved`'s
+// counterpart).
+pub fn event_dot_owner_drop_at_reassign_maybe_init(my_name: &String, note: &str, moved: bool) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only \
+         if {0} was assigned in the branch that ran{3} (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name), holds, rest,
+        if moved { " and wasn't moved there" } else { "" }
+    )
+}
+
+// Its scope end, when it isn't assigned again
+// (`event_dot_go_out_of_scope_maybe_moved`'s counterpart).
+pub fn event_dot_go_out_of_scope_maybe_init(my_name: &String, note: &str, moved: bool) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} was assigned in the \
+         branch that ran{3} (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name), holds, rest,
+        if moved { " and wasn't moved there" } else { "" }
+    )
+}
+
+// The join when every branch that assigned s moved its value away: s
+// holds nothing after it, on any path.
+pub fn event_dot_branch_merge_init_all_moved(my_name: &String, mutable: bool) -> String {
+    format!(
+        "{0} was assigned a value in only some of the branches above, and each of them moved it \
+         away, so {0} holds nothing after the branches{1}.",
+        fmt_style(my_name),
+        if mutable { " (until it's assigned again)" } else { "" }
+    )
+}
+
+// Its scope end.
+pub fn event_dot_go_out_of_scope_init_all_moved(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. No resource is dropped: each branch above that assigned {0} moved it away.",
         fmt_style(my_name)
     )
 }

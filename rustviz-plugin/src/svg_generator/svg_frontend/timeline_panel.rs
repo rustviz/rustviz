@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, string_of_external_event, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, string_of_external_event, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages;
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1063,7 +1063,7 @@ fn render_dot(
                 }
                 continue;
             }
-            Event::Branch { is, branch_history, ty, split_point, merge_point, .. } => {
+            Event::Branch { is, branch_history, ty, split_point, merge_point, maybe_init, .. } => {
                 // Top-of-branch dot on the parent column. Tooltip
                 // explains the variable's role ("X is live in a
                 // conditional expression"). Anchors the parent
@@ -1191,10 +1191,14 @@ fn render_dot(
                 let (mixed_moved, all_moved) = merge_move_kind(branch_history, ty);
                 // `let s;` left unassigned on some path (#234): that
                 // branch ends with no value, not with a move, so
-                // nothing is dropped there. The dot gets no message:
-                // "initialized in only some branches" would mislead
-                // when the other branch diverges (`panic!()`,
-                // `unreachable!()`), which this layer can't see.
+                // nothing is dropped there. When another branch that
+                // gets here assigned it, s is maybe-initialized after
+                // the join (#244), and the dot says so; a branch that
+                // returns or panics doesn't count. So does it when each
+                // branch that assigned s moved it away. Otherwise (s
+                // isn't assigned on any path that gets here) the dot
+                // gets no message.
+                let init = init_join(*maybe_init, reaching_end_states(branch_history));
                 let partly_initialized = branch_history.iter().filter(|b| !b.diverges).any(|b| {
                     matches!(
                         b.states.last().map(|s| &s.2),
@@ -1216,6 +1220,34 @@ fn render_dot(
                 // `None`: no join dot at all (the all-moved case below).
                 let title = if borrow_ended_in_every_arm {
                     Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
+                } else if let Some(InitJoin::AllMoved) = init {
+                    Some(hover_messages::event_dot_branch_merge_init_all_moved(&is.real_name(), rap.is_mut()))
+                } else if let Some(InitJoin::Maybe { moved }) = init {
+                    // As for a maybe-moved variable below, the old value
+                    // is dropped by a drop flag at the next assignment
+                    // if there is one, or else at the scope end. That
+                    // assignment may be in a later conditional's
+                    // branch, on some paths only.
+                    let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
+                    let after: Vec<&(usize, Event)> = full.iter().filter(|(l, _)| *l > *merge_point).collect();
+                    // (An assignment on every path: it comes before
+                    // the scope end.)
+                    let reassigned_next = after.iter()
+                        .any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_init: true, .. }));
+                    let reassigned_later = after.iter().any(|(_, e)| reassigns_maybe_init(e));
+                    Some(if reassigned_next {
+                        hover_messages::event_dot_branch_merge_maybe_init_then_reassigned(&is.real_name(), false, moved)
+                    } else if reassigned_later {
+                        hover_messages::event_dot_branch_merge_maybe_init_then_reassigned(&is.real_name(), true, moved)
+                    } else {
+                        hover_messages::event_dot_branch_merge_maybe_init(
+                            &is.real_name(),
+                            is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
+                            rap.is_mut(),
+                            moved,
+                            &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
+                        )
+                    })
                 } else if partly_initialized {
                     Some(String::new())
                 } else if mixed_moved {
@@ -1386,6 +1418,25 @@ fn render_dot(
                         };
                         append_drop_dot(drop_data, timeline_data, dots);
                         continue;
+                    } else if !resource_hold && init_at_end(history) == Some(InitJoin::AllMoved) {
+                        // Every branch that assigned it moved it (#244).
+                        data.title = hover_messages::event_dot_go_out_of_scope_init_all_moved(&name);
+                    } else if let (false, Some(InitJoin::Maybe { moved })) = (resource_hold, init_at_end(history)) {
+                        // Assigned in some branches of a conditional but
+                        // not others (#244): the drop flag decides here.
+                        let cx = timeline_data.x_val;
+                        let cy = event_y;
+                        let drop_data = DropDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title: hover_messages::event_dot_go_out_of_scope_maybe_init(&name, &ro.drop_note(), moved),
+                            p1x: cx - 3, p1y: cy - 1,
+                            p2x: cx + 3, p2y: cy - 1,
+                            p3x: cx,     p3y: cy + 3,
+                        };
+                        append_drop_dot(drop_data, timeline_data, dots);
+                        continue;
                     } else if !resource_hold && maybe_moved_at_end(history) {
                         // Moved in some branches of a conditional but
                         // not others (#179): the drop flag decides here.
@@ -1531,7 +1582,11 @@ fn render_dot(
                     let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
-                    let title = if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false, .. })
+                    let title = if let Event::OwnerDropAtReassign { maybe_init: true, maybe_moved, .. } = event {
+                        // A `let s;` local only some branches above
+                        // assigned (#244), and maybe moved after that.
+                        hover_messages::event_dot_owner_drop_at_reassign_maybe_init(&name, &note, *maybe_moved)
+                    } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false, .. })
                         // (Before the new value's Acquire on this line.)
                         && maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)) {
                         // A `let` or-pattern, not a branch, may have moved it (#597).
@@ -1785,6 +1840,9 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
     let mut maybe = false;
     for (_, e) in history {
         match e {
+            // Assigned in some branches only, not moved (#244).
+            Event::Branch { branch_history, maybe_init, .. }
+                if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => maybe = false,
             Event::Branch { branch_history, ty, .. } => {
                 let (mixed, all_moved) = merge_move_kind(branch_history, ty);
                 if mixed {
@@ -1811,6 +1869,47 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
         }
     }
     maybe
+}
+
+// A drop-flag assignment to a maybe-initialized `let x;` local (#244),
+// also one in a branch of a later conditional.
+fn reassigns_maybe_init(e: &Event) -> bool {
+    match e {
+        Event::OwnerDropAtReassign { maybe_init, .. } => *maybe_init,
+        Event::Branch { branch_history, .. } =>
+            branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| reassigns_maybe_init(e))),
+        _ => false,
+    }
+}
+
+// The end state of each branch of a conditional that reaches its join
+// (not one that returns or panics, #296).
+fn reaching_end_states(branch_history: &[BranchData]) -> impl Iterator<Item = &State> + Clone {
+    branch_history.iter().filter(|b| !b.diverges).filter_map(|b| b.states.last().map(|s| &s.2))
+}
+
+// `Some` when the last thing that decided what this column holds was a
+// conditional that assigned it, a `let s;` local, in only some of the
+// branches that reach its join (#244): at scope end, Rust drops the
+// value only if there is one (a runtime drop flag).
+fn init_at_end(history: &[(usize, Event)]) -> Option<InitJoin> {
+    init_after(None, history)
+}
+
+// `init_at_end` for events that follow a point where the column was in
+// state `start`.
+fn init_after(start: Option<InitJoin>, history: &[(usize, Event)]) -> Option<InitJoin> {
+    let mut init = start;
+    for (_, e) in history {
+        match e {
+            Event::Branch { branch_history, maybe_init, .. } => {
+                init = init_join(*maybe_init, reaching_end_states(branch_history));
+            }
+            e if holds_value_after(false, e) => init = None,
+            _ => {}
+        }
+    }
+    init
 }
 
 // `Some(some_diverge)` when the last thing that decided this column's
@@ -4027,6 +4126,9 @@ fn perp_unit(p1: (f64, f64), p2: (f64, f64)) -> (f64, f64) {
 
 /// Render every Branch event reachable through `history`. Recurses
 /// into nested branches.
+///
+/// `maybe_init`: the column is a `let s;` local that only some branches
+/// of an earlier conditional assigned (#244) when `history` starts.
 fn render_branches(
     hash: &u64,
     rap: &ResourceAccessPoint,
@@ -4035,10 +4137,16 @@ fn render_branches(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     timeline_data: &TimelineColumnData,
+    maybe_init: bool,
 ) {
     if rap.is_fn() { return; }
-    for (_, ev) in history {
+    for (k, (_, ev)) in history.iter().enumerate() {
         let Event::Branch { branch_history, split_point, merge_point, ty, .. } = ev else { continue };
+        // Maybe-initialized as the conditional starts (#244): where an
+        // arm hasn't assigned s yet, s may or may not hold a value.
+        let entry_maybe_init = matches!(
+            init_after(maybe_init.then_some(InitJoin::Maybe { moved: false }), &history[..k]),
+            Some(InitJoin::Maybe { .. }));
 
         let parent_x = timeline_data.x_val as f64;
         // Branches that share lines (`let s = if c { a } else { b };`)
@@ -4221,6 +4329,12 @@ fn render_branches(
                 }
             }
 
+            if entry_maybe_init {
+                let no_value = hover_messages::state_uninitialized(rap.name());
+                for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
+                    seg.title = hover_messages::state_maybe_uninitialized(rap.name());
+                }
+            }
             let segs = trim_dashes_under_solid(segs);
             let runs = split_centerline_runs(&segs);
 
@@ -4262,7 +4376,7 @@ fn render_branches(
 
             render_branches(
                 hash, rap, &branch.e_data, &branch.states,
-                output, visualization_data, &branch.t_data,
+                output, visualization_data, &branch.t_data, entry_maybe_init,
             );
         }
     }
@@ -4579,7 +4693,7 @@ fn render_timeline(
     // ranges (clean_states leaves an OOS placeholder over the
     // branch's split..merge span, so those rows naturally render
     // as nothing).
-    render_branches(hash, rap, history, states, output, visualization_data, timeline_data);
+    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false);
 
     let apexes = CollapsedApexes::of(history);
     for (line_start, line_end, state) in states {
@@ -4937,6 +5051,7 @@ mod tests {
             ty: BranchType::Match(Vec::new(), Vec::new()),
             split_point: 0,
             merge_point: 0,
+            maybe_init: false,
             id: 0,
         })];
         compute_width(&mut events);

@@ -1519,6 +1519,10 @@ pub enum ExternalEvent {
         // `ro` is a struct or tuple some of whose parts were moved out
         // before (#628): what of its previous value is dropped.
         parts: Option<ReassignParts>,
+        // `ro` is a `let x;` local that only some branches above
+        // initialized (#244): the old value is dropped here only if
+        // there is one (a runtime drop flag decides).
+        maybe_init: bool,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -1722,6 +1726,11 @@ pub enum ExternalEvent {
       branch_type: BranchType,
       split_point: usize,
       merge_point: usize,
+      // `let x;` locals initialized in only some of the branches that
+      // reach the merge (#244), so maybe-initialized after it (a drop
+      // flag decides whether their scope end or next assignment drops
+      // anything).
+      maybe_init: HashSet<ResourceAccessPoint>,
       id: usize
     }
 }
@@ -1908,6 +1917,9 @@ pub enum Event {
       ty: BranchType,
       split_point: usize,
       merge_point: usize,
+      // This column is a `let x;` local initialized in only some of the
+      // branches that reach the merge (#244).
+      maybe_init: bool,
       id: usize
     },
 
@@ -1974,7 +1986,8 @@ pub enum Event {
     // unchanged across this event because the matching Acquire from
     // rhs lands on the same line and immediately re-establishes
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts> },
+    // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts>, maybe_init: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -2266,6 +2279,39 @@ pub fn branch_state_converter(s: &State) -> State {
         State::PartialPrivilege { .. } => State::PartialPrivilege { s: LineState::Gray },
         State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
         _ => s.clone()
+    }
+}
+
+/// What a conditional's join leaves in a `let x;` local that only some
+/// of the branches reaching it assigned (#244; the Branch event's
+/// `maybe_init`), the others leaving it with no value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InitJoin {
+    /// Some branches leave x holding a value. Rust tracks whether it
+    /// does with a drop flag, and x can't be read after the join until
+    /// it's assigned again. `moved`: some other branch assigned x and
+    /// then moved its value away.
+    Maybe { moved: bool },
+    /// Every branch that assigned x moved its value away: x holds
+    /// nothing after the join on any path.
+    AllMoved,
+}
+
+/// `InitJoin` of a conditional from the end states `ends` of its
+/// branches that reach the join (not one that returns or panics).
+pub fn init_join<'a>(maybe_init: bool, ends: impl IntoIterator<Item = &'a State> + Clone) -> Option<InitJoin> {
+    let unassigned = |s: &State| matches!(s, State::OutOfScope | State::FullPrivilege { s: LineState::Uninit });
+    if !maybe_init || !ends.clone().into_iter().any(unassigned) {
+        return None;
+    }
+    let moved = ends.clone().into_iter().any(|s| matches!(s, State::ResourceMoved { .. }));
+    let holds = ends.into_iter().any(|s| matches!(s,
+        State::FullPrivilege { .. } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
+        && !unassigned(s));
+    match (holds, moved) {
+        (true, _) => Some(InitJoin::Maybe { moved }),
+        (false, true) => Some(InitJoin::AllMoved),
+        (false, false) => None,
     }
 }
 
@@ -3743,7 +3789,7 @@ impl Visualizable for VisualizationData {
             };
             states.push((previous_line, *l, pre_event_state));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
                     // State of each branch that reaches the merge; a
@@ -3773,6 +3819,12 @@ impl Visualizable for VisualizationData {
                             broke_states.push(end_state);
                         }
                     }
+                    // A `let x;` local assigned in only some of the
+                    // branches (#244) has no line after the join: it
+                    // can't be used until it's assigned again (like a
+                    // maybe-moved one), and it doesn't surely own
+                    // anything.
+                    let unassigned_on_some_path = matches!(init_join(*maybe_init, reaching_states.iter()), Some(InitJoin::Maybe { .. }));
                     // If every recorded branch diverges, only a path
                     // the user didn't write can get past the
                     // conditional (the implicit empty `else` of an
@@ -3785,6 +3837,9 @@ impl Visualizable for VisualizationData {
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
+                    if unassigned_on_some_path {
+                        previous_state = State::OutOfScope;
+                    }
                     // Every branch leaves the function (#515): nothing
                     // follows the conditional, and the column ends in
                     // the branches.
@@ -3844,7 +3899,7 @@ impl Visualizable for VisualizationData {
         for (i, (l, e)) in history.iter_mut().enumerate() {
             states.push((previous_line, *l, previous_state.clone()));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
                     // State of each branch that reaches the merge; a
@@ -3874,6 +3929,12 @@ impl Visualizable for VisualizationData {
                             broke_states.push(end_state);
                         }
                     }
+                    // A `let x;` local assigned in only some of the
+                    // branches (#244) has no line after the join: it
+                    // can't be used until it's assigned again (like a
+                    // maybe-moved one), and it doesn't surely own
+                    // anything.
+                    let unassigned_on_some_path = matches!(init_join(*maybe_init, reaching_states.iter()), Some(InitJoin::Maybe { .. }));
                     // If every recorded branch diverges, only a path
                     // the user didn't write can get past the
                     // conditional (the implicit empty `else` of an
@@ -3886,6 +3947,9 @@ impl Visualizable for VisualizationData {
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
+                    if unassigned_on_some_path {
+                        previous_state = State::OutOfScope;
+                    }
                     // Every branch leaves the function (#515): nothing
                     // follows the conditional, and the column ends in
                     // the branches.
@@ -4069,8 +4133,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, parts, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, parts: parts.clone() })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, parts, maybe_init, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, parts: parts.clone(), maybe_init: *maybe_init })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -4119,7 +4183,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, id } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -4144,6 +4208,7 @@ impl Visualizable for VisualizationData {
                                         ty: branch_type.clone(), 
                                         split_point: *split_point, 
                                         merge_point: *merge_point,
+                                        maybe_init: maybe_init.contains(rap),
                                         id: *id}));
                 }
             }
@@ -4283,7 +4348,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, id } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -4310,6 +4375,7 @@ impl Visualizable for VisualizationData {
                                         ty: branch_type.clone(), 
                                         split_point: split_point, 
                                         merge_point: merge_point, 
+                                        maybe_init: maybe_init.contains(var),
                                         id: id}, line_number);
                 }
 
@@ -4425,8 +4491,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, parts, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, parts }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, parts, maybe_init, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, parts, maybe_init }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
