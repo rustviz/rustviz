@@ -233,6 +233,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// parameter's caller-side data, a value we don't track): the
   /// result may point there instead of into the returned lenders.
   pub fn call_lenders_full(&self, call: &'tcx Expr<'tcx>) -> (Vec<ResourceTy>, bool) {
+    // `Some(W { a: &s, b: &mut t })` (#708).
+    let mixed = self.ctor_mixed_muts(call);
+    if !mixed.is_empty() {
+      return (mixed.into_iter().map(|(l, _)| l).collect(), false);
+    }
     self.lenders_of_flows(self.call_arg_flows(call).unwrap_or_default())
   }
 
@@ -357,6 +362,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Which of `call`'s arguments its signature ties the result to,
   /// and how many of those have no column (see `ArgTie`).
   pub fn call_arg_tie(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> ArgTie {
+    if field.is_none() && !self.ctor_mixed_muts(call).is_empty() {
+      return ArgTie { total: 1, tied: vec![0], holds_all: true, ..ArgTie::default() };
+    }
     let Some((_, _, args, _)) = self.callee_sig(call) else { return ArgTie::default() };
     let mut tie = ArgTie {
       receiver: matches!(call.kind, ExprKind::MethodCall(..)),
@@ -425,6 +433,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
       return (Vec::new(), false);
     }
+    // `Some(W { a: &s, b: &mut t })`: each lender has its own kind (#708).
+    let mixed = self.holder_lender_muts(init);
+    if !mixed.is_empty() {
+      return (mixed.into_iter().map(|(l, _)| l).collect(), false);
+    }
     match init.kind {
       ExprKind::Call(..) | ExprKind::MethodCall(..) => (self.call_lenders(init), self.call_borrow_is_mut(init)),
       // `let refs = [&a, &b];` (`vec![&a, &b]` is a call; #349).
@@ -439,6 +452,79 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         None => (Vec::new(), false),
       },
       _ => (Vec::new(), false),
+    }
+  }
+
+  /// For a value built from `&` and `&mut` borrows together
+  /// (`Some(W { a: &s, b: &mut t })`, a tuple, an array), each
+  /// lender with whether it is borrowed mutably. Empty unless both
+  /// kinds are present: a holder with one kind records it once.
+  pub fn holder_lender_muts(&self, init: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
+    let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+    if !self.collect_lender_muts(init, &mut out) {
+      return Vec::new();
+    }
+    if out.iter().any(|(_, m)| *m) && out.iter().any(|(_, m)| !*m) { out } else { Vec::new() }
+  }
+
+  /// `holder_lender_muts` for a tuple struct / variant constructor
+  /// call (`Some(W { a: &s, b: &mut t })`); empty for any other call.
+  fn ctor_mixed_muts(&self, call: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
+    match call.kind {
+      ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
+        if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))) => self.holder_lender_muts(call),
+      _ => Vec::new(),
+    }
+  }
+
+  /// Adds the lenders `e`'s value holds, with their kinds, to `out`
+  /// (a lender borrowed both ways counts as mutable). False when `e`
+  /// has a part this can't account for.
+  fn collect_lender_muts(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<(ResourceTy, bool)>) -> bool {
+    let mut add = |ls: Vec<ResourceTy>, m: bool| {
+      for l in ls {
+        match out.iter_mut().find(|(x, _)| *x == l) {
+          Some(entry) => entry.1 |= m,
+          None => out.push((l, m)),
+        }
+      }
+    };
+    match e.kind {
+      ExprKind::Struct(_, fields, tail) => {
+        let base = match tail {
+          rustc_hir::StructTailExpr::Base(b) => Some(b),
+          _ => None,
+        };
+        fields.iter().map(|f| f.expr).chain(base).all(|x| self.collect_lender_muts(x, out))
+      }
+      ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().all(|x| self.collect_lender_muts(x, out)),
+      ExprKind::Repeat(x, _) => self.collect_lender_muts(x, out),
+      ExprKind::Block(b, _) => b.expr.is_none_or(|x| self.collect_lender_muts(x, out)),
+      ExprKind::DropTemps(inner) => self.collect_lender_muts(inner, out),
+      // A tuple struct / variant constructor (`Some(..)`, `W(..)`).
+      ExprKind::Call(f, args) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
+        if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))) => {
+        args.iter().all(|x| self.collect_lender_muts(x, out))
+      }
+      ExprKind::AddrOf(_, m, inner) => {
+        add(self.place_lenders(inner), m.is_mut());
+        true
+      }
+      ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
+        let m = self.value_borrow_is_mut(e);
+        match expr_to_rap_name(e, &self.tcx).and_then(|n| self.borrow_map.get(&n)) {
+          Some(rd) => {
+            for l in rd.all_lenders() {
+              let lm = rd.mut_of(&l);
+              add(vec![l], lm);
+            }
+          }
+          None => add(self.value_lenders(e), m),
+        }
+        true
+      }
+      // A literal, a call, or anything else holding no borrow we track.
+      _ => self.value_lenders(e).is_empty(),
     }
   }
 

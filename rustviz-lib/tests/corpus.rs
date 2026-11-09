@@ -1188,6 +1188,10 @@ const EXPECTED_OK: &[&str] = &[
     // A `move` closure returned from a fn takes its captures with it
     // (#760).
     "closure_return_move",
+    // A `&s` inside an array argument is a borrow for the call (#705).
+    "take_array_ref_arg",
+    // A struct literal mixing `&` and `&mut` holds both (#708).
+    "struct_literal_mixed_borrows_pattern",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -5557,19 +5561,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // reference `o` held, a borrow of `s` (#692): no "from the
         // caller", no return arrow to x.part or *x.part. `q`, a copy of
         // that reference, borrows what x.part borrows, not x.part.
-        // `w` holds a `&s` and a `&mut k`; RustViz records one kind of
-        // borrow per holder, so it doesn't track w's, and `y.e.part` /
-        // `y.m` still name no lender (#708).
+        // `w` holds a `&s` and a `&mut k`: each is drawn with its own
+        // kind, and `y.e.part` / `y.m` carry them on (#708).
         must_contain: &[
             "Immutable borrow from s to x.part: x.part is a reference that came with the value moved out of o into x",
             "Copy from x.part to q",
             "Return immutably borrowed resource from q to s",
-            "y.e.part holds an immutable reference (it came with the value matched into y)",
+            "Immutable borrow from s to w: w holds the borrows its argument holds: s and k, and both stay borrowed while w is in use; w isn't a reference, but its value holds one",
+            "Mutable borrow from k to w: w holds the borrows its argument holds: s and k, and both stay borrowed while w is in use; w isn't a reference, but its value holds one",
+            "Immutable borrow from s to y.e.part: y.e.part is a reference that came with the value moved out of w into y.e",
+            "Mutable borrow from k to y.m: y.m is a reference that came with the value moved out of w into y",
             "y.e.part's immutable borrow ends",
-            "y.m holds a mutable reference (it came with the value matched into y)",
             "y.m's mutable borrow ends",
         ],
         must_not_contain: &[
+            "y.e.part holds an immutable reference (it came with the value matched into y)",
+            "y.m holds a mutable reference (it came with the value matched into y)",
             "x.part holds an immutable reference (it came with the value matched into x)",
             // A borrow of the wrong kind (`s` is only read, `k` written).
             "Mutable borrow from s to",
@@ -13483,6 +13490,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped",
             "label goes out of scope. Its resource is dropped",
+        ],
+    },
+    // #705: `take([&s])` borrows s for the call, like `take_ref(&s)`;
+    // nothing was drawn on s's column. (`n` is a usize copied out of the
+    // call, so the later `println!` of s is a separate borrow.)
+    TooltipExpect {
+        name: "take_array_ref_arg",
+        must_contain: &[
+            "s's resource is immutably borrowed by take; s is read-only while the borrow is live",
+            "take reads from s",
+            "s's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "s's resource is mutably borrowed by take",
+        ],
+    },
+    // #708: `Some(W { e: E { part: &s, n: 1 }, m: &mut k })` mixes a
+    // shared and a mutable borrow. w holds both, s shared (reading s on
+    // line 7 is fine) and k mutable (using k before the match is E0502),
+    // and the two fields bound out of it carry them on. Nothing was
+    // drawn on s's or k's column, and y.e.part / y.m ended with no lender.
+    TooltipExpect {
+        name: "struct_literal_mixed_borrows_pattern",
+        must_contain: &[
+            "Immutable borrow from s to w: w holds the borrows its argument holds: s and k, and both stay borrowed while w is in use; w isn't a reference, but its value holds one",
+            "Mutable borrow from k to w: w holds the borrows its argument holds: s and k, and both stay borrowed while w is in use; w isn't a reference, but its value holds one",
+            "s's resource is immutably borrowed by w; s is read-only while the borrow is live",
+            "k's value is mutably borrowed by w; k can't be used while the borrow is live",
+            "Immutable borrow from s to y.e.part: y.e.part is a reference that came with the value moved out of w into y.e",
+            "Mutable borrow from k to y.m: y.m is a reference that came with the value moved out of w into y",
+            "Return immutably borrowed resource from y.e.part to s",
+            "Return mutably borrowed value from y.m to k",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from s to",
+            "Immutable borrow from k to",
+            "(it came with the value matched into y)",
         ],
     },
 ];

@@ -2829,7 +2829,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.add_borrow_end_ev(end_line, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
                 // ...and to each further lender (#171).
                 for co in ref_data.co_lenders.iter() {
-                  let evt = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
+                  let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
                   self.add_ev(line_num, evt, co.clone(), lhs_rty.clone(), false);
                 }
               }
