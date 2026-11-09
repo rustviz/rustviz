@@ -36,7 +36,9 @@ fn main() {
     let m2 = String::from("m2");
     take(Some(m2));
     let p = pick(&s);
+    let wrapped = Some(String::from("w"));
+    let r2: Result<String, String> = Err(String::from("e"));
     println!("{:?} {:?} {:?} {:?} {:?} {:?}", o, r, n, b, c.map(|w| w.n), moved);
-    println!("{:?}", p);
+    println!("{:?} {:?} {:?}", p, wrapped, r2);
     println!("{}", d.map(|w| w.n).unwrap_or(0));
 }

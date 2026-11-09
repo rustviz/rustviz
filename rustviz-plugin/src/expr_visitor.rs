@@ -1446,11 +1446,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())));
     let mut taken: Vec<(usize, ExternalEvent)> = Vec::new();
     self.preprocessed_events.retain(|(l, e)| {
-      // Only a variable's move or copy: a call's result moved into the
-      // constructor, or a literal, has no column to redraw.
+      // A variable's or a call's result's move or copy (a literal has
+      // no source to draw from).
       let hit = (lo..hi).contains(&e.get_id()) && match e {
         ExternalEvent::Move { from, to, .. } | ExternalEvent::Copy { from, to, .. } =>
-          is_ctor_fn(to) && from.extract_rap().is_some_and(|r| !r.is_fn()),
+          is_ctor_fn(to) && from.extract_rap().is_some(),
         _ => false,
       };
       if hit { taken.push((*l, e.clone())); }
@@ -1459,13 +1459,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // A reference variable put into a value that has a holder: the
     // holder's borrow is drawn from the lender, so the copy of the
     // reference itself isn't drawn. Returned to the caller it is.
-    let any = !taken.is_empty()
-      && !self.preprocessed_events.iter().any(|(_, e)| (lo..hi).contains(&e.get_id()) && matches!(e,
-        ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } if is_ctor_fn(to)));
+    let any = !taken.is_empty();
     if !matches!(new_to, ResourceTy::Caller) {
       taken.retain(|(_, e)| !matches!(e,
         ExternalEvent::Move { from, .. } | ExternalEvent::Copy { from, .. }
           if from.extract_rap().is_some_and(|r| r.is_ref())));
+    } else {
+      // A call's result has no column to return from (an arrow from a
+      // function to the caller can't be drawn).
+      taken.retain(|(_, e)| !matches!(e,
+        ExternalEvent::Move { from, .. } | ExternalEvent::Copy { from, .. }
+          if from.extract_rap().is_some_and(|r| r.is_fn())));
     }
     for (l, mut e) in taken {
       if let ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } = &mut e {

@@ -798,12 +798,13 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c9_08_unwrap_or_else",
         must_contain: &[
-            "Move from Err to r",
+            "Move from String::from to r",
             "Move from r to unwrap_or_else",
             "Copy of the value unwrap_or_else() returns to n",
             "r goes out of scope. No resource is dropped.",
         ],
-        must_not_contain: &["r goes out of scope. Its resource is dropped."],
+        // #768: `Err` is a constructor, never an actor.
+        must_not_contain: &["r goes out of scope. Its resource is dropped.", "Move from Err to r", "to Err"],
         ..E
     },
     // ─── Chapter 10: generics, traits, lifetimes ──────────────────────
@@ -1047,11 +1048,13 @@ const BOOK: &[Snippet] = &[
         id: "c15_02_cons_list",
         note: "was a crash at c2037dd (nested Cons constructor)",
         must_contain: &[
-            "Move from Cons to list",
+            "Move from Box::new to list",
             "Move from list to _l",
             "_l goes out of scope. Its resource is dropped (including the Box&lt;List&gt; it holds, if any).",
             "list goes out of scope. No resource is dropped.",
         ],
+        // #768: `Cons` is a constructor, never an actor.
+        must_not_contain: &["Move from Cons to list", "to Cons"],
         ..E
     },
     Snippet {
@@ -1389,7 +1392,8 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x07_cons_qualified",
         note: "single (non-nested) constructor",
-        must_contain: &["Move from List::Cons to list", "Move from list to _l", "_l goes out of scope. Its resource is dropped (including the Box&lt;List&gt; it holds, if any)."],
+        must_contain: &["Move from Box::new to list", "Move from list to _l", "_l goes out of scope. Its resource is dropped (including the Box&lt;List&gt; it holds, if any)."],
+        must_not_contain: &["Move from List::Cons to list", "to List::Cons"],
         ..E
     },
     Snippet {
@@ -1441,11 +1445,12 @@ const BOOK: &[Snippet] = &[
         id: "x12_cons_qualified_nested",
         note: "was a crash at c2037dd (nested List::Cons)",
         must_contain: &[
-            "Move from List::Cons to list",
+            "Move from Box::new to list",
             "Move from list to _l",
             "_l goes out of scope. Its resource is dropped (including the Box&lt;List&gt; it holds, if any).",
             "list goes out of scope. No resource is dropped.",
         ],
+        must_not_contain: &["Move from List::Cons to list", "to List::Cons"],
         ..E
     },
     Snippet {

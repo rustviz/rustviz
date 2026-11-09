@@ -2351,7 +2351,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // one branch (#517: this fixture used to claim there is no Branch
         // event).
         must_contain: &[
-            "Move from Some to opt",
+            "Move from String::from to opt",
             "Move from opt to x",
             "show reads from x",
             "x goes out of scope. Its resource is dropped.",
@@ -2360,6 +2360,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              dropped when opt goes out of scope.",
         ],
         must_not_contain: &[
+            // #768: `Some` is a constructor, never an actor.
+            "Move from Some to opt",
+            "to Some",
             "may have been moved",
             "moved or dropped in every branch",
             "in branches where it was not",
@@ -2863,27 +2866,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── One Function RAP receiving several values ───────────────────
     TooltipExpect {
         name: "cons_list_nested",
-        // Book ch15 cons list. The outer constructor's value moves into
-        // `list`; the inner `Cons` / `Box::new` calls are fn-to-fn
-        // hand-offs, which (as for any nested call) draw no arrow.
+        // Book ch15 cons list. The `Box::new` result moves into `list`
+        // (a constructor is never an actor, #768); the inner `Cons` /
+        // `Box::new` calls are fn-to-fn hand-offs, which (as for any
+        // nested call) draw no arrow.
         must_contain: &[
-            "Move from Cons to list",
+            "Move from Box::new to list",
             "Move from list to _l",
             "list goes out of scope. No resource is dropped.",
             "_l goes out of scope. Its resource is dropped (including the Box<List> it holds, if any).",
         ],
         must_not_contain: &[
+            "Move from Cons to list",
+            "to Cons",
             "list goes out of scope. Its resource is dropped.",
         ],
     },
     TooltipExpect {
         name: "cons_list_qualified_nested",
         must_contain: &[
-            "Move from List::Cons to list",
+            "Move from Box::new to list",
             "Move from list to _l",
             "_l goes out of scope. Its resource is dropped (including the Box<List> it holds, if any).",
         ],
         must_not_contain: &[
+            "Move from List::Cons to list",
+            "to List::Cons",
             "list goes out of scope. Its resource is dropped.",
         ],
     },
@@ -13878,6 +13886,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from m to moved",
             "Move from w to c",
             "Move from m2 to take",
+            // A call's result moved into a constructor goes to the
+            // holder too.
+            "Move from String::from to wrapped",
+            "Move from String::from to r2",
             // A reference returned inside `Some(a)` goes to the caller.
             "a reference from a is returned to the caller; the data it points to is not copied",
         ],
@@ -13885,6 +13897,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "to Some",
             "to Ok",
             "Move from Some to",
+            "Move from Err to",
             "returned to the caller; the data it points to is not copied• a's immutable borrow ends",
             "Copy from Some to",
             "Copy from Ok to",
