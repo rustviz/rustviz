@@ -3598,6 +3598,18 @@ impl Visualizable for VisualizationData {
             (State::FullPrivilege{..}, Event::RefGoOutOfScope) =>
                 State::OutOfScope,
 
+            // A write to a lender inside the span drawn for its loan (#778):
+            // the borrow checker keeps the loan until its latest end over
+            // the paths that meet after an `if`, but on the path through
+            // the write the loan is already dead (the reference was
+            // overwritten), so rustc accepts the write. The line goes on
+            // to the loan's end.
+            (State::PartialPrivilege{ .. }, Event::Acquire{ .. })
+            | (State::PartialPrivilege{ .. }, Event::Copy{ .. })
+            | (State::RevokedPrivilege{ .. }, Event::Acquire{ .. })
+            | (State::RevokedPrivilege{ .. }, Event::Copy{ .. }) if !self.is_ref(hash) =>
+                (*previous_state).clone(),
+
             (State::FullPrivilege{..}, Event::StaticLend{ ..}) =>
                 State::PartialPrivilege { s: LineState::Full },
 

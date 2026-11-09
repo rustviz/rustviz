@@ -360,6 +360,16 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// hands the loan to the new holder right away: it's the one that
   /// keeps the loan live, and `t`'s borrow ends at `t`'s last use.
   pub taken_over_loans: HashSet<String>,
+  /// The end of an old loan drawn on a line after the reassignment that
+  /// ends it (#778): `if c { r = &y; } else { use(r); }` keeps the lender
+  /// borrowed on the path through the else arm, so the end is at its read.
+  /// It can't be added while the arm holding the write is visited, or it
+  /// would be drawn in that arm; `print_lifetimes` adds them at the top
+  /// level, where `end_outer_borrows_in_arms` moves each into the arm that
+  /// holds its line and ends the borrow in the other arms.
+  pub late_old_ends: Vec<(usize, ExternalEvent)>,
+  /// While true, `add_external_event` queues events in `late_old_ends`.
+  pub defer_old_ends: bool,
 
 
   // Variables moved in a branch that then `break`s out of a loop
@@ -1191,6 +1201,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // renderer only materialises a timeline when a hash sees its
     // first event, a RAP with zero events never gets a column.
     if self.event_touches_skipped(&event) {
+      return;
+    }
+    if self.defer_old_ends {
+      self.late_old_ends.push((line_num, event));
       return;
     }
 
@@ -3425,7 +3439,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }?;
     let in_range = |end: usize| end < write_line && end >= rd.assigned_at;
     Some(own.region.1).filter(|&end| in_range(end))
-      .or_else(|| self.loan_end_on_path_to(own.borrow_idx, write_line).filter(|&end| in_range(end)))
+      .or_else(|| {
+        // The write is on one path only (`if c { r = &y; }`) and the loan
+        // is still in scope on another path after it: the borrow checker
+        // keeps the lender borrowed until the latest end over the paths
+        // that meet there (#778), not where the loan stops on the path
+        // through the write.
+        let path_end = self.loan_end_on_path_to(own.borrow_idx, write_line).filter(|&end| in_range(end))?;
+        Some(if own.region.1 > write_line { own.region.1 } else { path_end })
+      })
   }
 
   /// `src` (its old data `old`) is being given a new value: the
@@ -6649,6 +6671,9 @@ pub fn print_out_of_scope(&mut self){
         let end_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous } else { ResourceTy::Value(from_ro) };
         self.add_borrow_end_ev(*lifetime, to_ro, end_from, ref_data, Vec::new());
       }
+    }
+    for (line, ev) in std::mem::take(&mut self.late_old_ends) {
+      self.add_external_event(line, ev);
     }
     self.nest_borrow_ends_in_arms();
     end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.unique_id);

@@ -378,6 +378,14 @@ const Description: React.FC = () => (
         <code>match</code> arm.
       </li>
       <li>
+        When a reference is reassigned in one branch only (
+        <code>if c {'{'} r = &amp;y; {'}'}</code>) and read after the{' '}
+        <code>if</code>, the old lender is drawn borrowed until that read, as
+        on the path that skips the branch. A write to the lender inside the
+        branch (<code>x += 1;</code>, which compiles there) is drawn inside
+        the borrowed span.
+      </li>
+      <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)
         and unions are drawn as a single owner (except a <code>Box</code> of a
         struct that a field is moved out of, as in <code>take(b.name)</code>,
