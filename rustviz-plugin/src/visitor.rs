@@ -158,7 +158,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // returned, not a reference (#670). (A `*r` that isn't Copy can only
     // be reborrowed, never moved out from behind r; that's left as is.)
     let deref = if matches!(evt, Evt::Copy) { self.deref_of_ref(e) } else { None };
-    let from_ro = if let Some(rty) = deref { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
+    // `&self.s` returned: a reference reborrowed through `self` goes to
+    // the caller, and `self`'s borrow goes on with it (#784). Drawn as a
+    // copy of the reference for `&mut` too: `self` isn't moved, it is
+    // reborrowed.
+    let reborrow = if lhs_ty.is_ref() { self.reborrow_through_ref(e) } else { None };
+    let evt = if reborrow.is_some() { Evt::Copy } else { evt };
+    let from_ro = if let Some(rty) = deref.or(reborrow) { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
       // A unit struct / enum constructor (`Marker`) or a fn item
       // named as the returned value has no column of its own, and
       // neither has the caller: an arrow between the two can't be
@@ -215,7 +221,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let returned: Option<String> = match e.kind {
       ExprKind::Path(QPath::Resolved(None, path)) if path.segments.len() == 1 => Some(path.segments[0].ident.name.to_string()),
       ExprKind::Lit(_) => None,
-      _ => return,
+      // `&self.s`: the parameter it reborrows through is the one returned.
+      _ => match self.reborrow_through_ref(e) {
+        Some(r) => Some(r.deref_rap().map(|r| r.name().to_string()).unwrap_or_default()),
+        None => return,
+      },
     };
     let sig = self.tcx.liberate_late_bound_regions(owner.to_def_id(), self.tcx.fn_sig(owner).instantiate_identity().skip_norm_wip());
     let out_regions: Vec<ty::Region<'tcx>> = sig.output().walk()
@@ -302,10 +312,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut values = Vec::new();
     self.returned_values(e, &mut values);
     self.tail_values.extend(values.iter().map(|v| v.hir_id));
-    // A branch that reborrows a parameter (`&self.s`) keeps its
-    // borrow going on that path, so a note on the other branches would
-    // contradict what the fn's end says about it.
-    if values.iter().all(|v| matches!(v.kind, ExprKind::Lit(_) | ExprKind::Path(QPath::Resolved(None, _)))) {
+    // A branch that reborrows a parameter (`&self.s`) hands its borrow
+    // to the caller on that path (#784), like one that returns it.
+    if values.iter().all(|v| matches!(v.kind, ExprKind::Lit(_) | ExprKind::Path(QPath::Resolved(None, _)))
+      || self.reborrow_through_ref(v).is_some()) {
       self.tail_plain.extend(values.iter().map(|v| v.hir_id));
     }
     true

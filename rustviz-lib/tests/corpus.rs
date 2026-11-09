@@ -1236,6 +1236,9 @@ const EXPECTED_OK: &[&str] = &[
     // A closure holding only references is a value, not a resource (#791).
     "closure_value_not_resource",
     "closure_owning_still_resource",
+    // A returned reborrow through a reference parameter (`&self.s`) hands
+    // the parameter's borrow to the caller (#784).
+    "return_reborrow_tail_784",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14192,6 +14195,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "pr's resource",
             "push's resource",
             "=Return immutably borrowed resource from g to f",
+        ],
+    },
+    // #784: `&self.s` returned (as the tail, from a branch of a tail
+    // `if` / `match`, or by `return`) is a reborrow through `self`; the
+    // caller's value stays borrowed while the result is used. On main the
+    // fn's end said "self's immutable borrow ends" (false), and the other
+    // path of a tail `if` got no dot for a parameter tied to the result.
+    // `untied`'s `other: &str` has a lifetime of its own, so its borrow
+    // does end.
+    TooltipExpect {
+        name: "return_reborrow_tail_784",
+        must_contain: &[
+            "a reference to self.s, reborrowed through self, is returned to the caller; the data it points to is not copied",
+            "a reference to self.v[0], reborrowed through self, is returned to the caller; the data it points to is not copied",
+            "a mutable reference to self.s, reborrowed through self, is returned to the caller; the data it points to is not copied",
+            "other isn't returned on this path, but its borrow lasts as long as the result (same lifetime 'a)",
+            "self isn't returned on this path, but its borrow lasts as long as the result (same lifetime 'a)",
+            "other's immutable borrow ends",
+        ],
+        must_not_contain: &[
+            "self's immutable borrow ends",
+            "self's mutable borrow ends",
+            // No dot without a tooltip.
+            "=",
         ],
     },
 ];

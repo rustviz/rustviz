@@ -3268,6 +3268,9 @@ fn render_arrow (
                 _ => Box::new(hover_messages::event_dot_move_to_caller),
             };
             let title = match external_event {
+                // `&self.s` returned: a reborrow through `self` (#784).
+                ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('&') =>
+                    hover_messages::event_dot_reborrow_to_caller(r.name(), place),
                 // `*r` returned with r a reference: a copy of the value
                 // r points to (#670).
                 ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('*') =>

@@ -1720,6 +1720,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
         ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Caller, .. }
           if *f.hash() == hash && *line >= rd_assigned_at => true,
+        // `&self.s` returned: a reborrow through `self` goes to the caller (#784).
+        ExternalEvent::Copy { from: ResourceTy::DerefField(f, place, _), to: ResourceTy::Caller, .. }
+          if place.starts_with('&') && *f.hash() == hash && *line >= rd_assigned_at => true,
         ExternalEvent::Branch { branches, .. } => branches.iter()
           .any(|b| handed(this, &b.e_data, hash, rd_assigned_at, swapped_here, true, caller_only)),
         _ => false,
@@ -2650,6 +2653,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .filter(|s| !expr.span.from_expansion() && !s.contains('\n'))
       .or_else(|| expr_to_rap_name(expr, &self.tcx))?;
     Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
+  }
+
+  /// `&self.s` / `&mut p.items[0]`: a reference to a place reached
+  /// through the reference variable `self` / `p`, a reborrow of what it
+  /// points to (#784). `DerefField(self, "&self.s")`, drawn on the
+  /// reference's column. `&*x` and `&v[0]` (a place `x` / `v` itself)
+  /// are not this: they resolve to the variable. None when the place is
+  /// itself a reference (`&self.r` with `r: &T`).
+  pub fn reborrow_through_ref(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    if e.span.from_expansion() {
+      return None;
+    }
+    let ExprKind::AddrOf(_, _, place) = e.kind else { return None };
+    let mut p = place;
+    while let ExprKind::Index(recv, _, _) = p.kind {
+      p = recv;
+    }
+    let ExprKind::Field(..) = p.kind else { return None };
+    let ResourceTy::DerefField(rap, _, w) = self.field_through_ref(p)? else { return None };
+    let text = self.tcx.sess.source_map().span_to_snippet(e.span).ok().filter(|s| !s.contains('\n'))?;
+    Some(ResourceTy::DerefField(rap, text, w))
   }
 
   /// `expr` is `*r` (or `**r`, ...) with `r` a reference RAP: the value
