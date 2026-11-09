@@ -181,7 +181,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         return;
       }
     }
+    // `Some(a)` as the returned value: what it wraps goes to the caller
+    // (a constructor never receives anything, #768).
+    let ctor_value = !e.span.from_expansion()
+      && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
+        && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))))
+      && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
+      || ctor_value
       || vec_macro_elems(e).is_some() {
       // `User { email, .. }` / `(s, 1)` / `[s, t]` as the returned value: the
       // literal's field initialisers move/copy their sources into
@@ -2404,12 +2411,29 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
             self.add_fn(name.clone());
             let typeck = self.tcx.typeck(expr.hir_id.owner);
+            let lo = *self.unique_id;
+            let to_call = matches!(self.tcx.parent_hir_node(expr.hir_id),
+              rustc_hir::Node::Expr(p) if matches!(p.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)));
             for arg in args.iter() {
               self.visit_expr(arg);
-              if !typeck.node_type(arg.hir_id).is_ref() {
+              let arg_ty = typeck.node_type(arg.hir_id);
+              if !arg_ty.is_ref() {
                 self.match_arg(arg, name.clone());
+              } else if !to_call && matches!(arg.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+                // A reference variable put into the value: its copy
+                // (or move, for `&mut`) goes where the value goes, and
+                // is drawn there once that's known (#768).
+                let from = self.rap_or_field_through_ref(arg);
+                let line = expr_to_line(arg, &self.tcx);
+                if let (ResourceTy::Value(rap) | ResourceTy::Deref(rap), Some(to)) = (&from, self.raps.get(&fn_key(&name))) {
+                  let (rap, to) = (rap.to_owned(), ResourceTy::Value(to.rap.to_owned()));
+                  self.update_rap(&rap, line);
+                  let evt = if arg_ty.ref_mutability() == Some(Mutability::Mut) { Evt::Move } else { Evt::Copy };
+                  self.add_ev(line, evt, to, from, false);
+                }
               }
             }
+            self.ctor_arg_ids.insert(expr.hir_id, (lo, *self.unique_id));
             return;
           }
         }

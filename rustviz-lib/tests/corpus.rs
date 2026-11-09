@@ -2576,9 +2576,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Copy of the value inside the Ok that parse() returns to n",
             "n is initialized with the value inside the Ok that parse() returns",
-            "Copy from n to Ok",
+            // #768: the tail `Ok(n)` copies n to the caller; `Ok` isn't
+            // an actor.
+            "n's value is copied to the caller",
         ],
         must_not_contain: &[
+            "Copy from n to Ok",
             "n is initialized with the value parse() returns",
             "n is bound to a copyable value",
         ],
@@ -13855,8 +13858,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // Some to o"), but the variable's dot still says what it holds. A
     // constructor isn't a borrower: `Some(&s)` is borrowed by the
     // variable that holds it, or by the call it's passed to (on main "s
-    // is immutably borrowed by Some"). `Some(m)` with a variable still
-    // draws "Move from m to Some".
+    // is immutably borrowed by Some"). `Some(m)` with a variable draws
+    // "Move from m to moved" (on main "Move from m to Some" and "Move
+    // from Some to moved"). A reference returned inside `Some(a)` is
+    // copied to the caller; its borrow doesn't end in the fn.
     TooltipExpect {
         name: "ctor_literals_768",
         must_contain: &[
@@ -13868,9 +13873,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s's resource is immutably borrowed by b; s is read-only while the borrow is live",
             "s's resource is immutably borrowed by d; s is read-only while the borrow is live",
             "s's resource is immutably borrowed by take; s is read-only while the borrow is live",
-            "Move from m to Some",
+            // A variable moved into a constructor goes to whoever takes
+            // the value: the variable it is bound to, or the call.
+            "Move from m to moved",
+            "Move from w to c",
+            "Move from m2 to take",
+            // A reference returned inside `Some(a)` goes to the caller.
+            "a reference from a is returned to the caller; the data it points to is not copied",
         ],
         must_not_contain: &[
+            "to Some",
+            "to Ok",
+            "Move from Some to",
+            "returned to the caller; the data it points to is not copied• a's immutable borrow ends",
             "Copy from Some to",
             "Copy from Ok to",
             "Copy from None to",

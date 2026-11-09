@@ -8,6 +8,12 @@ struct W<'a> {
 
 fn take<T>(_t: T) {}
 
+// `a` goes to the caller inside the `Some`: the caller's `String` stays
+// borrowed, so `a`'s borrow doesn't end here.
+fn pick<'a>(a: &'a String) -> Option<&'a String> {
+    Some(a)
+}
+
 fn main() {
     let o = Some(5);
     let r: Result<i32, ()> = Ok(1);
@@ -27,6 +33,10 @@ fn main() {
     take(Some(&s));
     let m = String::from("m");
     let moved = Some(m);
+    let m2 = String::from("m2");
+    take(Some(m2));
+    let p = pick(&s);
     println!("{:?} {:?} {:?} {:?} {:?} {:?}", o, r, n, b, c.map(|w| w.n), moved);
+    println!("{:?}", p);
     println!("{}", d.map(|w| w.n).unwrap_or(0));
 }

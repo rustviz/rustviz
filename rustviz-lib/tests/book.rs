@@ -773,8 +773,8 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c9_05_early_err_return",
         status: Missing,
-        note: "`return Err(..)` and the tail `Ok(x)` are not shown as returned to the caller",
-        must_contain: &["Copy from x to Ok", "Move from check to r", "r goes out of scope. Its resource is dropped (including the String it holds, if any)."],
+        note: "`return Err(..)` is not shown as returned to the caller (the tail `Ok(x)` is, since #768: no arrow into `Ok`)",
+        must_contain: &["x's value is copied to the caller", "Move from check to r", "r goes out of scope. Its resource is dropped (including the String it holds, if any)."],
         ..E
     },
     Snippet {
@@ -1420,9 +1420,9 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x10_existing_question_mark",
-        status: Missing,
-        note: "copy of tests/question_mark.rs; renders since #155. The tail `Ok(n)` is not shown as returned",
-        must_contain: &["Copy of the value inside the Ok that parse() returns to n", "Copy from n to Ok"],
+        note: "copy of tests/question_mark.rs; renders since #155. The tail `Ok(n)` copies n to the caller (#768: no arrow into `Ok`)",
+        must_contain: &["Copy of the value inside the Ok that parse() returns to n", "n's value is copied to the caller"],
+        must_not_contain: &["Copy from n to Ok"],
         ..E
     },
     Snippet {
