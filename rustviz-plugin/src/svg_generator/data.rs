@@ -1519,10 +1519,10 @@ pub enum ExternalEvent {
         // `ro` is a struct or tuple some of whose parts were moved out
         // before (#628): what of its previous value is dropped.
         parts: Option<ReassignParts>,
-        // `ro` is a `let x;` local that only some branches above
-        // initialized (#244): the old value is dropped here only if
-        // there is one (a runtime drop flag decides).
-        maybe_init: bool,
+        // `ro` is a `let x;` local that may have no value here (see
+        // InitBy): the old value is dropped here only if there is one
+        // (a runtime drop flag decides).
+        maybe_init: Option<InitBy>,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -1562,6 +1562,16 @@ pub enum ExternalEvent {
     LoopIteratorDrop {
         ro: ResourceAccessPoint,
         left: LoopLeft,
+        id: usize
+    },
+    // At the end of a loop: `ro`, a `let x;` local declared before the
+    // loop, is assigned in the loop's body, but the loop may end before
+    // that assignment ran (a `while` / `for` whose body never ran, a
+    // `break` before it; #786). After the loop it may have no value: a
+    // drop flag decides whether its next assignment or its scope end
+    // drops anything.
+    LoopMaybeInit {
+        ro: ResourceAccessPoint,
         id: usize
     },
     // At the end of a loop: `ro` (declared outside the loop) was moved
@@ -1800,6 +1810,7 @@ impl ExternalEvent {
             &ExternalEvent::ManuallyDropByHand { id, .. } |
             &ExternalEvent::TemporaryDrop { id, .. } |
             &ExternalEvent::LoopIteratorDrop { id, .. } |
+            &ExternalEvent::LoopMaybeInit { id, .. } |
             &ExternalEvent::LoopExitMove { id, .. } |
             &ExternalEvent::OwnerDropIfTryReturns { id, .. } |
             &ExternalEvent::OwnerDropUnlessReturned { id, .. } |
@@ -1987,7 +1998,7 @@ pub enum Event {
     // rhs lands on the same line and immediately re-establishes
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
     // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts>, maybe_init: bool },
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy> },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -1995,6 +2006,8 @@ pub enum Event {
     TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart> },
     // See ExternalEvent::LoopIteratorDrop.
     LoopIteratorDrop { left: LoopLeft },
+    // See ExternalEvent::LoopMaybeInit.
+    LoopMaybeInit,
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
@@ -2282,6 +2295,22 @@ pub fn branch_state_converter(s: &State) -> State {
     }
 }
 
+/// Why a `let x;` local may have no value where it's assigned, so that
+/// a drop flag decides whether the assignment drops an old value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InitBy {
+    /// Only some branches of a conditional above assigned it (#244).
+    Branch,
+    /// A loop above assigns it, but may have ended before doing so
+    /// (#786).
+    Loop,
+    /// The assignment is in a loop body and x had no value before the
+    /// loop: the first time round it initializes x, later times round
+    /// it drops what an earlier iteration assigned, if x still holds it
+    /// (#786).
+    EarlierIteration,
+}
+
 /// What a conditional's join leaves in a `let x;` local that only some
 /// of the branches reaching it assigned (#244; the Branch event's
 /// `maybe_init`), the others leaving it with no value.
@@ -2295,6 +2324,9 @@ pub enum InitJoin {
     /// Every branch that assigned x moved its value away: x holds
     /// nothing after the join on any path.
     AllMoved,
+    /// Not a conditional's join: a loop above assigns x but may have
+    /// ended before doing so (`ExternalEvent::LoopMaybeInit`, #786).
+    Loop,
 }
 
 /// `InitJoin` of a conditional from the end states `ends` of its
@@ -2509,6 +2541,9 @@ impl Display for Event {
             Event::LoopIteratorDrop { .. } => {
                 write!(f, "The for loop's iterator is dropped")
             },
+            Event::LoopMaybeInit => {
+                write!(f, "May have no value when the loop ends")
+            },
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
@@ -2721,6 +2756,10 @@ impl Event {
             }
             Event::LoopIteratorDrop { left } => {
                 hover_messages::event_dot_loop_iterator_drop(my_name, *left)
+            }
+            // (The timeline panel words it with what follows.)
+            Event::LoopMaybeInit => {
+                hover_messages::event_dot_loop_maybe_init(my_name, true, true, None)
             }
             Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
                 hover_messages::event_dot_temporary_part_drop(ty, when, part)
@@ -3665,6 +3704,9 @@ impl Visualizable for VisualizationData {
             // The iterator the variable was moved into is dropped: the
             // variable itself is unchanged (already moved).
             (_, Event::LoopIteratorDrop { .. }) => (*previous_state).clone(),
+            // May have no value after the loop (#786): no line until
+            // it's assigned again, like a maybe-moved one.
+            (_, Event::LoopMaybeInit) => State::OutOfScope,
 
             // `ManuallyDrop::drop(&mut md)`: no resource left, and md
             // must not be used again.
@@ -4145,6 +4187,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopIteratorDrop{ left, .. } => {
           vec![(line_num, Event::LoopIteratorDrop { left: *left })]
         },
+        ExternalEvent::LoopMaybeInit{ .. } => {
+          vec![(line_num, Event::LoopMaybeInit)]
+        },
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
@@ -4213,6 +4258,7 @@ impl Visualizable for VisualizationData {
                 }
             }
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
+            | ExternalEvent::LoopMaybeInit { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_exteranl_event(line_number, event, true));
@@ -4502,6 +4548,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::LoopIteratorDrop{ro, left, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left }, line_number);
+            },
+            ExternalEvent::LoopMaybeInit{ro, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit, line_number);
             },
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);

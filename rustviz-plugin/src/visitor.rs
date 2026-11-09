@@ -1654,7 +1654,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // inner match before what an outer one holds.
     let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.iter()
       .filter(|t| t.frame >= frame_floor).cloned().collect();
-    for (idx, rap) in self.droppable_locals_at(from, end, &moved, true, line, false) {
+    // A `let x;` local declared outside the loop the exit leaves, but
+    // first assigned inside it, isn't one of its locals (#786).
+    let declared_outside = |rap: &ResourceAccessPoint| loop_id.is_some()
+      && self.deferred_decl_at.get(rap.name().split('.').next().unwrap_or("")).is_some_and(|at| *at < frame_floor);
+    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &moved, true, line, false)
+      .into_iter().filter(|(_, rap)| !declared_outside(rap)).collect();
+    for (idx, rap) in droppable {
       // A tuple is dropped after what its arm declared, before the
       // locals declared before its match.
       while tuples.last().is_some_and(|t| idx < t.len) {
@@ -2791,14 +2797,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // paths to here initialized x (#244), it is a reassignment that
         // drops x's old value only if there is one, and x has a value
         // from here on.
-        let mut maybe_init = false;
+        let mut maybe_init = None;
         if let (ExprKind::Assign(..), ExprKind::Path(QPath::Resolved(None, path))) = (expr.kind, lhs_expr.kind) {
           if let Res::Local(hirid) = path.res {
             if let Some(decl) = self.uninit_locals.remove(&hirid) {
               self.init_deferred_local(hirid, decl, rhs_expr);
+              // (An immutable `let x;` can't be assigned twice, E0384:
+              // a loop that assigns it leaves right after.)
+              if matches!(decl.annotation.1, Mutability::Mut) {
+                self.drop_earlier_iteration(hirid, lhs_expr);
+              }
               return;
             }
-            maybe_init = self.maybe_init_locals.remove(&hirid);
+            if self.maybe_init_locals.remove(&hirid) {
+              maybe_init = Some(if self.maybe_init_by_loop.remove(&hirid) { InitBy::Loop } else { InitBy::Branch });
+            }
           }
         }
 
@@ -4050,7 +4063,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 }
                 let before = self.rap_names();
                 self.inside_branch = true;
+                // The body may run no times or many (#786).
+                let inits = self.enter_loop_inits();
                 self.visit_expr(then_body);
+                self.leave_loop_inits(expr, expr.hir_id, inits, true);
                 self.inside_branch = prev;
                 // The body's `let`s, and the pattern's bindings, go out
                 // of scope at its closing brace (#256); nothing else
@@ -4086,7 +4102,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let prev = self.inside_branch;
             let before = self.rap_names();
             self.inside_branch = true;
+            // Left only by a `break` (#786).
+            let inits = self.enter_loop_inits();
             self.visit_block(block);
+            self.leave_loop_inits(expr, expr.hir_id, inits, false);
             self.inside_branch = prev;
             // Same as the while arm: the body's `let`s end at its
             // closing brace (#256).
@@ -5034,7 +5053,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     self.loop_iterators.push((loop_expr.hir_id, ro.clone()));
                   }
                 }
+                // The body may run no times or many (#786).
+                let inits = self.enter_loop_inits();
                 self.visit_expr(body_expr);
+                if let Some(loop_expr) = arms.first().map(|a| a.body) {
+                  self.leave_loop_inits(expr, loop_expr.hir_id, inits, true);
+                }
                 if iterator_head.is_some() {
                   self.loop_iterators.pop();
                 }
@@ -5119,6 +5143,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // (no loop) drops nothing drawn here.
       ExprKind::Break(dest, value) => {
         intravisit::walk_expr(self, expr);
+        // What `let x;` locals have no value where this `break` leaves
+        // its loop (#786).
+        if let Ok(target) = dest.target_id {
+          if !self.uninit_locals.is_empty() || !self.maybe_init_locals.is_empty() {
+            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+            let uninit = self.uninit_locals.keys().copied().collect();
+            self.break_uninit.push((target, uninit, self.maybe_init_locals.clone()));
+          }
+        }
         // `let r = loop { break k; }`: `r` gets `k` (#431).
         if let (Ok(target), Some(value)) = (dest.target_id, value) {
           let has_receiver = self.break_pats.iter().any(|(id, ..)| *id == target)
@@ -5205,9 +5238,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // so register no RAP and emit no event here. Remember each
       // binding; its first assignment registers the RAP with this
       // `let`'s scope and reads as initialization (see the Assign arm).
-      let (scope, inside_branch) = (self.current_scope, self.inside_branch);
+      let (scope, inside_branch, frames_at) = (self.current_scope, self.inside_branch, self.exit_frames.len());
       local.pat.each_binding(|annotation, hir_id, _, _| {
-        self.uninit_locals.insert(hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped });
+        self.uninit_locals.insert(hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped, frames_at });
       });
     }
 
@@ -7605,6 +7638,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .filter(|id| known.contains(id) && !joined.contains_key(id))
       .collect();
     self.uninit_locals = joined;
+    // Still maybe-initialized by a loop above only where no branch here
+    // assigned it (#786).
+    self.maybe_init_by_loop.retain(|id| reaching.iter().all(|(_, s)| s.contains(id)));
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let cols = maybe.iter()
       .filter_map(|id| self.raps.get(&binding_name(&self.tcx, *id)).map(|rd| rd.rap.clone()))
@@ -7612,6 +7648,109 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.maybe_init_locals = maybe;
     // A struct's field columns (`p.name`) got their values with it.
     self.with_struct_members(&cols)
+  }
+
+  /// A loop's body is about to be visited (#786): remember which `let
+  /// x;` locals have no value as it starts. Returns the state to hand
+  /// to `leave_loop_inits`.
+  fn enter_loop_inits(&mut self) -> (HashMap<HirId, DeferredLet>, HashSet<HirId>) {
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let entry = self.uninit_locals.keys().copied().collect();
+    self.loop_entry_uninit.push(entry);
+    (self.uninit_locals.clone(), self.maybe_init_locals.clone())
+  }
+
+  /// The loop `loop_expr` (whose `break`s name `target`) has been
+  /// visited (#786). Join the `let x;` locals' state over the ways out
+  /// of it, as `join_uninit_locals` does for a conditional: each
+  /// `break`, and for a `while` / `for` (`may_skip`), the condition
+  /// failing before the first iteration or after the body. A local
+  /// that had no value before the loop and is assigned on some of those
+  /// paths only is maybe-initialized after it: a `LoopMaybeInit` event
+  /// on its column says so where the loop ends. The state at a `break`
+  /// is as of the first time round: on a later one, a local the body
+  /// assigned may hold a value there, so it is definitely uninitialized
+  /// only if the body's end (where the next time round starts) has it
+  /// uninitialized too.
+  fn leave_loop_inits(
+    &mut self,
+    loop_expr: &'tcx Expr<'tcx>,
+    target: HirId,
+    (uninit_before, maybe_before): (HashMap<HirId, DeferredLet>, HashSet<HirId>),
+    may_skip: bool,
+  ) {
+    self.loop_entry_uninit.pop();
+    let (mine, rest): (Vec<_>, Vec<_>) =
+      std::mem::take(&mut self.break_uninit).into_iter().partition(|(t, _, _)| *t == target);
+    self.break_uninit = rest;
+    let mut ends: Vec<(HashSet<HirId>, HashSet<HirId>)> = mine.into_iter().map(|(_, u, m)| (u, m)).collect();
+    if may_skip {
+      #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+      let before: HashSet<HirId> = uninit_before.keys().copied().collect();
+      #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+      let after: HashSet<HirId> = self.uninit_locals.keys().copied().collect();
+      ends.push((before, maybe_before.clone()));
+      ends.push((after, self.maybe_init_locals.clone()));
+    }
+    // A `loop` with no `break`: nothing after it runs.
+    if ends.is_empty() {
+      return;
+    }
+    let mut definite = uninit_before.clone();
+    definite.retain(|id, _| ends.iter().all(|(u, _)| u.contains(id)) && self.uninit_locals.contains_key(id));
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let maybe: HashSet<HirId> = ends.iter()
+      .flat_map(|(u, m)| u.iter().chain(m.iter()).copied())
+      .filter(|id| (uninit_before.contains_key(id) || maybe_before.contains(id)) && !definite.contains_key(id))
+      .collect();
+    // Newly maybe-initialized: no value before the loop.
+    #[expect(clippy::disallowed_methods, reason = "sorted by name below")]
+    let mut newly: Vec<HirId> = maybe.iter().filter(|id| uninit_before.contains_key(id)).copied().collect();
+    newly.sort_by_key(|id| binding_name(&self.tcx, *id));
+    self.uninit_locals = definite;
+    self.maybe_init_locals = maybe;
+    let line = span_end_line(&loop_expr.span, &self.tcx);
+    for id in newly {
+      self.maybe_init_by_loop.insert(id);
+      let Some(rd) = self.raps.get(&binding_name(&self.tcx, id)) else { continue };
+      let ro = rd.rap.clone();
+      if self.skip_raps.contains(ro.name()) || ro.is_ref() {
+        continue;
+      }
+      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, id: *self.unique_id });
+      *self.unique_id += 1;
+    }
+  }
+
+  /// `x = rhs` just initialized the `let x;` local `hirid` inside the
+  /// body of a loop it had no value before (#786): later times round
+  /// the loop, the same assignment drops the value an earlier iteration
+  /// assigned, if x still holds it. Drawn as a drop on the assignment,
+  /// whose text says so.
+  fn drop_earlier_iteration(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>) {
+    if !self.loop_entry_uninit.iter().any(|s| s.contains(&hirid)) {
+      return;
+    }
+    let ty = self.tcx.typeck(hirid.owner).node_type(hirid);
+    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, hirid.owner);
+    if ty.is_ref() || self.tcx.type_is_copy_modulo_regions(env, ty) || !ty.needs_drop(self.tcx, env) {
+      return;
+    }
+    let Some(rd) = self.raps.get(&binding_name(&self.tcx, hirid)) else { return };
+    let ro = rd.rap.clone();
+    if self.skip_raps.contains(ro.name()) {
+      return;
+    }
+    let line = expr_to_line(lhs_expr, &self.tcx);
+    self.add_external_event(line, ExternalEvent::OwnerDropAtReassign {
+      ro,
+      id: *self.unique_id,
+      maybe_moved: false,
+      by_cond: false,
+      parts: None,
+      maybe_init: Some(InitBy::EarlierIteration),
+    });
+    *self.unique_id += 1;
   }
 
   /// The first assignment `x = rhs` to a `let x;` binding (#234). It
@@ -7626,6 +7765,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let evt = self.bind_evt(lhs_ty, hirid);
     let saved = (self.current_scope, self.inside_branch);
     (self.current_scope, self.inside_branch) = (decl.scope, decl.inside_branch);
+    self.deferred_decl_at.insert(name.clone(), decl.frames_at);
     self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), rhs, lhs_ty);
     (self.current_scope, self.inside_branch) = saved;
     if decl.is_skipped {

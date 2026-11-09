@@ -940,7 +940,7 @@ pub fn collect_event_live_vars(
             // The drop of the iterator `ro` was moved into, at a
             // `return` from inside its `for` loop (#482): drawn on ro's
             // column in the branch.
-            ExternalEvent::LoopIteratorDrop { ro, .. } => {
+            ExternalEvent::LoopIteratorDrop { ro, .. } | ExternalEvent::LoopMaybeInit { ro, .. } => {
                 out.insert(ro.clone());
             }
             // A reassignment in a branch drops the old value of `ro`:

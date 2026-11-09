@@ -158,6 +158,9 @@ pub struct DeferredLet {
   pub scope: usize,
   pub inside_branch: bool,
   pub is_skipped: bool,
+  // `exit_frames`' length at the `let`: the loops and branches it is
+  // inside of.
+  pub frames_at: usize,
 }
 
 
@@ -238,6 +241,22 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // value only if there is one, and so does s's scope end. Set where
   // branches join (`join_uninit_locals`); an assignment takes x out.
   pub maybe_init_locals: HashSet<rustc_hir::HirId>,
+  // Those of `maybe_init_locals` that are so because a loop above
+  // assigns them but may have ended before it did (#786).
+  pub maybe_init_by_loop: HashSet<rustc_hir::HirId>,
+  // For each loop being visited, innermost last: the `let x;` locals
+  // with no value as it starts (#786). An assignment to one in its body
+  // initializes it the first time round, and later times round drops
+  // what an earlier iteration assigned.
+  pub loop_entry_uninit: Vec<HashSet<rustc_hir::HirId>>,
+  // At each `break` visited so far: the loop (or block) it leaves, and
+  // the definitely and maybe uninitialized `let x;` locals there
+  // (#786). The loop joins them where it ends.
+  pub break_uninit: Vec<(rustc_hir::HirId, HashSet<rustc_hir::HirId>, HashSet<rustc_hir::HirId>)>,
+  // A `let x;` local's name, once assigned, to `DeferredLet::frames_at`
+  // (#786): it joins `in_scope` where it's first assigned, maybe inside
+  // a loop, but belongs to the scope of its `let`.
+  pub deferred_decl_at: HashMap<String, usize>,
 
   // For `let x = if … { a } else { b };` (and `match`), the events that
   // pair each branch's value with `x` are emitted before the branches
@@ -1130,7 +1149,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::OwnerDropUnlessReturned { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. }
-      | ExternalEvent::LoopIteratorDrop { ro, .. } => {
+      | ExternalEvent::LoopIteratorDrop { ro, .. }
+      | ExternalEvent::LoopMaybeInit { ro, .. } => {
         self.skip_raps.contains(ro.name())
       }
       ExternalEvent::InitRefParam { param, .. } => {

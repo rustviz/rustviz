@@ -2916,6 +2916,71 @@ pub fn event_dot_go_out_of_scope_init_all_moved(my_name: &String) -> String {
     )
 }
 
+// ── `let x;` locals assigned in a loop (#786) ─────────────────────
+//
+// `let mut s; for … { s = String::from("x"); }`: the first time round,
+// the assignment initializes s; later times round, it first drops the
+// String an earlier iteration assigned, if s still holds it. After the
+// loop s holds a value only if the loop assigned it (a `while` / `for`
+// may not run at all, a `break` may come first): rustc rejects a read
+// there (E0381), and a drop flag decides what's dropped.
+
+// The assignment in the loop body, drawn as a drop on its dot (the
+// acquire's text is listed with it).
+pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
+    format!(
+        "On a later iteration of the loop, the resource an earlier iteration gave {0} is dropped \
+         here first, if {0} still holds it (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name)
+    )
+}
+
+// Where the loop ends. `value`, `mutable`: as for
+// `event_dot_branch_merge_maybe_init`. `reassigned`: s is assigned
+// again before its scope ends, on every path (`Some(true)`) or only in
+// a branch of a later conditional (`Some(false)`).
+pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>) -> String {
+    let my_name_fmt = fmt_style(my_name);
+    let mut out = format!(
+        "{0} may have no value after the loop: the loop may end before assigning it, so it can't be \
+         used after the loop{1}.",
+        my_name_fmt,
+        if mutable { " (until it's assigned again)" } else { "" }
+    );
+    if !value {
+        out.push_str(&format!(
+            " If the loop assigned it, its resource is dropped when {0} {1}.",
+            my_name_fmt,
+            match reassigned {
+                Some(true) => "is assigned again",
+                Some(false) => "is assigned again (or, if it isn't, when it goes out of scope)",
+                None => "goes out of scope",
+            }
+        ));
+    }
+    out
+}
+
+// The next assignment after the loop.
+pub fn event_dot_owner_drop_at_reassign_after_loop(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only \
+         if the loop above assigned {0} (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name), holds, rest
+    )
+}
+
+// Its scope end, when it isn't assigned again.
+pub fn event_dot_go_out_of_scope_after_loop(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if the loop above assigned \
+         {0} (Rust tracks this with a runtime drop flag).",
+        fmt_style(my_name), holds, rest
+    )
+}
+
 // Scope end of a variable that was moved on some paths of a conditional
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).

@@ -1227,6 +1227,10 @@ const EXPECTED_OK: &[&str] = &[
     "deferred_init_maybe",
     "deferred_init_two_ifs",
     "deferred_init_then_moved",
+    // A `let` first assigned in a loop body: later iterations drop the
+    // earlier value, and after the loop a drop flag decides (#786).
+    "deferred_init_loop",
+    "deferred_init_loop_break",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14077,6 +14081,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "only if no branch above moved it",
             // No dot without a tooltip.
             "=",
+        ],
+    },
+    // #786: a `let` first assigned in a loop body. Before, the body's
+    // assignment read as a plain initialization (later iterations drop
+    // the earlier String), s's scope end said its resource is dropped
+    // and t's assignment after the `while` said its previous resource is
+    // dropped (nothing is when the body never ran). n is Copy.
+    TooltipExpect {
+        name: "deferred_init_loop",
+        must_contain: &[
+            "On a later iteration of the loop, the resource an earlier iteration gave s is dropped here first, if s still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if the loop above assigned s (Rust tracks this with a runtime drop flag).",
+            "On a later iteration of the loop, the resource an earlier iteration gave t is dropped here first, if t still holds it (Rust tracks this with a runtime drop flag).",
+            "t may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when t is assigned again.",
+            "t acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned t (Rust tracks this with a runtime drop flag).",
+            "n may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again).",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "On a later iteration of the loop, the resource an earlier iteration gave n",
+            "only if the loop above assigned n",
+        ],
+    },
+    // #786: s's `loop` can break before assigning s, also after an
+    // earlier time round assigned it; main said the next assignment
+    // drops the previous resource. t's loop leaves only right after
+    // assigning t, so t surely holds a value afterwards; t is immutable,
+    // so the assignment never runs twice. main also dropped t at the
+    // `break` (it is declared outside the loop) and then said nothing
+    // is dropped at its scope end.
+    TooltipExpect {
+        name: "deferred_init_loop_break",
+        must_contain: &[
+            "On a later iteration of the loop, the resource an earlier iteration gave s is dropped here first, if s still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s is assigned again.",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned s (Rust tracks this with a runtime drop flag).",
+            "t acquires ownership of a resource",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "t may have no value",
+            "earlier iteration gave t",
+            "only if the loop above assigned t",
+            "t goes out of scope. No resource is dropped.",
         ],
     },
 ];
