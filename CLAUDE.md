@@ -24,6 +24,11 @@ writes through `&mut` mutate the referent, drops happen at scope end).
   the source tree. Reinstall after plugin changes:
   `cargo install --locked --path rustviz-plugin`, or the tests silently
   exercise a stale build.
+  Cargo resolves `cargo rv-plugin` from `$CARGO_HOME/bin` *before* `PATH`,
+  so with the per-clone `.envrc` (`CARGO_HOME=.cargo-home`) a plugin
+  installed there shadows one you put on `PATH`. To test a specific build,
+  also use a `CARGO_HOME` whose `bin` has no plugin (or `--root` into it),
+  and check `cargo rv-plugin --version` / `which`.
 
 ## Known gaps are issues, not README text
 
@@ -90,8 +95,9 @@ syntax (e.g. `if let` guards), which the visitor may not handle yet.
 
 1. Build the old plugin from `main` and the new one into separate roots
    (`cargo install --locked --path rustviz-plugin --root <dir>`), then
-   `PATH=<new>/bin:$PATH cargo test --workspace --locked` (corpus tests
-   run the *installed* plugin).
+   `CARGO_HOME=$(mktemp -d) PATH=<new>/bin:$PATH cargo test --workspace
+   --locked` (corpus tests run the *installed* plugin, and `$CARGO_HOME/bin`
+   beats `PATH`; see the note under "Tests must pin correct behaviour").
 2. Check exit codes: a snippet that doesn't compile must make
    `cargo rv-plugin` exit non-zero with rustc's diagnostic on stderr
    (`compile_errors_are_reported_not_swallowed` covers this).
