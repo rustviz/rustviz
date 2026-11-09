@@ -4854,6 +4854,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 if head_is_iterator && arms.first().is_some_and(|a| breaks_out_of(a.body) <= 1) {
                   if let Some(name) = expr_to_rap_name(head_arg, &self.tcx) {
                     if self.borrow_map.contains_key(&name) {
+                      if self.raps.get(&name).is_some_and(|r| r.rap.holds_borrow()) {
+                        self.for_moved_holders.insert(name.clone());
+                      }
                       let floor = self.borrow_floor.entry(name).or_insert(body_end);
                       *floor = (*floor).max(body_end);
                     }
