@@ -1171,6 +1171,12 @@ const EXPECTED_OK: &[&str] = &[
     "edition2024/temporary_let_chain_partly_moved",
     // A destructuring assignment that leaves part of a call's result (#625).
     "destructure_assign_temporary_leftover",
+    "or_pattern_nested_match",
+    "or_pattern_nested_let",
+    "or_pattern_nested_if_let",
+    "or_pattern_nested_fields",
+    "or_pattern_nested_two",
+    "or_pattern_nested_ref",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13256,6 +13262,129 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary 3)",
         ],
     },
+    TooltipExpect {
+        name: "or_pattern_nested_match",
+        // `(a, (x, _) | (_, x))` on `t` (#612): the nested or-pattern
+        // binds `x` from `t.1.0` or `t.1.1`, as `(a, (x, _)) | (a, (_,
+        // x))` would. The old plugin drew `Move from t.1 to x` and still
+        // dropped both `t.1.0` and `t.1.1` at scope end.
+        must_contain: &[
+            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.0, t.1.0's resource is moved into x here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a resource",
+            "a acquires ownership of a resource",
+            "Move from t.0 to a",
+            "t.1.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1 goes out of scope. t.1.0 and t.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "t goes out of scope. t.0 was moved out earlier. t.1.0 and t.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "Move from t.1 to x",
+            "=t.1.0 goes out of scope. Its resource is dropped.",
+            "=t.1.1 goes out of scope. Its resource is dropped.",
+            "=t.1 goes out of scope. No resource is dropped.",
+            "t.0 and t.1 were moved out earlier",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_nested_let",
+        // `let (a, (x, _) | (_, x)) = t;` (#612): no branch, so "nothing
+        // above". The old plugin drew `Move from t to x` (the whole
+        // tuple) and still dropped `t.1.0` and `t.1.1`.
+        must_contain: &[
+            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.0, t.1.0's resource is moved into x here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a resource",
+            "Move from t.0 to a",
+            "t.1.0 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1.1 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1 goes out of scope. t.1.0 and t.1.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+            "t goes out of scope. t.0 was moved out earlier. t.1.0 and t.1.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "Move from t to x",
+            "Move from t.1 to x",
+            "branch above",
+            "=t.1.0 goes out of scope. Its resource is dropped.",
+            "=t.1.1 goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_nested_if_let",
+        // `if let (n, (Some(x), _) | (_, Some(x))) = t` (#612): `x` may
+        // move out of `t.1.0` or `t.1.1`, in the branch. The old plugin
+        // drew `Move from t.1 to x` and dropped `t.1.0` and `t.1.1`
+        // unconditionally.
+        must_contain: &[
+            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.0, t.1.0's resource is moved into x here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a resource",
+            "n is initialized with a copy of t.0",
+            "t.1.0 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t.1 goes out of scope. t.1.0 and t.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "Move from t.1 to x",
+            "=t.1.0 goes out of scope. Its resource is dropped.",
+            "=t.1.1 goes out of scope. Its resource is dropped.",
+            "t.1 was moved out in at least one branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_nested_fields",
+        // `(s, P { a: x, .. } | P { b: x, .. })` on `t` (#612): `x` comes
+        // from `t.1.a` or `t.1.b`. The old plugin drew `Move from t.1 to
+        // x` and dropped both fields at scope end.
+        must_contain: &[
+            "x is bound from t.1.a or t.1.b, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.a, t.1.a's resource is moved into x here; otherwise t.1.a still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.1.a or t.1.b, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.b, t.1.b's resource is moved into x here; otherwise t.1.b still owns it (Rust tracks this with a runtime drop flag).",
+            "t.1.b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Move from t.1 to x",
+            "=t.1.a goes out of scope. Its resource is dropped.",
+            "=t.1.b goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_nested_two",
+        // `((x, _) | (_, x), (n, _) | (_, n))` (#612): two nested
+        // or-patterns. `x` comes from `t.0.0` or `t.0.1`; the copied `n`
+        // is just bound (it's a copy of `t.1.0` or `t.1.1`, not of
+        // `t.1`). The old plugin drew `Move from t.0 to x` and `Copy
+        // from t.1 to n`.
+        must_contain: &[
+            "x is bound from t.0.0 or t.0.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0.0, t.0.0's resource is moved into x here; otherwise t.0.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "x is bound from t.0.0 or t.0.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0.1, t.0.1's resource is moved into x here; otherwise t.0.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "n is bound to a copyable value",
+            "t.0.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "Move from t.0 to x",
+            "Copy from t.1 to n",
+            "n is initialized with a copy of t.1",
+            "=t.0.0 goes out of scope. Its resource is dropped.",
+            "=t.0.1 goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_nested_ref",
+        // `(ref a, (ref x, _) | (_, ref x))` on `t`: the nested or-pattern
+        // binds the reference `x` to `t.1.0` or `t.1.1`, drawn as a borrow
+        // of whichever matched (#565 for a match arm, reached through
+        // #612's nested or-patterns). #612 alone refused it.
+        must_contain: &[
+            "x immutably borrows t.1.0 or t.1.1, whichever alternative of the pattern matches",
+            "x borrows t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.0, t.1.0's resource is immutably borrowed by x here. Which alternative matches is decided at run time, so the borrow checker treats t.1.0 as borrowed either way: t.1.0 is read-only while x's borrow is live.",
+            "x borrows t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is immutably borrowed by x here. Which alternative matches is decided at run time, so the borrow checker treats t.1.1 as borrowed either way: t.1.1 is read-only while x's borrow is live.",
+        ],
+        must_not_contain: &[
+            "Partial immutable borrow from t.1 to x",
+            "Move from t.1 to x",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -15738,6 +15867,38 @@ fn or_pattern_let_binding_a_reference_or_struct_from_different_places_is_refused
         let msg = err.to_string();
         assert!(msg.contains(&format!("or-patterns that bind {} from different places in the value being matched", what)),
             "expected the or-pattern refusal, got:\n{}", msg);
+    }
+}
+
+/// An or-pattern nested inside another pattern (#612) is refused when the
+/// places are parts of a variable that a tuple literal being matched moved
+/// into a temporary (`match (s, u) { (p, (x, _) | (_, x)) => … }`): what
+/// `x` doesn't take of `u` is dropped with the temporary at the end of the
+/// match / `let`, not by a drop flag at `u`'s scope end, which is what
+/// drawing `u.0` / `u.1` as maybe-moved would say. (A nested `ref x` is no
+/// longer refused: it's drawn as a borrow, like a top-level one, #565; see
+/// `or_pattern_nested_ref`.) In a `match` and an `if let` the refusal is
+/// the one for a tuple value that is a struct or tuple (#580), which
+/// comes first.
+#[test]
+fn nested_or_pattern_that_cant_be_drawn_is_refused() {
+    env::set_var("RV_RUNNER", "local");
+    let u = "    let s = String::from(\"s\");\n    let u = (String::from(\"b\"), String::from(\"c\"));\n";
+    let temporary = "or-patterns that bind `x` from different parts of `u`, which the tuple or struct being matched moves into a temporary";
+    let tuple_value = "or-patterns that bind `x` from different values of a tuple being matched, when a value is a struct or tuple or is copied into it";
+    for (src, expected) in [
+        (format!("fn main() {{\n{u}    match (s, u) {{\n        (p, (x, _) | (_, x)) => println!(\"{{}} {{}}\", p, x),\n    }}\n}}\n"),
+         tuple_value),
+        (format!("fn main() {{\n{u}    match (s, u) {{\n        (p, (x, _)) | (p, (_, x)) => println!(\"{{}} {{}}\", p, x),\n    }}\n}}\n"),
+         tuple_value),
+        (format!("fn main() {{\n{u}    if let (p, (x, _) | (_, x)) = (s, u) {{\n        println!(\"{{}} {{}}\", p, x);\n    }}\n}}\n"),
+         tuple_value),
+        (format!("fn main() {{\n{u}    let (p, (x, _) | (_, x)) = (s, u);\n    println!(\"{{}} {{}}\", p, x);\n}}\n"),
+         temporary),
+    ] {
+        let err = Rustviz::new(&src).expect_err("an or-pattern binding of this kind must not render");
+        let msg = err.to_string();
+        assert!(msg.contains(expected), "expected the or-pattern refusal for\n{}\ngot:\n{}", src, msg);
     }
 }
 
