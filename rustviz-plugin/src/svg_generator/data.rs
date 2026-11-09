@@ -2840,6 +2840,12 @@ impl Event {
                 };
                 hover_messages::event_dot_acquire_from_try(&self.deref_name(my_name), from.name(), *kind, holds)
             }
+            // `let o = Some(5);`: the value a constructor of literals
+            // builds; nothing is copied from the constructor (#768).
+            Event::Acquire{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), is, via_try: None, ..}
+                if is.extract_rap().is_some_and(|r| r.is_copy_owner()) && f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())) => {
+                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, None, f.inside.as_deref())
+            }
             Event::Acquire{ from, is, ..} => {
                 if is.is_closure() && from.extract_rap().is_some() {
                     // `f` (closure) acquiring from a real source —

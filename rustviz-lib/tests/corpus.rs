@@ -1211,6 +1211,9 @@ const EXPECTED_OK: &[&str] = &[
     "return_ref_param_reborrow",
     // `for n in a` over Copy elements draws no move into `n` (#772).
     "for_copy_arrow",
+    // A constructor of literals draws no arrow; a constructor is never a
+    // borrower (#768).
+    "ctor_literals_768",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -13581,7 +13584,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // its (Copy) value.
             "k is bound to a copyable value",
             // #758: `Some(5)` is written out, not a call that returns.
-            "x is initialized with the value inside a Some value",
+            // (#768: and it draws no arrow, so x is just bound to a
+            // copyable value.)
+            "x is bound to a copyable value",
         ],
         must_not_contain: &[
             "len is initialized with a copy of len",
@@ -13843,6 +13848,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // No `else` exists for these two.
             "This temporary Vec<String> is dropped before the `else` block",
             "This temporary Option<Box<i32>> is dropped before the `else` block",
+        ],
+    },
+    // #768: `Some(5)`, `Ok(1)`, `None` build a value of the type like a
+    // literal does: no arrow from the constructor (on main "Copy from
+    // Some to o"), but the variable's dot still says what it holds. A
+    // constructor isn't a borrower: `Some(&s)` is borrowed by the
+    // variable that holds it, or by the call it's passed to (on main "s
+    // is immutably borrowed by Some"). `Some(m)` with a variable still
+    // draws "Move from m to Some".
+    TooltipExpect {
+        name: "ctor_literals_768",
+        must_contain: &[
+            "o is initialized with a Some value",
+            "r is initialized with an Ok value",
+            "n is initialized with a None value",
+            "x is bound to a copyable value",
+            "y is bound to a copyable value",
+            "s's resource is immutably borrowed by b; s is read-only while the borrow is live",
+            "s's resource is immutably borrowed by d; s is read-only while the borrow is live",
+            "s's resource is immutably borrowed by take; s is read-only while the borrow is live",
+            "Move from m to Some",
+        ],
+        must_not_contain: &[
+            "Copy from Some to",
+            "Copy from Ok to",
+            "Copy from None to",
+            "Partial copy from Some to",
+            "borrowed by Some",
+            "Some reads from s",
         ],
     },
 ];
