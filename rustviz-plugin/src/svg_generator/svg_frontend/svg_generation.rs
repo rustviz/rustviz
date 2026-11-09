@@ -134,6 +134,21 @@ fn binds_source_of_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
         return false;
     }
     let ResourceTy::Value(t) = ResourceAccessPoint_extract(e).1 else { return false };
+    // A field of a struct or tuple that one of the line's arrows moves
+    // or copies into gets its part with the whole, on the row the whole
+    // is bound on: `(r, z)` on `(g, (h, k))` moves `h` and `k` into `z`,
+    // and `z.0`'s dot sat on the row below them, after all of its
+    // events, so its column was a single dot (#781).
+    // (Not when the line also moves the whole or the field away, as in
+    // `(p, q) = (q, p)`: the new value arrives after the old one left.)
+    let owner = t.get_owner() as u64;
+    let arrow_to_owner = |o: &ExternalEvent| matches!(o, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. })
+        && matches!(ResourceAccessPoint_extract(o).1, ResourceTy::Value(p) if *p.hash() == owner);
+    let arrow_from_whole = |o: &ExternalEvent| matches!(o, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. })
+        && matches!(ResourceAccessPoint_extract(o).0, ResourceTy::Value(p) if *p.hash() == owner || p.hash() == t.hash());
+    if t.is_member() && group.iter().any(arrow_to_owner) && !group.iter().any(arrow_from_whole) {
+        return true;
+    }
     let t = *t.hash();
     // Only an arrow that comes after the binding: `n = n + 1;` copies `n`
     // first and is assigned after.
