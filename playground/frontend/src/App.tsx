@@ -442,14 +442,19 @@ const Description: React.FC = () => (
         a <code>ref</code> binding of a value (
         <code>let ref t = String::from(&quot;a&quot;);</code>) borrows one, and
         so does a literal of only fresh values (
-        <code>let (ref a, _) = (make(), make());</code>).
-        A variable moved into a <code>vec![..]</code> or literal that nothing
-        binds (<code>vec![s];</code>, or by struct update,{' '}
-        <code>P {'{'} n: 1, ..p {'}'};</code>) is drawn moving into the
-        temporary. The bindings of a scrutinee&apos;s pattern are drawn from the call, not
-        from that column. Not drawn or mentioned: what a{' '}
-        <code>let</code>-<code>else</code> pattern refuses, and a temporary that
-        is a struct update&apos;s base (<code>..make()</code>).
+        <code>let (ref a, _) = (make(), make());</code>). The
+        bindings of a scrutinee&apos;s pattern are drawn from the call, not from
+        that column. A <code>let</code>-
+        <code>else</code> scrutinee, a struct update&apos;s base (
+        <code>..make()</code>) and a temporary whose field is matched on (
+        <code>match make().name</code>) get one too, as does a let chain&apos;s
+        scrutinee, and so does a call&apos;s
+        result that a <code>let</code> pattern takes apart (
+        <code>let (a, _) = make();</code>, <code>(m, _) = make();</code>). A
+        variable moved into a{' '}
+        <code>vec![..]</code> or literal that nothing binds (<code>vec![s];</code>,
+        or by struct update, <code>P {'{'} n: 1, ..p {'}'};</code>) is drawn
+        moving into the temporary.
         Where a tuple of variables matched by <code>if let</code> or{' '}
         <code>match</code> (<code>(x, y)</code>) is dropped is stated on{' '}
         <code>x</code>&apos;s and <code>y</code>&apos;s columns (not when a{' '}

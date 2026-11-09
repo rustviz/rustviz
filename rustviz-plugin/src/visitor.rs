@@ -5137,16 +5137,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       Some(self.temp_part_moved(expr, ty, typeck, env)?)
     };
-    let (mut when, end_line, owner) = self.temporary_scope_end(expr)?;
-    // A `match` that is a statement, a `let`'s initializer or a block's
-    // value: its scrutinee is dropped when the match ends.
-    if part == Some(TempPart::Match) {
-      if let rustc_hir::Node::Expr(m) = self.tcx.parent_hir_node(expr.hir_id) {
-        if matches!(self.tcx.parent_hir_node(m.hir_id),
-          rustc_hir::Node::Stmt(_) | rustc_hir::Node::LetStmt(_) | rustc_hir::Node::Block(_)) {
-          when = "when the match ends";
+    let (mut when, mut end_line, owner) = self.temporary_scope_end(expr)?;
+    // What is matched on: the temporary, or a field of it (#605).
+    let scrut = self.field_top(expr);
+    match part {
+      // A `match` that is a statement, a `let`'s initializer or a block's
+      // value: its scrutinee is dropped when the match ends.
+      Some(TempPart::Match(_)) => {
+        if let rustc_hir::Node::Expr(m) = self.tcx.parent_hir_node(scrut.hir_id) {
+          if matches!(self.tcx.parent_hir_node(m.hir_id),
+            rustc_hir::Node::Stmt(_) | rustc_hir::Node::LetStmt(_) | rustc_hir::Node::Block(_)) {
+            when = "when the match ends";
+          }
         }
       }
+      // `let Ok(s) = res() else { .. };`: dropped once the pattern is
+      // matched, before the `else` block runs (any edition, #605).
+      // `(m, _) = pair();`: dropped at the end of the `let` it is
+      // lowered to, before the places on the left are assigned (#625).
+      Some(TempPart::Assign(_)) => {
+        when = "as soon as the assignment has taken it apart (before the places on the left get their new values)";
+      }
+      Some(TempPart::LetElse(_)) => {
+        when = "as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match)";
+        end_line = span_end_line(&scrut.span, &self.tcx);
+      }
+      _ => {}
     }
     self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part)
   }
@@ -5154,8 +5170,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// What `note_temporary_drop` says is moved out of the temporary
   /// `expr` (of type `ty`), when that leaves something in it that may
   /// need dropping: a field (`let s = make_q().a;`, `take(make_q().b)`),
-  /// or what the pattern of a `match` / `if let` / `while let` binds by
-  /// value. None for any other use, and when nothing that needs
+  /// the fields a struct update takes from its base (`..make_p()`), or
+  /// what the pattern of a `match` / `if let` / `while let` / `let`-`else`
+  /// binds by value, from the temporary or from a field of it (`match
+  /// make_p().name { .. }`, #605), or what a `let` pattern takes apart
+  /// (`let (a, _) = pair();`, #623). None for any other use, and when
+  /// nothing that needs
   /// dropping can be left (`match make() { Some(s) => .., None => .. }`
   /// on an `Option<String>`: the arm that binds `s` takes all of it).
   fn temp_part_moved(
@@ -5165,52 +5185,146 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
     env: rustc_middle::ty::TypingEnv<'tcx>,
   ) -> Option<TempPart> {
-    let rustc_hir::Node::Expr(p) = self.tcx.parent_hir_node(expr.hir_id) else { return None };
-    match p.kind {
-      ExprKind::Field(..) => {
-        // `make_q().inner.name`: the field path moved out, and whether
-        // anything beside it needs dropping.
-        let mut top = expr;
-        let mut path: Vec<String> = Vec::new();
-        let mut left = false;
-        while let rustc_hir::Node::Expr(q) = self.tcx.parent_hir_node(top.hir_id) {
-          let ExprKind::Field(base, f) = q.kind else { break };
-          if base.hir_id != top.hir_id {
-            break;
+    use rustc_hir::Node;
+    // `make_q().inner.name`: the outermost field projection, its path,
+    // and whether a field beside it needs dropping.
+    let top = self.field_top(expr);
+    let (sty, path, left) = if top.hir_id == expr.hir_id {
+      (ty, None, false)
+    } else {
+      let mut path: Vec<String> = Vec::new();
+      let mut left = false;
+      let mut e = top;
+      while let ExprKind::Field(base, f) = e.kind {
+        left |= self.other_fields_need_drop(typeck.expr_ty(base), f.as_str(), env);
+        path.push(f.as_str().to_owned());
+        if base.hir_id == expr.hir_id {
+          break;
+        }
+        e = base;
+      }
+      path.reverse();
+      (typeck.expr_ty(top), Some(path.join(".")), left)
+    };
+    match self.tcx.parent_hir_node(top.hir_id) {
+      // `match make() { .. }`, `match make_p().name { .. }` (#605).
+      Node::Expr(p) => match p.kind {
+        ExprKind::Match(s, arms, rustc_hir::MatchSource::Normal) if s.hir_id == top.hir_id => {
+          (left || arms.iter().any(|a| self.pat_leaves_temp_drop(a.pat, sty, typeck, env))).then_some(TempPart::Match(path))
+        }
+        ExprKind::Let(l) if l.init.hir_id == top.hir_id => {
+          // The condition of an `if let` / `while let`, or a `let` in the
+          // let chain that is one (`if a && let Ok(s) = make()`, edition
+          // 2024): the scrutinee lives until the matched block ends or the
+          // `else` runs (`temporary_scope_end`, #604).
+          let mut cond = p;
+          let mut in_chain = false;
+          let i = loop {
+            match self.tcx.parent_hir_node(cond.hir_id) {
+              Node::Expr(b) if matches!(b.kind, ExprKind::Binary(op, ..) if op.node == rustc_hir::BinOpKind::And) => {
+                cond = b;
+                in_chain = true;
+              }
+              Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == cond.hir_id) => break i,
+              _ => return None,
+            }
+          };
+          if !left && !self.pat_leaves_temp_drop(l.pat, sty, typeck, env) && !self.pat_rejects_drop(l.pat, sty, typeck, env) {
+            return None;
           }
-          left |= self.other_fields_need_drop(typeck.expr_ty(base), f.as_str(), env);
-          path.push(f.as_str().to_owned());
-          top = q;
+          let is_while = matches!(i.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop));
+          Some(if in_chain { TempPart::LetChain(path) } else if is_while { TempPart::WhileLet(path) } else { TempPart::IfLet(path) })
         }
-        let ftop = typeck.expr_ty(top);
-        // A Copy read or a borrow of the field is `is_unmoved_temporary`'s;
-        // a field that is matched on, or borrowed by a `let`, isn't drawn.
-        let scrutinee = matches!(self.tcx.parent_hir_node(top.hir_id),
-          rustc_hir::Node::Expr(m) if matches!(m.kind, ExprKind::Match(..) | ExprKind::Let(_)));
-        if !left || scrutinee || self.extended_by_let(top) || self.tcx.type_is_copy_modulo_regions(env, ftop) {
+        // `P { n: 1, ..make_p() }`: the literal moves the fields it
+        // doesn't name out of the base (#605).
+        ExprKind::Struct(_, fields, rustc_hir::StructTailExpr::Base(b)) if b.hir_id == top.hir_id => {
+          if path.is_some() {
+            return None;
+          }
+          let rustc_middle::ty::TyKind::Adt(def, args) = ty.kind() else { return None };
+          if !def.is_struct() {
+            return None;
+          }
+          let mut moved = Vec::new();
+          let mut left = false;
+          for f in def.non_enum_variant().fields.iter() {
+            let fty = f.ty(self.tcx, args);
+            if fields.iter().any(|ef| ef.ident.name == f.name) {
+              left |= fty.needs_drop(self.tcx, env);
+            } else if !self.tcx.type_is_copy_modulo_regions(env, fty) {
+              moved.push(f.name.as_str().to_owned());
+            }
+          }
+          (left && !moved.is_empty()).then_some(TempPart::UpdateBase(moved))
+        }
+        _ => self.field_moved_part(top, path, left, typeck, env),
+      },
+      // `let Ok(s) = res() else { .. };` (#605).
+      Node::LetStmt(l) if l.els.is_some() => {
+        if l.span.from_expansion() || !l.init.is_some_and(|i| i.hir_id == top.hir_id) {
           return None;
         }
-        Some(TempPart::Field(path.join(".")))
+        (left || self.pat_leaves_temp_drop(l.pat, sty, typeck, env) || self.pat_rejects_drop(l.pat, sty, typeck, env))
+          .then_some(TempPart::LetElse(path))
       }
-      ExprKind::Match(s, arms, rustc_hir::MatchSource::Normal) if s.hir_id == expr.hir_id => {
-        arms.iter().any(|a| self.pat_leaves_temp_drop(a.pat, ty, typeck, env)).then_some(TempPart::Match)
+      // `let t = make_q().a;`.
+      Node::LetStmt(l) if matches!(l.pat.kind, PatKind::Binding(ann, .., None) if ann.0 == rustc_hir::ByRef::No) => {
+        self.field_moved_part(top, path, left, typeck, env)
       }
-      ExprKind::Let(l) if l.init.hir_id == expr.hir_id => {
-        // Only the condition of an `if let` / `while let` itself: in a
-        // let chain (`if a && let Some(s) = make()`) the scrutinee isn't
-        // dropped where `temporary_scope_end` says (#604).
-        let rustc_hir::Node::Expr(i) = self.tcx.parent_hir_node(p.hir_id) else { return None };
-        if !matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == p.hir_id) {
+      // `let (a, _) = pair();`, `let (b, _) = make().pair;`: the pattern
+      // takes the value (or the field) apart, and can leave parts of it
+      // in the temporary, which is dropped at the end of the statement
+      // (#623). A `ref` binding extends the temporary instead (#483); a
+      // destructuring assignment (`(m, _) = pair();`) is lowered to such
+      // a `let` (#625). A literal (`let (a, _) = (s, t);`) is #445's.
+      Node::LetStmt(l) => {
+        let assign = matches!(l.source, rustc_hir::LocalSource::AssignDesugar);
+        if (!assign && (l.span.from_expansion() || !matches!(l.source, rustc_hir::LocalSource::Normal)))
+          || !l.init.is_some_and(|i| i.hir_id == top.hir_id)
+          || matches!(expr.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
           return None;
         }
-        if !self.pat_leaves_temp_drop(l.pat, ty, typeck, env) && !self.pat_rejects_drop(l.pat, ty, typeck, env) {
+        let mut by_ref = false;
+        l.pat.each_binding(|ann, _, _, _| by_ref |= ann.0 != rustc_hir::ByRef::No);
+        if by_ref || !(left || self.pat_leaves_temp_drop(l.pat, sty, typeck, env)) {
           return None;
         }
-        let is_while = matches!(i.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop));
-        Some(if is_while { TempPart::WhileLet } else { TempPart::IfLet })
+        Some(if assign { TempPart::Assign(path) } else { TempPart::Let(path) })
       }
-      _ => None,
+      _ => self.field_moved_part(top, path, left, typeck, env),
     }
+  }
+
+  /// `TempPart::Field` for a field `top` (at `path`) of a temporary that
+  /// is moved out, when another field (`left`) needs dropping.
+  fn field_moved_part(
+    &self,
+    top: &'tcx Expr<'tcx>,
+    path: Option<String>,
+    left: bool,
+    typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+    env: rustc_middle::ty::TypingEnv<'tcx>,
+  ) -> Option<TempPart> {
+    let path = path?;
+    // A Copy read or a borrow of the field is `is_unmoved_temporary`'s;
+    // a field borrowed by a `let` isn't drawn.
+    if !left || self.extended_by_let(top) || self.tcx.type_is_copy_modulo_regions(env, typeck.expr_ty(top)) {
+      return None;
+    }
+    Some(TempPart::Field(path))
+  }
+
+  /// The outermost field projection on `expr` (`make_q().inner.name`
+  /// for `make_q()`), or `expr` itself.
+  fn field_top(&self, expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
+    let mut top = expr;
+    while let rustc_hir::Node::Expr(q) = self.tcx.parent_hir_node(top.hir_id) {
+      match q.kind {
+        ExprKind::Field(base, _) if base.hir_id == top.hir_id => top = q,
+        _ => break,
+      }
+    }
+    top
   }
 
   /// True iff a field of `ty` other than `field` needs dropping (true
@@ -5293,6 +5407,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `None`, a unit variant: nothing in it. Literals and ranges
       // match values that need no drop.
       PatKind::Expr(_) | PatKind::Range(..) | PatKind::Never | PatKind::Err(_) => false,
+      // `[a, b]`, `[first, ..]`: the elements the pattern names, and
+      // what its `..` covers.
+      PatKind::Slice(before, mid, after) => {
+        let elem = match ty.kind() {
+          rustc_middle::ty::TyKind::Array(e, _) | rustc_middle::ty::TyKind::Slice(e) => *e,
+          _ => return true,
+        };
+        before.iter().chain(after.iter()).any(|p| self.pat_leaves_temp_drop(p, elem, typeck, env))
+          || mid.is_some_and(|m| self.pat_leaves_temp_drop(m, typeck.node_type(m.hir_id), typeck, env))
+      }
       PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..) => match self.pat_fields(pat, ty, typeck) {
         Some((subs, rest)) => rest.iter().any(|t| t.needs_drop(self.tcx, env))
           || subs.iter().any(|(p, t)| self.pat_leaves_temp_drop(p, *t, typeck, env)),
@@ -5380,11 +5504,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.update_rap(&src, line);
       self.add_ev(src_line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
     }
-    // A field moved out (`let s = make_q().a;`) is drawn from this
-    // column. A pattern's bindings stay drawn from the call: an arm
-    // can't draw a move out of a column that isn't its own (the
-    // temporary isn't split into the arms).
-    if matches!(part, Some(TempPart::Field(_))) {
+    // A field moved out (`let s = make_q().a;`, or by a struct update,
+    // `let q = P { n: 1, ..make_p() };`) is drawn from this column. A
+    // pattern's bindings stay drawn from the call: an arm can't draw a
+    // move out of a column that isn't its own (the temporary isn't split
+    // into the arms).
+    if matches!(part, Some(TempPart::Field(_) | TempPart::UpdateBase(_))) {
       self.temp_cols.insert(expr.hir_id, tmp.clone());
     }
     // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
@@ -5478,6 +5603,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ExprKind::Call(callee, _) if is_me(callee) => {
           !typeck.type_dependent_def_id(p.hir_id)
             .is_some_and(|m| self.tcx.trait_of_assoc(m) == self.tcx.lang_items().fn_once_trait())
+        }
+        // `P { name: s, ..make_p() }` where the fields it takes from the
+        // base are all Copy: they are copied out, the base is left whole
+        // (#605).
+        ExprKind::Struct(_, fields, rustc_hir::StructTailExpr::Base(b)) if is_me(b) => {
+          match typeck.expr_ty(expr).kind() {
+            rustc_middle::ty::TyKind::Adt(def, args) if def.is_struct() => def.non_enum_variant().fields.iter()
+              .filter(|f| !fields.iter().any(|ef| ef.ident.name == f.name))
+              .all(|f| self.tcx.type_is_copy_modulo_regions(env, f.ty(self.tcx, args))),
+            _ => false,
+          }
         }
         ExprKind::Match(scrut, arms, rustc_hir::MatchSource::Normal) if is_me(scrut) => {
           let mut moves_out = false;
