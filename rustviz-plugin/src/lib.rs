@@ -48,8 +48,29 @@ pub struct RVPlugin;
 pub struct RVPluginArgs {
   #[arg(short, long)]
   write_to_cwd: bool, // write to cwd (from where the plugin is called)
+  /// Source file to visualize, relative to the crate directory (e.g.
+  /// `src/shapes.rs`). Must be a file the crate compiles. Defaults to the
+  /// crate root (`src/lib.rs` or `src/main.rs`).
+  #[arg(short, long)]
+  file: Option<String>,
 }
 
+
+/// Cargo doesn't know the plugin's arguments (they reach the driver in an
+/// environment variable), so after a run with different arguments, such as
+/// another `--file`, `cargo check` would call the build fresh and never run
+/// the driver. Remember the last arguments next to the build and, when they
+/// change, drop cargo's fingerprints so the next check re-runs the driver.
+fn forget_cached_check_if_args_changed(target_dir: &Utf8Path, args: &RVPluginArgs) {
+  let Ok(now) = serde_json::to_string(args) else { return };
+  let stamp = target_dir.join("rv-last-args");
+  if std::fs::read_to_string(&stamp).ok().as_deref() == Some(now.as_str()) {
+    return;
+  }
+  let _ = std::fs::remove_dir_all(target_dir.join("debug").join(".fingerprint"));
+  let _ = std::fs::create_dir_all(target_dir);
+  let _ = std::fs::write(&stamp, now);
+}
 
 // https://github.com/cognitive-engineering-lab/rustc_plugin
 impl RustcPlugin for RVPlugin {
@@ -63,8 +84,9 @@ impl RustcPlugin for RVPlugin {
     "rv-plugin-driver".into()
   }
 
-  fn args(&self, _target_dir: &Utf8Path) -> RustcPluginArgs<Self::Args> {
+  fn args(&self, target_dir: &Utf8Path) -> RustcPluginArgs<Self::Args> {
     let args = RVPluginArgs::parse_from(env::args().skip(1));//read command line arguments
+    forget_cached_check_if_args_changed(target_dir, &args);
     let filter = CrateFilter::AllCrates; //decide which crate to compile
     RustcPluginArgs { args, filter }
   }
