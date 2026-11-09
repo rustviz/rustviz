@@ -820,10 +820,13 @@ const BOOK: &[Snippet] = &[
             "L13 Immutable borrow from number_list to result: largest's signature gives the reference it returns the same lifetime as its argument",
             "L14 Return immutably borrowed resource from result to number_list",
             "number_list goes out of scope. Its resource is dropped.",
+            // #754: list's borrow goes on in the caller, through result.
+            "the resource list points to is immutably borrowed by largest",
         ],
         must_not_contain: &[
             "result is the owner of the resource",
             "item's resource is copied",
+            "list's immutable borrow ends",
             "Immutable borrow from list to largest",
             "Return immutably borrowed resource from result to *result",
             "L5 largest is initialized with a copy of item",

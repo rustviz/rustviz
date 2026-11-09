@@ -1563,6 +1563,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// nothing else with a column ends that borrow, so `r`'s end stands
   /// for it.
   pub fn ref_handed_off(&self, name: &str) -> bool {
+    self.ref_handed_off_to(name, false)
+  }
+
+  /// Like `ref_handed_off`, but only a hand-off to the caller counts
+  /// (#754): the borrow then carries on past the fn, so nothing else
+  /// in the fn ends it.
+  pub fn ref_handed_to_caller(&self, name: &str) -> bool {
+    self.ref_handed_off_to(name, true)
+  }
+
+  fn ref_handed_off_to(&self, name: &str, caller_only: bool) -> bool {
     let (Some(rd), Some(rap_data)) = (self.borrow_map.get(name), self.raps.get(name)) else {
       return false;
     };
@@ -1573,8 +1584,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // only a hand-off to the caller counts: a `&mut` moved or a shared
     // reference copied to the caller (`if c { x } else { y }` as the
     // tail, #742): the reference goes to the caller on
-    // that path, so its borrow doesn't end there.
-    fn handed(this: &ExprVisitor, events: &[(usize, ExternalEvent)], hash: u64, rd_assigned_at: usize, swapped_here: &dyn Fn(usize) -> bool, in_branch: bool) -> bool {
+    // that path, so its borrow doesn't end there. The same holds for a
+    // shared reference parameter that is the fn's whole result
+    // (`fn id(x: &String) -> &String { x }`, #754).
+    fn handed(this: &ExprVisitor, events: &[(usize, ExternalEvent)], hash: u64, rd_assigned_at: usize, swapped_here: &dyn Fn(usize) -> bool, in_branch: bool, caller_only: bool) -> bool {
       events.iter().any(|(line, ev)| match ev {
         ExternalEvent::Move { from: ResourceTy::Value(f), to, .. }
           if *f.hash() == hash && *line >= rd_assigned_at && !swapped_here(*line) =>
@@ -1582,19 +1595,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           match to {
             ResourceTy::Caller => true,
             // Moves into another reference inside a branch keep the old drawing.
-            ResourceTy::Value(t) if !in_branch => this.borrow_map.contains_key(t.name())
+            ResourceTy::Value(t) if !in_branch && !caller_only => this.borrow_map.contains_key(t.name())
               && this.raps.get(t.name()).map_or(false, |r| r.rap.hash() == t.hash()),
             _ => false,
           }
         }
         ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Caller, .. }
-          if in_branch && *f.hash() == hash && *line >= rd_assigned_at => true,
+          if *f.hash() == hash && *line >= rd_assigned_at => true,
         ExternalEvent::Branch { branches, .. } => branches.iter()
-          .any(|b| handed(this, &b.e_data, hash, rd_assigned_at, swapped_here, true)),
+          .any(|b| handed(this, &b.e_data, hash, rd_assigned_at, swapped_here, true, caller_only)),
         _ => false,
       })
     }
-    handed(self, self.preprocessed_events, hash, rd.assigned_at, &swapped_here, false)
+    handed(self, self.preprocessed_events, hash, rd.assigned_at, &swapped_here, false, caller_only)
   }
 
   /// `let r2: &mut String = r;`, `Holder { r: a }`, `q = r;`: a `&mut`
@@ -6260,6 +6273,34 @@ pub fn print_out_of_scope(&mut self){
       .filter(|k| self.ref_handed_off(k))
       .cloned()
       .collect();
+    // A region with a reference that went to the caller keeps its
+    // lender borrowed past the fn: no other member of it ends the
+    // borrow (#754: `largest = item; … largest` as the tail).
+    #[expect(clippy::disallowed_methods, reason = "collected into a set, order never observed")]
+    let to_caller: HashSet<String> = self.borrow_map.keys()
+      .filter(|k| self.ref_handed_to_caller(k))
+      .cloned()
+      .collect();
+    // The reference parameters those references reborrow from
+    // (`&list[i]`, `for item in list`): the caller's data stays
+    // borrowed through the returned reference, so the parameter's own
+    // borrow doesn't end at the fn's end either (#754).
+    let mut lent_to_caller: HashSet<String> = HashSet::new();
+    {
+      #[expect(clippy::disallowed_methods, reason = "collected into a set, order never observed")]
+      let mut work: Vec<String> = to_caller.iter().cloned().collect();
+      while let Some(name) = work.pop() {
+        let Some(rd) = self.borrow_map.get(&name) else { continue };
+        for l in rd.all_lenders() {
+          if matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+            let n = l.real_name();
+            if self.borrow_map.contains_key(&n) && lent_to_caller.insert(n.clone()) {
+              work.push(n);
+            }
+          }
+        }
+      }
+    }
     let lender_to_refs = get_non_anon_lenders(&self.borrow_map);
     info!("lender to refs {:#?}", lender_to_refs);
 
@@ -6281,6 +6322,9 @@ pub fn print_out_of_scope(&mut self){
     for (lender, refs) in lender_to_refs.iter() {
       let regions = get_regions(refs, &self.borrow_map);
       for region in regions.iter() {
+        if region.iter().any(|r| to_caller.contains(r.as_str())) {
+          continue;
+        }
         let region: Vec<&String> = region.iter().filter(|r| !handed_off.contains(*r)).collect();
         let mut max_lifetime: usize = 0;
         for r in region.iter() {
@@ -6329,7 +6373,8 @@ pub fn print_out_of_scope(&mut self){
     // Add events
     for (k, ref_data) in &vec {
       let RefData { lender: r_ty, lifetime, co_lenders, .. } = ref_data;
-      if handed_off.contains(k) {
+      if handed_off.contains(k)
+        || (lent_to_caller.contains(k) && matches!(r_ty, ResourceTy::Caller)) {
         continue;
       }
       let from_ro = self.raps.get(k).unwrap().rap.to_owned();
