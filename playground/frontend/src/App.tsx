@@ -266,19 +266,8 @@ const Description: React.FC = () => (
     <p><strong>Some of what&apos;s drawn is wrong</strong>, so don&apos;t rely on it for:</p>
     <ul>
       <li>
-        A reference bound by a pattern out of a value that holds borrows of
-        several variables (<code>Some(x)</code> on{' '}
-        <code>pick(&amp;a, &amp;b)</code>) isn&apos;t linked to them. (What a
-        call returns, like{' '}
-        <code>first_word(&amp;s)</code>, <code>longest(&amp;a, &amp;b)</code>{' '}
-        or <code>v.iter()</code>, is.)
-      </li>
-      <li>
         A variable assigned in only some branches of an <code>if</code> is drawn
         as owning a value afterwards; Rust treats it as possibly uninitialized.
-      </li>
-      <li>
-        A reference field of a struct bound by <code>if let</code>/<code>match</code> is drawn as an owner.
       </li>
       <li>
         <code>Rc</code>/<code>Arc</code> reference counts aren&apos;t tracked: each
@@ -350,20 +339,10 @@ const Description: React.FC = () => (
         and <code>c</code> are drawn as never moved.
       </li>
       <li>
-        A <code>ref</code> binding in a <code>match</code> arm keeps what it
-        borrows borrowed to the end of the arm, not just to its last use.
-      </li>
-      <li>
         A <code>for</code> loop drops its iterator where the loop is left. A{' '}
         <code>break &apos;outer</code> or <code>continue &apos;outer</code> out
         of an inner loop is drawn only in an <code>if</code>/<code>else</code>{' '}
         branch, not in an <code>if</code> without <code>else</code>.
-      </li>
-      <li>
-        <code>let r = loop {'{'} … break ra; {'}'};</code> where <code>ra</code> is a
-        reference: <code>r</code>&apos;s borrow isn&apos;t linked back to what it
-        borrows, and for a <code>&amp;mut</code> the lender is wrongly shown with
-        nothing to drop at the end of its scope.
       </li>
       <li>
         Values dropped by a <code>return</code>, a <code>panic!()</code> or a{' '}
@@ -401,24 +380,11 @@ const Description: React.FC = () => (
         reference&apos;s column.
       </li>
       <li>
-        Overwriting a struct field of a struct with a call&apos;s result (
-        <code>o.inner = make_inner(&amp;t)</code>) doesn&apos;t draw the new
-        borrow. In a few programs a borrow is drawn ending earlier than
-        rustc allows: after <code>let hold = other;</code>, assigning{' '}
         A borrow that a struct field write keeps alive until the struct&apos;s
         last use (<code>o.inner.r = &amp;t;</code>,{' '}
         <code>o.inner = other;</code>) is drawn ending on the lender&apos;s arm
         column below the join when the write is inside an <code>if</code> /{' '}
         <code>match</code> arm.
-      </li>
-      <li>
-        In a few programs a borrow is drawn ending earlier than rustc
-        allows: after <code>let hold = other;</code>, assigning{' '}
-        <code>other</code> again keeps what <code>hold</code> borrows
-        borrowed until <code>other</code>&apos;s last use in rustc.
-        A struct that holds a borrow and is moved to another variable (
-        <code>hold = other;</code>) keeps the borrow drawn on{' '}
-        <code>other</code>&apos;s field column.
       </li>
       <li>
         Smart pointers (<code>Box</code>, <code>Rc</code>, <code>RefCell</code>)
@@ -428,11 +394,6 @@ const Description: React.FC = () => (
         <code>*cell.borrow_mut()</code> shows only the call, not the write.
       </li>
       <li>
-        A reference field of a struct bound by <code>if let</code>/
-        <code>match</code> (<code>x.part</code>) isn&apos;t linked to what it
-        borrows.
-        </li>
-        <li>
         A temporary borrowed by a <code>let</code> (
         <code>let r = &amp;String::from(&quot;a&quot;);</code>) gets a{' '}
         <code>(temporary)</code> column that lives to the end of the block. A
