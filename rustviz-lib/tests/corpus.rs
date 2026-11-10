@@ -1256,6 +1256,8 @@ const EXPECTED_OK: &[&str] = &[
     // (borrow_made_in_arm_else is run by its own test below, not here: main's
     // drawing of its `if` arm fails the well-formedness check, #801.)
     "borrow_made_in_arm_match",
+    // A bare call's result returned goes to the caller (#792).
+    "bare_call_return_792",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14343,6 +14345,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f's resource is moved into a temporary",
             "g's resource is moved into a temporary",
             "h's resource is moved into a temporary",
+        ],
+    },
+    // #792: a bare call's result as the tail or a `return`, and a tuple /
+    // struct / array literal of call results, goes to the caller (nothing
+    // was drawn before).
+    TooltipExpect {
+        name: "bare_call_return_792",
+        must_contain: &[
+            "Move from make to the caller",
+            "Move from String::from to the caller",
+            "Copy of the value num() returns to the caller",
+        ],
+        must_not_contain: &[
+            "Move from Some to",
+            // No dot without a tooltip.
+            "=",
         ],
     },
 ];

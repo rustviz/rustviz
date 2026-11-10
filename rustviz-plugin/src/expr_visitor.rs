@@ -2729,6 +2729,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// variable. Other elements (literals, calls) have nothing to draw
   /// beyond `lhs` getting its value. A reference element (`[&s]`)
   /// stores a borrow we don't track, so it's left out.
+  /// A call's result (`make()`, `s.len()`; not a constructor, a macro or
+  /// a reference) that is returned to the caller, alone or as an
+  /// element of a returned literal (#792): handed over as `match_rhs`
+  /// draws a call's result going anywhere else.
+  pub fn is_returned_call_result(&self, e: &'tcx Expr<'tcx>) -> bool {
+    !e.span.from_expansion()
+      && match e.kind {
+        ExprKind::Call(callee, _) => !crate::visitor::is_ctor_path(callee, self.tcx.typeck(e.hir_id.owner))
+          && !self.is_copy_literal_value(e),
+        ExprKind::MethodCall(..) => true,
+        _ => false,
+      }
+      && !self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_ref()
+      && !self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_unit()
+  }
+
   pub fn match_array_elems(&mut self, lhs: ResourceTy, elems: &'tcx [Expr<'tcx>], line_num: usize) {
     let mut drew_source = false;
     for elem in elems {
@@ -2739,6 +2755,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => None,
       };
       let ty = self.tcx.typeck(elem.hir_id.owner).node_type(elem.hir_id);
+      if name.is_none() && matches!(lhs, ResourceTy::Caller) && self.is_returned_call_result(elem) {
+        let e = if self.ty_is_copy(ty, elem.hir_id.owner) { Evt::Copy } else { Evt::Move };
+        self.match_rhs(ResourceTy::Caller, elem, e);
+        drew_source = true;
+        continue;
+      }
       let Some(name) = name else { continue };
       if ty.is_ref() {
         continue;
@@ -5771,7 +5793,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           if matches!(lhs, ResourceTy::Caller) {
             let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
             let is_place = matches!(field.expr.kind, ExprKind::Path(_) | ExprKind::Field(..));
-            if is_place && !field_ty.is_ref() && !field.expr.span.from_expansion() {
+            if (is_place || self.is_returned_call_result(field.expr)) && !field_ty.is_ref() && !field.expr.span.from_expansion() {
               let e = if self.ty_is_copy(field_ty, field.expr.hir_id.owner) { Evt::Copy } else { Evt::Move };
               self.match_rhs(ResourceTy::Caller, field.expr, e);
             }
@@ -5945,6 +5967,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           // into it is still moved: record that, so it isn't shown
           // dropping the value at its scope end.
           None => {
+            if matches!(lhs, ResourceTy::Caller) && self.is_returned_call_result(elem) {
+              self.match_rhs(ResourceTy::Caller, elem, e);
+              continue;
+            }
             let is_place = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..));
             if is_place && matches!(e, Evt::Move) && !elem.span.from_expansion()
               && !typeck.node_type(elem.hir_id).is_ref()
