@@ -2986,6 +2986,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   Some(end) => end,
                   None => end_of(self, &ref_data.lender),
                 };
+                // The loan lives on in another arm of an enclosing `if` /
+                // `match` (`c = &y;` in one arm, a read of `c` in a later
+                // one): on this path it ends at the write, on the other at
+                // that read, and the borrow checker ends it at each (#806).
+                // The end past the write is drawn at the read, in that arm,
+                // and ends the loan in this one too, where it is last used.
+                let end_line = match self.loan_end(&ref_data).filter(|&e| e > line_num && self.in_sibling_arm(e)) {
+                  Some(e) if end_line == line_num => e,
+                  _ => end_line,
+                };
                 // An end past the write (#778) is added once the whole
                 // body is visited, at the top level (`late_old_ends`).
                 self.defer_old_ends = end_line > line_num;
@@ -3626,7 +3636,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         });
         let live = live_tuple.is_some();
         self.live_tuples.extend(live_tuple);
+        let mut arm_borrows = self.arm_borrows_begin();
+        let arm_lines = |this: &Self, e: &Expr<'_>| {
+          let sm = this.tcx.sess.source_map();
+          (sm.lookup_char_pos(expr.span.lo()).line, sm.lookup_char_pos(expr.span.hi()).line,
+           sm.lookup_char_pos(e.span.lo()).line, sm.lookup_char_pos(e.span.hi()).line)
+        };
+        self.arm_frames.push(arm_lines(self, if_expr));
         self.visit_expr(&if_expr);
+        self.arm_frames.pop();
         if live {
           self.live_tuples.pop();
         }
@@ -3701,7 +3719,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // Nor are the if-body's `if let` bindings: an exit in the
             // `else` doesn't drop them.
             self.in_scope.truncate(entry_len);
+            self.arm_borrows_next(&mut arm_borrows);
+            self.arm_frames.push(arm_lines(self, e));
             self.visit_expr(e);
+            self.arm_frames.pop();
             get_decl_of_expr(e, &self.tcx, &self.raps)
           }
           None => HashSet::new(),
@@ -3710,6 +3731,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if let Some(e) = else_expr {
           else_inner = &else_inner | &else_if_let_bindings(e, &self.tcx, &self.raps);
         }
+        self.arm_borrows_end(arm_borrows);
         let uninit_after_else = std::mem::take(&mut self.uninit_locals);
         let maybe_init_after_else = std::mem::take(&mut self.maybe_init_locals);
         #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
@@ -4269,7 +4291,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // The tuple lives to the end of the statement holding the
             // match, usually the match's own last line.
             let past_match = self.temporary_scope_end(guard_expr).is_some_and(|(_, l, _)| l > merge);
-            for arm in arms.iter() {
+            let mut arm_borrows = self.arm_borrows_begin();
+            for (arm_idx, arm) in arms.iter().enumerate() {
+              if arm_idx > 0 {
+                self.arm_borrows_next(&mut arm_borrows);
+              }
               // An arm's pattern bindings are out of scope in the next.
               self.in_scope.truncate(entry_len);
               let arm_hash_lo = self.rap_hashes;
@@ -4603,7 +4629,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 b.clone_from(&branch_e_data);
                 *at = binds_at;
               }
+              self.arm_frames.push((split, merge, begin, end));
               self.visit_expr(arm.body);
+              self.arm_frames.pop();
               if live {
                 self.live_tuples.pop();
               }
@@ -4749,6 +4777,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
               }
             }
+            self.arm_borrows_end(arm_borrows);
             #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
             let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
             let maybe_init = self.join_uninit_locals(uninit_ends, &known);
