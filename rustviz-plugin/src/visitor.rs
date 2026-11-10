@@ -203,6 +203,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // literal's field initialisers move/copy their sources into
       // the returned value.
       self.match_rhs(to_ro, e, evt);
+    } else if self.is_returned_call_result(e) {
+      // A bare call's result (`make()`, `return make();`) goes to the
+      // caller from the function that returned it (#792).
+      self.match_rhs(to_ro, e, evt);
     } else {
       self.add_ev(line_num, evt, to_ro, from_ro, false);
     }
