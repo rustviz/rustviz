@@ -208,6 +208,15 @@ pub struct Owner {
     /// it is dropped (`make_p().name`, a `match` scrutinee whose pattern
     /// binds by value): what that is; the rest is dropped with it (#469).
     pub temp_part: Option<TempPart>,
+    /// True iff this unbound temporary is a tuple struct / variant
+    /// constructor's value (`Some(make());`): what the constructor was
+    /// given is moved into it (#783).
+    pub ctor_temp: bool,
+    /// For an unbound temporary that is the scrutinee of a `match` /
+    /// `if let` / `while let` / let chain (and nothing is moved out of it
+    /// by value): what examines it ("`match`") and when it is dropped,
+    /// for the tooltip of what moved into it.
+    pub scrutinee: Option<(String, String)>,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
     /// True iff this owner isn't a reference but its value holds a
@@ -2932,6 +2941,8 @@ impl Event {
                     // `vec![s];`: s is moved into the temporary the macro or
                     // literal builds, which nothing takes (#570). (A `let`'s
                     // literal, #439, says where it's dropped on its column.)
+                    ResourceTy::Value(ResourceAccessPoint::Owner(Owner { scrutinee: Some((what, when)), unbound_temp: true, let_literal_temp: false, .. })) =>
+                        hover_messages::event_dot_move_to_scrutinee_temporary(&self.deref_name(my_name), what, when),
                     ResourceTy::Value(rap) if rap.is_unbound_temporary() && !rap.is_let_literal_temporary() =>
                         hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), false),
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
@@ -3069,6 +3080,12 @@ impl Event {
                     // `vec![s];`: s is moved into the temporary (#570).
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
                     hover_messages::event_dot_unbound_temporary_takes(&from_name)
+                } else if matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, .. })))
+                    && matches!(from, ResourceTy::Value(ResourceAccessPoint::Function(f))
+                        if !f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase()))) {
+                    // `Some(make());`: what `make` returned is moved into
+                    // the value the constructor builds (#783).
+                    hover_messages::event_dot_unbound_temporary_takes_result(&from.name())
                 } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, temp_part: Some(part), .. })) = is {
                     // `make_p().name`, `match make() { Some(s) => .. }`:
                     // part of the value is moved out (#469).

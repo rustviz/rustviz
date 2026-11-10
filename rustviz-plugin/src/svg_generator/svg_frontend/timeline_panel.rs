@@ -3221,6 +3221,44 @@ fn render_arrow (
                 output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
             }
         }
+        // A call's result handed to the caller (`Err(String::from(..))`
+        // as the returned value, #783). A function has no column to
+        // return from, so its logo is drawn in the gutter left of the
+        // fn's first column (columns start at x = 70), with the same L
+        // up to the caller as a returned variable's.
+        ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. }
+        | ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. } => {
+            let y = get_y_axis_pos(*line_number) as f64;
+            let logo_x: f64 = 14.0;
+            let source_x = logo_x + 16.0;
+            let bend_x = source_x + 14.0;
+            let head_end_y = y - 5.0;
+            let tip: f64 = 12.75;
+            let styled_fn = styled_name_html(&f.name);
+            let last = f.name.rsplit("::").next().unwrap_or(&f.name);
+            let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
+            let title = match (external_event, named_call) {
+                (ExternalEvent::Copy { .. }, true) => format!("Copy of the value {}() returns to the caller", styled_fn),
+                (ExternalEvent::Copy { .. }, false) => format!("Copy from {} to the caller", styled_fn),
+                _ => format!("Move from {} to the caller", styled_fn),
+            };
+            let rendered = format!(
+                "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+                    \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{source_x} {y} {bend_x} {y} {bend_x} {head_end_y}\" style=\"fill: none;\"/>\n\
+                    \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+                    \x20       </g>\n",
+                bend_x - 6.0, head_end_y, bend_x, head_end_y - tip, bend_x + 6.0, head_end_y,
+            );
+            let logo = FunctionLogoData {
+                x: logo_x as i64,
+                y: y as i64 + 5,
+                hash: f.hash as u64,
+                title: styled_fn,
+            };
+            let out = &mut output.get_mut(&-1).unwrap().0;
+            out.arrows.push_str(&rendered);
+            out.dots.push_str(&registry.render("function_logo_template", &logo).unwrap());
+        }
         // Move/Copy out to the caller (function tail expression):
         // L on the dot's *right* side, matching the InitRefParam
         // L's positioning so callers and returns occupy the same

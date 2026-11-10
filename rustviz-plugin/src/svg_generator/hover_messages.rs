@@ -557,6 +557,15 @@ pub fn event_dot_unbound_temporary_takes(from_name: &String) -> String {
     )
 }
 
+// A call's result moved into the value a constructor builds (`Some(make());`)
+// and nothing binds that value (#783).
+pub fn event_dot_unbound_temporary_takes_result(from_name: &String) -> String {
+    format!(
+        "This temporary takes the value that {0}, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+        temporary_source(from_name)
+    )
+}
+
 // The drop of a temporary that a `let` borrowed (#400): its column has
 // the same label as an unbound temporary's, so the tooltip says why it
 // is dropped here and not at the end of its statement.
@@ -1044,6 +1053,19 @@ pub fn event_dot_move_to_temporary(my_name: &String, extended: bool) -> String {
         "{0}'s resource is moved into a temporary that is dropped at the end of {1}",
         fmt_style(my_name),
         if extended { "the block (a `ref` binding borrows from it)" } else { "this statement" }
+    )
+}
+
+// `match Some(c) { Some(_) => .., None => .. }`, `if let Some(_) = Some(c)`:
+// c is moved into the temporary the `match` / `if let` examines, and no
+// arm binds it by value, so it is dropped with the temporary, when the
+// scrutinee's scope ends (`when`, e.g. "when the `match` ends").
+pub fn event_dot_move_to_scrutinee_temporary(my_name: &String, what: &str, when: &str) -> String {
+    format!(
+        "{0}'s resource is moved into a temporary that this {1} examines; the temporary is dropped {2}",
+        fmt_style(my_name),
+        what,
+        when
     )
 }
 

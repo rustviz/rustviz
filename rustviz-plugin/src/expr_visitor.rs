@@ -324,6 +324,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // is moved out of (`make_q().a`), by the expression that makes it
   // (#469).
   pub temp_cols: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
+  // The `(temporary N)` column of an unbound temporary that is a
+  // constructor call (`Some(make());`), with the id of the move into it
+  // from the constructor, which the constructor's arguments replace
+  // once they are visited (#783).
+  pub ctor_temps: HashMap<rustc_hir::HirId, (ResourceAccessPoint, usize)>,
   // State for the destructuring assignment being visited
   // (`(a, b) = (b, a);`, see `visit_destructuring_assign`). rustc
   // lowers it to `{ let (lhs, lhs) = (b, a); a = lhs; b = lhs; }`;
@@ -720,13 +725,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, ctor_temp: false, scrutinee: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, ctor_temp: false, scrutinee: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   /// `Some(kind)` iff `ty` is `Rc<T>`, `Arc<T>` or one of their
@@ -970,7 +975,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, is_plain_value: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, ctor_temp: false, scrutinee: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -1509,12 +1514,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       taken.retain(|(_, e)| !matches!(e,
         ExternalEvent::Move { from, .. } | ExternalEvent::Copy { from, .. }
           if from.extract_rap().is_some_and(|r| r.is_ref())));
-    } else {
-      // A call's result has no column to return from (an arrow from a
-      // function to the caller can't be drawn).
-      taken.retain(|(_, e)| !matches!(e,
-        ExternalEvent::Move { from, .. } | ExternalEvent::Copy { from, .. }
-          if from.extract_rap().is_some_and(|r| r.is_fn())));
     }
     for (l, mut e) in taken {
       if let ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } = &mut e {

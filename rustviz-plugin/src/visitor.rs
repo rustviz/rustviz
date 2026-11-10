@@ -191,7 +191,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (a constructor never receives anything, #768).
     let ctor_value = !e.span.from_expansion()
       && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
-        && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))))
+        && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
+          // A call's result put into the value goes to the caller too (#783).
+          || (!a.span.from_expansion() && matches!(a.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+              && !tycheck_results.node_type(a.hir_id).is_ref())))
       && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
       || ctor_value
@@ -2515,6 +2518,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               }
             }
             self.ctor_arg_ids.insert(expr.hir_id, (lo, *self.unique_id));
+            // An unbound temporary (`Some(make());`) takes what the
+            // arguments moved in, not the constructor (#783).
+            if let Some((tmp, id)) = self.ctor_temps.remove(&expr.hir_id) {
+              if self.retarget_ctor_arg_events(expr, ResourceTy::Value(tmp)) {
+                self.preprocessed_events.retain(|(_, e)| e.get_id() != id);
+              }
+            }
             return;
           }
         }
@@ -5787,6 +5797,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// When `expr` is directly the scrutinee of a `match`, `if let`,
+  /// `while let` or a let chain's `let`: what examines it, and when its
+  /// temporary is dropped (`when` is where its scope ends). A `match`
+  /// that ends a statement (or a 2024 block's final expression) drops it
+  /// when the `match` ends.
+  fn scrutinee_scope(&self, expr: &'tcx Expr<'tcx>, when: &str) -> Option<(String, String)> {
+    use rustc_hir::Node;
+    let Node::Expr(parent) = self.tcx.parent_hir_node(expr.hir_id) else { return None };
+    match parent.kind {
+      ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) if s.hir_id == expr.hir_id && !parent.span.from_expansion() => {
+        let ends_match = match self.tcx.parent_hir_node(parent.hir_id) {
+          Node::Stmt(_) | Node::LetStmt(_) => true,
+          Node::Block(b) => b.expr.is_some_and(|e| e.hir_id == parent.hir_id)
+            && expr.span.edition() >= rustc_span::edition::Edition::Edition2024,
+          _ => false,
+        };
+        let when = if ends_match { "when the `match` ends" } else { when };
+        Some(("`match`".to_owned(), when.to_owned()))
+      }
+      ExprKind::Let(l) if l.init.hir_id == expr.hir_id && !parent.span.from_expansion() => {
+        let what = match self.tcx.parent_hir_node(parent.hir_id) {
+          Node::Expr(i) if matches!(i.kind, ExprKind::If(..)) => {
+            if matches!(i.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) { "`while let`" } else { "`if let`" }
+          }
+          _ => "`let`",
+        };
+        Some((what.to_owned(), when.to_owned()))
+      }
+      _ => None,
+    }
+  }
+
   /// The `(temporary N)` column of a value nothing takes: it acquires
   /// `ty`'s value from `fn_name` where `expr` is, and is dropped by a
   /// `TemporaryDrop` at `end_line`.
@@ -5807,6 +5849,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return None;
     }
     self.temp_drops_noted.insert(expr.hir_id);
+    let scrutinee = self.scrutinee_scope(expr, when);
 
     // The temporary gets a short column: it acquires the call's result
     // here and is dropped where its scope ends.
@@ -5820,10 +5863,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
       o.unbound_temp = true;
       o.temp_part = part.clone();
+      o.ctor_temp = part.is_none() && !expr.span.from_expansion()
+        && matches!(expr.kind, ExprKind::Call(callee, _) if is_ctor_path(callee, self.tcx.typeck(expr.hir_id.owner)));
+      if part.is_none() {
+        o.scrutinee = scrutinee;
+      }
     }
     self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let line = expr_to_line(expr, &self.tcx);
+    // `Some(make());`: a constructor isn't an actor (#768); once its
+    // arguments are visited, what was moved into it (a call's result, a
+    // variable) is redrawn into the temporary instead (#783).
+    if matches!(&tmp, ResourceAccessPoint::Owner(Owner { ctor_temp: true, .. })) {
+      self.ctor_temps.insert(expr.hir_id, (tmp.clone(), *self.unique_id));
+    }
     self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
     // Variables moved into the temporary (`vec![s];`, #570; the fields
     // `P { n: 1, ..p }` takes from p, #574).
