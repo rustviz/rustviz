@@ -1243,6 +1243,8 @@ const EXPECTED_OK: &[&str] = &[
     // borrowed until the latest end over the paths (#778).
     "borrow_end_join_one_branch",
     "borrow_end_join_else",
+    // #801: read in the `if` arm, re-pointed in the `else` arm; one segment per row.
+    "borrow_read_in_arm_repoint_else",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -18204,6 +18206,28 @@ fn old_lender_ends_on_each_arm_where_it_is_borrowed_no_longer() {
     let c_ends = dots_where(&timeline, |l| l.iter().any(|t| t == "c's immutable borrow ends"));
     assert!(c_ends.iter().all(|d| (d.1 - read_y).abs() >= 10.0 || d.0 >= c_col),
         "a second \"c's immutable borrow ends\" on the `println!` row of the `then` arm: {:?}", c_ends);
+}
+
+/// #801: `c = &x` before an `if` that reads `c` in the `if` arm and
+/// re-points it in the `else` arm. `x` stays borrowed in the `if` arm
+/// until `c`'s last use there (the `println!`), and in the `else` arm
+/// until `c` is overwritten (`c = &y;`). The old head drew the `else`
+/// arm's end at the `println!` row (a line of the other arm) and gave the
+/// `if` arm no end, so `x`'s column was drawn twice over those rows
+/// (`corpus_expected_ok_produce_well_formed_svg` flags that too).
+#[test]
+fn old_lender_ends_in_each_arm_when_read_in_if_and_repointed_in_else() {
+    let rv = run_with_local_backend("borrow_read_in_arm_repoint_else");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let read_y = code_row_y(&code, "println!(\"{}\", c);");
+    let write_y = code_row_y(&code, "c = &y;");
+    let mut ends = dots_listing_tooltip(&timeline, "x's value is no longer immutably borrowed");
+    ends.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    assert_eq!(ends.len(), 2, "x's borrow should end once per arm: {:?}", ends);
+    assert!((ends[0].1 - read_y).abs() < 10.0,
+        "x's borrow in the `if` arm ends at c's last use there, the `println!` (y={}), not at {:?}", read_y, ends[0]);
+    assert!((ends[1].1 - write_y).abs() < 10.0,
+        "x's borrow in the `else` arm ends at `c = &y;` (y={}), not at {:?}", write_y, ends[1]);
 }
 
 /// #771: `r = if *r > 0 { &b } else { &c };` reads `*r` first, so the
