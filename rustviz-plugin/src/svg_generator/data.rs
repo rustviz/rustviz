@@ -2668,6 +2668,35 @@ impl Event {
         }
     }
 
+    /// The text of a borrow's end that names the lender ("c's immutable
+    /// borrow of x ends"), for a dot that ends more than one of the
+    /// reference's loans (#803). None for any other event, or when the
+    /// lender has no name of its own.
+    pub fn borrow_end_naming_lender(&self, my_name: &mut String) -> Option<String> {
+        let (to, is_mut) = match self {
+            Event::StaticDie { to, .. } => (to, false),
+            Event::MutableDie { to, .. } => (to, true),
+            _ => return None,
+        };
+        let lender = match to {
+            ResourceTy::Value(r) => r.name().clone(),
+            ResourceTy::Deref(r) => format!("*{}", r.name()),
+            _ => return None,
+        };
+        let shown = self.deref_name(my_name).clone();
+        Some(hover_messages::event_dot_borrow_of_ends(&shown, &lender, is_mut))
+    }
+
+    /// The name of the lender a borrow end gives its value back to
+    /// (see `borrow_end_naming_lender`).
+    pub fn borrow_end_lender_name(&self) -> Option<String> {
+        match self {
+            Event::StaticDie { to: ResourceTy::Value(r), .. } | Event::MutableDie { to: ResourceTy::Value(r), .. } => Some(r.name().clone()),
+            Event::StaticDie { to: ResourceTy::Deref(r), .. } | Event::MutableDie { to: ResourceTy::Deref(r), .. } => Some(format!("*{}", r.name())),
+            _ => None,
+        }
+    }
+
     // This function tells us what the text associated with a Dot event should be
     pub fn print_message_with_name(&self, my_name: &mut String) -> String {
         match self {

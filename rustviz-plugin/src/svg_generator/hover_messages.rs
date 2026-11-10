@@ -1384,6 +1384,18 @@ pub fn event_dot_mut_return(my_name: &String, _target_name: &String) -> String {
     )
 }
 
+// A dot that ends more than one of a reference's loans (`c = &y;` ends
+// c's loan of `x` and its unused new loan of `y`, #803): name the lender
+// of each, or the dot would say the same sentence twice.
+pub fn event_dot_borrow_of_ends(my_name: &String, lender: &String, is_mut: bool) -> String {
+    format!(
+        "{0}'s {2} borrow of {1} ends",
+        fmt_style(my_name),
+        fmt_style(lender),
+        if is_mut { "mutable" } else { "immutable" }
+    )
+}
+
 /* The Event dot is the destination of an arrow, we typically follow the following format: 
    ... from <Resource Owner 1>
  */
