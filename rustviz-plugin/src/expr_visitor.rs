@@ -64,6 +64,23 @@ pub struct MemberSite {
   pub ref_lender: Option<ResourceTy>,
 }
 
+/// The loans every reference held when an `if` / `match` began, for the
+/// arms to start from (see `ExprVisitor::arm_borrows_next`).
+pub struct ArmBorrows {
+  before: HashMap<String, RefData>,
+  /// The loans earlier arms gave a reference, in arm order.
+  done: Vec<(String, RefData)>,
+  /// The last use of a loan held from before in an arm that used it,
+  /// over the arms so far.
+  last_use: std::collections::BTreeMap<String, usize>,
+}
+
+/// Whether `a` and `b` are the same loan of the same reference.
+fn same_loan(a: &RefData, b: &RefData) -> bool {
+  a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
+    && a.borrow_span == b.borrow_span && a.co_lenders == b.co_lenders
+}
+
 #[derive(Debug, Clone)]
 pub struct RefData {
   pub lender: ResourceTy, // who this reference borrowed from
@@ -373,6 +390,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// level, where `end_outer_borrows_in_arms` moves each into the arm that
   /// holds its line and ends the borrow in the other arms.
   pub late_old_ends: Vec<(usize, ExternalEvent)>,
+  /// Loans a reference was given in an arm of an `if` / `match` that
+  /// another arm's, or the conditional's end, replaced in `borrow_map`
+  /// (`c = &y;` in one arm, `c = &z;` in the next, #806): the arms are
+  /// alternatives, so each loan ends on its own path. `print_lifetimes`
+  /// ends each one like the loan `borrow_map` holds.
+  pub arm_loans: Vec<(String, RefData)>,
+  /// The arms being visited, innermost last: (the conditional's first
+  /// and last lines, the arm's first and last lines).
+  pub arm_frames: Vec<(usize, usize, usize, usize)>,
   /// While true, `add_external_event` queues events in `late_old_ends`.
   pub defer_old_ends: bool,
 
@@ -1833,6 +1859,75 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     self.add_external_event(line_num, ev);
     *self.unique_id += 1;
+  }
+
+  /// Whether `line` is in an arm of an enclosing `if` / `match` other than
+  /// the one being visited: a use of a reference there is on a path the
+  /// current arm is not on.
+  pub fn in_sibling_arm(&self, line: usize) -> bool {
+    self.arm_frames.iter().any(|&(split, merge, lo, hi)| split < line && line < merge && !(lo <= line && line <= hi))
+  }
+
+  /// Called when an `if` / `match` begins: the loans its arms start from.
+  pub fn arm_borrows_begin(&self) -> ArmBorrows {
+    ArmBorrows { before: self.borrow_map.clone(), done: Vec::new(), last_use: std::collections::BTreeMap::new() }
+  }
+
+  /// Called before each arm but the first is visited. The arms are
+  /// alternatives: `c = &y;` in one arm doesn't change the loan `c` holds
+  /// when another starts (still `x`, #806), so that arm's `c = &z;` ends
+  /// `x`'s loan, not `y`'s. Every reference starts the arm with the loan
+  /// it held before the conditional.
+  pub fn arm_borrows_next(&mut self, ab: &mut ArmBorrows) {
+    #[expect(clippy::disallowed_methods, reason = "sorted below")]
+    let mut keys: Vec<&String> = ab.before.keys().collect();
+    keys.sort();
+    for k in keys {
+      let old = &ab.before[k];
+      if let Some(cur) = self.borrow_map.get(k) {
+        if same_loan(cur, old) {
+          // (Its last use seen in the source: a later arm's replaces an
+          // earlier one's, as when the arms shared one `borrow_map`.)
+          if cur.lifetime != old.lifetime {
+            ab.last_use.insert(k.clone(), cur.lifetime);
+          }
+        } else {
+          ab.done.push((k.clone(), cur.clone()));
+        }
+      }
+      self.borrow_map.insert(k.clone(), old.clone());
+    }
+  }
+
+  /// Called after the last arm. A reference that only an earlier arm
+  /// re-pointed keeps that arm's loan after the conditional (the latest
+  /// in source order), as it did before arms started from the same
+  /// loans; the other arms' loans are ended by `print_lifetimes`
+  /// (`arm_loans`). A loan held from before keeps the last use seen in
+  /// source order.
+  pub fn arm_borrows_end(&mut self, ab: ArmBorrows) {
+    let mut done = ab.done;
+    let mut keep: Vec<usize> = Vec::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "`keep` is sorted before use; the inserts are independent")]
+    for (k, old) in ab.before.iter() {
+      let Some(cur) = self.borrow_map.get(k) else { continue };
+      if !same_loan(cur, old) {
+        continue;
+      }
+      if let Some(i) = done.iter().rposition(|(n, _)| n == k) {
+        keep.push(i);
+        self.borrow_map.insert(k.clone(), done[i].1.clone());
+      } else if let Some(&l) = ab.last_use.get(k) {
+        if let Some(cur) = self.borrow_map.get_mut(k).filter(|c| c.lifetime == old.lifetime) {
+          cur.lifetime = l;
+        }
+      }
+    }
+    keep.sort_unstable();
+    for i in keep.into_iter().rev() {
+      done.remove(i);
+    }
+    self.arm_loans.extend(done);
   }
 
   /// The end of reference `from`'s borrow (StaticDie / MutableDie),
@@ -6448,15 +6543,15 @@ pub fn print_out_of_scope(&mut self){
     // `let a = &x; let b = &x;` can't hand `b` the loan of `a`. Each
     // pass is independent of borrow_map's iteration order.
     let mut by_span: HashSet<usize> = HashSet::new();
-    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each entry is refined on its own; the by_span set is order-independent")]
-    for (_name, data) in self.borrow_map.iter_mut() {
+    #[expect(clippy::disallowed_methods, reason = "each entry is refined on its own; the by_span set is order-independent")]
+    for data in self.borrow_map.values_mut().chain(self.arm_loans.iter_mut().map(|(_, d)| d)) {
       if let Some(m_data) = mir_b_data.iter().find(|m| ExprVisitor::borrow_span_match(data, m)) {
         data.lifetime = m_data.region.1;
         by_span.insert(m_data.borrow_idx);
       }
     }
-    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each entry is refined on its own from the mir_b_data Vec")]
-    for (_name, data) in self.borrow_map.iter_mut() {
+    #[expect(clippy::disallowed_methods, reason = "each entry is refined on its own from the mir_b_data Vec")]
+    for data in self.borrow_map.values_mut().chain(self.arm_loans.iter_mut().map(|(_, d)| d)) {
       if data.borrow_span.is_some_and(|sp| mir_b_data.iter().any(|m| m.span == sp)) {
         continue; // refined above
       }
@@ -6697,10 +6792,42 @@ pub fn print_out_of_scope(&mut self){
         self.add_borrow_end_ev(*lifetime, to_ro, end_from, ref_data, Vec::new());
       }
     }
+    // The loans earlier arms gave a reference (#806): each ends on its
+    // own path, where the borrow checker ends it, like the loan
+    // `borrow_map` holds.
+    for (k, rd) in std::mem::take(&mut self.arm_loans) {
+      if handed_off.contains(&k) {
+        continue;
+      }
+      let Some(from_ro) = self.raps.get(&k).map(|r| r.rap.to_owned()) else { continue };
+      let to_ro = match &rd.lender {
+        ResourceTy::Anonymous => ResourceTy::Deref(from_ro.clone()),
+        l => l.clone(),
+      };
+      for co in rd.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
+        let evt = if rd.mut_of(co) { Evt::MDie } else { Evt::SDie };
+        self.add_ev(rd.lifetime, evt, co.clone(), ResourceTy::Value(from_ro.clone()), false);
+      }
+      // Another reference that borrows the same lender and outlives
+      // this loan keeps it borrowed: this one's end gives nothing back.
+      #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+      let outlived = !matches!(rd.lender, ResourceTy::Anonymous)
+        && self.borrow_map.iter().any(|(n, d)| *n != k && d.lender == rd.lender && d.lifetime > rd.lifetime);
+      if outlived {
+        self.add_external_event(rd.lifetime, ExternalEvent::RefDie {
+          from: ResourceTy::Value(from_ro.clone()), to: to_ro,
+          num_curr_borrowers: get_borrowers(from_ro.name(), &self.borrow_map).len().saturating_sub(1),
+          id: *self.unique_id });
+        *self.unique_id += 1;
+      } else {
+        self.add_borrow_end_ev(rd.lifetime, to_ro, ResourceTy::Value(from_ro), &rd, Vec::new());
+      }
+    }
     for (line, ev) in std::mem::take(&mut self.late_old_ends) {
       self.add_external_event(line, ev);
     }
     hoist_ends_on_other_arms_lines(self.preprocessed_events);
+    dedupe_borrow_ends(self.preprocessed_events);
     self.nest_borrow_ends_in_arms();
     end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.unique_id);
     self.end_outer_borrows_in_arms();
@@ -6845,6 +6972,15 @@ pub fn print_out_of_scope(&mut self){
 /// conditionals only.
 fn hoist_ends_on_other_arms_lines(events: &mut Vec<(usize, ExternalEvent)>) {
   let mut hoisted: Vec<(usize, ExternalEvent)> = Vec::new();
+  hoist_ends_in(events, &HashSet::new(), &mut hoisted);
+  events.extend(hoisted);
+}
+
+/// `hoist_ends_on_other_arms_lines` for the conditionals among `events`
+/// and, inside their arms, the nested ones (`else if`, #806). `outer`:
+/// what the enclosing arms declare; an end of one of those stays where
+/// it is.
+fn hoist_ends_in(events: &mut [(usize, ExternalEvent)], outer: &HashSet<ResourceAccessPoint>, hoisted: &mut Vec<(usize, ExternalEvent)>) {
   for (_, ev) in events.iter_mut() {
     let ExternalEvent::Branch { branches, live_vars, branch_type, .. } = ev else { continue };
     if matches!(branch_type, BranchType::Loop(..)) {
@@ -6862,7 +6998,7 @@ fn hoist_ends_on_other_arms_lines(events: &mut Vec<(usize, ExternalEvent)>) {
         }
         let own = ranges[b].0 <= *line && *line <= ranges[b].1;
         let other = ranges.iter().enumerate().any(|(o, (s, t))| o != b && *s <= *line && *line <= *t);
-        if !own && other && live_vars.contains(r) && !branches.iter().any(|x| x.decl_vars.contains(r)) {
+        if !own && other && live_vars.contains(r) && !outer.contains(r) && !branches.iter().any(|x| x.decl_vars.contains(r)) {
           take.push(i);
         }
       }
@@ -6875,8 +7011,31 @@ fn hoist_ends_on_other_arms_lines(events: &mut Vec<(usize, ExternalEvent)>) {
         hoisted.push((line, e));
       }
     }
+    for br in branches.iter_mut() {
+      let mut inner = outer.clone();
+      #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+      inner.extend(br.decl_vars.iter().cloned());
+      hoist_ends_in(&mut br.e_data, &inner, hoisted);
+    }
   }
-  events.extend(hoisted);
+}
+
+/// Two arms that each re-point a reference declared before the
+/// conditional (`c = &y;` / `c = &z;`) end the loan it held before, once
+/// each, but at the same line (that loan's last use on another path,
+/// #806): keep one at the top level, where `end_outer_borrows_in_arms`
+/// puts it in the arm that holds the line and a copy in each other arm.
+fn dedupe_borrow_ends(events: &mut Vec<(usize, ExternalEvent)>) {
+  let mut seen: Vec<(usize, std::mem::Discriminant<ExternalEvent>, ResourceAccessPoint, ResourceTy)> = Vec::new();
+  events.retain(|(line, e)| {
+    let Some((r, to)) = borrow_end_of(e) else { return true };
+    let key = (*line, std::mem::discriminant(e), r.clone(), to.clone());
+    if seen.contains(&key) {
+      return false;
+    }
+    seen.push(key);
+    true
+  });
 }
 
 /// Whether `e`, the end of a borrow `d` describes the reference of,
@@ -7023,7 +7182,19 @@ fn end_borrow_in_arms(
       }
       _ => unreachable!("only a borrow's end is moved into arms"),
     }
+    // An arm that gives `r` a new value (`c = &y;`) ends the loan `r`
+    // held before it on that line, ahead of the new borrow: the
+    // lender is free again before `r` borrows anything else (#806).
+    let new_value = arm.e_data.iter().position(|(_, e)| matches!(e,
+      ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. }
+      | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
+      | ExternalEvent::Move { to: ResourceTy::Value(t), .. }
+      | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if t == r));
     let at = match last_use_in(&arm.e_data, r) {
+      Some(_) if new_value.is_some() => {
+        let i = new_value.unwrap_or_default();
+        (arm.e_data[i].0, i)
+      }
       // After the arm's last use of r.
       Some(at) => at,
       // The arm doesn't use r: on this path the borrow ended before

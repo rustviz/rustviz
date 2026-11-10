@@ -1253,11 +1253,15 @@ const EXPECTED_OK: &[&str] = &[
     "scrutinee_temp_wording_794",
     // A borrow made inside one arm ends only on that arm (#800).
     "borrow_made_in_arm_if",
-    // (borrow_made_in_arm_else is run by its own test below, not here: main's
-    // drawing of its `if` arm fails the well-formedness check, #801.)
     "borrow_made_in_arm_match",
     // A bare call's result returned goes to the caller (#792).
     "bare_call_return_792",
+    // #806: a reference re-pointed in two or more arms of an `if` / `match`.
+    "borrow_made_in_arm_else",
+    "repoint_match_arms_806",
+    "repoint_if_chain_806",
+    "repoint_match_read_first_806",
+    "repoint_if_chain_read_middle_806",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14346,6 +14350,96 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g's resource is moved into a temporary",
             "h's resource is moved into a temporary",
         ],
+    },    // #806: `c` points at `x` before the conditional and is re-pointed in two or
+    // more arms. `x`'s loan ends once per path, `c`'s borrows of the arms'
+    // variables each end, and no dot is left without a tooltip. Main ended it
+    // on the first re-pointing arm only and left an empty dot at the join.
+    TooltipExpect {
+        name: "repoint_match_arms_806",
+        must_contain: &[
+        "c immutably borrows a value",
+        "c's immutable borrow ends",
+        "x's value is no longer immutably borrowed",
+        "y's value is no longer immutably borrowed",
+        "z's value is no longer immutably borrowed",
+        "w's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // an empty dot at the join
+            "=",
+        ],
+    },
+    // #806: `c` points at `x` before the conditional and is re-pointed in two or
+    // more arms. `x`'s loan ends once per path, `c`'s borrows of the arms'
+    // variables each end, and no dot is left without a tooltip. Main ended it
+    // on the first re-pointing arm only and left an empty dot at the join.
+    TooltipExpect {
+        name: "repoint_if_chain_806",
+        must_contain: &[
+        "c immutably borrows a value",
+        "c's immutable borrow ends",
+        "x's value is no longer immutably borrowed",
+        "y's value is no longer immutably borrowed",
+        "z's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // an empty dot at the join
+            "=",
+        ],
+    },
+    // #806: `c` points at `x` before the conditional and is re-pointed in two or
+    // more arms. `x`'s loan ends once per path, `c`'s borrows of the arms'
+    // variables each end, and no dot is left without a tooltip. Main ended it
+    // on the first re-pointing arm only and left an empty dot at the join.
+    TooltipExpect {
+        name: "repoint_match_read_first_806",
+        must_contain: &[
+        "c immutably borrows a value",
+        "c's immutable borrow ends",
+        "x's value is no longer immutably borrowed",
+        "y's value is no longer immutably borrowed",
+        "z's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // an empty dot at the join
+            "=",
+        ],
+    },
+    // #806: `c` points at `x` before the conditional and is re-pointed in two or
+    // more arms. `x`'s loan ends once per path, `c`'s borrows of the arms'
+    // variables each end, and no dot is left without a tooltip. Main ended it
+    // on the first re-pointing arm only and left an empty dot at the join.
+    TooltipExpect {
+        name: "repoint_if_chain_read_middle_806",
+        must_contain: &[
+        "c immutably borrows a value",
+        "c's immutable borrow ends",
+        "x's value is no longer immutably borrowed",
+        "y's value is no longer immutably borrowed",
+        "z's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // an empty dot at the join
+            "=",
+        ],
+    },
+    // #806: `c` points at `x` before the conditional and is re-pointed in two or
+    // more arms. `x`'s loan ends once per path, `c`'s borrows of the arms'
+    // variables each end, and no dot is left without a tooltip. Main ended it
+    // on the first re-pointing arm only and left an empty dot at the join.
+    TooltipExpect {
+        name: "borrow_made_in_arm_match",
+        must_contain: &[
+        "c immutably borrows a value",
+        "c's immutable borrow ends",
+        "x's value is no longer immutably borrowed",
+        "y's value is no longer immutably borrowed",
+        "z's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // an empty dot at the join
+            "=",
+        ],
     },
     // #792: a bare call's result as the tail or a `return`, and a tuple /
     // struct / array literal of call results, goes to the caller (nothing
@@ -19214,5 +19308,38 @@ fn borrow_made_in_one_arm_ends_only_on_that_arm() {
                 assert_eq!(n, 1, "{}: {:?} appears {} times (want 1, on the arm that borrowed {})", name, want, n, l);
             }
         }
+    }
+}
+
+/// #806: `c = &x;` before a conditional whose arms re-point `c` (`c = &y;`,
+/// `c = &z;`) or read it. The borrow checker ends `x`'s loan on each path:
+/// at the re-pointing write on an arm that re-points `c`, at `c`'s last use
+/// on an arm that reads it. Main ended it on the first arm only (the later
+/// arms saw `c` already pointing at `y`), so `x` was drawn as lent on the
+/// other paths and `c`'s column ran on to the join with a dot with no
+/// tooltip.
+#[test]
+fn old_lender_ends_once_per_arm_when_repointed_in_several_arms() {
+    // (fixture, the source line each arm's end of x's loan is on)
+    let cases: [(&str, &[&str]); 5] = [
+        ("borrow_made_in_arm_match", &["0 => c = &y,", "1 => c = &z,", "_ => println!(\"{}\", c),"]),
+        ("repoint_match_arms_806", &["0 => c = &y,", "1 => c = &z,", "2 => c = &w,", "_ => println!(\"{}\", c),"]),
+        ("repoint_match_read_first_806", &["0 => println!(\"{}\", c),", "1 => c = &y,", "_ => c = &z,"]),
+        ("repoint_if_chain_806", &["c = &y;", "c = &z;", "println!(\"{}\", c);"]),
+        ("repoint_if_chain_read_middle_806", &["c = &y;", "println!(\"{}\", c);", "c = &z;"]),
+    ];
+    for (name, lines) in cases {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let mut ends = dots_listing_tooltip(&timeline, "x's value is no longer immutably borrowed");
+        ends.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(ends.len(), lines.len(), "{}: x's borrow should end once per arm: {:?}", name, ends);
+        for (end, src) in ends.iter().zip(lines.iter()) {
+            let want = code_row_y(&code, src);
+            assert!((end.1 - want).abs() < 10.0,
+                "{}: x's loan ends at {:?} (y={}), not at the row of `{}` (y={})", name, end, end.1, src, want);
+        }
+        let empty: Vec<_> = tooltip_lines(&timeline).into_iter().filter(|l| l.iter().all(|t| t.trim().is_empty())).collect();
+        assert!(empty.is_empty(), "{}: {} dot(s) with an empty tooltip", name, empty.len());
     }
 }
