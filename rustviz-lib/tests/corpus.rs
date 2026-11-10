@@ -1251,6 +1251,11 @@ const EXPECTED_OK: &[&str] = &[
     // temporary constructor takes the call's result (#783).
     "ctor_call_result_783",
     "scrutinee_temp_wording_794",
+    // A borrow made inside one arm ends only on that arm (#800).
+    "borrow_made_in_arm_if",
+    // (borrow_made_in_arm_else is run by its own test below, not here: main's
+    // drawing of its `if` arm fails the well-formedness check, #801.)
+    "borrow_made_in_arm_match",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -19164,4 +19169,32 @@ fn nested_tuple_binding_member_columns_have_lifelines() {
         checked.push(label);
     }
     assert_eq!(checked, ["z", "z.0", "z.1"]);
+}
+
+#[test]
+fn borrow_made_in_one_arm_ends_only_on_that_arm() {
+    // `c` points at `x` before the conditional; one arm re-points it at
+    // `y` (`c = &y;`), another reads it. `y` is borrowed only on the arm
+    // that made the borrow, so exactly one dot says its borrow ended and
+    // exactly one arrow gives it back from `c`. Main drew a second pair
+    // on the arm that reads `c` (where `c` still points at `x`), a false
+    // "y is no longer borrowed" on a path where it never was (#800). The
+    // `match` has two arms that each borrow a different variable.
+    for (name, lenders) in [
+        ("borrow_made_in_arm_if", &["y"][..]),
+        ("borrow_made_in_arm_else", &["y"][..]),
+        ("borrow_made_in_arm_match", &["y", "z"][..]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let tips = timeline_tooltips(&rv.timeline_panel_string());
+        for l in lenders {
+            for want in [
+                format!("{}'s value is no longer immutably borrowed", l),
+                format!("Return immutably borrowed value from c to {}", l),
+            ] {
+                let n = tips.iter().filter(|t| **t == want).count();
+                assert_eq!(n, 1, "{}: {:?} appears {} times (want 1, on the arm that borrowed {})", name, want, n, l);
+            }
+        }
+    }
 }

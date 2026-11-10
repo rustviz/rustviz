@@ -6799,7 +6799,11 @@ pub fn print_out_of_scope(&mut self){
       // if it was stacked with other arrows at the top level. An arrow
       // its line map doesn't list is drawn first on its line.
       let stacked = self.event_line_map.get(&ev.0).is_some_and(|evs| evs.len() > 1);
-      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), stacked, self.unique_id);
+      // The line the reference's current loan was made on, if `ev` ends
+      // that loan. An end of an earlier loan (`c = &y;` ends c's loan of
+      // x, made before the conditional; #778, #801) isn't described by it.
+      let made = self.borrow_map.get(r.name()).filter(|d| ends_current_loan(&ev.1, d)).map(|d| d.assigned_at);
+      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), made, stacked, self.unique_id);
     }
   }
 }
@@ -6847,6 +6851,26 @@ fn hoist_ends_on_other_arms_lines(events: &mut Vec<(usize, ExternalEvent)>) {
     }
   }
   events.extend(hoisted);
+}
+
+/// Whether `e`, the end of a borrow `d` describes the reference of,
+/// gives back `d`'s loan (rather than one the reference held earlier).
+fn ends_current_loan(e: &ExternalEvent, d: &RefData) -> bool {
+  let Some(l) = borrow_end_of(e).and_then(|(_, to)| to.extract_rap()) else { return true };
+  d.lender.extract_rap() == Some(l) || d.co_lenders.iter().any(|c| c.extract_rap() == Some(l))
+}
+
+/// Whether `events` (looking into nested conditionals) make `r` borrow
+/// from `lender` on or before `line`: a loan made inside an arm.
+fn loan_made_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, lender: &ResourceAccessPoint, line: usize) -> bool {
+  events.iter().any(|(l, e)| match e {
+    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| loan_made_in(&b.e_data, r, lender, line)),
+    ExternalEvent::StaticBorrow { from, to: ResourceTy::Value(t), .. }
+    | ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(t), .. } => {
+      *l <= line && t == r && from.extract_rap() == Some(lender)
+    }
+    _ => false,
+  })
 }
 
 /// The `if` / `match` among `events` that `r` is live in (declared
@@ -6907,11 +6931,19 @@ fn last_use_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> Op
 /// into `events`: into the arm of the conditional that holds its line
 /// (recursing into nested conditionals), with a copy ending the borrow
 /// in each other arm; or, if no conditional holds it, in line order.
+/// `made`: the line the borrow was made on, if `ev` ends the reference's
+/// current loan. A borrow made inside an arm (`c = &y;` in the `if` arm,
+/// or `c = d;` copying a reference there) doesn't exist on the paths
+/// through the other arms, so they get no end of it (#800). The end of a
+/// loan made before the conditional (`c`'s old loan of `x`, which `c = &y;`
+/// ends on one path and a read ends on the other, #778) still ends on
+/// every arm.
 fn end_borrow_in_arms(
   events: &mut Vec<(usize, ExternalEvent)>,
   ev: (usize, ExternalEvent),
   r: &ResourceAccessPoint,
   lender: Option<&ResourceAccessPoint>,
+  made: Option<usize>,
   in_line_map: bool,
   unique_id: &mut usize,
 ) {
@@ -6929,9 +6961,12 @@ fn end_borrow_in_arms(
     events.insert(at, ev);
     return;
   };
-  let ExternalEvent::Branch { branches, live_vars, branch_type, .. } = &mut events[k].1 else {
+  let ExternalEvent::Branch { branches, live_vars, branch_type, split_point, merge_point, .. } = &mut events[k].1 else {
     unreachable!("branch_ending_borrow returns a Branch")
   };
+  let ev_lender = borrow_end_of(&ev.1).and_then(|(_, to)| to.extract_rap());
+  let made_in_arm = made.is_some_and(|m| *split_point < m && m <= ev.0 && m < *merge_point)
+    || ev_lender.is_some_and(|l| branches.iter().any(|b| loan_made_in(&b.e_data, r, l, ev.0)));
   // The lender gets its value back in each arm, so it has a column in
   // the conditional.
   if let Some(l) = lender {
@@ -6948,7 +6983,10 @@ fn end_borrow_in_arms(
       if in_line_map && ev.1.is_arrow_ev() && branch_ending_borrow(&arm.e_data, r, ev.0).is_none() {
         arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
       }
-      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, in_line_map, unique_id);
+      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, made, in_line_map, unique_id);
+      continue;
+    }
+    if made_in_arm {
       continue;
     }
     let mut copy = ev.1.clone();
