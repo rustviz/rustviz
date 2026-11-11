@@ -1262,6 +1262,9 @@ const EXPECTED_OK: &[&str] = &[
     "repoint_if_chain_806",
     "repoint_match_read_first_806",
     "repoint_if_chain_read_middle_806",
+    // #813: a closure owning a std lock is a resource on every host.
+    "closure_rwlock_795",
+    "closure_mutex_795",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14456,6 +14459,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // No dot without a tooltip.
             "=",
         ],
+    },
+    // #813: a closure that owns a std lock is a resource on every host
+    // (`needs_drop` is false for RwLock<i32> on macOS and for Mutex<i32> on
+    // Linux), like the lock itself.
+    TooltipExpect {
+        name: "closure_rwlock_795",
+        must_contain: &[
+            "f's resource is immutably borrowed by apply; f is read-only while the borrow is live",
+            "f's resource is no longer immutably borrowed",
+            "f's resource is moved",
+        ],
+        must_not_contain: &["f's value is immutably borrowed", "f's value is no longer", "f's value is moved"],
+    },
+    TooltipExpect {
+        name: "closure_mutex_795",
+        must_contain: &[
+            "f's resource is immutably borrowed by apply; f is read-only while the borrow is live",
+            "f's resource is no longer immutably borrowed",
+            "f's resource is moved",
+        ],
+        must_not_contain: &["f's value is immutably borrowed", "f's value is no longer", "f's value is moved"],
     },
 ];
 

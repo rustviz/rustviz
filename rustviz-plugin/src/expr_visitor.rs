@@ -681,16 +681,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Windows (futex / SRW locks) it doesn't. So a type that is, or
   /// contains, a std `Mutex` / `RwLock` / `Condvar` / `Barrier` is
   /// always a resource: they own an OS synchronization object, and the
-  /// wording must not depend on the platform's std internals.
+  /// wording must not depend on the platform's std internals. A closure
+  /// is classified separately (it can be Copy and still plain), but by
+  /// the same rule: it is a resource if it captures such a type by value.
   pub fn ty_is_plain(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
     ty_is_plain(self.tcx, ty, owner)
-  }
-
-  /// True iff `ty` is, or contains (through generic arguments, tuples,
-  /// arrays, or the fields of local ADTs), one of std's lock types.
-  /// See `ty_is_plain` for why these are special-cased.
-  fn ty_has_std_sync_primitive(&self, ty: Ty<'tcx>) -> bool {
-    ty_has_std_sync_primitive(self.tcx, ty)
   }
 
   /// Whether a value of type `ty` can be mutated through a shared
@@ -3688,8 +3683,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // A closure that holds only references (or Copy captures) has
       // nothing to drop: what it holds is a "value", not a "resource"
       // (#484, #791).
+      // A captured std lock counts as a resource on every host, as
+      // for `ty_is_plain` (#813).
       let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
-      let plain = !ty.needs_drop(self.tcx, env);
+      let plain = !ty.needs_drop(self.tcx, env) && !ty_has_std_sync_primitive(self.tcx, ty);
       self.add_closure_owner(name, mutability, plain, self.current_scope, !self.inside_branch);
     }
     else {
@@ -7796,6 +7793,9 @@ fn ty_has_std_sync_primitive<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
       }
       rustc_middle::ty::Array(t, _) => go(tcx, *t, depth + 1, seen),
       rustc_middle::ty::Tuple(ts) => ts.iter().any(|t| go(tcx, t, depth + 1, seen)),
+      // A closure holds what it captures by value (by reference, the
+      // upvar is a `Ref`, which this doesn't look through).
+      rustc_middle::ty::Closure(_, args) => go(tcx, args.as_closure().tupled_upvars_ty(), depth + 1, seen),
       _ => false,
     }
   }
