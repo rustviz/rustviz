@@ -1266,6 +1266,8 @@ const EXPECTED_OK: &[&str] = &[
     "closure_rwlock_795",
     "closure_mutex_795",
     "mutref_call_through_812",
+    // #817: variables inside assert!(..) arguments are coloured.
+    "assert_macro_args_817",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -19382,4 +19384,39 @@ fn old_lender_ends_once_per_arm_when_repointed_in_several_arms() {
         let empty: Vec<_> = tooltip_lines(&timeline).into_iter().filter(|l| l.iter().all(|t| t.trim().is_empty())).collect();
         assert!(empty.is_empty(), "{}: {} dot(s) with an empty tooltip", name, empty.len());
     }
+}
+
+/// #817: the variables inside the arguments of `assert!` and its
+/// relatives are highlighted in the code panel (a `data-hash` span, which
+/// is also their hover target), like the arguments of a plain call. The
+/// macro's own name and the generated panic code are not.
+#[test]
+fn assert_macro_arguments_are_coloured_in_the_code_panel() {
+    let rv = run_with_local_backend("assert_macro_args_817");
+    let code = rv.code_panel_string();
+    let rows: Vec<&str> = code.split("</text>").collect();
+    let row_of = |src: &str| -> &str {
+        let hits: Vec<&&str> = rows.iter().filter(|r| r.contains(src)).collect();
+        assert_eq!(hits.len(), 1, "code rows containing {:?}: {}", src, hits.len());
+        hits[0]
+    };
+    let coloured = |row: &str, var: &str| {
+        let needle = format!(">{var}</tspan>");
+        row.match_indices(&needle).any(|(i, _)| row[..i].rfind("<tspan").is_some_and(|t| row[t..i].contains("data-hash=")))
+    };
+    for (line, vars) in [
+        ("    assert!(", &["r1", "r2"][..]),
+        ("    assert_eq!(", &["r1", "r2"]),
+        ("    assert_ne!(", &["r1"]),
+        ("    debug_assert!(", &["r1", "r2"]),
+        ("    debug_assert_eq!(", &["r1", "r2"]),
+        ("    debug_assert_ne!(", &["r2"]),
+    ] {
+        let row = row_of(line);
+        for v in vars {
+            assert!(coloured(row, v), "{v} in `{line}...` has no code-panel colouring: {row}");
+        }
+    }
+    // The macro name is plain text, not a highlighted function.
+    assert!(!row_of("    assert!(").contains(">assert!</tspan>"));
 }

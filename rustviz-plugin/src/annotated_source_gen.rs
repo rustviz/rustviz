@@ -7,7 +7,34 @@
 
 use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{binding_name, builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, operand_names_column, overloaded_by_value_binop, overloaded_comparison, path_name, span_to_line, unary_op_operand}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_span::{BytePos, Span};
+
+/// The std macros whose arguments the visitor traces as uses (the
+/// formatting macros and the assertion macros). Their expansions are
+/// synthetic, but the argument expressions inside them are the user's,
+/// and get highlighted like arguments of a plain call (#817).
+const ARG_TRACING_MACROS: &[&str] = &[
+  "assert!", "assert_eq!", "assert_ne!",
+  "debug_assert!", "debug_assert_eq!", "debug_assert_ne!",
+];
+
+/// Collects the maximal user-written sub-expressions of a macro
+/// expansion: the arguments the user typed, not the code the macro
+/// built around them.
+struct UserArgs<'tcx> {
+  args: Vec<&'tcx Expr<'tcx>>,
+}
+
+impl<'tcx> Visitor<'tcx> for UserArgs<'tcx> {
+  fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+    if expr.span.from_expansion() {
+      intravisit::walk_expr(self, expr);
+    } else {
+      self.args.push(expr);
+    }
+  }
+}
 
 
 
@@ -69,6 +96,14 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
   // descent, `s` in `while let Some(s) = stack.pop() { … }` and
   // `stack`/`pop` on the same line never get annotated.
   if expr.span.from_expansion() {
+    if crate::visitor::user_macro_name(expr.span).is_some_and(|m| ARG_TRACING_MACROS.contains(&m.as_str())) {
+      let mut found = UserArgs { args: Vec::new() };
+      intravisit::walk_expr(&mut found, expr);
+      for arg in found.args {
+        self.annotate_expr(arg);
+      }
+      return;
+    }
     if let ExprKind::If(guard, then_body, _else) = expr.kind {
       // The else arm of a while/if-let desugar is the synthetic
       // `break` — skip it. The guard is either a `Let(pat, init)`

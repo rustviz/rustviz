@@ -1265,7 +1265,7 @@ impl<'tcx> Visitor<'tcx> for LocalUseFinder<'tcx> {
 /// that `span` was expanded from: `println!` for the `&x` that
 /// `format_args_nl!` builds inside `println!`, `show!` if the user's
 /// own `macro_rules! show` calls `println!`.
-fn user_macro_name(span: rustc_span::Span) -> Option<String> {
+pub(crate) fn user_macro_name(span: rustc_span::Span) -> Option<String> {
   let mut span = span;
   let mut name = None;
   while span.from_expansion() {
