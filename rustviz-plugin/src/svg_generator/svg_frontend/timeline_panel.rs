@@ -3546,6 +3546,10 @@ fn render_arrow (
 
                     let title_fn = match external_event {
                         ExternalEvent::PassByStaticReference { .. } => " reads from ",
+                        // `r` is itself a `&mut` reference (#812): f
+                        // reads and writes the value r points to, not r,
+                        // so say "through" like the other `&mut` writes.
+                        ExternalEvent::PassByMutableReference { is_reborrow: true, .. } => " reads and writes through ",
                         ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
                         _ => panic!("internal state: expected a pass-by-reference event here")
                     };
