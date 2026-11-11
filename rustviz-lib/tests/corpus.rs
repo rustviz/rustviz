@@ -1268,6 +1268,8 @@ const EXPECTED_OK: &[&str] = &[
     "mutref_call_through_812",
     // #817: variables inside assert!(..) arguments are coloured.
     "assert_macro_args_817",
+    // #824: variables inside println!/format!/write!/panic! arguments are coloured.
+    "fmt_macro_args_824",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -19419,4 +19421,49 @@ fn assert_macro_arguments_are_coloured_in_the_code_panel() {
     }
     // The macro name is plain text, not a highlighted function.
     assert!(!row_of("    assert!(").contains(">assert!</tspan>"));
+}
+
+/// #824: the variables inside the arguments of `println!`, `format!`,
+/// `write!` and the other formatting macros are highlighted in the code
+/// panel (and so are hover targets), like the arguments of a plain call.
+/// The macro's own name is plain text.
+#[test]
+fn format_macro_arguments_are_coloured_in_the_code_panel() {
+    let rv = run_with_local_backend("fmt_macro_args_824");
+    let code = rv.code_panel_string();
+    let rows: Vec<&str> = code.split("</text>").collect();
+    let row_of = |src: &str| -> &str {
+        // `println!("{t}")` (an implicit capture) is not a row under test.
+        let hits: Vec<&&str> = rows.iter().filter(|r| r.contains(src) && !r.contains("{t}")).collect();
+        assert_eq!(hits.len(), 1, "code rows containing {:?}: {}", src, hits.len());
+        hits[0]
+    };
+    let coloured = |row: &str, var: &str| {
+        let needle = format!(">{var}</tspan>");
+        row.match_indices(&needle).any(|(i, _)| row[..i].rfind("<tspan").is_some_and(|t| row[t..i].contains("data-hash=")))
+    };
+    for (line, vars) in [
+        ("    println!(", &["r1"][..]),
+        ("    print!(", &["r1", "r2"]),
+        ("    eprintln!(", &["r2"]),
+        ("    eprint!(", &["r1"]),
+        ("= format!(", &["r1", "r2"]),
+        ("    write!(", &["out", "r1"]),
+        ("    writeln!(", &["out", "r2"]),
+        ("        panic!(", &["r1"]),
+    ] {
+        let row = row_of(line);
+        for v in vars {
+            assert!(coloured(row, v), "{v} in `{line}...` has no code-panel colouring: {row}");
+        }
+    }
+    // The implicit capture `{t}` is inside the format string: no
+    // highlight is nested in the string's span (the markup stays
+    // well-formed), and the explicit arguments elsewhere are unaffected.
+    for r in &rows {
+        assert_eq!(r.matches("<tspan").count(), r.matches("</tspan>").count(), "unbalanced markup: {r}");
+    }
+    // The macro name is plain text, not a highlighted function.
+    assert!(!row_of("    print!(").contains(">print!</tspan>"));
+    assert!(!row_of("= format!(").contains(">format!</tspan>"));
 }
