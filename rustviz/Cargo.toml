@@ -1,6 +1,6 @@
 [package]
 name = "rustviz"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 authors = ["Cyrus Omar <comar@umich.edu>", "Andrew Mahler <mahleran@umich.edu>"]
 repository = "https://github.com/rustviz/rustviz"
@@ -13,6 +13,6 @@ name = "rustviz"
 path = "src/main.rs"
 
 [dependencies]
-rustviz-lib = { path = "../rustviz-lib", version = "2.0.0" }
-rustviz-cli = { path = "../rustviz-cli", version = "2.0.0" }
+rustviz-lib = { path = "../rustviz-lib", version = "2.1.0" }
+rustviz-cli = { path = "../rustviz-cli", version = "2.1.0" }
 anyhow = "1"

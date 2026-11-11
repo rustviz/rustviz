@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "mdbook-rustviz"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "clap",
  "env_logger",
@@ -1821,7 +1821,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rustviz"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "rustviz-cli",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "rustviz-cli"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "rustviz-lib"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "libc",
  "serde",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "rustviz-plugin"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "clap",
