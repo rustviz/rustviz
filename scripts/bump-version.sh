@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Bump the synchronized version of all four published RustViz crates.
+# Bump the synchronized version of all five published RustViz crates.
 #
-# Per the project's release scheme, the four published crates share a
+# Per the project's release scheme, the five published crates share a
 # `v2.Y.0` version (Z always 0). One tag publishes them all from
-# `.github/workflows/publish.yml`, so the four Cargo.toml manifests
+# `.github/workflows/publish.yml`, so the five Cargo.toml manifests
 # must be in lockstep before tagging — the publish workflow rejects
 # the tag otherwise.
 #
@@ -16,6 +16,7 @@
 #   - rustviz-lib/Cargo.toml                (package version)
 #   - rustviz-cli/Cargo.toml                (package version + rustviz-lib path-dep pin)
 #   - mdbook-rustviz/Cargo.toml             (package version + rustviz-lib path-dep pin)
+#   - rustviz/Cargo.toml                    (package version + rustviz-lib and rustviz-cli path-dep pins)
 #   - Cargo.lock                            (refreshed via `cargo update -w`)
 #
 # After this runs, review the diff, commit, push to main, then once
@@ -55,7 +56,7 @@ import sys
 import pathlib
 
 new = sys.argv[1]
-crates = ['rustviz-plugin', 'rustviz-lib', 'rustviz-cli', 'mdbook-rustviz']
+crates = ['rustviz-plugin', 'rustviz-lib', 'rustviz-cli', 'mdbook-rustviz', 'rustviz']
 
 # 1. Bump [package] version in each manifest. The first `^version = "X"`
 #    line in each file is the package version (others, like
@@ -80,19 +81,21 @@ for c in crates:
 # 2. Crates that depend on rustviz-lib via `path = "..", version = ".."`
 #    pin the version so cargo publish accepts the manifest. Bump that
 #    pin to the new release version.
-for c in ['rustviz-cli', 'mdbook-rustviz']:
+# rustviz depends on rustviz-lib and rustviz-cli (path-dep pins on both).
+for c, dep in [('rustviz-cli', 'rustviz-lib'), ('mdbook-rustviz', 'rustviz-lib'),
+               ('rustviz', 'rustviz-lib'), ('rustviz', 'rustviz-cli')]:
     p = pathlib.Path(c) / 'Cargo.toml'
     text = p.read_text()
     new_text, n = re.subn(
-        r'(rustviz-lib\s*=\s*\{[^}]*version\s*=\s*")[^"]+(")',
+        r'(' + dep + r'\s*=\s*\{[^}]*version\s*=\s*")[^"]+(")',
         lambda m: m.group(1) + new + m.group(2),
         text,
     )
     if n != 1:
-        print(f"error: didn't find rustviz-lib version pin in {p}", file=sys.stderr)
+        print(f"error: didn't find {dep} version pin in {p}", file=sys.stderr)
         sys.exit(1)
     p.write_text(new_text)
-    print(f"  {c}: rustviz-lib path-dep pin -> {new}")
+    print(f"  {c}: {dep} path-dep pin -> {new}")
 PY
 
 echo
@@ -105,4 +108,4 @@ echo "  git add -A && git commit -m 'Bump RustViz to v${NEW}'"
 echo "  # push the commit, get it merged to main, then:"
 echo "  git tag v${NEW} && git push origin v${NEW}"
 echo "  # the v${NEW} tag triggers .github/workflows/publish.yml,"
-echo "  # which publishes all four crates to crates.io in dep order."
+echo "  # which publishes all five crates to crates.io in dep order."

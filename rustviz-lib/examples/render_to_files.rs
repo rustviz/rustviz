@@ -6,8 +6,8 @@
 //! Requires the nightly toolchain (auto-installed by
 //! `rust-toolchain.toml` at the workspace root) and `cargo rv-plugin`
 //! on `PATH` (see `rustviz-plugin/`). For a one-shot CLI rather than
-//! a code example, use the `rustviz` binary from `rustviz-cli`
-//! (`cargo install rustviz-cli`).
+//! a code example, use the `rustviz` binary from the `rustviz` crate
+//! (`cargo install rustviz`).
 
 use std::{env, fs, path::PathBuf, process};
 

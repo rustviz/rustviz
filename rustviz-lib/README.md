@@ -26,7 +26,7 @@ backend), which means it needs the matching nightly toolchain + the
 plugin installed:
 
 ```sh
-cargo install rustviz-cli   # bundles the bootstrap helper
+cargo install rustviz   # bundles the bootstrap helper
 rustviz init                # rustup install + cargo install rustviz-plugin
 ```
 
@@ -37,5 +37,5 @@ web playground), set `RV_RUNNER=docker` and ensure the
 for the full sandboxing contract.
 
 If you just want a CLI rather than a programmatic API, install
-[`rustviz-cli`](https://crates.io/crates/rustviz-cli) and use
+[`rustviz`](https://crates.io/crates/rustviz) and use
 `rustviz svg` / `rustviz html`.
