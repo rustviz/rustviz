@@ -1,0 +1,18 @@
+[package]
+name = "rustviz"
+version = "2.1.0"
+edition = "2021"
+authors = ["Cyrus Omar <comar@umich.edu>", "Andrew Mahler <mahleran@umich.edu>"]
+repository = "https://github.com/rustviz/rustviz"
+license = "MIT"
+description = "RustViz 2: ownership and borrow timelines for Rust. `cargo install rustviz` for the CLI; the library re-exports rustviz-lib."
+readme = "README.md"
+
+[[bin]]
+name = "rustviz"
+path = "src/main.rs"
+
+[dependencies]
+rustviz-lib = { path = "../rustviz-lib", version = "2.1.0" }
+rustviz-cli = { path = "../rustviz-cli", version = "2.1.0" }
+anyhow = "1"

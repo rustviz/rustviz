@@ -5,6 +5,7 @@ members = [
   "rustviz-plugin",
   "rustviz-lib",
   "rustviz-cli",
+  "rustviz",
   "mdbook-rustviz",
   "playground",
   "xtask",

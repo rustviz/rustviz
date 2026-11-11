@@ -22,6 +22,7 @@ COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY rustviz-plugin/ ./rustviz-plugin/
 COPY rustviz-lib/ ./rustviz-lib/
 COPY rustviz-cli/ ./rustviz-cli/
+COPY rustviz/ ./rustviz/
 COPY mdbook-rustviz/ ./mdbook-rustviz/
 COPY playground/Cargo.toml ./playground/Cargo.toml
 COPY playground/src/ ./playground/src/
