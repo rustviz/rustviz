@@ -455,11 +455,19 @@ const Description: React.FC = () => (
     <p>Besides this playground, RustViz ships as:</p>
     <ul>
       <li>
-        an mdBook preprocessor — for embedding visualizations in a
-        book, like our{' '}
+        an mdBook preprocessor (
+        <a href="https://github.com/rustviz/rustviz/tree/main/mdbook-rustviz" target="_blank" rel="noreferrer">
+          <code>mdbook-rustviz</code> docs
+        </a>
+        ) — for embedding visualizations in a book, like our{' '}
         <a href="https://rustviz.github.io/tutorial/" target="_blank" rel="noreferrer">
           visual Rust tutorial
+        </a>{' '}
+        (
+        <a href="https://github.com/rustviz/tutorial" target="_blank" rel="noreferrer">
+          source
         </a>
+        )
       </li>
       <li>
         a <code>rustviz</code> command-line tool — one-shot rendering
@@ -498,6 +506,18 @@ const Description: React.FC = () => (
       </a>
       . RustViz is an independent academic project and has no formal
       affiliation with the Rust project or the Rust Foundation.
+    </p>
+    {/* TODO(maintainer): confirm this list of names before release.
+        Names come from `git log` and the GitHub profiles of the rustviz/rustviz
+        and rustviz/rustviz2 contributors. GitHub user h-yyyue shows no real
+        name (git author "hyy"); fill in the real name or drop the entry. */}
+    <p>
+      RustViz is led by Cyrus Omar. RustViz 2, which compiles real Rust
+      programs through <code>rustc</code>, was built by Andrew Mahler, with
+      early contributions from Yifan Liu, Zesen (SenmiaoORZ), Arnav Shah,
+      Chenglin Li, and h-yyyue. Later contributors include Marcelo Almeida,
+      Vishnu Reddy, Yu Pan, and Jay Soh. The authors of the original
+      RustViz paper are listed below.
     </p>
     <h3>Research paper</h3>
     <p>
