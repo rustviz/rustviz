@@ -16,7 +16,7 @@ against the matching nightly toolchain. The fastest path is the CLI's
 bootstrap:
 
 ```sh
-cargo install rustviz-cli
+cargo install rustviz
 rustviz init
 ```
 
