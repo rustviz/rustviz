@@ -4123,6 +4123,21 @@ struct BranchSeg {
     p2: (f64, f64),
     state: State,
     title: String,
+    /// The arm's label when this is a dashed (`Gray`) vertical: its
+    /// `title` names the underlined code, so it's reworded if hovering
+    /// it underlines nothing (see `reword_unlit_inactive`).
+    inactive_arm: Option<String>,
+}
+
+/// Which part of an arm's strip a segment is.
+#[derive(Clone, Copy, PartialEq)]
+enum Leg {
+    /// The diagonal from the parent's column into the arm's.
+    Split,
+    /// A vertical stretch of the arm's own column.
+    Column,
+    /// The diagonal from the arm's column to where the branches join.
+    Join,
 }
 
 /// A column never draws two segments over the same rows: a dashed
@@ -4159,7 +4174,7 @@ fn trim_dashes_under_solid(segs: Vec<BranchSeg>) -> Vec<BranchSeg> {
         if !down { pieces.reverse(); }
         for (a, b) in pieces {
             let (p1y, p2y) = if down { (a, b) } else { (b, a) };
-            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone() });
+            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone(), inactive_arm: seg.inactive_arm.clone() });
         }
     }
     out
@@ -4279,7 +4294,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, column_top_y),
-                leading_state.clone(), visualization_data, &arm_label,
+                leading_state.clone(), visualization_data, &arm_label, Leg::Split,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with.
@@ -4289,7 +4304,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
-                        leading_state, visualization_data, &arm_label,
+                        leading_state, visualization_data, &arm_label, Leg::Column,
                     );
                 }
             }
@@ -4333,7 +4348,7 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state.clone(), visualization_data, &arm_label,
+                    state.clone(), visualization_data, &arm_label, Leg::Column,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
@@ -4347,7 +4362,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_bot_y), (parent_x, merge_y),
-                        end_state, visualization_data, &arm_label,
+                        end_state, visualization_data, &arm_label, Leg::Join,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -4389,8 +4404,7 @@ fn render_branches(
                     seg.title = hover_messages::state_maybe_uninitialized(rap.name());
                 }
             }
-            let segs = trim_dashes_under_solid(segs);
-            let runs = split_centerline_runs(&segs);
+            let mut segs = trim_dashes_under_solid(segs);
 
             // The arm's own source lines, as the y-range that hovering
             // its column underlines (#369). The column is also drawn
@@ -4402,6 +4416,18 @@ fn render_branches(
                 get_y_axis_pos(own_first) as f64,
                 get_y_axis_pos(own_last) as f64,
             ));
+
+            // A dashed stretch that underlines nothing mustn't say
+            // "the underlined code" (#843).
+            let split_row = get_y_axis_pos(*split_point) as f64;
+            for seg in &mut segs {
+                if let Some(arm) = &seg.inactive_arm {
+                    if seg_underline_y(seg, own_y, split_row).is_none() {
+                        seg.title = hover_messages::state_inactive_arm_unlit(arm);
+                    }
+                }
+            }
+            let runs = split_centerline_runs(&segs);
 
             // `data-arm-rows`: the first and last row of those lines (the
             // corpus tests check hover against it).
@@ -4446,6 +4472,7 @@ fn push_seg_if_renderable(
     state: State,
     visualization_data: &VisualizationData,
     arm_label: &str,
+    leg: Leg,
 ) {
     if !line_drawn(rap, &state) {
         return;
@@ -4453,15 +4480,20 @@ fn push_seg_if_renderable(
     // A dashed arm column (`Gray`): another arm's code runs on these
     // rows, so say what the dashes mean instead of repeating the
     // solid segment's text (#626).
-    let title = if matches!(
+    // The diagonals underline nothing, so they say where they lead
+    // instead (#843).
+    let inactive = matches!(
         state,
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray }
-    ) {
-        hover_messages::state_inactive_arm(arm_label)
-    } else {
-        timeline_segment_title(&state, rap, visualization_data, None)
+    );
+    let title = match (inactive, leg) {
+        (true, Leg::Split) => hover_messages::state_arm_split(arm_label),
+        (true, Leg::Join) => hover_messages::state_arm_join(arm_label),
+        (true, Leg::Column) => hover_messages::state_inactive_arm(arm_label),
+        (false, _) => timeline_segment_title(&state, rap, visualization_data, None),
     };
-    segs.push(BranchSeg { p1, p2, state, title });
+    let inactive_arm = (inactive && leg == Leg::Column).then(|| arm_label.to_owned());
+    segs.push(BranchSeg { p1, p2, state, title, inactive_arm });
 }
 
 /// The y-range of code to underline while hovering a segment. A solid
@@ -4656,9 +4688,12 @@ fn render_branch_run(
             if (prev_off.0 - curr_off.0).abs() > 1e-6
                 || (prev_off.1 - curr_off.1).abs() > 1e-6
             {
+                // The connector underlines nothing (#843).
+                let bevel_title = prev_seg.inactive_arm.as_deref()
+                    .map_or_else(|| prev_seg.title.clone(), hover_messages::state_inactive_arm_unlit);
                 svg.push_str(&format!(
                     "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-dasharray: {};\"/>\n",
-                    hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, prev_seg.title, dasharray,
+                    hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, bevel_title, dasharray,
                 ));
             }
         }

@@ -2254,20 +2254,44 @@ pub fn state_maybe_uninitialized(my_name: &String) -> String {
     )
 }
 
-/// A dashed arm column: the rows belong to another arm, so this arm
-/// isn't running here; the tooltip says which branch the line belongs to (#626).
-/// `label` is the arm's label (see `BranchType`): "If" / "Else" /
-/// `IF_LET_ARM` for an `if`, the arm's pattern for a `match`.
-pub fn state_inactive_arm(label: &str) -> String {
+/// How the tooltips name an arm: "if" / "else" / "if let" for an `if`,
+/// the pattern for a `match` arm. `label` is the arm's label (see
+/// `BranchType`).
+fn arm_name_html(label: &str) -> String {
     let name = match label {
         "If" => "if".to_owned(),
         "Else" => "else".to_owned(),
         l if l == IF_LET_ARM => "if let".to_owned(),
         l => l.to_owned(),
     };
+    styled_name_html(&name)
+}
+
+/// A dashed arm column that underlines the other arms' code on hover:
+/// the rows belong to another arm, so this arm isn't running here (#626).
+pub fn state_inactive_arm(label: &str) -> String {
     format!(
         "This segment is for the {} branch. The underlined code is not part of that branch.",
-        styled_name_html(&name)
+        arm_name_html(label)
+    )
+}
+
+/// A dashed arm stretch that has no other arm's code to underline.
+pub fn state_inactive_arm_unlit(label: &str) -> String {
+    format!("This segment is for the {} branch.", arm_name_html(label))
+}
+
+/// The diagonal from the parent's column into an arm's column. It
+/// underlines nothing (#843).
+pub fn state_arm_split(label: &str) -> String {
+    format!("This segment leads into the {} branch.", arm_name_html(label))
+}
+
+/// The diagonal from an arm's column to the join (#843).
+pub fn state_arm_join(label: &str) -> String {
+    format!(
+        "This segment leads from the {} branch to where the branches join.",
+        arm_name_html(label)
     )
 }
 

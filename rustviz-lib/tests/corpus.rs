@@ -13308,6 +13308,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.a was moved in at least one branch above, so it can't be used after the branches (until",
         ],
     },
+    // #843: an arm column with no events for the variable. The diagonals
+    // into and out of an arm underline nothing, so they say where they
+    // lead instead of pointing at "the underlined code". (The `None`
+    // arm is one row, so its column is dashed beside the `Some` arm's
+    // rows and has no solid stretch of its own.)
+    TooltipExpect {
+        name: "arm_no_events_own_rows_843",
+        must_contain: &[
+            "This segment leads into the None branch.",
+            "This segment leads from the None branch to where the branches join.",
+            "This segment leads from the Some branch to where the branches join.",
+            "This segment is for the None branch. The underlined code is not part of that branch.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "else_no_events_own_rows_843",
+        must_contain: &[
+            "This segment leads into the else branch.",
+            // The `else` body's own rows keep the ordinary state text.
+            "s is the owner of the resource",
+            "This segment is for the else branch. The underlined code is not part of that branch.",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17699,6 +17724,31 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
     assert_eq!(find((23, 26)).1, vec![23, 24, 25, 26], "_ arm's solid stretch: {:?}", seen);
     assert_eq!(find((23, 26)).2, vec![19, 20, 21, 22], "_ arm's dashed stretch: {:?}", seen);
     assert!(implicit_else.contains(&vec![30]), "implicit else's dashed stretch: {:?}", implicit_else);
+}
+
+/// #843: a hover that underlines nothing (`data-underline="none"`: the
+/// diagonals into and out of an arm, a dashed stretch with no other arm's
+/// code beside it) must not say "the underlined code is not part of that
+/// branch". The diagonals say where they lead; the arm's own and the
+/// dashed stretches keep their texts.
+#[test]
+fn arm_hovers_that_underline_nothing_do_not_mention_underlined_code() {
+    for name in ["arm_no_events_own_rows_843", "else_no_events_own_rows_843", "dashed_arm_hover"] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let mut leads = 0;
+        for tag in timeline.split('<').skip(1) {
+            let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+            if attr(tag, "data-underline") != Some("none") { continue; }
+            let Some(text) = attr(tag, "data-tooltip-text") else { continue };
+            assert!(
+                !text.contains("underlined code"),
+                "{name}: a hover that underlines nothing mentions underlined code: <{tag}"
+            );
+            leads += (text.contains("leads into the") || text.contains("to where the branches join")) as usize;
+        }
+        assert!(leads > 0, "{name}: no diagonal says where it leads");
+    }
 }
 
 /// #626: the hover glow covers one stretch at a time. A `branch-group`
