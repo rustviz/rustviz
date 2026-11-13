@@ -93,7 +93,7 @@ pub struct RefData {
   // a static); the borrow-end arrow then names it.
   pub static_lender: Option<StaticLender>,
   /// Span of the `&x` / `&mut x` expression this reference was
-  /// assigned from, when it was one. `print_lifetimes` uses it to
+  /// assigned from, when it was one. `emit_borrow_ends` uses it to
   /// pick this reference's own loan out of MIR's borrow data; two
   /// references borrowing the same variable on one line (`let a = &x;
   /// let b = &x;`) are otherwise indistinguishable (#233).
@@ -101,7 +101,7 @@ pub struct RefData {
   /// For a reference that got its value from a call (`id(&p)`,
   /// `v.first()`), or took over such a reference's loan (see
   /// `ExprVisitor::ref_carriers`): the line that issued the loan it
-  /// holds. `print_lifetimes` matches it on (this line, lender), as it
+  /// holds. `emit_borrow_ends` matches it on (this line, lender), as it
   /// does a reference's own assignment line (#664).
   pub loan_line: Option<usize>,
   // Further lenders, for a reference returned by a call whose result
@@ -115,7 +115,7 @@ pub struct RefData {
   pub lender_muts: Vec<(ResourceTy, bool)>,
 }
 
-/// The loan a reference holds, as `print_lifetimes` finds it in MIR's
+/// The loan a reference holds, as `emit_borrow_ends` finds it in MIR's
 /// borrow data (see `RefData::borrow_span` and `RefData::loan_line`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoanId {
@@ -374,7 +374,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// the same loan. When `o` is then given another value (`o = …`, or
   /// `*w = …` through a `w = &mut o`), the borrow checker still keeps
   /// that loan live while `o` is live (`o`'s type has one lifetime),
-  /// so `h` takes the loan over: `print_lifetimes` ends `h`'s borrow
+  /// so `h` takes the loan over: `emit_borrow_ends` ends `h`'s borrow
   /// where rustc ends the loan, not at `h`'s last use (#644).
   pub ref_carriers: Vec<(String, String, LoanId)>,
   /// References holding a loan they took over (see `ref_carriers`).
@@ -386,14 +386,14 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// ends it (#778): `if c { r = &y; } else { use(r); }` keeps the lender
   /// borrowed on the path through the else arm, so the end is at its read.
   /// It can't be added while the arm holding the write is visited, or it
-  /// would be drawn in that arm; `print_lifetimes` adds them at the top
+  /// would be drawn in that arm; `emit_borrow_ends` adds them at the top
   /// level, where `end_outer_borrows_in_arms` moves each into the arm that
   /// holds its line and ends the borrow in the other arms.
   pub late_old_ends: Vec<(usize, ExternalEvent)>,
   /// Loans a reference was given in an arm of an `if` / `match` that
   /// another arm's, or the conditional's end, replaced in `borrow_map`
   /// (`c = &y;` in one arm, `c = &z;` in the next, #806): the arms are
-  /// alternatives, so each loan ends on its own path. `print_lifetimes`
+  /// alternatives, so each loan ends on its own path. `emit_borrow_ends`
   /// ends each one like the loan `borrow_map` holds.
   pub arm_loans: Vec<(String, RefData)>,
   /// The arms being visited, innermost last: (the conditional's first
@@ -416,7 +416,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // by the reference's name (#372). A `match` arm binding that
   // reborrows through a reference (`match o { Some(s) => … }`, `o:
   // &Option<String>`) is taken out of `borrow_map` when its arm ends,
-  // so `print_lifetimes` can't see that `o`'s borrow has to last
+  // so `emit_borrow_ends` can't see that `o`'s borrow has to last
   // until then; the arm records it here instead.
   pub borrow_floor: HashMap<String, usize>,
   // Holders (`let it = v.iter_mut();`) moved into a `for` loop (#722).
@@ -1529,7 +1529,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// as long as any value holding the reference is, so `t` stays
   /// borrowed until `hold.r`'s last use, and `hold.r` is what gives it
   /// back. `hold.r` takes `other.r`'s loan as recorded (lender, line
-  /// and span it was made at), so `print_lifetimes` ends it where MIR
+  /// and span it was made at), so `emit_borrow_ends` ends it where MIR
   /// ends that loan; the field's own Move arrow makes `other.r` hand
   /// the borrow off (`ref_handed_off`), so it draws no end of its own.
   /// A Copy struct copies the reference: both hold the loan.
@@ -1989,7 +1989,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Called after the last arm. A reference that only an earlier arm
   /// re-pointed keeps that arm's loan after the conditional (the latest
   /// in source order), as it did before arms started from the same
-  /// loans; the other arms' loans are ended by `print_lifetimes`
+  /// loans; the other arms' loans are ended by `emit_borrow_ends`
   /// (`arm_loans`). A loan held from before keeps the last use seen in
   /// source order.
   pub fn arm_borrows_end(&mut self, ab: ArmBorrows) {
@@ -2022,7 +2022,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// 'static data it borrowed when the lender has no column.
   ///
   /// `still_borrowed_by`: the values that go on holding the lender's
-  /// borrow after this reference's ends (see `print_lifetimes`, #575).
+  /// borrow after this reference's ends (see `emit_borrow_ends`, #575).
   pub fn add_borrow_end_ev(&mut self, line_num: usize, to: ResourceTy, from: ResourceTy, ref_data: &RefData, still_borrowed_by: Vec<String>) {
     let id = *self.unique_id;
     *self.unique_id += 1;
@@ -4024,7 +4024,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `let third = v.get(2);`; see `holder_lenders`), mark it as a
   /// holder and record that borrow in `borrow_map` like a reference's,
   /// so it lasts until the holder's last use (MIR refines it in
-  /// `print_lifetimes`), and a reference later taken out of it
+  /// `emit_borrow_ends`), and a reference later taken out of it
   /// (`it.next().unwrap()`) finds `v` as its lender (#336).
   fn register_holder(&mut self, name: &String, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
     let (mut lenders, is_mut) = self.holder_lenders(init, ty);
@@ -5644,84 +5644,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     return;
   }
   match rhs.kind {
-    ExprKind::Path(QPath::Resolved(_,p)) => {
-      // const / static items aren't function-local RAPs — they're
-      // compile-time values (or `'static` references) baked into
-      // the binary. Treat reading one on the RHS of a let as if
-      // the RHS were a literal: the LHS gets a Bind from an
-      // Anonymous source. Same handling as the path-arm in
-      // visitor.rs's main expression walker.
-      //
-      // A function item (`let f = helper;`, `let d = std::mem::drop;`)
-      // isn't a RAP either: the function itself has no column, and
-      // the value bound is a Copy function pointer that owns nothing
-      // (#254). Without this, a callee registered earlier in the same
-      // fn would show up as the source of a copy into `f`.
-      if matches!(
-        p.res,
-        Res::Def(
-          rustc_hir::def::DefKind::Const { .. }
-            | rustc_hir::def::DefKind::AssocConst { .. }
-            | rustc_hir::def::DefKind::Static { .. }
-            | rustc_hir::def::DefKind::Fn
-            | rustc_hir::def::DefKind::AssocFn,
-          _
-        )
-      ) {
-        let line_num = span_to_line(&p.span, &self.tcx);
-        self.bind_from_anonymous(line_num, lhs);
-        return;
-      }
-      let line_num = span_to_line(&p.span, &self.tcx);
-      // `let n: Option<i32> = None;` is a literal value too (#768).
-      if self.is_copy_literal_value(rhs) {
-        self.bind_from_ctor(line_num, lhs, rhs);
-        return;
-      }
-      let rhs_name: String = match p.res {
-        Res::Def(rustc_hir::def::DefKind::Ctor(_, _), _) => {
-          let mut name = String::new();
-          for (i, segment) in p.segments.iter().enumerate() {
-            name.push_str(self.tcx.hir_name(segment.hir_id).as_str());
-            if i < p.segments.len() - 1 {
-              name.push_str("::");
-            }
-          }
-          name
-        }
-        _ => path_name(p, &self.tcx),
-      };
-      // Last-resort fallback: a path that doesn't resolve to a
-      // registered RAP gets an Anonymous source instead of
-      // panicking. The `?` desugar used to be the main way to land
-      // here (the synthetic `val` in `Continue(val) => val`), but
-      // the Match arm below now unwraps `?` to its operand before
-      // we get this far. If this fires, some other desugaring is
-      // leaking a synthetic local — worth a look, hence the warn.
-      let rhs_key = if matches!(p.res, Res::Local(_)) { rhs_name.clone() } else { fn_key(&rhs_name) };
-      match self.raps.get(&rhs_key) {
-        Some(rd) => {
-          let rhs_rap = rd.rap.to_owned();
-          self.update_rap(&rhs_rap, line_num);
-          if self.is_coerced_mut_reborrow(&lhs, &rhs_rap, rhs, &evt) {
-            self.add_borrow_ev(line_num, Evt::MBorrow, lhs, ResourceTy::Value(rhs_rap), true);
-            return;
-          }
-          if rhs_rap.is_closure() && lhs.is_closure() && matches!(evt, Evt::Copy | Evt::Move) {
-            self.move_or_copy_closure(line_num, evt, lhs, rhs_rap);
-            return;
-          }
-          self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
-        }
-        None => {
-          warn!(
-            "match_rhs: path `{}` (line {}) has no registered RAP; binding {} from an anonymous source",
-            rhs_name, line_num, lhs.name()
-          );
-          self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
-        }
-      }
-    },
+    ExprKind::Path(QPath::Resolved(_,p)) => self.match_rhs_path(lhs, rhs, evt, p),
     // `Type::item` (`let f = String::len;`, `let n = Self::N;`): an
     // associated function or const, never a local, so like the
     // fn-item / const case above the LHS gets a Bind from an
@@ -5732,106 +5655,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     }
     // fn_expr: resolves to function itself (Path)
     // second arg, is a list of args to the function
-    ExprKind::Call(fn_expr, _) => {
-      let line_num = span_to_line(&fn_expr.span, &self.tcx);
-      // `let o = Some(5);`: a constructor of literals is a value of the
-      // type, like `let x = 5;`. Nothing is copied from the
-      // constructor (#768).
-      if self.is_copy_literal_value(rhs) {
-        self.bind_from_ctor(line_num, lhs, rhs);
-        return;
-      }
-      // Fall back to Anonymous when the call doesn't have a name we
-      // can resolve. Two cases land here: (1) a macro-expanded call
-      // (e.g. `vec![1,2,3]` lowering to `<[_]>::into_vec(…)`) whose
-      // name was never registered via add_fn because visit_expr
-      // returned early on `from_expansion`; (2) a desugaring whose
-      // fn_expr is `QPath::LangItem` that hirid_to_var_name can't
-      // name. Same rationale as the Path / Field arms in get_rap.
-      //
-      // When match_rhs runs *before* visit_expr has reached this
-      // call site (the let-as-rhs reordering for If/Match init in
-      // process_let_binding), the fn name has a resolvable identity
-      // but isn't in `self.raps` yet. Register it on the fly so the
-      // Move/Copy arrow has a labeled source instead of falling back
-      // to Anonymous.
-      // A returned reference that borrows from the caller's variables
-      // (`let w = first_word(&s);`) is drawn as a borrow of each of
-      // them, not as a copy out of the function (#171).
-      let retargeted = crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner))
-        && self.retarget_ctor_arg_events(rhs, lhs.clone());
-      if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-        if self.emit_call_result_borrows(&lhs, rhs, func, line_num) {
-          return;
-        }
-      }
-      // `let moved = Some(m);`: `m` was moved into `moved`; nothing is
-      // moved out of the constructor (#768).
-      if retargeted {
-        return;
-      }
-      // A call through a local `f` (closure, fn pointer) that leaves
-      // `f` in place: the result comes from the call, so its source is
-      // the call's Function RAP, not `f`'s column (#254, #299). An
-      // `FnOnce` call does consume `f`, and keeps `f` as the source.
-      let callee = match local_callee_result_key(rhs, &self.tcx) {
-        // A Copy result (`let n = f();` with `f: FnOnce() -> i32`)
-        // isn't a copy of anything `f` holds: it comes from the call
-        // (#271).
-        LocalCallee::Consumed if matches!(evt, Evt::Copy) => {
-          match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-            Some(n) => LocalCallee::Call(fn_key(&n)),
-            None => LocalCallee::Consumed,
-          }
-        }
-        other => other,
-      };
-      match callee {
-        LocalCallee::Call(key) => {
-          // Registered on the fly if visit_expr hasn't reached the call yet.
-          if !self.raps.contains_key(&key) {
-            if let Some(n) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-              self.add_fn(n);
-            }
-          }
-          let from = self.raps.get(&key)
-            .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
-            .unwrap_or(ResourceTy::Anonymous);
-          self.add_ev(line_num, evt, lhs, from, false);
-          return;
-        }
-        LocalCallee::Consumed => {
-          let from = expr_to_rap_name(fn_expr, &self.tcx)
-            .and_then(|n| self.raps.get(&n))
-            .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
-            .unwrap_or(ResourceTy::Anonymous);
-          self.add_ev(line_num, evt, lhs, from, false);
-          return;
-        }
-        LocalCallee::NotLocal => {}
-      }
-      // The callee is an expression (`(w.f)()`, `make()(x)`; #703):
-      // the result is a new value the call returned.
-      if !matches!(fn_expr.kind, ExprKind::Path(_)) {
-        self.bind_from_anonymous(line_num, lhs);
-        return;
-      }
-      let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-        Some(n) => {
-          if !self.raps.contains_key(&fn_key(&n)) {
-            self.add_fn(n.clone());
-          }
-          self.raps.get(&fn_key(&n))
-            .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.to_owned(), &self.tcx)))
-            .unwrap_or(ResourceTy::Anonymous)
-        }
-        None => ResourceTy::Anonymous,
-      };
-      self.add_ev(line_num, evt, lhs.clone(), from, false);
-      if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-        self.emit_struct_field_borrows(&lhs, rhs, func, line_num);
-      }
-    },
+    ExprKind::Call(fn_expr, _) => self.match_rhs_call(lhs, rhs, evt, fn_expr),
     
     ExprKind::Lit(_) | ExprKind::Binary(..) | // Any type of literal on RHS implies a bind
     ExprKind::Unary(UnOp::Neg, _) | // ~<expr>
@@ -5945,137 +5769,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     }
     // Struct intializer list:
     // ex struct = {a: <expr>, b: <expr>, c: <expr>}
-    ExprKind::Struct(_qpath, expr_fields, base) => {
-      let line_num = span_to_line(&rhs.span, &self.tcx);
-      self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
-      for field in expr_fields.iter() {
-          // Struct literal that isn't bound to a struct RAP: the
-          // value is returned (`User { email, .. }` as a fn's tail
-          // expression). The field initialisers still move/copy
-          // their sources (field-init shorthand `email` moves the
-          // local `email`), into the value handed to the caller.
-          if matches!(lhs, ResourceTy::Caller) {
-            let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
-            let is_place = matches!(field.expr.kind, ExprKind::Path(_) | ExprKind::Field(..));
-            if (is_place || self.is_returned_call_result(field.expr)) && !field_ty.is_ref() && !field.expr.span.from_expansion() {
-              let e = if self.ty_is_copy(field_ty, field.expr.hir_id.owner) { Evt::Copy } else { Evt::Move };
-              self.match_rhs(ResourceTy::Caller, field.expr, e);
-            }
-            continue;
-          }
-          let new_lhs_name = format!("{}.{}", lhs.name(), field.ident.as_str());
-          // Skip fields whose RAP we never registered. The most
-          // common case is a struct field whose type is itself a
-          // struct (`R { a: A { b: ... } }`): define_lhs registers
-          // `r.a` but doesn't recurse to add `r.a.b`, so the inner
-          // struct's expansion lands here without an entry. Better
-          // to lose the per-field event than crash the whole render.
-          let field_rap = match self.raps.get(&new_lhs_name) {
-            Some(rd) => rd.rap.to_owned(),
-            None => continue,
-          };
-          let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
-          let is_copyable = self.ty_is_copy(field_ty, field.expr.hir_id.owner);
-          let e = if field_ty.is_ref() {
-            match field_ty.ref_mutability().unwrap() {
-              Mutability::Not => Evt::Copy,
-              Mutability::Mut => Evt::Move,
-            }
-          } else {
-            match is_copyable {
-              true => Evt::Copy,
-              false => Evt::Move
-            }
-          };
-          // For ref-typed fields, define_lhs registered the field
-          // as a StaticRef/MutRef with a placeholder Anonymous
-          // lender. Resolve the real lender from the field's
-          // initialiser expression here (same path as a `let r =
-          // …` outside a struct) so print_lifetimes can pair the
-          // borrow with its return-of-borrow at end-of-loan and
-          // the ref-line trapezoid covers the right range.
-          if field_ty.is_ref() {
-            let (lender, aliasing, static_lender, co_lenders) = self.get_ref_data_full(&field.expr);
-            if let Some(rd) = self.borrow_map.get_mut(&new_lhs_name) {
-              rd.lender = lender;
-              rd.aliasing = aliasing;
-              rd.static_lender = static_lender;
-              rd.co_lenders = co_lenders;
-            }
-          }
-          // A struct field initialised by a call (`O { inner: mk(&t), .. }`):
-          // its reference fields borrow what the callee's signature ties
-          // them to, as for `let inner = mk(&t);` (#638).
-          if matches!(field_rap, ResourceAccessPoint::Struct(_)) {
-            self.register_struct_field_lenders(&new_lhs_name, field.expr, field_ty);
-          }
-          self.match_rhs(ResourceTy::Value(field_rap), field.expr, e);
-      }
-      // Struct update syntax `S { a: e, ..base }`: every field not
-      // written explicitly comes from `base`, moved if its type isn't
-      // Copy and copied otherwise. That's a *partial* move of `base`:
-      // its explicitly-overridden fields stay put and are still
-      // dropped at its scope end.
-      if let rustc_hir::StructTailExpr::Base(base_expr) = base {
-        let base_line = span_to_line(&base_expr.span, &self.tcx);
-        let base_name = expr_to_rap_name(base_expr, &self.tcx)
-          .filter(|n| self.raps.contains_key(n));
-        let explicit: HashSet<String> = expr_fields.iter().map(|f| f.ident.as_str().to_owned()).collect();
-        // Field names come from whichever side has per-field RAPs:
-        // the new struct, or (when it's returned to the caller) the base.
-        let (field_names, dest_prefix): (Vec<(String, bool)>, Option<String>) = match &lhs {
-          ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => {
-            let prefix = rap.name().clone();
-            (self.struct_children(&prefix).iter()
-              .map(|c| (c.name()[prefix.len() + 1..].to_owned(), c.never_drops()))
-              .collect(), Some(prefix))
-          }
-          ResourceTy::Caller => match &base_name {
-            Some(b) => (self.struct_children(b).iter()
-              .map(|c| (c.name()[b.len() + 1..].to_owned(), c.never_drops()))
-              .collect(), None),
-            None => (Vec::new(), None),
-          },
-          _ => (Vec::new(), None),
-        };
-        for (field, field_is_copy) in field_names {
-          if explicit.contains(&field) {
-            continue;
-          }
-          let dest = match &dest_prefix {
-            Some(p) => match self.raps.get(&format!("{}.{}", p, field)) {
-              Some(rd) => ResourceTy::Value(rd.rap.clone()),
-              None => continue,
-            },
-            None => ResourceTy::Caller,
-          };
-          let src = base_name.as_ref()
-            .and_then(|b| self.raps.get(&format!("{}.{}", b, field)))
-            .map(|rd| rd.rap.clone());
-          match src {
-            Some(src_rap) => {
-              let e = if field_is_copy { Evt::Copy } else { Evt::Move };
-              self.add_ev(base_line, e, dest, ResourceTy::Value(src_rap), false);
-            }
-            // `..make_p()` whose temporary keeps fields that need
-            // dropping: the field is moved out of its column (#605).
-            None if !field_is_copy && matches!(dest, ResourceTy::Value(_)) && self.part_temp_of(base_expr).is_some() => {
-              let tmp = self.part_temp_of(base_expr).unwrap();
-              self.add_ev(base_line, Evt::Move, dest, ResourceTy::Value(tmp), true);
-            }
-            // `..Default::default()` and other non-place bases: the
-            // field gets its value from a temporary.
-            None => {
-              if let ResourceTy::Value(d) = &dest {
-                let d_name = d.name().clone();
-                self.add_ev(base_line, Evt::Bind, dest.clone(), ResourceTy::Anonymous, false);
-                self.bind_struct_fields(base_line, &d_name);
-              }
-            }
-          }
-        }
-      }
-    },
+    ExprKind::Struct(_qpath, expr_fields, base) => self.match_rhs_struct(lhs, rhs, _qpath, expr_fields, base),
 
     // Tuple literal `(e0, e1, …)`. A tuple local has a column per
     // element (`t.0`, `t.1`; see `member_fields`), so, like a struct
@@ -6368,108 +6062,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // `p.name` and leaves `p.nick` with `p`. Each capture is drawn on
     // the column of the place it captures (`p.name`), or of its
     // nearest enclosing place that has a column (#328).
-    ExprKind::Closure(closure) => {
-      let line_num = span_to_line(&rhs.span, &self.tcx);
-      // Bind for the closure value itself — gives `f` an "acquires
-      // ownership of a resource" dot like other Bind sites.
-      self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
-
-      // MIR loan facts for the enclosing fn body. Each ref capture
-      // becomes one polonius loan whose `borrowed_place` is the
-      // upvar and whose `region.1` is the NLL kill line — the line
-      // where the borrow ends, which under NLL is the closure
-      // binding's last use, not its lexical scope end. We use this
-      // below to emit a StaticDie / MutableDie at the kill line so
-      // the captured borrow visually returns to its lender on the
-      // line the user expects.
-      let mir_b_data = self.gather_borrow_data(self.bwf);
-
-      let typeck = self.tcx.typeck(closure.def_id);
-      for capture in typeck.closure_min_captures_flattened(closure.def_id) {
-        let upvar_hir_id = match capture.place.base {
-          rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
-          _ => continue,
-        };
-        // The root variable's name (MIR loans below are keyed on it)
-        // and the captured place's column: `p.name` for a disjoint
-        // field capture, `p` for a whole-variable one.
-        let upvar_name = binding_name(&self.tcx, upvar_hir_id);
-        let by_value = matches!(capture.info.capture_kind,
-          rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
-        // A by-value capture of a Copy place copies it into the
-        // closure (#311): `m` is still usable afterwards and the
-        // closure has nothing of m's to drop. A Copy field
-        // (`move || p.x`) is drawn on its own column (#328).
-        let env = typing_env(self.tcx, rhs.hir_id.owner);
-        let copied = by_value && self.tcx.type_is_copy_modulo_regions(env, capture.place.ty());
-        let upvar_rap = match self.capture_rap(&capture.place, &upvar_name) {
-          Some(rap) => rap,
-          None => continue,
-        };
-        // A closure that uses a reference variable through it
-        // (`|| r.push('a')`, `|| r.len()`) captures the place `*r`,
-        // i.e. it reborrows what r points to rather than borrowing r
-        // itself (#277). Tagged like `&mut *r` (`is_reborrow`).
-        let through_ref = upvar_rap.is_ref()
-          && matches!(capture.place.projections.first(),
-                      Some(p) if matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
-        let from = ResourceTy::Value(upvar_rap);
-        let to = lhs.clone();
-        let evt_kind = match capture.info.capture_kind {
-          _ if copied => Evt::Copy,
-          rustc_middle::ty::UpvarCapture::ByValue
-          | rustc_middle::ty::UpvarCapture::ByUse => Evt::Move,
-          rustc_middle::ty::UpvarCapture::ByRef(kind) => match kind {
-            rustc_middle::ty::BorrowKind::Mutable => Evt::MBorrow,
-            // Immutable + UniqueImmBorrow both render as a static
-            // (immutable) borrow from the user's perspective —
-            // UniqueImmBorrow is an internal closure-borrow flavor
-            // they can't write, and the visualization shouldn't
-            // distinguish it.
-            _ => Evt::SBorrow,
-          },
-        };
-        match evt_kind {
-          Evt::SBorrow | Evt::MBorrow =>
-            self.add_borrow_ev(line_num, evt_kind.clone(), to, from.clone(), through_ref),
-          _ => self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false),
-        }
-
-        // For ref captures, find the matching MIR loan and emit
-        // a Die event at its kill line so the borrow returns on
-        // the closure's last use, not at the closure's lexical
-        // scope end. Move captures don't go through the loan
-        // machinery — they transfer ownership outright, and the
-        // closure's drop is what releases them.
-        let die_evt = match evt_kind {
-          Evt::SBorrow => Some(Evt::SDie),
-          Evt::MBorrow => Some(Evt::MDie),
-          _ => None,
-        };
-        if let Some(die_evt) = die_evt {
-          let kill_line = mir_b_data.iter().find_map(|b| {
-            // Match on (assignment line, upvar name): the loan
-            // for this capture is issued at the closure literal's
-            // line and borrows the upvar by name. region.1 is the
-            // NLL-refined kill line.
-            if b.region.0 == line_num
-              && b.borrowed_place.as_deref() == Some(upvar_name.as_str())
-            {
-              Some(b.region.1)
-            } else {
-              None
-            }
-          });
-          if let Some(die_line) = kill_line {
-            // add_ev maps (lhs, rhs) → StaticDie/MutableDie
-            // {from: rhs, to: lhs}. We want from=closure (f),
-            // to=upvar (s) so the renderer's return arrow goes
-            // f → s, mirroring the borrow direction.
-            self.add_ev(die_line, die_evt, from, lhs.clone(), false);
-          }
-        }
-      }
-    }
+    ExprKind::Closure(closure) => self.match_rhs_closure(lhs, rhs, closure),
     // `let r = refs[0];`: a copy of a reference stored in a collection
     // that holds borrows we track borrows what it borrows (#349).
     ExprKind::Index(base, _, _) if lhs.is_ref() && !lhs.is_mutref() => {
@@ -6502,6 +6095,425 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     }
     _ => {
       warn!("unmatched rhs {:#?}", rhs);
+    }
+  }
+}
+
+/// The `ExprKind::Path` case of `match_rhs`: `let lhs = <path>;` (a variable, a const or static, a unit struct or variant).
+pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Evt, p: &'tcx rustc_hir::Path<'tcx>) {
+  // const / static items aren't function-local RAPs — they're
+  // compile-time values (or `'static` references) baked into
+  // the binary. Treat reading one on the RHS of a let as if
+  // the RHS were a literal: the LHS gets a Bind from an
+  // Anonymous source. Same handling as the path-arm in
+  // visitor.rs's main expression walker.
+  //
+  // A function item (`let f = helper;`, `let d = std::mem::drop;`)
+  // isn't a RAP either: the function itself has no column, and
+  // the value bound is a Copy function pointer that owns nothing
+  // (#254). Without this, a callee registered earlier in the same
+  // fn would show up as the source of a copy into `f`.
+  if matches!(
+    p.res,
+    Res::Def(
+      rustc_hir::def::DefKind::Const { .. }
+        | rustc_hir::def::DefKind::AssocConst { .. }
+        | rustc_hir::def::DefKind::Static { .. }
+        | rustc_hir::def::DefKind::Fn
+        | rustc_hir::def::DefKind::AssocFn,
+      _
+    )
+  ) {
+    let line_num = span_to_line(&p.span, &self.tcx);
+    self.bind_from_anonymous(line_num, lhs);
+    return;
+  }
+  let line_num = span_to_line(&p.span, &self.tcx);
+  // `let n: Option<i32> = None;` is a literal value too (#768).
+  if self.is_copy_literal_value(rhs) {
+    self.bind_from_ctor(line_num, lhs, rhs);
+    return;
+  }
+  let rhs_name: String = match p.res {
+    Res::Def(rustc_hir::def::DefKind::Ctor(_, _), _) => {
+      let mut name = String::new();
+      for (i, segment) in p.segments.iter().enumerate() {
+        name.push_str(self.tcx.hir_name(segment.hir_id).as_str());
+        if i < p.segments.len() - 1 {
+          name.push_str("::");
+        }
+      }
+      name
+    }
+    _ => path_name(p, &self.tcx),
+  };
+  // Last-resort fallback: a path that doesn't resolve to a
+  // registered RAP gets an Anonymous source instead of
+  // panicking. The `?` desugar used to be the main way to land
+  // here (the synthetic `val` in `Continue(val) => val`), but
+  // the Match arm below now unwraps `?` to its operand before
+  // we get this far. If this fires, some other desugaring is
+  // leaking a synthetic local — worth a look, hence the warn.
+  let rhs_key = if matches!(p.res, Res::Local(_)) { rhs_name.clone() } else { fn_key(&rhs_name) };
+  match self.raps.get(&rhs_key) {
+    Some(rd) => {
+      let rhs_rap = rd.rap.to_owned();
+      self.update_rap(&rhs_rap, line_num);
+      if self.is_coerced_mut_reborrow(&lhs, &rhs_rap, rhs, &evt) {
+        self.add_borrow_ev(line_num, Evt::MBorrow, lhs, ResourceTy::Value(rhs_rap), true);
+        return;
+      }
+      if rhs_rap.is_closure() && lhs.is_closure() && matches!(evt, Evt::Copy | Evt::Move) {
+        self.move_or_copy_closure(line_num, evt, lhs, rhs_rap);
+        return;
+      }
+      self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
+    }
+    None => {
+      warn!(
+        "match_rhs: path `{}` (line {}) has no registered RAP; binding {} from an anonymous source",
+        rhs_name, line_num, lhs.name()
+      );
+      self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+    }
+  }
+}
+
+/// The `ExprKind::Call` case of `match_rhs`: `let lhs = f(args);`.
+pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Evt, fn_expr: &'tcx Expr<'tcx>) {
+  let line_num = span_to_line(&fn_expr.span, &self.tcx);
+  // `let o = Some(5);`: a constructor of literals is a value of the
+  // type, like `let x = 5;`. Nothing is copied from the
+  // constructor (#768).
+  if self.is_copy_literal_value(rhs) {
+    self.bind_from_ctor(line_num, lhs, rhs);
+    return;
+  }
+  // Fall back to Anonymous when the call doesn't have a name we
+  // can resolve. Two cases land here: (1) a macro-expanded call
+  // (e.g. `vec![1,2,3]` lowering to `<[_]>::into_vec(…)`) whose
+  // name was never registered via add_fn because visit_expr
+  // returned early on `from_expansion`; (2) a desugaring whose
+  // fn_expr is `QPath::LangItem` that hirid_to_var_name can't
+  // name. Same rationale as the Path / Field arms in get_rap.
+  //
+  // When match_rhs runs *before* visit_expr has reached this
+  // call site (the let-as-rhs reordering for If/Match init in
+  // process_let_binding), the fn name has a resolvable identity
+  // but isn't in `self.raps` yet. Register it on the fly so the
+  // Move/Copy arrow has a labeled source instead of falling back
+  // to Anonymous.
+  // A returned reference that borrows from the caller's variables
+  // (`let w = first_word(&s);`) is drawn as a borrow of each of
+  // them, not as a copy out of the function (#171).
+  let retargeted = crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner))
+    && self.retarget_ctor_arg_events(rhs, lhs.clone());
+  if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+    if self.emit_call_result_borrows(&lhs, rhs, func, line_num) {
+      return;
+    }
+  }
+  // `let moved = Some(m);`: `m` was moved into `moved`; nothing is
+  // moved out of the constructor (#768).
+  if retargeted {
+    return;
+  }
+  // A call through a local `f` (closure, fn pointer) that leaves
+  // `f` in place: the result comes from the call, so its source is
+  // the call's Function RAP, not `f`'s column (#254, #299). An
+  // `FnOnce` call does consume `f`, and keeps `f` as the source.
+  let callee = match local_callee_result_key(rhs, &self.tcx) {
+    // A Copy result (`let n = f();` with `f: FnOnce() -> i32`)
+    // isn't a copy of anything `f` holds: it comes from the call
+    // (#271).
+    LocalCallee::Consumed if matches!(evt, Evt::Copy) => {
+      match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+        Some(n) => LocalCallee::Call(fn_key(&n)),
+        None => LocalCallee::Consumed,
+      }
+    }
+    other => other,
+  };
+  match callee {
+    LocalCallee::Call(key) => {
+      // Registered on the fly if visit_expr hasn't reached the call yet.
+      if !self.raps.contains_key(&key) {
+        if let Some(n) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+          self.add_fn(n);
+        }
+      }
+      let from = self.raps.get(&key)
+        .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+        .unwrap_or(ResourceTy::Anonymous);
+      self.add_ev(line_num, evt, lhs, from, false);
+      return;
+    }
+    LocalCallee::Consumed => {
+      let from = expr_to_rap_name(fn_expr, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+        .unwrap_or(ResourceTy::Anonymous);
+      self.add_ev(line_num, evt, lhs, from, false);
+      return;
+    }
+    LocalCallee::NotLocal => {}
+  }
+  // The callee is an expression (`(w.f)()`, `make()(x)`; #703):
+  // the result is a new value the call returned.
+  if !matches!(fn_expr.kind, ExprKind::Path(_)) {
+    self.bind_from_anonymous(line_num, lhs);
+    return;
+  }
+  let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+    Some(n) => {
+      if !self.raps.contains_key(&fn_key(&n)) {
+        self.add_fn(n.clone());
+      }
+      self.raps.get(&fn_key(&n))
+        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.to_owned(), &self.tcx)))
+        .unwrap_or(ResourceTy::Anonymous)
+    }
+    None => ResourceTy::Anonymous,
+  };
+  self.add_ev(line_num, evt, lhs.clone(), from, false);
+  if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+    self.emit_struct_field_borrows(&lhs, rhs, func, line_num);
+  }
+}
+
+/// The `ExprKind::Struct` case of `match_rhs`: `let lhs = S { f: v, ..base };`.
+pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpath: &'tcx QPath<'tcx>, expr_fields: &'tcx [rustc_hir::ExprField<'tcx>], base: rustc_hir::StructTailExpr<'tcx>) {
+  let line_num = span_to_line(&rhs.span, &self.tcx);
+  self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+  for field in expr_fields.iter() {
+      // Struct literal that isn't bound to a struct RAP: the
+      // value is returned (`User { email, .. }` as a fn's tail
+      // expression). The field initialisers still move/copy
+      // their sources (field-init shorthand `email` moves the
+      // local `email`), into the value handed to the caller.
+      if matches!(lhs, ResourceTy::Caller) {
+        let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
+        let is_place = matches!(field.expr.kind, ExprKind::Path(_) | ExprKind::Field(..));
+        if (is_place || self.is_returned_call_result(field.expr)) && !field_ty.is_ref() && !field.expr.span.from_expansion() {
+          let e = if self.ty_is_copy(field_ty, field.expr.hir_id.owner) { Evt::Copy } else { Evt::Move };
+          self.match_rhs(ResourceTy::Caller, field.expr, e);
+        }
+        continue;
+      }
+      let new_lhs_name = format!("{}.{}", lhs.name(), field.ident.as_str());
+      // Skip fields whose RAP we never registered. The most
+      // common case is a struct field whose type is itself a
+      // struct (`R { a: A { b: ... } }`): define_lhs registers
+      // `r.a` but doesn't recurse to add `r.a.b`, so the inner
+      // struct's expansion lands here without an entry. Better
+      // to lose the per-field event than crash the whole render.
+      let field_rap = match self.raps.get(&new_lhs_name) {
+        Some(rd) => rd.rap.to_owned(),
+        None => continue,
+      };
+      let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
+      let is_copyable = self.ty_is_copy(field_ty, field.expr.hir_id.owner);
+      let e = if field_ty.is_ref() {
+        match field_ty.ref_mutability().unwrap() {
+          Mutability::Not => Evt::Copy,
+          Mutability::Mut => Evt::Move,
+        }
+      } else {
+        match is_copyable {
+          true => Evt::Copy,
+          false => Evt::Move
+        }
+      };
+      // For ref-typed fields, define_lhs registered the field
+      // as a StaticRef/MutRef with a placeholder Anonymous
+      // lender. Resolve the real lender from the field's
+      // initialiser expression here (same path as a `let r =
+      // …` outside a struct) so emit_borrow_ends can pair the
+      // borrow with its return-of-borrow at end-of-loan and
+      // the ref-line trapezoid covers the right range.
+      if field_ty.is_ref() {
+        let (lender, aliasing, static_lender, co_lenders) = self.get_ref_data_full(&field.expr);
+        if let Some(rd) = self.borrow_map.get_mut(&new_lhs_name) {
+          rd.lender = lender;
+          rd.aliasing = aliasing;
+          rd.static_lender = static_lender;
+          rd.co_lenders = co_lenders;
+        }
+      }
+      // A struct field initialised by a call (`O { inner: mk(&t), .. }`):
+      // its reference fields borrow what the callee's signature ties
+      // them to, as for `let inner = mk(&t);` (#638).
+      if matches!(field_rap, ResourceAccessPoint::Struct(_)) {
+        self.register_struct_field_lenders(&new_lhs_name, field.expr, field_ty);
+      }
+      self.match_rhs(ResourceTy::Value(field_rap), field.expr, e);
+  }
+  // Struct update syntax `S { a: e, ..base }`: every field not
+  // written explicitly comes from `base`, moved if its type isn't
+  // Copy and copied otherwise. That's a *partial* move of `base`:
+  // its explicitly-overridden fields stay put and are still
+  // dropped at its scope end.
+  if let rustc_hir::StructTailExpr::Base(base_expr) = base {
+    let base_line = span_to_line(&base_expr.span, &self.tcx);
+    let base_name = expr_to_rap_name(base_expr, &self.tcx)
+      .filter(|n| self.raps.contains_key(n));
+    let explicit: HashSet<String> = expr_fields.iter().map(|f| f.ident.as_str().to_owned()).collect();
+    // Field names come from whichever side has per-field RAPs:
+    // the new struct, or (when it's returned to the caller) the base.
+    let (field_names, dest_prefix): (Vec<(String, bool)>, Option<String>) = match &lhs {
+      ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => {
+        let prefix = rap.name().clone();
+        (self.struct_children(&prefix).iter()
+          .map(|c| (c.name()[prefix.len() + 1..].to_owned(), c.never_drops()))
+          .collect(), Some(prefix))
+      }
+      ResourceTy::Caller => match &base_name {
+        Some(b) => (self.struct_children(b).iter()
+          .map(|c| (c.name()[b.len() + 1..].to_owned(), c.never_drops()))
+          .collect(), None),
+        None => (Vec::new(), None),
+      },
+      _ => (Vec::new(), None),
+    };
+    for (field, field_is_copy) in field_names {
+      if explicit.contains(&field) {
+        continue;
+      }
+      let dest = match &dest_prefix {
+        Some(p) => match self.raps.get(&format!("{}.{}", p, field)) {
+          Some(rd) => ResourceTy::Value(rd.rap.clone()),
+          None => continue,
+        },
+        None => ResourceTy::Caller,
+      };
+      let src = base_name.as_ref()
+        .and_then(|b| self.raps.get(&format!("{}.{}", b, field)))
+        .map(|rd| rd.rap.clone());
+      match src {
+        Some(src_rap) => {
+          let e = if field_is_copy { Evt::Copy } else { Evt::Move };
+          self.add_ev(base_line, e, dest, ResourceTy::Value(src_rap), false);
+        }
+        // `..make_p()` whose temporary keeps fields that need
+        // dropping: the field is moved out of its column (#605).
+        None if !field_is_copy && matches!(dest, ResourceTy::Value(_)) && self.part_temp_of(base_expr).is_some() => {
+          let tmp = self.part_temp_of(base_expr).unwrap();
+          self.add_ev(base_line, Evt::Move, dest, ResourceTy::Value(tmp), true);
+        }
+        // `..Default::default()` and other non-place bases: the
+        // field gets its value from a temporary.
+        None => {
+          if let ResourceTy::Value(d) = &dest {
+            let d_name = d.name().clone();
+            self.add_ev(base_line, Evt::Bind, dest.clone(), ResourceTy::Anonymous, false);
+            self.bind_struct_fields(base_line, &d_name);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The `ExprKind::Closure` case of `match_rhs`: `let lhs = |..| ..;`.
+pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, closure: &'tcx rustc_hir::Closure<'tcx>) {
+  let line_num = span_to_line(&rhs.span, &self.tcx);
+  // Bind for the closure value itself — gives `f` an "acquires
+  // ownership of a resource" dot like other Bind sites.
+  self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+
+  // MIR loan facts for the enclosing fn body. Each ref capture
+  // becomes one polonius loan whose `borrowed_place` is the
+  // upvar and whose `region.1` is the NLL kill line — the line
+  // where the borrow ends, which under NLL is the closure
+  // binding's last use, not its lexical scope end. We use this
+  // below to emit a StaticDie / MutableDie at the kill line so
+  // the captured borrow visually returns to its lender on the
+  // line the user expects.
+  let mir_b_data = self.gather_borrow_data(self.bwf);
+
+  let typeck = self.tcx.typeck(closure.def_id);
+  for capture in typeck.closure_min_captures_flattened(closure.def_id) {
+    let upvar_hir_id = match capture.place.base {
+      rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
+      _ => continue,
+    };
+    // The root variable's name (MIR loans below are keyed on it)
+    // and the captured place's column: `p.name` for a disjoint
+    // field capture, `p` for a whole-variable one.
+    let upvar_name = binding_name(&self.tcx, upvar_hir_id);
+    let by_value = matches!(capture.info.capture_kind,
+      rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
+    // A by-value capture of a Copy place copies it into the
+    // closure (#311): `m` is still usable afterwards and the
+    // closure has nothing of m's to drop. A Copy field
+    // (`move || p.x`) is drawn on its own column (#328).
+    let env = typing_env(self.tcx, rhs.hir_id.owner);
+    let copied = by_value && self.tcx.type_is_copy_modulo_regions(env, capture.place.ty());
+    let upvar_rap = match self.capture_rap(&capture.place, &upvar_name) {
+      Some(rap) => rap,
+      None => continue,
+    };
+    // A closure that uses a reference variable through it
+    // (`|| r.push('a')`, `|| r.len()`) captures the place `*r`,
+    // i.e. it reborrows what r points to rather than borrowing r
+    // itself (#277). Tagged like `&mut *r` (`is_reborrow`).
+    let through_ref = upvar_rap.is_ref()
+      && matches!(capture.place.projections.first(),
+                  Some(p) if matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
+    let from = ResourceTy::Value(upvar_rap);
+    let to = lhs.clone();
+    let evt_kind = match capture.info.capture_kind {
+      _ if copied => Evt::Copy,
+      rustc_middle::ty::UpvarCapture::ByValue
+      | rustc_middle::ty::UpvarCapture::ByUse => Evt::Move,
+      rustc_middle::ty::UpvarCapture::ByRef(kind) => match kind {
+        rustc_middle::ty::BorrowKind::Mutable => Evt::MBorrow,
+        // Immutable + UniqueImmBorrow both render as a static
+        // (immutable) borrow from the user's perspective —
+        // UniqueImmBorrow is an internal closure-borrow flavor
+        // they can't write, and the visualization shouldn't
+        // distinguish it.
+        _ => Evt::SBorrow,
+      },
+    };
+    match evt_kind {
+      Evt::SBorrow | Evt::MBorrow =>
+        self.add_borrow_ev(line_num, evt_kind.clone(), to, from.clone(), through_ref),
+      _ => self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false),
+    }
+
+    // For ref captures, find the matching MIR loan and emit
+    // a Die event at its kill line so the borrow returns on
+    // the closure's last use, not at the closure's lexical
+    // scope end. Move captures don't go through the loan
+    // machinery — they transfer ownership outright, and the
+    // closure's drop is what releases them.
+    let die_evt = match evt_kind {
+      Evt::SBorrow => Some(Evt::SDie),
+      Evt::MBorrow => Some(Evt::MDie),
+      _ => None,
+    };
+    if let Some(die_evt) = die_evt {
+      let kill_line = mir_b_data.iter().find_map(|b| {
+        // Match on (assignment line, upvar name): the loan
+        // for this capture is issued at the closure literal's
+        // line and borrows the upvar by name. region.1 is the
+        // NLL-refined kill line.
+        if b.region.0 == line_num
+          && b.borrowed_place.as_deref() == Some(upvar_name.as_str())
+        {
+          Some(b.region.1)
+        } else {
+          None
+        }
+      });
+      if let Some(die_line) = kill_line {
+        // add_ev maps (lhs, rhs) → StaticDie/MutableDie
+        // {from: rhs, to: lhs}. We want from=closure (f),
+        // to=upvar (s) so the renderer's return arrow goes
+        // f → s, mirroring the borrow direction.
+        self.add_ev(die_line, die_evt, from, lhs.clone(), false);
+      }
     }
   }
 }
@@ -6560,7 +6572,7 @@ pub fn print_out_of_scope(&mut self){
 }
   
   /// A borrow held by a reference declared inside an `if` / `match`
-  /// arm ends inside that arm (#389). `print_lifetimes` runs after the
+  /// arm ends inside that arm (#389). `emit_borrow_ends` runs after the
   /// whole body is visited, when each arm's events are already inside
   /// its Branch event, so the borrow-end events it adds land on the
   /// fn's top level: the lender got its value back on its parent
@@ -6600,7 +6612,7 @@ pub fn print_out_of_scope(&mut self){
   }
 
   // This is where we annotate all RefDie events that were not handled by the assignment operator
-  pub fn print_lifetimes(&mut self){
+  pub fn emit_borrow_ends(&mut self){
 
     // first refine the loans that we've computed using MIR information
     // this is necessary for some cases where we can't know where a lifetime actually ends
@@ -6913,7 +6925,7 @@ pub fn print_out_of_scope(&mut self){
   /// a panic, a `break` / `continue` the borrow doesn't outlive): the
   /// reference is never used again on that path, so its borrow ends
   /// there, after the arm's last use of it, or where the arm starts if
-  /// it doesn't use it. `print_lifetimes` drew the end only at the
+  /// it doesn't use it. `emit_borrow_ends` drew the end only at the
   /// later use, which that path never reaches, so the arm left the
   /// lender lent, and an exit that drops the lender dropped it while
   /// lent (#663). Give each such arm its own end of the borrow, ahead
@@ -6981,7 +6993,7 @@ pub fn print_out_of_scope(&mut self){
 
   /// A reference declared before an `if` / `match` whose last use is
   /// inside one of its arms: its borrow ends in that arm, and on the
-  /// paths through the other arms it has already ended. `print_lifetimes`
+  /// paths through the other arms it has already ended. `emit_borrow_ends`
   /// adds the borrow's end at that last use's line on the fn's top
   /// level, after the whole body is visited, so it was drawn on the
   /// reference's and the lender's *parent* columns, in the middle of
@@ -7003,7 +7015,7 @@ pub fn print_out_of_scope(&mut self){
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. } => {
           (r, to.extract_rap().filter(|l| *l != r))
         }
-        // A RefDie gives nothing back to its lender (see print_lifetimes).
+        // A RefDie gives nothing back to its lender (see emit_borrow_ends).
         ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } => (r, None),
         _ => { i += 1; continue; }
       };

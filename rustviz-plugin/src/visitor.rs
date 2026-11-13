@@ -2210,13 +2210,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // borrow that came from the caller's frame. Model that
             // explicitly so the borrow region renders for the full
             // function body and the matching return-of-borrow
-            // (StaticDie / MutableDie emitted by print_lifetimes)
+            // (StaticDie / MutableDie emitted by emit_borrow_ends)
             // lands at the fn body's closing brace rather than the
             // parameter declaration line.
             //
             // Without this fix, add_ref left the lender as
             // Anonymous and the lifetime equal to the param's own
-            // line — print_lifetimes then emitted a phantom
+            // line — emit_borrow_ends then emitted a phantom
             // StaticDie at the signature line whose `to` field
             // resolved to `Deref(s)`, surfacing the nonsensical
             // tooltip "Return immutably borrowed resource from s
@@ -2729,574 +2729,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
       // assignment 
       // ex a = <expr>
-      ExprKind::Assign(lhs_expr, rhs_expr, _,) => {
-        // `a = lhs` inside a destructuring assignment: draw it as
-        // `a = <the part of the RHS lhs holds>`. That part was
-        // already visited with the whole RHS.
-        let destructure_hid = local_of_path(rhs_expr)
-          .filter(|h| self.destructure_srcs.contains_key(h));
-        let rhs_expr: &'tcx Expr<'tcx> = match destructure_hid {
-          Some(h) => self.destructure_srcs[&h],
-          None => rhs_expr,
-        };
-        self.visit_expr(lhs_expr);
-        if destructure_hid.is_none() {
-          self.visit_expr(rhs_expr);
-        }
-
-        // Writing to a `static mut` (`COUNTER += inc`): the static has no
-        // column (see the Path arm below), so there's no LHS resource to
-        // attribute the write to. Events inside the RHS were emitted by
-        // the visit above; a non-Copy value assigned in (`LOG = v;`) is
-        // moved out of its owner, so record that move (to no column).
-        if let ExprKind::Path(QPath::Resolved(_, p)) = lhs_expr.kind {
-          if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) {
-            let rhs_ty = self.tcx.typeck(rhs_expr.hir_id.owner).node_type(rhs_expr.hir_id);
-            let rhs_copy = self.ty_is_copy(rhs_ty, rhs_expr.hir_id.owner);
-            if !rhs_copy {
-              self.match_rhs(ResourceTy::Anonymous, rhs_expr, Evt::Move);
-            }
-            return;
-          }
-        }
-
-        // `x = rhs` where x came from `let x;` and is still
-        // uninitialized here: this initializes x (#234). If only some
-        // paths to here initialized x (#244), it is a reassignment that
-        // drops x's old value only if there is one, and x has a value
-        // from here on.
-        let mut maybe_init = None;
-        if let (ExprKind::Assign(..), ExprKind::Path(QPath::Resolved(None, path))) = (expr.kind, lhs_expr.kind) {
-          if let Res::Local(hirid) = path.res {
-            if let Some(decl) = self.uninit_locals.remove(&hirid) {
-              self.init_deferred_local(hirid, decl, rhs_expr);
-              // (An immutable `let x;` can't be assigned twice, E0384:
-              // a loop that assigns it leaves right after.)
-              if matches!(decl.annotation.1, Mutability::Mut) {
-                self.drop_earlier_iteration(hirid, lhs_expr);
-              }
-              return;
-            }
-            if self.maybe_init_locals.remove(&hirid) {
-              maybe_init = Some(if self.maybe_init_by_loop.remove(&hirid) { InitBy::Loop } else { InitBy::Branch });
-            }
-          }
-        }
-
-        // typecheck to figure out what type of event is going to occur
-        let line_num = expr_to_line(&lhs_expr, &self.tcx);
-        // `u._a = …` on a union: resource_of_lhs maps it to the
-        // union's own column. The field's type (possibly a ref, or
-        // a non-Copy ManuallyDrop<T>) says nothing about `u`, and a
-        // union field write never runs a destructor, so skip the
-        // ref-reassignment and drop-at-reassign handling below.
-        let lhs_is_union_field = matches!(lhs_expr.kind,
-          ExprKind::Field(recv, _) if self.is_union_typed(recv));
-        let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
-        let is_copyable = self.ty_is_copy(lhs_ty, lhs_expr.hir_id.owner);
-        let e = if lhs_ty.is_ref() {
-          match lhs_ty.ref_mutability().unwrap() {
-            Mutability::Not => Evt::Copy,
-            Mutability::Mut => Evt::Move,
-          }
-        } else {
-          match is_copyable {
-            true => Evt::Copy, 
-            false => Evt::Move
-          }
-        };
-        // None means the LHS is a place the plugin doesn't model (a
-        // reference-typed field through a reference `h.r = &x`, a tuple
-        // field `t.0`, an element that is itself a reference
-        // `v[i] = &s`, …) or an unregistered name. The write itself
-        // isn't drawn, but for `=` the RHS still goes into that place:
-        // `t.1 = s` moves `s`. Record that
-        // against an anonymous destination, otherwise `s` would later
-        // be shown dropping a resource it no longer owns.
-        let lhs_rty = match self.resource_of_lhs(lhs_expr) {
-          Some(rty) => rty,
-          None => {
-            if let ExprKind::AddrOf(..) = rhs_expr.kind {
-              // `v[0] = &u` / `self.r = &x`: a borrow stored in a
-              // place with no column (#282).
-              self.store_borrow_in_unmodelled_place(lhs_expr, rhs_expr, e);
-            } else {
-              self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
-            }
-            return;
-          }
-        };
-        // `*r = v` / `p.name = v` assign to a place behind a reference:
-        // they read like a plain assignment `y = e` (2026-11-05
-        // decision), with the place as the subject. The place has no
-        // column, so the tooltip also says the old value is dropped
-        // when its type needs drop. `*r += v` / `p.n += v` are in-place
-        // updates and keep their "modified through" wording.
-        let is_assign = matches!(expr.kind, ExprKind::Assign(..));
-        let assign_kind = || if is_copyable {
-          PlaceWrite::AssignCopy
-        } else if self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
-          PlaceWrite::AssignDropsOld
-        } else {
-          PlaceWrite::AssignOwned
-        };
-        let lhs_rty = match lhs_rty {
-          ResourceTy::Deref(rap) if is_assign && !lhs_ty.is_ref() =>
-            ResourceTy::Deref(rap.with_place_write(assign_kind())),
-          // A reference-typed field (`h.r = &x`) is not an owned or Copy
-          // value; leave its wording alone.
-          ResourceTy::DerefField(rap, place, _) if is_assign && !lhs_ty.is_ref() =>
-            ResourceTy::DerefField(rap, place, assign_kind()),
-          // A write to a union (`u.f = e`, `u = U { .. }`) is flagged
-          // too, with the Copy-ness of the value written, so the dot
-          // can say "assigned a copy of y" or "acquires ownership of
-          // a resource" (a union never drops either way).
-          ResourceTy::Value(rap) if is_assign
-            && rap.is_union() && (lhs_is_union_field || lhs_ty.is_union()) => {
-            let write = if is_copyable { PlaceWrite::AssignCopy } else { PlaceWrite::AssignOwned };
-            ResourceTy::Value(rap.with_place_write(write))
-          }
-          other => other,
-        };
-        // if we are pointing at a new piece of data
-        //
-        // `resource_of_lhs` returns Anonymous when the LHS is a deref
-        // of a temporary rather than a named place:
-        // `*c.borrow_mut() += 1`, `*v.last_mut().unwrap() = 5`,
-        // `*map.entry(k).or_insert(0) += 1`. There is no RAP for the
-        // temporary, so there's no reference to re-point here. The
-        // method calls inside the LHS already produced their events
-        // (`visit_expr(lhs_expr)` above), and `match_rhs` below still
-        // records what happens to the RHS (e.g. `= v` moves v); the
-        // temporary itself gets no ownership event.
-        // (Union field writes are excluded too; see lhs_is_union_field.)
-        if lhs_ty.is_ref() && !lhs_is_union_field && lhs_rty.extract_rap().is_some() {
-          let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
-          match lhs_rty {
-            // ex:
-            // let mut a = &b (where b is &&i32)
-            // a = &c (where c is &&i32)
-            ResourceTy::Value(_) => {
-              let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
-              self.hand_loan_to_carriers(lhs_rap.name(), &ref_data);
-              let to_ro = match ref_data.lender {
-                ResourceTy::Anonymous => ResourceTy::Deref(lhs_rap.clone()),
-                _ => ref_data.lender.clone()
-              };
-
-              // add event
-              // (None if the old reference was moved on, `let r2 = r;`
-              // before `r = &mut t;`: r had no borrow left to end, #209.)
-              let borrowers = get_borrowers(&lhs_rty.real_name(), &self.borrow_map);
-              // In a destructuring assignment, another destination may
-              // take this borrow over in the same statement: in
-              // `(r1, r2) = (r2, r1)` r1 stops borrowing x but r2 now
-              // does, so x is still borrowed (#291). The parts not yet
-              // drawn still have their new lender precomputed.
-              #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
-              let taken_over = matches!(ref_data.lender, ResourceTy::Value(_))
-                && destructure_hid.is_some_and(|me| self.destructure_ref_data.iter()
-                  .any(|(h, (lender, _, _, _))| *h != me && *lender == ref_data.lender));
-              if self.ref_handed_off(lhs_rap.name()) {
-              }
-              else if borrowers.len() > 1 || taken_over { // there is another active reference at this point, the resource cannot be returned
-                self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
-                *self.unique_id += 1;
-              }
-              else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num) {
-                // `hold.r = &t;` where `hold` held `&s`: the field no
-                // longer points to s, but `hold`'s type has one lifetime
-                // for the field's reference, so the borrow checker keeps
-                // s borrowed until the loan's last use (#531). Drawn on
-                // the lender's column only, like #512's stored borrows.
-                let place = ResourceTy::Index(lhs_rap.clone(), lhs_rap.name().to_owned(), PlaceWrite::Update);
-                let die = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
-                self.add_ev(end_line, die, to_ro, place, false);
-              }
-              else {
-                // `o = &q;` ends the old loan where the borrow checker
-                // does: `o` is dead until the write, so that can be
-                // earlier than the write itself (#745). (A loan
-                // `*w = &c` made through a reference ends the same
-                // way.)
-                //
-                // The loan's end on the paths that reach the write, if
-                // it lives on another one (`if c { x += 1; r = &y; }`
-                // with `r` read after the `if`), and for each lender
-                // of a reference that borrows from either of two
-                // (#770).
-                let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num).unwrap_or(line_num);
-                let end_line = match self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
-                  Some(end) => end,
-                  None => end_of(self, &ref_data.lender),
-                };
-                // The loan lives on in another arm of an enclosing `if` /
-                // `match` (`c = &y;` in one arm, a read of `c` in a later
-                // one): on this path it ends at the write, on the other at
-                // that read, and the borrow checker ends it at each (#806).
-                // The end past the write is drawn at the read, in that arm,
-                // and ends the loan in this one too, where it is last used.
-                let end_line = match self.loan_end(&ref_data).filter(|&e| e > line_num && self.in_sibling_arm(e)) {
-                  Some(e) if end_line == line_num => e,
-                  _ => end_line,
-                };
-                // An end past the write (#778) is added once the whole
-                // body is visited, at the top level (`late_old_ends`).
-                self.defer_old_ends = end_line > line_num;
-                self.add_borrow_end_ev(end_line, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
-                self.defer_old_ends = false;
-                // ...and to each further lender (#171).
-                for co in ref_data.co_lenders.iter() {
-                  let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
-                  let co_end = end_of(self, co);
-                  self.defer_old_ends = co_end > line_num;
-                  self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
-                  self.defer_old_ends = false;
-                }
-              }
-
-              // Add event for possible lender if necessary
-              // set possible lender to None
-
-              // check for a match in MIR
-              // let mir_b_data = self.gather_borrow_data(&self.bwf);
-              // for m_data in mir_b_data.iter() {
-              //   match ExprVisitor::borrow_match(&ref_data, m_data) {
-              //     Some(kill) => {
-              //       if kill > line_num { // this loan needs to be extended 
-                      
-              //       }
-              //       break;
-              //     }
-              //     None => {}
-              //   }
-              // }
-
-              // update lhs_rty with new lender information (for a
-              // destructuring assignment, as computed before any of
-              // its parts was drawn: in `(r1, r2) = (r2, r1)`, r1's
-              // lender has changed by the time r2 is assigned)
-              let precomputed = destructure_hid.and_then(|h| self.destructure_ref_data.remove(&h));
-              // The reference whose loan the new value is (#644): in a
-              // destructuring assignment, as found before any part was
-              // drawn. One the same statement reassigns (`(m1, m2) =
-              // (m2, m1)`) hands its loan over right away.
-              let (src_loan, taken_over_now) = match destructure_hid {
-                Some(h) => match self.destructure_ref_src.remove(&h) {
-                  Some((n, sp, now)) => (Some((n, sp)), now),
-                  None => (None, false),
-                },
-                None => (self.source_ref_loan(rhs_expr), false),
-              };
-              let (mut new_lender, new_aliasing, new_static_lender, new_co_lenders) = match precomputed {
-                Some(d) => d,
-                None => self.get_ref_data_full(&rhs_expr),
-              };
-              // `cur = &cur.next;` (or `cur = n` with n borrowed from
-              // `cur.next`): the new pointee is a field of the *old*
-              // cur's pointee, which no column names. Don't record cur
-              // as its own lender ("returned to cur.next").
-              if new_lender.deref_rap() == Some(&lhs_rap) {
-                new_lender = ResourceTy::Anonymous;
-              }
-              let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
-              r.assigned_at = line_num;
-              r.aliasing = new_aliasing;
-              r.lender = new_lender;
-              r.static_lender = new_static_lender;
-              r.borrow_span = borrow_span_of(rhs_expr);
-              r.loan_line = call_loan_line(rhs_expr, line_num);
-              r.co_lenders = new_co_lenders;
-              if taken_over_now {
-                self.note_ref_carrier(lhs_rap.name(), None);
-                if let Some((_, sp)) = src_loan {
-                  self.take_over_loan(lhs_rap.name(), sp);
-                }
-              } else {
-                self.note_ref_carrier(lhs_rap.name(), src_loan);
-              }
-            }
-
-            // ex:
-            // let a = & mut b (where b is &i32)
-            // *a = &c (where c is &i32)
-            ResourceTy::Deref(_) => {
-              let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
-              let deref_index = num_derefs(&lhs_expr) - 1;
-              let modified_ref_name = ref_data.aliasing.get(deref_index).unwrap().clone();
-              let modified_ref_data = self.borrow_map.get(&modified_ref_name).unwrap().clone();
-              let to_ro = modified_ref_data.lender.clone();
-              // References that copied the old value of the modified
-              // reference (`let h = o;` before `w = &mut o; *w = &q;`)
-              // keep its loan, as for `o = &q` (#664).
-              self.hand_loan_to_carriers(&modified_ref_name, &modified_ref_data);
-
-              // add event
-              // (Other references with the same lender, a carrier among
-              // them, keep the lender borrowed.)
-              let borrowers = get_borrowers(&modified_ref_name, &self.borrow_map);
-              // `o` stays live across the write (w borrows it), so
-              // unlike `o = &q`, which ends the old loan because `o` is
-              // dead until then, the borrow checker keeps the old loan
-              // live while `o` is: until the loan's end, past the write
-              // (#664). `o` no longer points to the lender, so like a
-              // field write (#531) the end is drawn on the lender's
-              // column only.
-              let old_end = self.loan_end(&modified_ref_data).filter(|&end| end > line_num)
-                .zip(self.raps.get(&modified_ref_name).map(|r| r.rap.clone()));
-              if borrowers.len() > 1 {
-                // Another reference keeps the lender borrowed and gives
-                // it back. (A RefDie from `*w` would be drawn on w's
-                // column with w's mutability, not the old value's.)
-              }
-              else if let (Some((end_line, o_rap)), ResourceTy::Value(_)) = (old_end, &to_ro) {
-                let place = ResourceTy::Index(o_rap, modified_ref_name.clone(), PlaceWrite::Update);
-                let die = if modified_ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
-                self.add_ev(end_line, die, to_ro, place, false);
-              }
-              else {
-                self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &modified_ref_data, Vec::new());
-              }
-
-              // update modified (derefed) reference's lender and aliasing data
-              let src_loan = self.source_ref_loan(rhs_expr);
-              let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = self.get_ref_data_full(&rhs_expr);
-              let r = self.borrow_map.get_mut(&modified_ref_name).unwrap();
-              r.assigned_at = line_num;
-              r.aliasing = new_aliasing.clone();
-              r.lender = new_lender;
-              r.static_lender = new_static_lender;
-              r.borrow_span = borrow_span_of(rhs_expr);
-              r.loan_line = call_loan_line(rhs_expr, line_num);
-              r.co_lenders = new_co_lenders;
-              self.note_ref_carrier(&modified_ref_name, src_loan);
-
-              let old_aliasing_data = self.borrow_map.get(&lhs_rty.real_name()).unwrap().aliasing.clone();
-              // update other aliases' aliasing data 
-              for i in 0..deref_index {
-                let ref_name = old_aliasing_data[i].clone();
-                let offset = deref_index - i;
-                let r = self.borrow_map.get_mut(&ref_name).unwrap();
-                r.aliasing.drain(offset..r.aliasing.len()); // remove old aliasing data
-                for (j, s) in new_aliasing.iter().enumerate() {
-                  r.aliasing.insert(offset + j, s.to_owned());
-                }
-              }
-
-              // update parent's aliasing data
-              let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
-              r.aliasing.drain(deref_index + 1..r.aliasing.len()); // remove old aliasing data
-              for (j, s) in new_aliasing.iter().enumerate() {
-                r.aliasing.insert(deref_index + 1 + j, s.to_owned());
-              }
-            }
-            _ => panic!("internal state: a write through `*` whose target is neither a reference nor a plain dereference")
-          }
-        }
-
-        // Owned non-Copy reassignment: the previous value is dropped
-        // at this line. Two shapes:
-        //   `y = x`  — drop y's prior resource (its own resource is
-        //              what's being overwritten).
-        //   `*p = x` — drop the resource currently pointed to via p
-        //              (i.e. the lender's resource, found through the
-        //              borrow_map alias chain).
-        // Skip when the type is Copy (i32 etc.) or a reference (the
-        // ref-reassignment branch above already emits the appropriate
-        // SDie / MDie / RefDie events for those).
-        // Decide the drop target BEFORE match_rhs runs, since
-        // match_rhs would update rap_holds_resource_now's state for
-        // the lhs (the new Move-into makes it look like the old
-        // resource is still held). Emit the event AFTER match_rhs so
-        // its dot is drawn over the regular Acquire dot at the same
-        // (x, y) — otherwise the colored Acquire circle paints over
-        // the white down-arrow triangle and the drop becomes
-        // invisible.
-        // Assigning a whole union (`u = U { .. }`) drops nothing unless
-        // the union has its own `Drop` impl: a union never drops its
-        // fields (#191).
-        let union_without_drop = lhs_ty.is_union()
-          && !self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
-        // Nor does overwriting a `ManuallyDrop<T>` drop the old `T` (#283).
-        let lhs_is_manually_drop = lhs_ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
-        let drop_target: Option<ResourceAccessPoint> =
-          if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
-            match &lhs_rty {
-              ResourceTy::Value(rap) => {
-                // Plain reassign — only emit the drop if y currently
-                // holds a resource (rules out `let y; y = x;` first
-                // assignment, and `let y = a; let z = y; y = x;` where
-                // y was moved out before reassignment). A value moved
-                // on only some paths above counts; the event says so
-                // (`maybe_moved` below).
-                //
-                // A destructuring assignment that also moves y's old
-                // value out (`(a, b) = (b, a)`) doesn't drop it, even
-                // if that move is drawn after y's new value arrives.
-                if self.rap_holds_resource_now(rap.name())
-                  && !self.destructure_moved.contains(rap.name()) {
-                  Some(rap.clone())
-                } else {
-                  None
-                }
-              }
-              ResourceTy::Deref(p_rap) => {
-                // Deref reassign through a &mut — the owner p points to
-                // (found through its lender, and through reborrows:
-                // `let f = &mut r.a; *f = …` overwrites `s.a`) holds
-                // the resource being overwritten. Borrow checker
-                // guarantees it currently holds (otherwise *p
-                // wouldn't be a valid place to write to), so we don't
-                // need rap_holds_resource_now here.
-                self.owner_behind_ref(p_rap, "")
-              }
-              ResourceTy::DerefField(p_rap, _, _) => {
-                // `r.a = v` after `let r = &mut s;`: the field being
-                // overwritten is the lender's `s.a`, so that's where
-                // the old value is dropped (#152). Only when the lender
-                // is a local with per-field columns; a parameter's
-                // lender is the caller, which has no column here.
-                expr_to_rap_name(lhs_expr, &self.tcx)
-                  .and_then(|full| full.strip_prefix(p_rap.name().as_str()).map(str::to_owned))
-                  .filter(|sfx| sfx.starts_with('.'))
-                  .and_then(|sfx| self.owner_behind_ref(p_rap, &sfx))
-              }
-              _ => None,
-            }
-          } else {
-            None
-          };
-
-        // Overwriting a whole struct drops the resources its fields
-        // still own too (`d = c;` drops the old `d.data`), also when
-        // the struct is overwritten through a reference (`*r = S {..}`
-        // / `r.inner = I {..}` drop the lender's `s.a` / `s.inner.v`).
-        let field_drop_targets: Vec<ResourceAccessPoint> = match (&drop_target, &lhs_rty) {
-          (Some(rap @ ResourceAccessPoint::Struct(_)),
-           ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) => {
-            self.struct_fields_holding_resource(rap.name())
-          }
-          _ => Vec::new(),
-        };
-
-        // Whether each old value is there on every path, decided
-        // before match_rhs too (see above). `*p = x` writes through a
-        // live `&mut`, so its lender holds a value.
-        let maybe_moved: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
-          .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
-            && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
-          .collect();
-        // A struct or tuple some of whose parts were moved out before
-        // (on every path, or some only): only the parts still there are
-        // dropped (#628).
-        let parts: Vec<Option<ReassignParts>> = drop_target.iter().chain(field_drop_targets.iter())
-          .zip(maybe_moved.iter())
-          .map(|(rap, maybe)| match rap {
-            ResourceAccessPoint::Struct(_) if !maybe && matches!(lhs_rty, ResourceTy::Value(_)) => self.reassign_parts(rap.name()),
-            _ => None,
-          })
-          .collect();
-
-        // `it = b.iter();` where `it` holds a borrow (#336).
-        if let ResourceTy::Value(rap) = &lhs_rty {
-          if rap.holds_borrow() && !lhs_is_union_field && matches!(expr.kind, ExprKind::Assign(..)) {
-            let rap = rap.clone();
-            self.reassign_holder(&rap, rhs_expr, lhs_ty, line_num);
-          }
-        }
-        // `hold = H { r: &t };` overwrites a whole struct whose
-        // reference fields hold borrows (#538). The old value is
-        // dropped, so the borrow checker ends the loans it held at the
-        // write (a `&mut s` right after compiles), unlike a direct
-        // field write (#531), where `hold`'s single lifetime keeps
-        // them. The old loans are read before the literal's fields
-        // replace them and drawn after its Bind. The same holds for any
-        // other new value of a whole local (`hold = make(&t);`,
-        // `hold = other;`, #569), whose fields then hold that value's
-        // borrows, not the old ones. A struct field of a struct
-        // overwritten by a call (`hold.inner = make_inner(&t)`, #638)
-        // or by another variable (`hold.inner = other`, #655) takes the
-        // new value's borrows the same way (a variable's go with it,
-        // `transfer_ref_fields`), while its old loans last until
-        // hold's last use (#531; see `struct_field_borrow_ends`).
-        let struct_field_ends = match (&lhs_rty, expr.kind) {
-          (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
-            if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) => {
-            let rap = rap.clone();
-            let ends = self.struct_field_borrow_ends(&rap, line_num);
-            // The literal's fields hold borrows made here: an earlier
-            // move of the old value (`let h2 = hold;`, #637) doesn't
-            // hand these on.
-            self.restart_struct_field_loans(&rap, line_num);
-            ends
-          }
-          (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
-            if !lhs_is_union_field => {
-            let rap = rap.clone();
-            let ends = self.struct_field_borrow_ends(&rap, line_num);
-            self.reassign_struct_field_lenders(&rap, rhs_expr, lhs_ty, line_num);
-            ends
-          }
-          _ => Vec::new(),
-        };
-        let mut drop_line = line_num;
-        let mut drop_at: Option<usize> = None;
-        if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
-          // `v[i] += k`: k is an operand, not the element's new
-          // value, so don't draw it as copied into v[i].
-          let compound = match &lhs_rty {
-            ResourceTy::Index(r, place, w) => ResourceTy::Index(r.clone(), place.clone(), w.into_update()),
-            other => other.clone(),
-          };
-          self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);
-        } else {
-          let n_events = self.preprocessed_events.len();
-          self.match_rhs(lhs_rty.clone(), rhs_expr, e);
-          self.draw_struct_field_borrow_ends(struct_field_ends);
-          // `v[1] = v[2]`: match_rhs has nothing to say about some
-          // RHS shapes (an index read, a field of a call, …), but the
-          // element is still overwritten.
-          if matches!(lhs_rty, ResourceTy::Index(..)) && self.preprocessed_events.len() == n_events {
-            self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
-          }
-          // `r = loop { … break a; };`: the loop runs first, and the
-          // old value is dropped when its value is assigned, after the
-          // loop ends: drawn where the new value arrives (#586), ahead
-          // of the arrivals, so that several `break`s' arrows stacked
-          // on that line (#561) don't push it onto a row of its own.
-          if let (ResourceTy::Value(rap), ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _)) = (&lhs_rty, rhs_expr.kind) {
-            let arrivals: Vec<(usize, usize)> = self.preprocessed_events.iter().enumerate().skip(n_events)
-              .filter(|(_, (_, ev))| matches!(ev,
-                ExternalEvent::Move { to: ResourceTy::Value(t), .. }
-                | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
-                | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if t.hash() == rap.hash()))
-              .map(|(i, (line, _))| (i, *line))
-              .collect();
-            match arrivals.first() {
-              Some(&(i, line)) => { drop_line = line; drop_at = Some(i); }
-              None => drop_line = span_end_line(&rhs_expr.span, &self.tcx),
-            }
-          }
-        }
-
-        let n_before_drops = self.preprocessed_events.len();
-        for ((rap, maybe_moved), parts) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts) {
-          let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
-          self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
-            ro: rap,
-            id: *self.unique_id,
-            maybe_moved,
-            by_cond,
-            parts,
-            maybe_init,
-          });
-          *self.unique_id += 1;
-        }
-        if let Some(i) = drop_at {
-          let n_drops = self.preprocessed_events.len() - n_before_drops;
-          self.preprocessed_events[i..].rotate_right(n_drops);
-        }
-      }
+      ExprKind::Assign(lhs_expr, rhs_expr, _,) => self.visit_assign(expr, lhs_expr, rhs_expr),
 
       // `return v`: like a tail expression, `v` goes to the caller
       // (#318). The path through the `return` never reaches the end
@@ -3444,568 +2877,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       }
 
       // if <expr> { } Option<else>
-      ExprKind::If(guard_expr, if_expr, else_expr) => {
-        // Macro-expanded `if`s — `assert!(cond)` becomes
-        // `match cond { true => {}, _ => panic!(...) }` (which the
-        // HIR represents as an If after match-desugaring); the `?`
-        // operator and several other macros do similar things.
-        // Visualizing these as a control-flow Branch on the user's
-        // timeline pollutes the diagram with branches the user
-        // didn't write. Walk the guard so any user-side variable
-        // accesses inside it (e.g. function arguments) are recorded
-        // as ordinary events on their owners' timelines, then skip
-        // the body/else and the Branch event entirely.
-        if expr.span.from_expansion() {
-          self.visit_expr(&guard_expr);
-          return;
-        }
-
-        // if-let: `if let pat = expr { body }`. The guard is an
-        // ExprKind::Let; register its pattern bindings against the
-        // scrutinee so identifiers in the body resolve, and emit the
-        // scrutinee→binding event + a GoOutOfScope at the body's
-        // closing brace. Otherwise (plain `if cond { … }`) just visit
-        // the guard for any variable accesses inside it.
-        // If-let: collect the pattern bindings registered against the
-        // scrutinee. We add them to `if_decl` below so the Branch's
-        // decl_vars set covers them and `append_decl_branch_events`
-        // populates each binding's timeline with a branch-shaped
-        // history (the surrounding If arm already emits the
-        // GoOutOfScope events from `if_decl`, so the helper skips
-        // emitting them itself).
-        //
-        // Each branch's events are the ones whose ids are handed out
-        // while it is visited (`if_ids`, `else_ids`), see
-        // `take_branch_events`. An if-let's pattern bindings happen
-        // only when the branch is taken, so they start `if_ids`; the
-        // scrutinee is evaluated either way and stays outside.
-        let entry_len = self.in_scope.len();
-        let if_lo;
-        let if_hash_lo;
-        // `if let … = (x, y)` moves `x` and `y` into the tuple even when
-        // the pattern doesn't match; the else branch shows that (#327).
-        let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
-        let mut iflet_tuple: Option<&'tcx rustc_hir::LetExpr<'tcx>> = None;
-        let mut chain_fail = ChainFail::default();
-        // Events handed out ids in the if-branch's range that stay
-        // before the split (see the let-chain case below).
-        let mut pre_split: HashSet<usize> = HashSet::new();
-        let iflet_bindings: HashSet<ResourceAccessPoint> =
-          if let ExprKind::Let(let_expr) = guard_expr.kind {
-            self.visit_expr(let_expr.init);
-            if_hash_lo = self.rap_hashes;
-            scrutinee_moves = self.tuple_scrutinee_moves(let_expr.init);
-            iflet_tuple = Some(let_expr);
-            let (bound, first_in_branch) = self.register_iflet_let_bindings(let_expr, None);
-            // Copies out of the scrutinee stay before the split (#496).
-            if_lo = first_in_branch;
-            bound
-          } else if is_let_chain(guard_expr) {
-            // `if let A = x && let B = y && cond` (#198): see
-            // visit_if_let_chain. The variables in scope here: a name
-            // that was in scope earlier and has ended (an earlier `if
-            // let`'s binding `a`) is free for the chain's own bindings
-            // (#696).
-            let outer: HashSet<ResourceAccessPoint> = self.in_scope.iter()
-              .filter_map(|name| self.raps.get(name))
-              .map(|rd| rd.rap.clone()).filter(|r| !r.is_fn()).collect();
-            if_hash_lo = self.rap_hashes;
-            let mut decls = HashSet::new();
-            let start = *self.unique_id;
-            let chain_lo = self.preprocessed_events.len();
-            let mut walk = ChainWalk::default();
-            self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
-            if_lo = walk.first_lo.unwrap_or(start);
-            chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
-            let binds = self.chain_binding_events(&(if_lo..*self.unique_id), &decls);
-            // Copying a value out of a variable declared before the `if`
-            // changes nothing about that variable, so, as for a lone `if
-            // let` (#496), the copy stays before the split and the
-            // variable's column doesn't branch for it (#583).
-            pre_split = binds.iter()
-              .filter(|(_, ev)| matches!(ev, ExternalEvent::Copy { from: ResourceTy::Value(f), .. } if outer.contains(f)))
-              .map(|(_, ev)| ev.get_id())
-              .collect();
-            let cols = self.chain_binding_columns(&binds, &decls);
-            self.binding_columns.extend(cols);
-            decls
-          } else {
-            self.visit_expr(&guard_expr);
-            if_lo = *self.unique_id;
-            if_hash_lo = self.rap_hashes;
-            HashSet::new()
-          };
-        // Restored, not reset: this `if` may sit inside another branch
-        // (#410).
-        let prev_inside_branch = self.inside_branch;
-        self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
-        // Both branches start from the same set of uninitialized
-        // `let x;` locals (#234); see join_uninit_locals.
-        let uninit_before = self.uninit_locals.clone();
-        let maybe_init_before = self.maybe_init_locals.clone();
-        // An exit in a branch sees neither the other branch's events
-        // nor the binding of the `if`'s value to a `let` (#410).
-        let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
-        // The scrutinee's temporaries (#469) outlive the pattern match,
-        // so an exit in a branch drops them (#410).
-        let frame_len = self.hoist_unbound_temporaries(entry_len);
-        // In edition 2024 those of an `if let` (or a let chain) are
-        // dropped before the `else` block runs (#469, #604): they aren't
-        // alive on the else path. They get no column in the branches and
-        // no join; an exit in the else branch doesn't drop them again.
-        let else_drops_temps = is_let_chain(guard_expr)
-          && !matches!(expr.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop))
-          && expr.span.edition() >= rustc_span::edition::Edition::Edition2024;
-        let scrutinee_temps: HashSet<ResourceAccessPoint> = if else_drops_temps {
-          self.in_scope[entry_len..frame_len].iter()
-            .filter_map(|n| self.raps.get(n).map(|rd| rd.rap.clone()))
-            .collect()
-        } else {
-          HashSet::new()
-        };
-        #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
-        self.unbranched_temps.extend(scrutinee_temps.iter().cloned());
-        self.exit_frames.push(ExitFrame::Branch { len: frame_len, hide, binds: Vec::new(), binds_at: 0 });
-        // An exit in the if branch drops the tuple scrutinee (#327).
-        let live_tuple = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()).map(|let_expr| LiveTuple {
-          frame: self.exit_frames.len() - 1,
-          len: entry_len,
-          scrutinee: let_expr.init,
-          tuple: match self.tuple_scrutinee_target(let_expr.init) {
-            ResourceTy::Temporary { tuple: Some(t), .. } => t,
-            _ => String::new(),
-          },
-          pat: let_expr.pat,
-          at: TupleDropAt::IfExit,
-        });
-        let live = live_tuple.is_some();
-        self.live_tuples.extend(live_tuple);
-        let mut arm_borrows = self.arm_borrows_begin();
-        let arm_lines = |this: &Self, e: &Expr<'_>| {
-          let sm = this.tcx.sess.source_map();
-          (sm.lookup_char_pos(expr.span.lo()).line, sm.lookup_char_pos(expr.span.hi()).line,
-           sm.lookup_char_pos(e.span.lo()).line, sm.lookup_char_pos(e.span.hi()).line)
-        };
-        self.arm_frames.push(arm_lines(self, if_expr));
-        self.visit_expr(&if_expr);
-        self.arm_frames.pop();
-        if live {
-          self.live_tuples.pop();
-        }
-        // Everything declared in each branch, also inside an inline
-        // construct nested in it (an `else if let`'s bindings, #501):
-        // see raps_declared_since.
-        let if_inner = self.raps_declared_since(if_hash_lo, &uninit_before);
-        let else_hash_lo = self.rap_hashes;
-        let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
-        let maybe_init_after_if = std::mem::replace(&mut self.maybe_init_locals, maybe_init_before.clone());
-        let if_ids = if_lo..*self.unique_id;
-        // A let-chain condition that moved a variable before a part
-        // that then failed (#281): the else branch (or the implicit
-        // empty one) starts with that variable maybe-moved, or, for an
-        // assignment, maybe holding its new value (#579). Emitted
-        // before the else branch is visited, so it's the first of its
-        // events and a reassignment in it sees the drop flag (#335).
-        // It's drawn on the `} else {` line; without an `else`, on the
-        // `if` line, where the condition fails and the body is skipped.
-        let fail_line = match else_expr {
-          Some(_) => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line,
-          None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line,
-        };
-        for a in std::mem::take(&mut chain_fail.assigns) {
-          self.add_external_event(fail_line, ExternalEvent::ChainFailAssign {
-            ro: a.rap,
-            place: a.place,
-            drops_old: a.drops_old,
-            no_else: else_expr.is_none(),
-            id: *self.unique_id,
-          });
-          *self.unique_id += 1;
-        }
-        for m in std::mem::take(&mut chain_fail.moves) {
-          self.add_external_event(fail_line, ExternalEvent::LoopExitMove {
-            ro: m.rap,
-            definite: m.definite,
-            at: MaybeMovedAt::ChainFail { to: m.to, dropped: m.dropped, no_else: else_expr.is_none(), how: m.how },
-            id: *self.unique_id,
-          });
-          *self.unique_id += 1;
-        }
-        // Borrows it made that have ended by then (#688).
-        let uses_lo = *self.unique_id;
-        for u in std::mem::take(&mut chain_fail.uses) {
-          self.add_external_event(fail_line, ExternalEvent::ChainFailUse {
-            ro: u.rap,
-            uses: u.uses,
-            definite: u.definite,
-            no_else: else_expr.is_none(),
-            id: *self.unique_id,
-          });
-          *self.unique_id += 1;
-        }
-        let uses_ids = uses_lo..*self.unique_id;
-        let else_decl = match else_expr {
-          Some(e) => {
-            // The scrutinee's temporaries are gone by now (see
-            // `scrutinee_temps`).
-            if !scrutinee_temps.is_empty() && self.in_scope.len() >= frame_len {
-              self.in_scope.drain(entry_len..frame_len);
-              if let Some(ExitFrame::Branch { len, .. }) = self.exit_frames.last_mut() {
-                *len = entry_len;
-              }
-            }
-            // The if-body's events stay in `preprocessed_events` until
-            // both branches are visited; they aren't on the `else`'s
-            // path.
-            if let Some(ExitFrame::Branch { hide, .. }) = self.exit_frames.last_mut() {
-              hide.push(if_ids.clone());
-            }
-            // Nor are the if-body's `if let` bindings: an exit in the
-            // `else` doesn't drop them.
-            self.in_scope.truncate(entry_len);
-            self.arm_borrows_next(&mut arm_borrows);
-            self.arm_frames.push(arm_lines(self, e));
-            self.visit_expr(e);
-            self.arm_frames.pop();
-            get_decl_of_expr(e, &self.tcx, &self.raps)
-          }
-          None => HashSet::new(),
-        };
-        let mut else_inner = self.raps_declared_since(else_hash_lo, &uninit_before);
-        if let Some(e) = else_expr {
-          else_inner = &else_inner | &else_if_let_bindings(e, &self.tcx, &self.raps);
-        }
-        self.arm_borrows_end(arm_borrows);
-        let uninit_after_else = std::mem::take(&mut self.uninit_locals);
-        let maybe_init_after_else = std::mem::take(&mut self.maybe_init_locals);
-        #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-        let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
-        // The `let x;` locals the if branch surely assigned (only
-        // tested with `any` below: order doesn't matter).
-        #[expect(clippy::disallowed_methods, reason = "only tested with any; order doesn't matter")]
-        let assigned_in_if: Vec<HirId> = known.iter()
-          .filter(|id| !uninit_after_if.contains_key(id) && !maybe_init_after_if.contains(id))
-          .copied().collect();
-        let maybe_init = self.join_uninit_locals(vec![
-          (Some(if_expr), uninit_after_if, maybe_init_after_if),
-          (else_expr, uninit_after_else, maybe_init_after_else),
-        ], &known);
-        // A `let x;` local the if branch assigned that may still have
-        // no value after the `if` (#244). (Not a reference: it owns
-        // nothing a drop flag could drop.)
-        let assigns_maybe_init = assigned_in_if.iter().any(|id| self.maybe_init_locals.contains(id)
-          && !self.tcx.typeck(id.owner).node_type(*id).is_ref());
-        let else_ids = if_ids.end..*self.unique_id;
-        self.exit_frames.pop();
-        // The `if let` bindings go out of scope with the `if`.
-        self.in_scope.truncate(entry_len);
-        self.inside_branch = prev_inside_branch;
-
-        // compute split and merge points
-        let line_num = expr_to_line(&guard_expr, &self.tcx);
-        let split = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line;
-        let if_end = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line;
-        let merge = match else_expr {
-          Some(e) => self.tcx.sess.source_map().lookup_char_pos(e.span.hi()).line,
-          None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line
-        };
-
-        // Bindings declared by an `if let` guard belong in the if
-        // branch's decl set (they live for the body block, same as a
-        // top-level `let` inside it).
-        let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
-        if_decl = &if_decl | &iflet_bindings;
-        // `if_decl` / `else_decl` are the variables this `if` ends at
-        // its branches' closing braces. The `*_scope` sets add those
-        // ended by a construct nested in the branch (it draws their
-        // GoOutOfScope itself): none of them is live across the `if`,
-        // and the branch's events for them go on their own columns.
-        let if_scope = &(&if_decl | &if_inner) | &scrutinee_temps;
-        let else_scope = &else_decl | &else_inner;
-
-        // `if cond { … }` / `if let pat = expr { … }` without an
-        // `else`. When the body moves a variable that outlives the
-        // `if`, the program has two paths: the body ran and moved it,
-        // or it didn't (the implicit empty `else`), so the variable is
-        // maybe-moved afterwards and dropped at scope end only if the
-        // body didn't run (#257). That's drawn exactly like
-        // `if cond { … } else {}`: the Branch below gets an empty
-        // `else` branch. The body's own range is the same one the
-        // if-branch filter below uses.
-        //
-        // Otherwise (reads, borrows, …: nothing that changes what the
-        // variable holds after the `if`) the body is drawn inline:
-        // its events are already in `preprocessed_events` from the
-        // body visit above, and a branch would only add columns. Just
-        // emit GoOutOfScope events for any branch-local bindings
-        // (if-let pattern bindings, body-internal let-stmts) so they
-        // wind down at the closing brace as they would inside the
-        // Branch.
-        if else_expr.is_none() {
-            let rhs = self.rhs_arm_ids.get(&if_expr.hir_id).copied();
-            let body_ev: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter()
-              .filter(|(_, e)| (if_ids.contains(&e.get_id()) && !pre_split.contains(&e.get_id()))
-                || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
-              .cloned().collect();
-            // (Borrows that ended in the condition, #688, don't make a
-            // second path: drawn inline, the condition's events are on
-            // the one path already. Their dots are taken out.)
-            let chain_fail_ev = self.preprocessed_events.iter()
-              .any(|(_, e)| else_ids.contains(&e.get_id()) && !uses_ids.contains(&e.get_id()));
-            // A body that always exits (`return`, a panic, `break` /
-            // `continue`) and drops something there is drawn as a
-            // branch too: its column ends in those drops, and the
-            // implicit `else` carries on (#429). On one line it's drawn
-            // like any other one-line branch (#360). A body that only
-            // sometimes exits (the exit is in a nested conditional drawn
-            // inline) has no column to end in them, so they aren't drawn
-            // (#410).
-            let exit_branch = self.expr_diverges(if_expr)
-              && body_ev.iter().any(|(_, e)| self.exit_drops.contains(&e.get_id()));
-            // An `if let` whose pattern matches every value always runs
-            // its body: there's no implicit empty `else` path, so what
-            // the body does to outer variables is drawn inline, not as
-            // a branch.
-            let always_runs = matches!(guard_expr.kind, ExprKind::Let(l)
-              if pat_is_irrefutable(l.pat, self.tcx.typeck(l.pat.hir_id.owner)));
-            // A body that assigns a `let x;` local is drawn as a branch
-            // too when x may have no value on the implicit `else` path
-            // (#244): the join says so.
-            let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch
-              || assigns_maybe_init;
-            // A tuple scrutinee's variables are moved whether or not the
-            // body runs (#327), so that's a second path as well.
-            if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {
-                self.preprocessed_events.retain(|(_, e)| !uses_ids.contains(&e.get_id()));
-                for evs in self.event_line_map.values_mut() {
-                  evs.retain(|e| !uses_ids.contains(&e.get_id()));
-                }
-                // The body may be skipped, so a `return` / `break` /
-                // panic in it doesn't end the columns it's drawn on;
-                // its drops aren't drawn (#410).
-                self.discard_exit_drops(if_ids.clone());
-                for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
-                    self.preprocessed_events.push((
-                        if_end,
-                        ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
-                    ));
-                    *self.unique_id += 1;
-                }
-                return;
-            }
-        }
-
-        // Take each branch's events out of the global timeline. They
-        // used to be picked by source line (the if-body's lines, then
-        // the else-body's), which put everything in the wrong place
-        // when branches share a line: a one-line `if c { take(s); }
-        // else { … }` drew the move as unconditional, and the `} else
-        // if c2 {` line put the inner `if` in the outer if-branch
-        // (#117). The guard's events were handed out before `if_ids`,
-        // so they stay on the global timeline.
-        let _ = line_num; // no longer used for guard-live extension
-        let mut if_ev = self.take_branch_events(if_ids, Some(if_expr), &pre_split);
-        let mut else_ev = self.take_branch_events(else_ids, else_expr, &HashSet::new());
-        // The arrows now inside the branches are drawn from each
-        // branch's own line map. Take them out of the global one, or an
-        // arrow that stays on the split line (a copy out of an if-let
-        // scrutinee, #496) would drag them out of their branches.
-        let in_branches: HashSet<usize> = if_ev.iter().chain(else_ev.iter()).map(|(_, e)| e.get_id()).collect();
-        for evs in self.event_line_map.values_mut() {
-          evs.retain(|e| !in_branches.contains(&e.get_id()));
-        }
-
-        // Compute liveness from the events actually inside the
-        // branches — only variables touched by a real event get a
-        // branched timeline. Avoids the previous behaviour where
-        // `get_live_of_expr(guard_expr)` always promoted guard
-        // variables (e.g. the `n` in `if n > 0 { … }`) into branched
-        // columns even when neither branch references them.
-        let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
-        collect_event_live_vars(&if_ev, &mut liveness);
-        collect_event_live_vars(&else_ev, &mut liveness);
-        // A branch of type `!` (`return`, `panic!()`) never reaches
-        // the merge (#296). Values dropped at a `return` in it (#363)
-        // are live in it.
-        let if_diverges = self.expr_diverges(if_expr);
-        let else_diverges = else_expr.is_some_and(|e| self.expr_diverges(e));
-        liveness.extend(self.keep_exit_drops(&mut if_ev, if_diverges));
-        liveness.extend(self.keep_exit_drops(&mut else_ev, else_diverges));
-        // Variables declared inside a loop in a branch already go out
-        // of scope there (see scoped_in_events). A `return`'s drops
-        // (#363) are not that: they leave the enclosing scope.
-        let if_scoped = scoped_in_events(&if_ev, &self.exit_drops);
-        let else_scoped = scoped_in_events(&else_ev, &self.exit_drops);
-        // Variables declared inside a branch (let-stmts within the
-        // body, plus if-let pattern bindings) live only for that
-        // branch — they're not pre-existing variables that need a
-        // branched timeline. Subtract them out.
-        let declared_in_branches: HashSet<ResourceAccessPoint> =
-          &(&if_scope | &else_scope) | &(&if_scoped | &else_scoped);
-        liveness = &liveness - &declared_in_branches;
-
-        // add gos events for variables declared in each block, except
-        // where every path through the branch leaves it at an exit
-        // that drops them (#630)
-        let if_left = Self::left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
-        let else_left = Self::left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
-        for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
-          if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
-          *self.unique_id += 1;
-        }
-
-        for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
-          else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
-          *self.unique_id += 1;
-        }
-        if_decl.extend(if_inner);
-        if_decl.extend(if_scoped);
-        let mut else_decl = else_decl;
-        else_decl.extend(else_inner);
-        else_decl.extend(else_scoped);
-        // The pattern didn't match, but the tuple literal it was matched
-        // against already took `x` / `y` (the if branch's own moves come
-        // from register_iflet_let_bindings).
-        //
-        // The tuple is dropped (#327) where an edition-2024 `if let`
-        // drops its scrutinee's temporaries: at the end of the if
-        // branch (when it leaves early, then), or, when the pattern
-        // doesn't match, before the else branch runs. It has no column,
-        // so a drop dot on each variable whose value (or part of it)
-        // is still in it says so.
-        if let Some(let_expr) = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()) {
-          let tuple_name = match self.tuple_scrutinee_target(let_expr.init) {
-            ResourceTy::Temporary { tuple: Some(t), .. } => t,
-            _ => String::new(),
-          };
-          let mut front: Vec<(usize, ExternalEvent)> = Vec::new();
-          // (A struct or tuple variable's part columns too, #627.)
-          let unbound: Vec<ResourceAccessPoint> = scrutinee_moves.iter()
-            .flat_map(|v| self.tuple_scrutinee_unbound(v, &[])).collect();
-          for r in &unbound {
-            front.push((if_end, ExternalEvent::Move {
-              from: ResourceTy::Value(r.clone()),
-              to: self.tuple_scrutinee_target(let_expr.init),
-              id: *self.unique_id,
-              is_partial: false,
-              into_closure: false,
-              loop_head: LoopHead::No,
-              break_alt: None,
-              break_out: false,
-              via_try: None,
-              closure_value: false,
-            }));
-            *self.unique_id += 1;
-            liveness.insert(r.clone());
-          }
-          let at = if else_expr.is_some() { TupleDropAt::Else } else { TupleDropAt::NoElse };
-          front.extend(self.tuple_drop_events(let_expr.init, &tuple_name, None, at).into_iter().map(|e| (if_end, e)));
-          else_ev.splice(0..0, front);
-
-          // A branch that leaves early drops it at its exit instead:
-          // see drop_locals_on_exit.
-          if !if_diverges {
-            let evs = self.tuple_drop_events(let_expr.init, &tuple_name, Some(let_expr.pat), TupleDropAt::IfEnd);
-            if_ev.extend(evs.into_iter().map(|e| (if_end, e)));
-          }
-        }
-
-        
-        let if_map = create_line_map(&if_ev);
-
-        // Per-branch "active" line ranges. Each branch is rendered
-        // solid inside its active range and dashed outside. The
-        // ranges are non-overlapping so the if-branch transitions
-        // to dashed at the line where the else-branch becomes
-        // active.
-        //
-        // For the if-branch we use its body content range
-        // (`split + 1 ..= if_end`); for the else-branch we use its
-        // body span starting at the `} else {` line so the
-        // active region has at least two rows even when the body
-        // has a single content line. Without that, an empty or
-        // single-line else (e.g. `else { println!(...) }` whose
-        // formatter doesn't emit per-event entries on `s`) would
-        // collapse to a zero-length solid segment, leaving the
-        // entire else column dashed.
-        //
-        // `merge_point - 1` is the last line each branch column is
-        // drawn on; the convergence diagonal then bridges that row
-        // to the join dot at `merge_point` (see render_timeline's
-        // Branch arm). Clamping the else-branch's end there keeps
-        // it consistent with the column-trim done in
-        // compute_branch_states.
-        //
-        // Branches that share lines (#117) are drawn on the split..merge
-        // rows themselves; each is active on its own lines.
-        let merge_minus_one = merge.saturating_sub(1);
-        let collapsed = branch_is_collapsed(split, merge);
-        let if_slice = if collapsed { (split, if_end) } else { (split + 1, if_end) };
-        let else_slice = match else_expr {
-          Some(e) if collapsed => (self.tcx.sess.source_map().lookup_char_pos(e.span.lo()).line, merge),
-          _ if collapsed => (if_end, merge),
-          _ => (if_end, merge_minus_one),
-        };
-        // A branch of type `!` (`return`, `panic!()`) never reaches
-        // the merge (#296).
-        let (if_diverges, if_exits, if_carries) = self.branch_divergence(if_expr, &if_ev, &if_decl);
-        let (else_diverges, else_exits, else_carries) = match else_expr {
-          Some(e) => self.branch_divergence(e, &else_ev, &else_decl),
-          None => (false, Vec::new(), Vec::new()),
-        };
-        let (b_labels, b_slices, b_branches) = match else_expr {
-          Some(_) => {
-            let else_map = create_line_map(&else_ev);
-            (
-              vec!["If".to_owned(), "Else".to_owned()],
-              vec![if_slice, else_slice],
-              vec![
-                ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits, break_carries: if_carries   },
-                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits, break_carries: else_carries },
-              ],
-            )
-          }
-          // No `else` (and the body moves something, see above): the
-          // implicit empty `else` is a second path that leaves every
-          // variable as it was (#257).
-          // Its events are the scrutinee's moves (#327), or those of a
-          // let-chain condition that failed after a move (#281), if any.
-          None => {
-            let else_map = create_line_map(&else_ev);
-            (
-              vec!["If".to_owned(), "Else".to_owned()],
-              vec![if_slice, else_slice],
-              vec![
-                ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits, break_carries: if_carries },
-                ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new(), break_carries: Vec::new() },
-              ],
-            )
-          }
-        };
-        // The arm of an `if let` with pattern bindings is named so for
-        // the drawing: they bind on the split line, and the arm's column
-        // starts there (#382).
-        let mut b_labels = b_labels;
-        if !iflet_bindings.is_empty() {
-          b_labels[0] = IF_LET_ARM.to_owned();
-        }
-        let b_ty = BranchType::If(b_labels, b_slices);
-        self.note_exit_scope(expr);
-        self.add_external_event(line_num,
-          ExternalEvent::Branch {
-            live_vars: liveness,
-            branches: b_branches,
-            branch_type: b_ty,
-            split_point: split,
-            merge_point: merge,
-            maybe_init,
-            id: *self.unique_id });
-            *self.unique_id += 1;
-        // Both branches leave the function: nothing after the `if` runs.
-        if else_expr.is_some() && if_diverges && else_diverges && self.at_fn_level(expr) {
-          self.all_paths_exit = true;
-        }
-      }
+      ExprKind::If(guard_expr, if_expr, else_expr) => self.visit_if(expr, guard_expr, if_expr, else_expr),
 
       ExprKind::Loop(block, _, loop_ty, _span) => {
         // What a `break` / `continue` in the body drops (#410). A
@@ -4133,1014 +3005,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // match <expr> {
       // <pat> => <expr>
       // }
-      ExprKind::Match(guard_expr, arms, source) => {
-        // Macro-expanded `match`s — `assert!(cond)` expands to
-        // `match cond { true => {}, _ => panic!(...) }`, and several
-        // other macros (notably `?`) also desugar through Match. Walk
-        // the guard so user-written variable accesses inside it (e.g.
-        // function arguments) are recorded, then skip the arms and
-        // the Branch event entirely. Same rationale as the
-        // from_expansion check on ExprKind::If above: macro-added
-        // control flow shouldn't be rendered as branches the user
-        // didn't write.
-        //
-        // Exception: ForLoopDesugar matches. They're from_expansion
-        // (rustc marks lower_expr_for's outer span with
-        // DesugaringKind::ForLoop) but the user's body still lives
-        // inside, and the source-discriminator below has explicit
-        // handling for it.
-        if expr.span.from_expansion()
-           && !matches!(source, rustc_hir::MatchSource::ForLoopDesugar)
-        {
-          self.visit_expr(guard_expr);
-          return;
-        }
-
-        // first visit the guard expression, annotate any events that happen there
-        self.visit_expr(guard_expr);
-        let typeck_res = self.tcx.typeck(expr.hir_id.owner);
-
-        // To my knowledge a match has to either contain a singular expression or Tuple
-        // get all the 'parents' ie things being matched on and their types
-        let (parents, parents_ty) = match guard_expr.kind {
-          ExprKind::Tup(fields) => {
-            let mut res = Vec::new();
-            let mut res_ty = Vec::new();
-            for field in fields.iter() {
-              res.push(self.scrutinee_rap(&field));
-              res_ty.push(typeck_res.node_type(field.hir_id));
-            }
-            (res, res_ty)
-          }
-          _ => {
-            // `match self.kind` with self a reference (#266).
-            (vec![self.scrutinee_rap(&guard_expr)], vec![typeck_res.node_type(guard_expr.hir_id)])
-          }
-        };
-        let typeck_res = self.tcx.typeck(guard_expr.hir_id.owner);
-
-        let split = span_end_line(&guard_expr.span, &self.tcx); // TODO: might need to alter this
-        let merge = self.tcx.sess.source_map().lookup_char_pos(expr.span.hi()).line;
-
-        let mut b_ty_names: Vec<String> = Vec::new();
-        let mut b_slices: Vec<(usize, usize)> = Vec::new();
-        let mut branch_data: Vec<ExtBranchData> = Vec::new();
-        // Liveness is computed from the events actually folded into
-        // each arm's `branch_e_data` below — see the symmetric note
-        // in the If arm. Pat-decls (variables bound by the arm's
-        // pattern) are subtracted off per arm so they don't show up
-        // as branched columns of their own.
-        let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
-        // Track every binding introduced by an arm pattern so we
-        // can subtract the union from `liveness` after all arms have
-        // been processed.
-        let mut all_pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
-
-        
-        match source {
-          // A normal match (not desugared)
-          rustc_hir::MatchSource::Normal => {
-            // Single-arm match: inline. Don't filter body events
-            // out of preprocessed_events / don't emit a Branch
-            // event — same rationale as single-arm if / if-let
-            // above. The directly-built events (pattern
-            // destructures, post-arm callbacks, per-arm
-            // GoOutOfScope) get routed through add_external_event
-            // after the loop so line_map picks them up; body
-            // events are already in preprocessed_events from the
-            // arm's visit_expr below.
-            let inline = arms.len() == 1;
-            // Every arm starts from the same uninitialized `let x;`
-            // locals (#234); see join_uninit_locals.
-            let uninit_before = self.uninit_locals.clone();
-            let maybe_init_before = self.maybe_init_locals.clone();
-            let mut uninit_ends = Vec::new();
-            // An exit in an arm doesn't see the binding of any arm's
-            // value to a `let` (#410): it happens after the match. The
-            // earlier arms' own events are out of `preprocessed_events`
-            // by then (`take_branch_events` below), except a lone
-            // arm's, which has no siblings.
-            let entry_len = self.in_scope.len();
-            let match_lo = *self.unique_id;
-            let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
-            self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0 });
-            // `match (x, y) { … }` moves `x` and `y` into the tuple
-            // whatever arm is taken (#327).
-            let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
-            let into_tuple = self.tuple_scrutinee_target(guard_expr);
-            let tuple_name = match &into_tuple {
-              ResourceTy::Temporary { tuple: Some(t), .. } => t.clone(),
-              _ => String::new(),
-            };
-            // The tuple lives to the end of the statement holding the
-            // match, usually the match's own last line.
-            let past_match = self.temporary_scope_end(guard_expr).is_some_and(|(_, l, _)| l > merge);
-            let mut arm_borrows = self.arm_borrows_begin();
-            for (arm_idx, arm) in arms.iter().enumerate() {
-              if arm_idx > 0 {
-                self.arm_borrows_next(&mut arm_borrows);
-              }
-              // An arm's pattern bindings are out of scope in the next.
-              self.in_scope.truncate(entry_len);
-              let arm_hash_lo = self.rap_hashes;
-              let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
-              let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
-              // Parents this arm's pattern moves out of.
-              let mut arm_moved: Vec<ResourceTy> = Vec::new();
-
-              // get line info
-              // An arm body can be a bare macro call
-              // (`Some(s) => println!("{s}"),`), whose span lies in
-              // the macro's expansion; span_to_line / span_end_line
-              // resolve it to the user's call site.
-              let begin = span_to_line(&arm.body.span, &self.tcx);
-              let end = span_end_line(&arm.body.span, &self.tcx);
-              let pat_line = span_to_line(&arm.pat.span, &self.tcx);
-              b_slices.push((begin, end));
-              b_ty_names.push(get_name_of_pat(arm.pat, &self.tcx));
-
-              
-              // add/fetch raps that are initialized in arm expr
-              // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
-              let mut pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
-              // Struct bindings whose field columns still need their
-              // "acquires its part" events (see below).
-              let mut member_binds: Vec<ResourceAccessPoint> = Vec::new();
-              // Events the pattern adds to the global list (a struct
-              // binding's reference fields, its fields' binds) belong
-              // to this arm; see the drain below.
-              let first_pat_ev = self.preprocessed_events.len();
-              // println!("arm pat {:#?}", arm.pat);
-              // Route pattern-destructure events into either
-              // `branch_e_data` (multi-arm: events live inside the
-              // Branch's per-arm event list) or `preprocessed_events`
-              // via `add_external_event` (single-arm inline: events
-              // join the global timeline before `visit_expr` so they
-              // appear in source order with the body).
-              let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
-              // The OrAltMove dots of the names `or_conflicts` lists,
-              // added after the moves into the scrutinee tuple below
-              // (the tuple holds the values they may take).
-              let mut or_events: Vec<ExternalEvent> = Vec::new();
-              // Where the possible borrows of an or-pattern's reference
-              // end (#565); added with the arm's other end events.
-              let mut or_end_events: Vec<(usize, ExternalEvent)> = Vec::new();
-              match arm_pat.kind {
-                // (<pat>, <pat>, ..) => <expr>
-                // First need to annotate events that occur between parents (the variables being matched upon)
-                // and the pattern bindings in each arm.
-                //
-                // `parents.len() == pat_list.len()` is the
-                // "guard-was-a-tuple-literal" shape (`match (a, b)
-                // { (x, y) => … }`): each inner pattern maps to its
-                // own parent expression. Otherwise the guard is a
-                // single tuple-/enum-typed scrutinee and every
-                // inner pattern destructures out of it (`match
-                // pair { (x, y) => … }`, `match res { Ok(a, b, c)
-                // => … }`); use the single parent for all inner
-                // pattern slots. Without that fallback, `parents[i]`
-                // for i>0 panics with an index-out-of-bounds.
-                PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _)=> {
-                  let same_arity = pat_list.len() == parents.len();
-                  // `match t { (a, b) => … }` / `match p { P(x, y) => … }`
-                  // on a variable whose parts have columns (#189, #326):
-                  // each sub-pattern destructures its own part, `t.0` /
-                  // `t.1`. (A tuple-literal scrutinee has one parent per
-                  // element already.)
-                  let part_parents = if parents.len() == 1 {
-                    self.pat_parts(arm_pat, &parents[0], parents_ty[0])
-                  } else {
-                    None
-                  };
-                  // Borrows the bindings take from what the scrutinee
-                  // borrows (#391) follow all the bindings, as in
-                  // `register_iflet_let_bindings`.
-                  let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
-                  // Each sub-pattern, the parent it destructures, and the
-                  // expression that is (the scrutinee, or its element).
-                  let mut subs: Vec<(&'tcx rustc_hir::Pat<'tcx>, ResourceTy, rustc_middle::ty::Ty<'tcx>, &'tcx Expr<'tcx>)> = Vec::new();
-                  // Whether each sub-pattern destructures a part of a
-                  // variable (parallel to `subs`).
-                  let mut sub_is_part: Vec<bool> = Vec::new();
-                  if matches!((arm_pat.kind, guard_expr.kind), (PatKind::Tuple(..), ExprKind::Tup(_))) && !guard_expr.span.from_expansion() {
-                    // `match (a, (b, c)) { (p, (x, _)) => … }`: each
-                    // sub-pattern with its element, through nested tuple
-                    // literals and `..` (#627).
-                    subs = self.literal_pat_parents(arm_pat, guard_expr);
-                    sub_is_part = vec![false; subs.len()];
-                  } else {
-                    for (i, p) in pat_list.iter().enumerate() {
-                      let parent_idx = if same_arity { i } else { 0 };
-                      let (parent, parent_ty) = match part_parents.as_ref().and_then(|v| v[i].1.clone()) {
-                        Some(pp) => pp,
-                        None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
-                      };
-                      let scrutinee = match guard_expr.kind {
-                        ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
-                        _ => guard_expr,
-                      };
-                      subs.push((p, parent, parent_ty, scrutinee));
-                      sub_is_part.push(part_parents.as_ref().is_some_and(|v| v[i].1.is_some()));
-                    }
-                  }
-                  for (sub_idx, (p, parent, parent_ty, scrutinee)) in subs.into_iter().enumerate() {
-                    let mut associated_ro = Vec::new();
-                    self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
-                    // `(p, q)` on `pair = (&c, &d)` copies the references
-                    // in `pair.0` / `pair.1`: `p` borrows what `pair.0`
-                    // borrows, as in `let (p, q) = pair;` (#756).
-                    if sub_is_part[sub_idx] && parent_ty.is_ref() {
-                      for (r, _, _, _) in associated_ro.iter() {
-                        self.adopt_part_borrow(r.name(), &parent.name());
-                      }
-                    }
-                    // A `ref` binding out of `(x, y)` borrows the tuple's
-                    // element, not x (#580).
-                    for (r, e, from, _) in associated_ro.iter_mut() {
-                      *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
-                    }
-                    let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
-                    or_events.extend(or_evs.start);
-                    or_end_events.extend(or_evs.end);
-                    pat_decls.extend(or_evs.decls);
-                    let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
-                    let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
-                    pat_decls.extend(temp2);
-                    for (to_ro, e, from, partial) in associated_ro.iter() {
-                      if matches!(e, Evt::Move) {
-                        arm_moved.push(from.clone());
-                      }
-                      // If the type of the pat is not the same as the parent associated with it then it must be a partial move
-                      let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
-                      let id = *self.unique_id;
-                      *self.unique_id += 1;
-                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
-                      // A reference copied out of a value that holds a
-                      // borrow also borrows what that value borrows (#391).
-                      pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
-                      // add_external_event gives a struct's fields their
-                      // part of a whole (non-partial) move; otherwise
-                      // that's done below.
-                      if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
-                        member_binds.push(to_ro.clone());
-                      }
-                      if inline {
-                        self.add_external_event(pat_line, ext_ev);
-                      } else {
-                        branch_e_data.push((pat_line, ext_ev));
-                      }
-                      match e {
-                        Evt::SBorrow => {
-                          callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
-                        }
-                        Evt::MBorrow => {
-                          callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
-                        }
-                        _ => {}
-                      }
-                    }
-                  }
-                  for ev in pending_borrows {
-                    if inline {
-                      self.add_external_event(pat_line, ev);
-                    } else {
-                      branch_e_data.push((pat_line, ev));
-                    }
-                  }
-                }
-                // <expr> => <expr> (just a singleton variable)
-                _ => {
-                  let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
-                  for i in 0..parents.len() {
-                    let mut associated_ro = Vec::new();
-                    // `P { a, b } => …` on a struct variable: `a` / `b`
-                    // come from `p.a` / `p.b` (#326).
-                    self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
-                    let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
-                    or_events.extend(or_evs.start);
-                    or_end_events.extend(or_evs.end);
-                    pat_decls.extend(or_evs.decls);
-                    let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
-                    let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
-                    pat_decls.extend(temp2);
-                    for (to_ro, e, from, partial) in associated_ro.iter() {
-                      if matches!(e, Evt::Move) {
-                        arm_moved.push(from.clone());
-                      }
-                      let id = *self.unique_id;
-                      *self.unique_id += 1;
-                      let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
-                      let scrutinee = match guard_expr.kind {
-                        ExprKind::Tup(fields) if fields.len() == parents.len() => &fields[i],
-                        _ => guard_expr,
-                      };
-                      pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
-                      if matches!(e, Evt::Move | Evt::Copy) && !inline {
-                        member_binds.push(to_ro.clone());
-                      }
-                      if inline {
-                        self.add_external_event(pat_line, ext_ev);
-                      } else {
-                        branch_e_data.push((pat_line, ext_ev));
-                      }
-                      match e {               // A borrow, mut/immut must be returned at the end of the block
-                        Evt::SBorrow => {
-                          callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
-                        }
-                        Evt::MBorrow => {
-                          callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
-                        }
-                        _ => {}
-                      }
-                    }
-                  }
-                  for ev in pending_borrows {
-                    if inline {
-                      self.add_external_event(pat_line, ev);
-                    } else {
-                      branch_e_data.push((pat_line, ev));
-                    }
-                  }
-                }
-              }
-
-              // A variable the scrutinee tuple took but this arm's
-              // pattern doesn't move out (`_ => …`, `(Some(_), b)`): it
-              // was still moved into the tuple, and isn't usable after
-              // the match (#327).
-              // (A struct or tuple variable's part columns too, but not
-              // the ones the pattern took, #627.)
-              for v in scrutinee_moves.iter() {
-                for r in self.tuple_scrutinee_unbound(v, &arm_moved) {
-                  let id = *self.unique_id;
-                  *self.unique_id += 1;
-                  let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), id, false);
-                  if inline {
-                    self.add_external_event(pat_line, ext_ev);
-                  } else {
-                    branch_e_data.push((pat_line, ext_ev));
-                  }
-                }
-              }
-              for ev in or_events {
-                if inline {
-                  self.add_external_event(pat_line, ev);
-                } else {
-                  branch_e_data.push((pat_line, ev));
-                }
-              }
-              // An arm that leaves early (`_ => return 0`) drops the tuple
-              // at its exit instead (#327): see drop_locals_on_exit.
-              let arm_diverges = self.expr_diverges(arm.body);
-
-              // A struct bound by the pattern (`Some(y) =>` with `y: P`)
-              // gets field columns (`y.name`, `y.n`). They receive their
-              // part of the value with `y`, go out of scope with it,
-              // and only exist in this arm (#405).
-              member_binds.sort_by_key(|r| *r.hash());
-              member_binds.dedup();
-              for r in member_binds {
-                if matches!(r, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
-                  self.bind_struct_fields(pat_line, r.name());
-                }
-              }
-              pat_decls = self.with_struct_members(&pat_decls);
-              if !inline {
-                branch_e_data.extend(self.preprocessed_events.drain(first_pat_ev..));
-              }
-
-              // Match guard: `pat if cond =>` / `pat if let p = e =>`.
-              // The guard runs after the pattern matched and before
-              // the body, and only then; if it's false, matching goes
-              // on with the later arms. We show its events in this
-              // arm's own column, next to the pattern's bindings:
-              // "when this arm is taken, this happened" is always true.
-              // What that leaves out is that the guard also ran when
-              // the pattern matched but the guard failed and a later
-              // arm was taken. For borrows and reads that's harmless
-              // (they end inside the guard, so later arms start from
-              // the same state), but a move or an assignment would
-              // still be in effect in those later arms, so
-              // `visit_match_guard` refuses those rather than draw a
-              // later arm with a value it no longer has.
-              //
-              // Bindings introduced by an `if let` guard are registered
-              // like `if let` condition bindings and live until the
-              // end of the arm, like the pattern's own bindings.
-              if let Some(guard) = arm.guard {
-                #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-                let outer: HashSet<ResourceAccessPoint> = self.raps.values()
-                  .map(|rd| rd.rap.clone())
-                  .filter(|r| !r.is_fn() && !pat_decls.contains(r))
-                  .collect();
-                let first_guard_ev = self.preprocessed_events.len();
-                let mut guard_decls: HashSet<ResourceAccessPoint> = HashSet::new();
-                self.visit_match_guard(guard, true, &outer, &mut guard_decls);
-                if !inline {
-                  branch_e_data.extend(self.preprocessed_events.drain(first_guard_ev..));
-                }
-                pat_decls.extend(guard_decls);
-              }
-              // While the body is visited, the pattern's and the guard's
-              // events are on the global list too, so that an exit in it
-              // sees the bindings own their values and drops them
-              // (#630). They're taken off again after the body.
-              let pat_ids: HashSet<usize> = branch_e_data.iter().map(|(_, e)| e.get_id()).collect();
-              self.preprocessed_events.extend(branch_e_data.iter().cloned());
-
-              // visit expr. inside_branch is restored, not reset: the
-              // match may sit inside another branch (#410).
-              let prev_inside_branch = self.inside_branch;
-              self.inside_branch = true;
-              self.uninit_locals = uninit_before.clone();
-              self.maybe_init_locals = maybe_init_before.clone();
-              let body_lo = *self.unique_id;
-              // An exit in the arm drops the tuple scrutinee (#327).
-              let live = !scrutinee_moves.is_empty();
-              if live {
-                self.live_tuples.push(LiveTuple {
-                  frame: self.exit_frames.len() - 1,
-                  len: entry_len,
-                  scrutinee: guard_expr,
-                  tuple: tuple_name.clone(),
-                  pat: arm.pat,
-                  at: TupleDropAt::MatchArmExit,
-                });
-              }
-              // A `?` in the body sees the pattern's bindings (#636).
-              let binds_at = self.preprocessed_events.len();
-              if let Some(ExitFrame::Branch { binds: b, binds_at: at, .. }) = self.exit_frames.last_mut() {
-                b.clone_from(&branch_e_data);
-                *at = binds_at;
-              }
-              self.arm_frames.push((split, merge, begin, end));
-              self.visit_expr(arm.body);
-              self.arm_frames.pop();
-              if live {
-                self.live_tuples.pop();
-              }
-              if let Some(ExitFrame::Branch { binds: b, .. }) = self.exit_frames.last_mut() {
-                b.clear();
-              }
-              let body_ids = body_lo..*self.unique_id;
-              uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals), std::mem::take(&mut self.maybe_init_locals)));
-              self.inside_branch = prev_inside_branch;
-
-              all_pat_decls = &all_pat_decls | &pat_decls;
-              let mut arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
-              // Everything declared in the arm, also inside an inline
-              // construct nested in it (`Some(x) => { if let Some(y) =
-              // b { … } }`, #501), exists only in the arm (the nested
-              // construct ends what it declares itself).
-              let arm_inner = self.raps_declared_since(arm_hash_lo, &uninit_before);
-              all_pat_decls = &all_pat_decls | &arm_inner;
-              // Variables declared inside a loop in this arm already go
-              // out of scope there (see scoped_in_events).
-              let mut arm_scoped: HashSet<ResourceAccessPoint> = HashSet::new();
-
-
-              // get events that occured in the arm: those handed out
-              // while its body was visited, plus the ones pairing its
-              // value with a `let` (see `take_branch_events`). Picking
-              // them by source line gave every event on a shared line
-              // to the first arm (#117).
-              self.preprocessed_events.retain(|(_, e)| !pat_ids.contains(&e.get_id()));
-              if !inline {
-                let body_ev = self.take_branch_events(body_ids, Some(arm.body), &HashSet::new());
-                branch_e_data.extend(body_ev);
-
-                // contribute events-touched variables to liveness; the
-                // arm's own pat-decls are subtracted at the end.
-                collect_event_live_vars(&branch_e_data, &mut liveness);
-                // Values dropped at a `return` in the arm (#363).
-                let arm_diverges = self.expr_diverges(arm.body);
-                liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
-                arm_scoped = scoped_in_events(&branch_e_data, &self.exit_drops);
-                all_pat_decls = &all_pat_decls | &arm_scoped;
-              }
-
-              // The end of an or-pattern reference's possible borrows
-              // (#565), where the borrow checker ends them: at the
-              // reference's last use, which can be before the arm ends.
-              for (line, ev) in or_end_events {
-                // Its borrow is drawn by these events, not `print_lifetimes`.
-                if let ExternalEvent::OrAltBorrow { into, .. } = &ev {
-                  self.borrow_map.remove(into.name());
-                }
-                if inline {
-                  self.add_external_event(line, ev);
-                } else {
-                  let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
-                  branch_e_data.insert(at, (line, ev));
-                }
-              }
-
-              // add callback events - events that need to happen at the end of an arm block
-              // ex: if a pattern binding borrows from a parent
-              let pat_end = span_end_line(&arm.pat.span, &self.tcx);
-              let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
-              for (to, from, e) in callback_events {
-                let name = from.real_name();
-                self.borrow_map.remove(&name);
-                // The borrow ends where the borrow checker ends it, at
-                // the binding's last use (#599): the end of the region
-                // of the loan MIR issues for the binding on the pattern's
-                // lines. A binding that reborrows through a shared
-                // reference (`(x, _)` on `o: &(String, String)`) has no
-                // loan of its own; its borrow lasts as long as it is
-                // live.
-                let ends_at = mir_b_data.iter()
-                  .filter(|m| m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
-                  .map(|m| m.region.1)
-                  .max()
-                  .or_else(|| self.last_live_line(&name, (pat_line, end)))
-                  .filter(|l| (pat_line..=end).contains(l))
-                  .unwrap_or(end);
-                // When the scrutinee is itself a reference (`match o`,
-                // `o: &Option<String>`), the binding reborrows through
-                // it, so `o`'s borrow lasts at least until here (#372).
-                if to.is_ref() {
-                  let floor = self.borrow_floor.entry(to.real_name()).or_insert(ends_at);
-                  *floor = (*floor).max(ends_at);
-                }
-                let id = *self.unique_id;
-                *self.unique_id += 1;
-                let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
-                if inline {
-                  self.add_external_event(ends_at, ext_ev);
-                } else {
-                  // After the arm's events up to that line.
-                  let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
-                  branch_e_data.insert(at, (ends_at, ext_ev));
-                }
-              }
-
-              // add gos events, except in an arm that always leaves at
-              // an exit that drops them (#630)
-              let arm_left = Self::left_at_exits(!inline && self.ends_at_exits(arm.body, true), &arm_decls);
-              for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
-                let id = *self.unique_id;
-                *self.unique_id += 1;
-                let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
-                if inline {
-                  self.add_external_event(end, gos);
-                } else {
-                  branch_e_data.push((end, gos));
-                }
-              }
-
-              // The tuple is dropped after the arm, and with it what of
-              // each variable's value the pattern didn't move out
-              // (#327). It has no column: a drop dot on each such
-              // variable's says so. (An arm that leaves early drops it
-              // at its `return` / `break` / `continue` / panic.)
-              if !arm_diverges {
-                let (at, line) = if past_match {
-                  (TupleDropAt::MatchArmStmt, end)
-                } else if inline {
-                  (TupleDropAt::MatchHere, merge)
-                } else {
-                  (TupleDropAt::MatchArm, end)
-                };
-                for ev in self.tuple_drop_events(guard_expr, &tuple_name, Some(arm.pat), at) {
-                  if inline {
-                    self.add_external_event(line, ev);
-                  } else {
-                    branch_e_data.push((line, ev));
-                  }
-                }
-              }
-
-              arm_decls.extend(arm_inner);
-              arm_decls.extend(arm_scoped);
-              if !inline {
-                let branch_line_map = create_line_map(&branch_e_data);
-                // An arm of type `!` (`_ => unreachable!()`) never
-                // reaches the merge (#296).
-                let (diverges, exits, break_carries) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
-                branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
-              }
-            }
-            self.arm_borrows_end(arm_borrows);
-            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-            let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
-            let maybe_init = self.join_uninit_locals(uninit_ends, &known);
-            self.exit_frames.pop();
-            self.in_scope.truncate(entry_len);
-            // Single-arm: events already routed through
-            // add_external_event during the loop, nothing else
-            // to do — bail out of the Normal arm before the
-            // multi-arm Branch construction below. An exit in the
-            // lone arm isn't drawn: the arm isn't a column of its
-            // own (#410).
-            if inline {
-                self.discard_exit_drops(match_lo..*self.unique_id);
-                return;
-            }
-            // Variables introduced by an arm's pattern only exist
-            // inside that arm — strip them out so they don't get a
-            // branched timeline of their own.
-            liveness = &liveness - &all_pat_decls;
-            // add branch event. merge_point is the closing-brace
-            // line of the match — same convention as If, where
-            // merge_point is the line of the else-block's closing
-            // `}`. Previously this used `merge - 1` (with a stale
-            // TODO marker), which landed the join dot one row above
-            // the `};`, on the last arm's body line.
-            if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
-              self.all_paths_exit = true;
-            }
-            self.note_exit_scope(expr);
-            self.add_external_event(split, ExternalEvent::Branch {
-              live_vars: liveness,
-              branches: branch_data,
-              branch_type: BranchType::Match(b_ty_names, b_slices),
-              split_point: split,
-              merge_point: merge,
-              maybe_init,
-              id: *self.unique_id });
-            *self.unique_id += 1;
-          }
-          rustc_hir::MatchSource::ForLoopDesugar => {
-            // For-loops desugar (rustc_ast_lowering's lower_expr_for) to:
-            //
-            //   match IntoIterator::into_iter(<head>) {
-            //     mut iter => loop {
-            //       match Iterator::next(&mut iter) {
-            //         None       => break,
-            //         Some(<pat>) => <body>,
-            //       }
-            //     }
-            //   }
-            //
-            // We render this as the issue's "single-iteration view":
-            // emit one borrow/move event for <head> at the for line,
-            // register the pattern binding(s) as branch-scoped RAPs,
-            // and visit <body> with inside_branch = true so its events
-            // flow into the timeline as if the loop ran once. We don't
-            // emit a Branch event yet — the conditional-shading
-            // visualization is design work tracked alongside #78.
-            //
-            // Shape pattern-matching is defensive: if the inner HIR
-            // doesn't look like the lowering above (e.g. a future
-            // rustc tweak, or a `for await`), we silently fall back to
-            // the previous behaviour (no body events) rather than
-            // panic.
-            if let Some(head_arg) = match guard_expr.kind {
-              ExprKind::Call(_, args) if args.len() == 1 => Some(&args[0]),
-              _ => None,
-            } {
-              if let Some((user_pat, body_expr)) = arms.first()
-                .and_then(|outer_arm| match outer_arm.body.kind {
-                  ExprKind::Loop(loop_block, _, rustc_hir::LoopSource::ForLoop, _) => {
-                    loop_block.stmts.first().and_then(|s| match s.kind {
-                      StmtKind::Expr(e) | StmtKind::Semi(e) => match e.kind {
-                        ExprKind::Match(_, inner_arms, rustc_hir::MatchSource::ForLoopDesugar) => {
-                          // The Some-arm of the inner match wraps the
-                          // user pattern in a `PatKind::Struct` with a
-                          // single PatField (rustc's pat_some →
-                          // pat_lang_item_variant — the wrapper is
-                          // `Some(pat)` where pat lives in fields[0]).
-                          inner_arms.iter().find_map(|a| match a.pat.kind {
-                            PatKind::Struct(_, fields, _) if fields.len() == 1 => {
-                              Some((fields[0].pat, a.body))
-                            }
-                            _ => None,
-                          })
-                        }
-                        _ => None,
-                      },
-                      _ => None,
-                    })
-                  }
-                  _ => None,
-                })
-              {
-                let head_from = self.in_scope.len();
-                self.note_for_head_temporary(head_arg, guard_expr, expr);
-                // Iterand event: shape of head_arg dictates the arrow.
-                //   &v       ⇒ SBorrow from v
-                //   &mut v   ⇒ MBorrow from v
-                //   v (owned, non-Copy) ⇒ Move from v
-                //   anything else (Range, call result, …) ⇒ Bind (below)
-                let for_line = self.tcx.sess.source_map()
-                  .lookup_char_pos(expr.span.lo()).line;
-                let iterand_evt = match head_arg.kind {
-                  ExprKind::AddrOf(_, Mutability::Not, _) => Some(Evt::SBorrow),
-                  ExprKind::AddrOf(_, Mutability::Mut, _) => Some(Evt::MBorrow),
-                  ExprKind::Path(_) => {
-                    let head_ty = self.tcx.typeck(head_arg.hir_id.owner)
-                      .node_type(head_arg.hir_id);
-                    let is_copy = self.tcx.type_is_copy_modulo_regions(
-                      typing_env(self.tcx, head_arg.hir_id.owner),
-                      head_ty);
-                    if head_ty.is_ref() { None }   // already a ref binding; skip
-                    else if is_copy { None }       // Range / Copy iterand
-                    else { Some(Evt::Move) }
-                  }
-                  _ => None,
-                };
-                let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
-                // `for x in it` where `it` is already an iterator
-                // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
-                // returns its argument unchanged, so the loop *moves*
-                // `it` into itself and each `x` is something `next()`
-                // hands out, not something `it` owns or lends (#417).
-                // Compare the head's type with the type of the
-                // `into_iter(head)` call: they are equal only for an
-                // iterator.
-                let head_is_iterator = matches!(head_arg.kind, ExprKind::Path(_))
-                  && matches!(iterand_evt, Some(Evt::Move))
-                  && {
-                    let typeck = self.tcx.typeck(head_arg.hir_id.owner);
-                    let head_ty = typeck.node_type(head_arg.hir_id);
-                    !head_ty.is_ref()
-                      && head_ty == typeck.node_type(guard_expr.hir_id)
-                  };
-
-                // The loop owns its iterator and drops it when the loop
-                // ends: a head that is moved in (`for s in v`, `for s in
-                // it`) whose iterator has drop glue (`vec::IntoIter`)
-                // says where it goes on the move (#482). `slice::Iter`
-                // and the like have nothing to drop. The iterator built
-                // from a collection (`v`) is a `(temporary N)` column
-                // (`note_for_head_temporary`); an iterator variable
-                // (`it`) is the loop's iterator itself, so its drop is
-                // on its own column (`iterator_head`).
-                let iterator_needs_drop = matches!(iterand_evt, Some(Evt::Move))
-                  && matches!(head_arg.kind, ExprKind::Path(_))
-                  && self.needs_drop(
-                    self.tcx.typeck(guard_expr.hir_id.owner).node_type(guard_expr.hir_id),
-                    guard_expr.hir_id.owner);
-
-                // Register the user pattern binding(s) as branch-scoped
-                // RAPs so events inside the body referencing them
-                // resolve. Two cases:
-                //
-                //   `for x in &v`           — single binding, attribute
-                //                             an iterand-shaped event
-                //                             (SBorrow / MBorrow / Move)
-                //                             from the head expression.
-                //
-                //   `for (i, a) in iter`    — tuple / struct / etc. The
-                //                             iterand semantics don't
-                //                             pair element-wise against
-                //                             a tuple pattern (the
-                //                             iterator yields tuples but
-                //                             the iter expression isn't
-                //                             one), so fall back to
-                //                             `bind_walk`: register every
-                //                             binding the pattern names
-                //                             against `head_arg`. Each
-                //                             gets a best-effort event
-                //                             (a Move/Copy via
-                //                             match_rhs) — approximate,
-                //                             but the body refs to
-                //                             `i`/`a` resolve and the
-                //                             columns aren't empty.
-                let prev_inside_branch = self.inside_branch;
-                self.inside_branch = true;
-                // A `break` / `continue` names the inner `loop` as its
-                // target, and drops the loop variable too (#410).
-                let entry_len = self.in_scope.len();
-                if let Some(outer_arm) = arms.first() {
-                  self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len, head_from });
-                }
-                // The variable moved into the loop as its iterator, whose
-                // drop is stated on its column (#482).
-                let mut iterator_head: Option<ResourceAccessPoint> = None;
-                if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
-                  let pat_name = binding_name(&self.tcx, pat_hirid);
-                  let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
-                    .pat_ty(user_pat);
-                    let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
-                  if pat_ty.is_ref() && head_is_iterator {
-                    // A reference an iterator hands out: its lender isn't
-                    // known here, and nothing is "returned" to the
-                    // iterator (or to anything) when it ends.
-                    self.add_ref(
-                      pat_name.clone(),
-                      bool_of_mut(pat_ty.ref_mutability().unwrap()),
-                      false,
-                      for_line,
-                      ResourceTy::Anonymous,
-                      std::collections::VecDeque::new(),
-                      self.current_scope,
-                      false,
-                      pointee_copy,
-                    );
-                    self.unlent_refs.insert(pat_name.clone());
-                  } else if pat_ty.is_ref() {
-                    // `for x in v.iter_mut()`: the loan came from `v`;
-                    // `iter_mut` is the method that lent it, not the
-                    // variable x hands the borrow back to (#749).
-                    let lender = match head_arg.kind {
-                      // Only an owner lends by autoref: a reference
-                      // receiver (`text.split_whitespace()` with
-                      // `text: &str`) is copied, so nothing is lent from it.
-                      ExprKind::MethodCall(_, recv, _, _)
-                        if !self.tcx.typeck(recv.hir_id.owner).node_type(recv.hir_id).is_ref() =>
-                      {
-                        match get_rap(recv, &self.tcx, &self.raps) {
-                          r @ ResourceTy::Value(_) => r,
-                          _ => head_rty.clone(),
-                        }
-                      }
-                      _ => head_rty.clone(),
-                    };
-                    self.add_ref(
-                      pat_name.clone(),
-                      bool_of_mut(pat_ty.ref_mutability().unwrap()),
-                      false,
-                      for_line,
-                      lender,
-                      std::collections::VecDeque::new(),
-                      self.current_scope,
-                      false,
-                      pointee_copy,
-                    );
-                  } else {
-                    let is_copy = self.tcx.type_is_copy_modulo_regions(
-                      typing_env(self.tcx, user_pat.hir_id.owner),
-                      pat_ty);
-                    self.add_owner(pat_name.clone(), false, is_copy, self.ty_is_plain(pat_ty, user_pat.hir_id.owner), self.ty_has_interior_mut(pat_ty, user_pat.hir_id.owner), self.current_scope, false);
-                    self.mark_owner_type(&pat_name, pat_ty);
-                  }
-                  self.annotate_src(pat_name.clone(), pat_ident.span, false,
-                    *self.raps.get(&pat_name).unwrap().rap.hash());
-
-                  // Emit the iterand event into the user's pattern binding.
-                  let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
-                  if head_is_iterator {
-                    // The iterator is moved into the loop; nothing is
-                    // moved into (or borrowed by) the loop variable.
-                    if iterator_needs_drop {
-                      iterator_head = head_rty.extract_rap().cloned();
-                      self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Iterator);
-                    } else {
-                      self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
-                    }
-                    self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
-                  } else if let Some(e) = iterand_evt {
-                    // `for n in a` moving a collection of Copy elements
-                    // (`Vec<i32>`): `a` is moved into the loop's
-                    // iterator, and each `n` is a copy `next()` hands
-                    // out, not something moved from `a` (#772). Draw the
-                    // move on the head and give `n` a plain binding.
-                    let elem_copy = matches!(e, Evt::Move) && !pat_ty.is_ref() && self.tcx.type_is_copy_modulo_regions(
-                      typing_env(self.tcx, user_pat.hir_id.owner),
-                      pat_ty);
-                    if elem_copy {
-                      if iterator_needs_drop {
-                        self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Collection);
-                      } else {
-                        self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
-                      }
-                      self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
-                    } else if iterator_needs_drop {
-                      self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::Collection);
-                    } else {
-                      self.add_ev(for_line, e, to_rty, head_rty, false);
-                    }
-                  } else {
-                    // A Range or a call result (`0..n`, `s.chars()`) has
-                    // no place to borrow or move from: each iteration's
-                    // value comes out of the iterator's `next()`. Give the
-                    // binding a plain Bind so its column starts at the
-                    // `for` line (#205).
-                    self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
-                  }
-                } else {
-                  // Composite patterns: bind every name in the pattern
-                  // as a branch-scoped RAP so body references resolve.
-                  // Emit a Bind from Anonymous for each — we don't
-                  // have a clean iterand shape (the iterator yields
-                  // tuples but the iter expression isn't a tuple).
-                  // Calling `match_rhs(head_arg)` would synthesize a
-                  // Copy from the iter's tail Function (e.g.
-                  // `enumerate`); those Function→Value events are
-                  // filtered out of `event_line_map` and end up
-                  // never reaching the destination's timeline, so the
-                  // column wouldn't render at all. The Bind shortcut
-                  // sidesteps that and matches the macro-RHS path.
-                  //
-                  // A head that is a variable moved into the loop
-                  // (`for (n, s) in pairs`) still moves it: draw that on
-                  // the head, into no particular binding, as the single
-                  // binding does (#527).
-                  if matches!(iterand_evt, Some(Evt::Move)) {
-                    if iterator_needs_drop {
-                      if head_is_iterator {
-                        iterator_head = head_rty.extract_rap().cloned();
-                        self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty.clone(), LoopHead::Iterator);
-                      } else {
-                        self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty.clone(), LoopHead::Collection);
-                      }
-                    } else {
-                      self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty.clone(), false);
-                    }
-                  }
-                  // `for (a, b) in &pairs` / `&mut pairs`: each reference
-                  // binding borrows the head (#576).
-                  if matches!(iterand_evt, Some(Evt::SBorrow) | Some(Evt::MBorrow)) {
-                    self.pattern_lender = iterand_evt.clone().map(|e| (e, head_rty.clone()));
-                  }
-                  self.register_pattern_bindings_anon(user_pat, for_line);
-                  self.pattern_lender = None;
-                }
-
-                // Visit body — events flow into the global timeline.
-                let before = self.rap_names();
-                if let Some(ro) = &iterator_head {
-                  if let Some(loop_expr) = arms.first().map(|a| a.body) {
-                    self.loop_iterators.push((loop_expr.hir_id, ro.clone()));
-                  }
-                }
-                // The body may run no times or many (#786).
-                let inits = self.enter_loop_inits();
-                self.visit_expr(body_expr);
-                if let Some(loop_expr) = arms.first().map(|a| a.body) {
-                  self.leave_loop_inits(expr, loop_expr.hir_id, inits, true);
-                }
-                if iterator_head.is_some() {
-                  self.loop_iterators.pop();
-                }
-                self.inside_branch = prev_inside_branch;
-
-                // The pattern bindings are fresh each iteration and,
-                // like the body's own `let`s, go out of scope at the
-                // body's closing brace (#205, #256). They're registered
-                // with is_global = false, so print_out_of_scope won't
-                // emit this for them.
-                let body_end = self.tcx.sess.source_map()
-                  .lookup_char_pos(body_expr.span.hi()).line;
-                // `for x in it`: the loop owns the iterator `it` holds a
-                // borrow in, until the loop ends, so the lender is
-                // borrowed through the whole body and its borrow ends
-                // where the loop does, not at the last use of `x`
-                // (#722). (A `break` that leaves the loop early ends it
-                // in its own branch.)
-                if head_is_iterator && arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1) {
-                  if let Some(name) = expr_to_rap_name(head_arg, &self.tcx) {
-                    if self.borrow_map.contains_key(&name) {
-                      if self.raps.get(&name).is_some_and(|r| r.rap.holds_borrow()) {
-                        self.for_moved_holders.insert(name.clone());
-                      }
-                      let floor = self.borrow_floor.entry(name).or_insert(body_end);
-                      *floor = (*floor).max(body_end);
-                    }
-                  }
-                }
-                let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
-                collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut loop_decls);
-                // Not where every path breaks or continues first (#631).
-                let loop_decls = &loop_decls - &Self::left_at_exits(self.ends_at_exits(body_expr, false), &loop_decls);
-                // The loop's iterator holds the loan the head made
-                // (`&mut m`, `&pairs`) until the loop ends, so the
-                // lender is borrowed through the whole body, not just
-                // to the last use of the binding: `m.len()` after
-                // `s`'s last use is still E0499/E0502 (#739). (A
-                // `break` / `return` in the body ends it in its own
-                // branch, drawn there.)
-                // (the loop's own desugared `None => break` is the one)
-                let runs_to_the_end = arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1)
-                  && !body_returns(body_expr);
-                let mut pat_decls = HashSet::new();
-                collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
-                #[expect(clippy::disallowed_methods, reason = "each binding's floor is raised on its own")]
-                for decl in pat_decls.iter().filter(|_| runs_to_the_end) {
-                  let lent = self.borrow_map.get(decl.name())
-                    .is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous));
-                  if lent {
-                    let floor = self.borrow_floor.entry(decl.name().to_owned()).or_insert(body_end);
-                    *floor = (*floor).max(body_end);
-                  }
-                }
-                self.emit_scope_end(loop_decls, body_end);
-                // `break`s in the body target the desugared `loop`
-                // (the outer arm's body), which also ends when the
-                // iterator runs out.
-                if let Some(loop_expr) = arms.first().map(|a| a.body) {
-                  self.emit_loop_exit_moves(loop_expr, None, &before, true);
-                }
-                if arms.first().is_some() {
-                  self.exit_frames.pop();
-                }
-                self.in_scope.truncate(entry_len);
-                // The loop drops its iterator where it ends, however it
-                // ends (running out, a `break`) (#482).
-                if let Some(ro) = iterator_head {
-                  self.add_loop_iterator_drop(ro, span_end_line(&expr.span, &self.tcx), LoopLeft::End);
-                }
-              }
-            }
-          }
-          // `e?`: the `Err` / `None` arm returns from the function
-          // (#430). The scrutinee `Try::branch(e)` was visited above.
-          rustc_hir::MatchSource::TryDesugar(_) => self.note_try(expr),
-          _ => {}
-        }
-      }
+      ExprKind::Match(guard_expr, arms, source) => self.visit_match(expr, guard_expr, arms, source),
       // `break` / `continue` leave the loop's iteration, dropping
       // what it declared (#410); a `break` in a labelled block
       // (no loop) drops nothing drawn here.
@@ -5293,6 +3158,2157 @@ fn is_place_expr(e: &Expr) -> bool {
     ExprKind::Field(base, _) | ExprKind::Index(base, _, _) | ExprKind::Unary(UnOp::Deref, base) => is_place_expr(base),
     _ => false,
   }
+}
+
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// The `ExprKind::Assign` arm of `visit_expr`: `lhs = rhs`.
+  fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
+    // `a = lhs` inside a destructuring assignment: draw it as
+    // `a = <the part of the RHS lhs holds>`. That part was
+    // already visited with the whole RHS.
+    let destructure_hid = local_of_path(rhs_expr)
+      .filter(|h| self.destructure_srcs.contains_key(h));
+    let rhs_expr: &'tcx Expr<'tcx> = match destructure_hid {
+      Some(h) => self.destructure_srcs[&h],
+      None => rhs_expr,
+    };
+    self.visit_expr(lhs_expr);
+    if destructure_hid.is_none() {
+      self.visit_expr(rhs_expr);
+    }
+
+    // Writing to a `static mut` (`COUNTER += inc`): the static has no
+    // column (see the Path arm below), so there's no LHS resource to
+    // attribute the write to. Events inside the RHS were emitted by
+    // the visit above; a non-Copy value assigned in (`LOG = v;`) is
+    // moved out of its owner, so record that move (to no column).
+    if let ExprKind::Path(QPath::Resolved(_, p)) = lhs_expr.kind {
+      if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) {
+        let rhs_ty = self.tcx.typeck(rhs_expr.hir_id.owner).node_type(rhs_expr.hir_id);
+        let rhs_copy = self.ty_is_copy(rhs_ty, rhs_expr.hir_id.owner);
+        if !rhs_copy {
+          self.match_rhs(ResourceTy::Anonymous, rhs_expr, Evt::Move);
+        }
+        return;
+      }
+    }
+
+    // `x = rhs` where x came from `let x;` and is still
+    // uninitialized here: this initializes x (#234). If only some
+    // paths to here initialized x (#244), it is a reassignment that
+    // drops x's old value only if there is one, and x has a value
+    // from here on.
+    let mut maybe_init = None;
+    if let (ExprKind::Assign(..), ExprKind::Path(QPath::Resolved(None, path))) = (expr.kind, lhs_expr.kind) {
+      if let Res::Local(hirid) = path.res {
+        if let Some(decl) = self.uninit_locals.remove(&hirid) {
+          self.init_deferred_local(hirid, decl, rhs_expr);
+          // (An immutable `let x;` can't be assigned twice, E0384:
+          // a loop that assigns it leaves right after.)
+          if matches!(decl.annotation.1, Mutability::Mut) {
+            self.drop_earlier_iteration(hirid, lhs_expr);
+          }
+          return;
+        }
+        if self.maybe_init_locals.remove(&hirid) {
+          maybe_init = Some(if self.maybe_init_by_loop.remove(&hirid) { InitBy::Loop } else { InitBy::Branch });
+        }
+      }
+    }
+
+    // typecheck to figure out what type of event is going to occur
+    let line_num = expr_to_line(&lhs_expr, &self.tcx);
+    // `u._a = …` on a union: resource_of_lhs maps it to the
+    // union's own column. The field's type (possibly a ref, or
+    // a non-Copy ManuallyDrop<T>) says nothing about `u`, and a
+    // union field write never runs a destructor, so skip the
+    // ref-reassignment and drop-at-reassign handling below.
+    let lhs_is_union_field = matches!(lhs_expr.kind,
+      ExprKind::Field(recv, _) if self.is_union_typed(recv));
+    let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
+    let is_copyable = self.ty_is_copy(lhs_ty, lhs_expr.hir_id.owner);
+    let e = if lhs_ty.is_ref() {
+      match lhs_ty.ref_mutability().unwrap() {
+        Mutability::Not => Evt::Copy,
+        Mutability::Mut => Evt::Move,
+      }
+    } else {
+      match is_copyable {
+        true => Evt::Copy, 
+        false => Evt::Move
+      }
+    };
+    // None means the LHS is a place the plugin doesn't model (a
+    // reference-typed field through a reference `h.r = &x`, a tuple
+    // field `t.0`, an element that is itself a reference
+    // `v[i] = &s`, …) or an unregistered name. The write itself
+    // isn't drawn, but for `=` the RHS still goes into that place:
+    // `t.1 = s` moves `s`. Record that
+    // against an anonymous destination, otherwise `s` would later
+    // be shown dropping a resource it no longer owns.
+    let lhs_rty = match self.resource_of_lhs(lhs_expr) {
+      Some(rty) => rty,
+      None => {
+        if let ExprKind::AddrOf(..) = rhs_expr.kind {
+          // `v[0] = &u` / `self.r = &x`: a borrow stored in a
+          // place with no column (#282).
+          self.store_borrow_in_unmodelled_place(lhs_expr, rhs_expr, e);
+        } else {
+          self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
+        }
+        return;
+      }
+    };
+    // `*r = v` / `p.name = v` assign to a place behind a reference:
+    // they read like a plain assignment `y = e` (2026-11-05
+    // decision), with the place as the subject. The place has no
+    // column, so the tooltip also says the old value is dropped
+    // when its type needs drop. `*r += v` / `p.n += v` are in-place
+    // updates and keep their "modified through" wording.
+    let is_assign = matches!(expr.kind, ExprKind::Assign(..));
+    let assign_kind = || if is_copyable {
+      PlaceWrite::AssignCopy
+    } else if self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
+      PlaceWrite::AssignDropsOld
+    } else {
+      PlaceWrite::AssignOwned
+    };
+    let lhs_rty = match lhs_rty {
+      ResourceTy::Deref(rap) if is_assign && !lhs_ty.is_ref() =>
+        ResourceTy::Deref(rap.with_place_write(assign_kind())),
+      // A reference-typed field (`h.r = &x`) is not an owned or Copy
+      // value; leave its wording alone.
+      ResourceTy::DerefField(rap, place, _) if is_assign && !lhs_ty.is_ref() =>
+        ResourceTy::DerefField(rap, place, assign_kind()),
+      // A write to a union (`u.f = e`, `u = U { .. }`) is flagged
+      // too, with the Copy-ness of the value written, so the dot
+      // can say "assigned a copy of y" or "acquires ownership of
+      // a resource" (a union never drops either way).
+      ResourceTy::Value(rap) if is_assign
+        && rap.is_union() && (lhs_is_union_field || lhs_ty.is_union()) => {
+        let write = if is_copyable { PlaceWrite::AssignCopy } else { PlaceWrite::AssignOwned };
+        ResourceTy::Value(rap.with_place_write(write))
+      }
+      other => other,
+    };
+    // if we are pointing at a new piece of data
+    //
+    // `resource_of_lhs` returns Anonymous when the LHS is a deref
+    // of a temporary rather than a named place:
+    // `*c.borrow_mut() += 1`, `*v.last_mut().unwrap() = 5`,
+    // `*map.entry(k).or_insert(0) += 1`. There is no RAP for the
+    // temporary, so there's no reference to re-point here. The
+    // method calls inside the LHS already produced their events
+    // (`visit_expr(lhs_expr)` above), and `match_rhs` below still
+    // records what happens to the RHS (e.g. `= v` moves v); the
+    // temporary itself gets no ownership event.
+    // (Union field writes are excluded too; see lhs_is_union_field.)
+    if lhs_ty.is_ref() && !lhs_is_union_field && lhs_rty.extract_rap().is_some() {
+      let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
+      match lhs_rty {
+        // ex:
+        // let mut a = &b (where b is &&i32)
+        // a = &c (where c is &&i32)
+        ResourceTy::Value(_) => {
+          let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
+          self.hand_loan_to_carriers(lhs_rap.name(), &ref_data);
+          let to_ro = match ref_data.lender {
+            ResourceTy::Anonymous => ResourceTy::Deref(lhs_rap.clone()),
+            _ => ref_data.lender.clone()
+          };
+
+          // add event
+          // (None if the old reference was moved on, `let r2 = r;`
+          // before `r = &mut t;`: r had no borrow left to end, #209.)
+          let borrowers = get_borrowers(&lhs_rty.real_name(), &self.borrow_map);
+          // In a destructuring assignment, another destination may
+          // take this borrow over in the same statement: in
+          // `(r1, r2) = (r2, r1)` r1 stops borrowing x but r2 now
+          // does, so x is still borrowed (#291). The parts not yet
+          // drawn still have their new lender precomputed.
+          #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+          let taken_over = matches!(ref_data.lender, ResourceTy::Value(_))
+            && destructure_hid.is_some_and(|me| self.destructure_ref_data.iter()
+              .any(|(h, (lender, _, _, _))| *h != me && *lender == ref_data.lender));
+          if self.ref_handed_off(lhs_rap.name()) {
+          }
+          else if borrowers.len() > 1 || taken_over { // there is another active reference at this point, the resource cannot be returned
+            self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
+            *self.unique_id += 1;
+          }
+          else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num) {
+            // `hold.r = &t;` where `hold` held `&s`: the field no
+            // longer points to s, but `hold`'s type has one lifetime
+            // for the field's reference, so the borrow checker keeps
+            // s borrowed until the loan's last use (#531). Drawn on
+            // the lender's column only, like #512's stored borrows.
+            let place = ResourceTy::Index(lhs_rap.clone(), lhs_rap.name().to_owned(), PlaceWrite::Update);
+            let die = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
+            self.add_ev(end_line, die, to_ro, place, false);
+          }
+          else {
+            // `o = &q;` ends the old loan where the borrow checker
+            // does: `o` is dead until the write, so that can be
+            // earlier than the write itself (#745). (A loan
+            // `*w = &c` made through a reference ends the same
+            // way.)
+            //
+            // The loan's end on the paths that reach the write, if
+            // it lives on another one (`if c { x += 1; r = &y; }`
+            // with `r` read after the `if`), and for each lender
+            // of a reference that borrows from either of two
+            // (#770).
+            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num).unwrap_or(line_num);
+            let end_line = match self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
+              Some(end) => end,
+              None => end_of(self, &ref_data.lender),
+            };
+            // The loan lives on in another arm of an enclosing `if` /
+            // `match` (`c = &y;` in one arm, a read of `c` in a later
+            // one): on this path it ends at the write, on the other at
+            // that read, and the borrow checker ends it at each (#806).
+            // The end past the write is drawn at the read, in that arm,
+            // and ends the loan in this one too, where it is last used.
+            let end_line = match self.loan_end(&ref_data).filter(|&e| e > line_num && self.in_sibling_arm(e)) {
+              Some(e) if end_line == line_num => e,
+              _ => end_line,
+            };
+            // An end past the write (#778) is added once the whole
+            // body is visited, at the top level (`late_old_ends`).
+            self.defer_old_ends = end_line > line_num;
+            self.add_borrow_end_ev(end_line, to_ro, lhs_rty.clone(), &ref_data, Vec::new());
+            self.defer_old_ends = false;
+            // ...and to each further lender (#171).
+            for co in ref_data.co_lenders.iter() {
+              let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
+              let co_end = end_of(self, co);
+              self.defer_old_ends = co_end > line_num;
+              self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
+              self.defer_old_ends = false;
+            }
+          }
+
+          // Add event for possible lender if necessary
+          // set possible lender to None
+
+          // check for a match in MIR
+          // let mir_b_data = self.gather_borrow_data(&self.bwf);
+          // for m_data in mir_b_data.iter() {
+          //   match ExprVisitor::borrow_match(&ref_data, m_data) {
+          //     Some(kill) => {
+          //       if kill > line_num { // this loan needs to be extended 
+                  
+          //       }
+          //       break;
+          //     }
+          //     None => {}
+          //   }
+          // }
+
+          // update lhs_rty with new lender information (for a
+          // destructuring assignment, as computed before any of
+          // its parts was drawn: in `(r1, r2) = (r2, r1)`, r1's
+          // lender has changed by the time r2 is assigned)
+          let precomputed = destructure_hid.and_then(|h| self.destructure_ref_data.remove(&h));
+          // The reference whose loan the new value is (#644): in a
+          // destructuring assignment, as found before any part was
+          // drawn. One the same statement reassigns (`(m1, m2) =
+          // (m2, m1)`) hands its loan over right away.
+          let (src_loan, taken_over_now) = match destructure_hid {
+            Some(h) => match self.destructure_ref_src.remove(&h) {
+              Some((n, sp, now)) => (Some((n, sp)), now),
+              None => (None, false),
+            },
+            None => (self.source_ref_loan(rhs_expr), false),
+          };
+          let (mut new_lender, new_aliasing, new_static_lender, new_co_lenders) = match precomputed {
+            Some(d) => d,
+            None => self.get_ref_data_full(&rhs_expr),
+          };
+          // `cur = &cur.next;` (or `cur = n` with n borrowed from
+          // `cur.next`): the new pointee is a field of the *old*
+          // cur's pointee, which no column names. Don't record cur
+          // as its own lender ("returned to cur.next").
+          if new_lender.deref_rap() == Some(&lhs_rap) {
+            new_lender = ResourceTy::Anonymous;
+          }
+          let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
+          r.assigned_at = line_num;
+          r.aliasing = new_aliasing;
+          r.lender = new_lender;
+          r.static_lender = new_static_lender;
+          r.borrow_span = borrow_span_of(rhs_expr);
+          r.loan_line = call_loan_line(rhs_expr, line_num);
+          r.co_lenders = new_co_lenders;
+          if taken_over_now {
+            self.note_ref_carrier(lhs_rap.name(), None);
+            if let Some((_, sp)) = src_loan {
+              self.take_over_loan(lhs_rap.name(), sp);
+            }
+          } else {
+            self.note_ref_carrier(lhs_rap.name(), src_loan);
+          }
+        }
+
+        // ex:
+        // let a = & mut b (where b is &i32)
+        // *a = &c (where c is &i32)
+        ResourceTy::Deref(_) => {
+          let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
+          let deref_index = num_derefs(&lhs_expr) - 1;
+          let modified_ref_name = ref_data.aliasing.get(deref_index).unwrap().clone();
+          let modified_ref_data = self.borrow_map.get(&modified_ref_name).unwrap().clone();
+          let to_ro = modified_ref_data.lender.clone();
+          // References that copied the old value of the modified
+          // reference (`let h = o;` before `w = &mut o; *w = &q;`)
+          // keep its loan, as for `o = &q` (#664).
+          self.hand_loan_to_carriers(&modified_ref_name, &modified_ref_data);
+
+          // add event
+          // (Other references with the same lender, a carrier among
+          // them, keep the lender borrowed.)
+          let borrowers = get_borrowers(&modified_ref_name, &self.borrow_map);
+          // `o` stays live across the write (w borrows it), so
+          // unlike `o = &q`, which ends the old loan because `o` is
+          // dead until then, the borrow checker keeps the old loan
+          // live while `o` is: until the loan's end, past the write
+          // (#664). `o` no longer points to the lender, so like a
+          // field write (#531) the end is drawn on the lender's
+          // column only.
+          let old_end = self.loan_end(&modified_ref_data).filter(|&end| end > line_num)
+            .zip(self.raps.get(&modified_ref_name).map(|r| r.rap.clone()));
+          if borrowers.len() > 1 {
+            // Another reference keeps the lender borrowed and gives
+            // it back. (A RefDie from `*w` would be drawn on w's
+            // column with w's mutability, not the old value's.)
+          }
+          else if let (Some((end_line, o_rap)), ResourceTy::Value(_)) = (old_end, &to_ro) {
+            let place = ResourceTy::Index(o_rap, modified_ref_name.clone(), PlaceWrite::Update);
+            let die = if modified_ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
+            self.add_ev(end_line, die, to_ro, place, false);
+          }
+          else {
+            self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &modified_ref_data, Vec::new());
+          }
+
+          // update modified (derefed) reference's lender and aliasing data
+          let src_loan = self.source_ref_loan(rhs_expr);
+          let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = self.get_ref_data_full(&rhs_expr);
+          let r = self.borrow_map.get_mut(&modified_ref_name).unwrap();
+          r.assigned_at = line_num;
+          r.aliasing = new_aliasing.clone();
+          r.lender = new_lender;
+          r.static_lender = new_static_lender;
+          r.borrow_span = borrow_span_of(rhs_expr);
+          r.loan_line = call_loan_line(rhs_expr, line_num);
+          r.co_lenders = new_co_lenders;
+          self.note_ref_carrier(&modified_ref_name, src_loan);
+
+          let old_aliasing_data = self.borrow_map.get(&lhs_rty.real_name()).unwrap().aliasing.clone();
+          // update other aliases' aliasing data 
+          for i in 0..deref_index {
+            let ref_name = old_aliasing_data[i].clone();
+            let offset = deref_index - i;
+            let r = self.borrow_map.get_mut(&ref_name).unwrap();
+            r.aliasing.drain(offset..r.aliasing.len()); // remove old aliasing data
+            for (j, s) in new_aliasing.iter().enumerate() {
+              r.aliasing.insert(offset + j, s.to_owned());
+            }
+          }
+
+          // update parent's aliasing data
+          let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
+          r.aliasing.drain(deref_index + 1..r.aliasing.len()); // remove old aliasing data
+          for (j, s) in new_aliasing.iter().enumerate() {
+            r.aliasing.insert(deref_index + 1 + j, s.to_owned());
+          }
+        }
+        _ => panic!("internal state: a write through `*` whose target is neither a reference nor a plain dereference")
+      }
+    }
+
+    // Owned non-Copy reassignment: the previous value is dropped
+    // at this line. Two shapes:
+    //   `y = x`  — drop y's prior resource (its own resource is
+    //              what's being overwritten).
+    //   `*p = x` — drop the resource currently pointed to via p
+    //              (i.e. the lender's resource, found through the
+    //              borrow_map alias chain).
+    // Skip when the type is Copy (i32 etc.) or a reference (the
+    // ref-reassignment branch above already emits the appropriate
+    // SDie / MDie / RefDie events for those).
+    // Decide the drop target BEFORE match_rhs runs, since
+    // match_rhs would update rap_holds_resource_now's state for
+    // the lhs (the new Move-into makes it look like the old
+    // resource is still held). Emit the event AFTER match_rhs so
+    // its dot is drawn over the regular Acquire dot at the same
+    // (x, y) — otherwise the colored Acquire circle paints over
+    // the white down-arrow triangle and the drop becomes
+    // invisible.
+    // Assigning a whole union (`u = U { .. }`) drops nothing unless
+    // the union has its own `Drop` impl: a union never drops its
+    // fields (#191).
+    let union_without_drop = lhs_ty.is_union()
+      && !self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
+    // Nor does overwriting a `ManuallyDrop<T>` drop the old `T` (#283).
+    let lhs_is_manually_drop = lhs_ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
+    let drop_target: Option<ResourceAccessPoint> =
+      if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
+        match &lhs_rty {
+          ResourceTy::Value(rap) => {
+            // Plain reassign — only emit the drop if y currently
+            // holds a resource (rules out `let y; y = x;` first
+            // assignment, and `let y = a; let z = y; y = x;` where
+            // y was moved out before reassignment). A value moved
+            // on only some paths above counts; the event says so
+            // (`maybe_moved` below).
+            //
+            // A destructuring assignment that also moves y's old
+            // value out (`(a, b) = (b, a)`) doesn't drop it, even
+            // if that move is drawn after y's new value arrives.
+            if self.rap_holds_resource_now(rap.name())
+              && !self.destructure_moved.contains(rap.name()) {
+              Some(rap.clone())
+            } else {
+              None
+            }
+          }
+          ResourceTy::Deref(p_rap) => {
+            // Deref reassign through a &mut — the owner p points to
+            // (found through its lender, and through reborrows:
+            // `let f = &mut r.a; *f = …` overwrites `s.a`) holds
+            // the resource being overwritten. Borrow checker
+            // guarantees it currently holds (otherwise *p
+            // wouldn't be a valid place to write to), so we don't
+            // need rap_holds_resource_now here.
+            self.owner_behind_ref(p_rap, "")
+          }
+          ResourceTy::DerefField(p_rap, _, _) => {
+            // `r.a = v` after `let r = &mut s;`: the field being
+            // overwritten is the lender's `s.a`, so that's where
+            // the old value is dropped (#152). Only when the lender
+            // is a local with per-field columns; a parameter's
+            // lender is the caller, which has no column here.
+            expr_to_rap_name(lhs_expr, &self.tcx)
+              .and_then(|full| full.strip_prefix(p_rap.name().as_str()).map(str::to_owned))
+              .filter(|sfx| sfx.starts_with('.'))
+              .and_then(|sfx| self.owner_behind_ref(p_rap, &sfx))
+          }
+          _ => None,
+        }
+      } else {
+        None
+      };
+
+    // Overwriting a whole struct drops the resources its fields
+    // still own too (`d = c;` drops the old `d.data`), also when
+    // the struct is overwritten through a reference (`*r = S {..}`
+    // / `r.inner = I {..}` drop the lender's `s.a` / `s.inner.v`).
+    let field_drop_targets: Vec<ResourceAccessPoint> = match (&drop_target, &lhs_rty) {
+      (Some(rap @ ResourceAccessPoint::Struct(_)),
+       ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) => {
+        self.struct_fields_holding_resource(rap.name())
+      }
+      _ => Vec::new(),
+    };
+
+    // Whether each old value is there on every path, decided
+    // before match_rhs too (see above). `*p = x` writes through a
+    // live `&mut`, so its lender holds a value.
+    let maybe_moved: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
+      .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
+        && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
+      .collect();
+    // A struct or tuple some of whose parts were moved out before
+    // (on every path, or some only): only the parts still there are
+    // dropped (#628).
+    let parts: Vec<Option<ReassignParts>> = drop_target.iter().chain(field_drop_targets.iter())
+      .zip(maybe_moved.iter())
+      .map(|(rap, maybe)| match rap {
+        ResourceAccessPoint::Struct(_) if !maybe && matches!(lhs_rty, ResourceTy::Value(_)) => self.reassign_parts(rap.name()),
+        _ => None,
+      })
+      .collect();
+
+    // `it = b.iter();` where `it` holds a borrow (#336).
+    if let ResourceTy::Value(rap) = &lhs_rty {
+      if rap.holds_borrow() && !lhs_is_union_field && matches!(expr.kind, ExprKind::Assign(..)) {
+        let rap = rap.clone();
+        self.reassign_holder(&rap, rhs_expr, lhs_ty, line_num);
+      }
+    }
+    // `hold = H { r: &t };` overwrites a whole struct whose
+    // reference fields hold borrows (#538). The old value is
+    // dropped, so the borrow checker ends the loans it held at the
+    // write (a `&mut s` right after compiles), unlike a direct
+    // field write (#531), where `hold`'s single lifetime keeps
+    // them. The old loans are read before the literal's fields
+    // replace them and drawn after its Bind. The same holds for any
+    // other new value of a whole local (`hold = make(&t);`,
+    // `hold = other;`, #569), whose fields then hold that value's
+    // borrows, not the old ones. A struct field of a struct
+    // overwritten by a call (`hold.inner = make_inner(&t)`, #638)
+    // or by another variable (`hold.inner = other`, #655) takes the
+    // new value's borrows the same way (a variable's go with it,
+    // `transfer_ref_fields`), while its old loans last until
+    // hold's last use (#531; see `struct_field_borrow_ends`).
+    let struct_field_ends = match (&lhs_rty, expr.kind) {
+      (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
+        if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) => {
+        let rap = rap.clone();
+        let ends = self.struct_field_borrow_ends(&rap, line_num);
+        // The literal's fields hold borrows made here: an earlier
+        // move of the old value (`let h2 = hold;`, #637) doesn't
+        // hand these on.
+        self.restart_struct_field_loans(&rap, line_num);
+        ends
+      }
+      (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
+        if !lhs_is_union_field => {
+        let rap = rap.clone();
+        let ends = self.struct_field_borrow_ends(&rap, line_num);
+        self.reassign_struct_field_lenders(&rap, rhs_expr, lhs_ty, line_num);
+        ends
+      }
+      _ => Vec::new(),
+    };
+    let mut drop_line = line_num;
+    let mut drop_at: Option<usize> = None;
+    if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
+      // `v[i] += k`: k is an operand, not the element's new
+      // value, so don't draw it as copied into v[i].
+      let compound = match &lhs_rty {
+        ResourceTy::Index(r, place, w) => ResourceTy::Index(r.clone(), place.clone(), w.into_update()),
+        other => other.clone(),
+      };
+      self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);
+    } else {
+      let n_events = self.preprocessed_events.len();
+      self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+      self.draw_struct_field_borrow_ends(struct_field_ends);
+      // `v[1] = v[2]`: match_rhs has nothing to say about some
+      // RHS shapes (an index read, a field of a call, …), but the
+      // element is still overwritten.
+      if matches!(lhs_rty, ResourceTy::Index(..)) && self.preprocessed_events.len() == n_events {
+        self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
+      }
+      // `r = loop { … break a; };`: the loop runs first, and the
+      // old value is dropped when its value is assigned, after the
+      // loop ends: drawn where the new value arrives (#586), ahead
+      // of the arrivals, so that several `break`s' arrows stacked
+      // on that line (#561) don't push it onto a row of its own.
+      if let (ResourceTy::Value(rap), ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _)) = (&lhs_rty, rhs_expr.kind) {
+        let arrivals: Vec<(usize, usize)> = self.preprocessed_events.iter().enumerate().skip(n_events)
+          .filter(|(_, (_, ev))| matches!(ev,
+            ExternalEvent::Move { to: ResourceTy::Value(t), .. }
+            | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
+            | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if t.hash() == rap.hash()))
+          .map(|(i, (line, _))| (i, *line))
+          .collect();
+        match arrivals.first() {
+          Some(&(i, line)) => { drop_line = line; drop_at = Some(i); }
+          None => drop_line = span_end_line(&rhs_expr.span, &self.tcx),
+        }
+      }
+    }
+
+    let n_before_drops = self.preprocessed_events.len();
+    for ((rap, maybe_moved), parts) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts) {
+      let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
+      self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
+        ro: rap,
+        id: *self.unique_id,
+        maybe_moved,
+        by_cond,
+        parts,
+        maybe_init,
+      });
+      *self.unique_id += 1;
+    }
+    if let Some(i) = drop_at {
+      let n_drops = self.preprocessed_events.len() - n_before_drops;
+      self.preprocessed_events[i..].rotate_right(n_drops);
+    }
+}
+
+  /// The `ExprKind::If` arm of `visit_expr`: `if guard { then } else { els }`.
+  fn visit_if(&mut self, expr: &'tcx Expr<'tcx>, guard_expr: &'tcx Expr<'tcx>, if_expr: &'tcx Expr<'tcx>, else_expr: Option<&'tcx Expr<'tcx>>) {
+    // Macro-expanded `if`s — `assert!(cond)` becomes
+    // `match cond { true => {}, _ => panic!(...) }` (which the
+    // HIR represents as an If after match-desugaring); the `?`
+    // operator and several other macros do similar things.
+    // Visualizing these as a control-flow Branch on the user's
+    // timeline pollutes the diagram with branches the user
+    // didn't write. Walk the guard so any user-side variable
+    // accesses inside it (e.g. function arguments) are recorded
+    // as ordinary events on their owners' timelines, then skip
+    // the body/else and the Branch event entirely.
+    if expr.span.from_expansion() {
+      self.visit_expr(&guard_expr);
+      return;
+    }
+
+    // if-let: `if let pat = expr { body }`. The guard is an
+    // ExprKind::Let; register its pattern bindings against the
+    // scrutinee so identifiers in the body resolve, and emit the
+    // scrutinee→binding event + a GoOutOfScope at the body's
+    // closing brace. Otherwise (plain `if cond { … }`) just visit
+    // the guard for any variable accesses inside it.
+    // If-let: collect the pattern bindings registered against the
+    // scrutinee. We add them to `if_decl` below so the Branch's
+    // decl_vars set covers them and `append_decl_branch_events`
+    // populates each binding's timeline with a branch-shaped
+    // history (the surrounding If arm already emits the
+    // GoOutOfScope events from `if_decl`, so the helper skips
+    // emitting them itself).
+    //
+    // Each branch's events are the ones whose ids are handed out
+    // while it is visited (`if_ids`, `else_ids`), see
+    // `take_branch_events`. An if-let's pattern bindings happen
+    // only when the branch is taken, so they start `if_ids`; the
+    // scrutinee is evaluated either way and stays outside.
+    let entry_len = self.in_scope.len();
+    let if_lo;
+    let if_hash_lo;
+    // `if let … = (x, y)` moves `x` and `y` into the tuple even when
+    // the pattern doesn't match; the else branch shows that (#327).
+    let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
+    let mut iflet_tuple: Option<&'tcx rustc_hir::LetExpr<'tcx>> = None;
+    let mut chain_fail = ChainFail::default();
+    // Events handed out ids in the if-branch's range that stay
+    // before the split (see the let-chain case below).
+    let mut pre_split: HashSet<usize> = HashSet::new();
+    let iflet_bindings: HashSet<ResourceAccessPoint> =
+      if let ExprKind::Let(let_expr) = guard_expr.kind {
+        self.visit_expr(let_expr.init);
+        if_hash_lo = self.rap_hashes;
+        scrutinee_moves = self.tuple_scrutinee_moves(let_expr.init);
+        iflet_tuple = Some(let_expr);
+        let (bound, first_in_branch) = self.register_iflet_let_bindings(let_expr, None);
+        // Copies out of the scrutinee stay before the split (#496).
+        if_lo = first_in_branch;
+        bound
+      } else if is_let_chain(guard_expr) {
+        // `if let A = x && let B = y && cond` (#198): see
+        // visit_if_let_chain. The variables in scope here: a name
+        // that was in scope earlier and has ended (an earlier `if
+        // let`'s binding `a`) is free for the chain's own bindings
+        // (#696).
+        let outer: HashSet<ResourceAccessPoint> = self.in_scope.iter()
+          .filter_map(|name| self.raps.get(name))
+          .map(|rd| rd.rap.clone()).filter(|r| !r.is_fn()).collect();
+        if_hash_lo = self.rap_hashes;
+        let mut decls = HashSet::new();
+        let start = *self.unique_id;
+        let chain_lo = self.preprocessed_events.len();
+        let mut walk = ChainWalk::default();
+        self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
+        if_lo = walk.first_lo.unwrap_or(start);
+        chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
+        let binds = self.chain_binding_events(&(if_lo..*self.unique_id), &decls);
+        // Copying a value out of a variable declared before the `if`
+        // changes nothing about that variable, so, as for a lone `if
+        // let` (#496), the copy stays before the split and the
+        // variable's column doesn't branch for it (#583).
+        pre_split = binds.iter()
+          .filter(|(_, ev)| matches!(ev, ExternalEvent::Copy { from: ResourceTy::Value(f), .. } if outer.contains(f)))
+          .map(|(_, ev)| ev.get_id())
+          .collect();
+        let cols = self.chain_binding_columns(&binds, &decls);
+        self.binding_columns.extend(cols);
+        decls
+      } else {
+        self.visit_expr(&guard_expr);
+        if_lo = *self.unique_id;
+        if_hash_lo = self.rap_hashes;
+        HashSet::new()
+      };
+    // Restored, not reset: this `if` may sit inside another branch
+    // (#410).
+    let prev_inside_branch = self.inside_branch;
+    self.inside_branch = true; // need this flag to correctly handle variables that are declared inside blocks
+    // Both branches start from the same set of uninitialized
+    // `let x;` locals (#234); see join_uninit_locals.
+    let uninit_before = self.uninit_locals.clone();
+    let maybe_init_before = self.maybe_init_locals.clone();
+    // An exit in a branch sees neither the other branch's events
+    // nor the binding of the `if`'s value to a `let` (#410).
+    let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
+    // The scrutinee's temporaries (#469) outlive the pattern match,
+    // so an exit in a branch drops them (#410).
+    let frame_len = self.hoist_unbound_temporaries(entry_len);
+    // In edition 2024 those of an `if let` (or a let chain) are
+    // dropped before the `else` block runs (#469, #604): they aren't
+    // alive on the else path. They get no column in the branches and
+    // no join; an exit in the else branch doesn't drop them again.
+    let else_drops_temps = is_let_chain(guard_expr)
+      && !matches!(expr.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop))
+      && expr.span.edition() >= rustc_span::edition::Edition::Edition2024;
+    let scrutinee_temps: HashSet<ResourceAccessPoint> = if else_drops_temps {
+      self.in_scope[entry_len..frame_len].iter()
+        .filter_map(|n| self.raps.get(n).map(|rd| rd.rap.clone()))
+        .collect()
+    } else {
+      HashSet::new()
+    };
+    #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
+    self.unbranched_temps.extend(scrutinee_temps.iter().cloned());
+    self.exit_frames.push(ExitFrame::Branch { len: frame_len, hide, binds: Vec::new(), binds_at: 0 });
+    // An exit in the if branch drops the tuple scrutinee (#327).
+    let live_tuple = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()).map(|let_expr| LiveTuple {
+      frame: self.exit_frames.len() - 1,
+      len: entry_len,
+      scrutinee: let_expr.init,
+      tuple: match self.tuple_scrutinee_target(let_expr.init) {
+        ResourceTy::Temporary { tuple: Some(t), .. } => t,
+        _ => String::new(),
+      },
+      pat: let_expr.pat,
+      at: TupleDropAt::IfExit,
+    });
+    let live = live_tuple.is_some();
+    self.live_tuples.extend(live_tuple);
+    let mut arm_borrows = self.arm_borrows_begin();
+    let arm_lines = |this: &Self, e: &Expr<'_>| {
+      let sm = this.tcx.sess.source_map();
+      (sm.lookup_char_pos(expr.span.lo()).line, sm.lookup_char_pos(expr.span.hi()).line,
+       sm.lookup_char_pos(e.span.lo()).line, sm.lookup_char_pos(e.span.hi()).line)
+    };
+    self.arm_frames.push(arm_lines(self, if_expr));
+    self.visit_expr(&if_expr);
+    self.arm_frames.pop();
+    if live {
+      self.live_tuples.pop();
+    }
+    // Everything declared in each branch, also inside an inline
+    // construct nested in it (an `else if let`'s bindings, #501):
+    // see raps_declared_since.
+    let if_inner = self.raps_declared_since(if_hash_lo, &uninit_before);
+    let else_hash_lo = self.rap_hashes;
+    let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
+    let maybe_init_after_if = std::mem::replace(&mut self.maybe_init_locals, maybe_init_before.clone());
+    let if_ids = if_lo..*self.unique_id;
+    // A let-chain condition that moved a variable before a part
+    // that then failed (#281): the else branch (or the implicit
+    // empty one) starts with that variable maybe-moved, or, for an
+    // assignment, maybe holding its new value (#579). Emitted
+    // before the else branch is visited, so it's the first of its
+    // events and a reassignment in it sees the drop flag (#335).
+    // It's drawn on the `} else {` line; without an `else`, on the
+    // `if` line, where the condition fails and the body is skipped.
+    let fail_line = match else_expr {
+      Some(_) => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line,
+      None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line,
+    };
+    for a in std::mem::take(&mut chain_fail.assigns) {
+      self.add_external_event(fail_line, ExternalEvent::ChainFailAssign {
+        ro: a.rap,
+        place: a.place,
+        drops_old: a.drops_old,
+        no_else: else_expr.is_none(),
+        id: *self.unique_id,
+      });
+      *self.unique_id += 1;
+    }
+    for m in std::mem::take(&mut chain_fail.moves) {
+      self.add_external_event(fail_line, ExternalEvent::LoopExitMove {
+        ro: m.rap,
+        definite: m.definite,
+        at: MaybeMovedAt::ChainFail { to: m.to, dropped: m.dropped, no_else: else_expr.is_none(), how: m.how },
+        id: *self.unique_id,
+      });
+      *self.unique_id += 1;
+    }
+    // Borrows it made that have ended by then (#688).
+    let uses_lo = *self.unique_id;
+    for u in std::mem::take(&mut chain_fail.uses) {
+      self.add_external_event(fail_line, ExternalEvent::ChainFailUse {
+        ro: u.rap,
+        uses: u.uses,
+        definite: u.definite,
+        no_else: else_expr.is_none(),
+        id: *self.unique_id,
+      });
+      *self.unique_id += 1;
+    }
+    let uses_ids = uses_lo..*self.unique_id;
+    let else_decl = match else_expr {
+      Some(e) => {
+        // The scrutinee's temporaries are gone by now (see
+        // `scrutinee_temps`).
+        if !scrutinee_temps.is_empty() && self.in_scope.len() >= frame_len {
+          self.in_scope.drain(entry_len..frame_len);
+          if let Some(ExitFrame::Branch { len, .. }) = self.exit_frames.last_mut() {
+            *len = entry_len;
+          }
+        }
+        // The if-body's events stay in `preprocessed_events` until
+        // both branches are visited; they aren't on the `else`'s
+        // path.
+        if let Some(ExitFrame::Branch { hide, .. }) = self.exit_frames.last_mut() {
+          hide.push(if_ids.clone());
+        }
+        // Nor are the if-body's `if let` bindings: an exit in the
+        // `else` doesn't drop them.
+        self.in_scope.truncate(entry_len);
+        self.arm_borrows_next(&mut arm_borrows);
+        self.arm_frames.push(arm_lines(self, e));
+        self.visit_expr(e);
+        self.arm_frames.pop();
+        get_decl_of_expr(e, &self.tcx, &self.raps)
+      }
+      None => HashSet::new(),
+    };
+    let mut else_inner = self.raps_declared_since(else_hash_lo, &uninit_before);
+    if let Some(e) = else_expr {
+      else_inner = &else_inner | &else_if_let_bindings(e, &self.tcx, &self.raps);
+    }
+    self.arm_borrows_end(arm_borrows);
+    let uninit_after_else = std::mem::take(&mut self.uninit_locals);
+    let maybe_init_after_else = std::mem::take(&mut self.maybe_init_locals);
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
+    // The `let x;` locals the if branch surely assigned (only
+    // tested with `any` below: order doesn't matter).
+    #[expect(clippy::disallowed_methods, reason = "only tested with any; order doesn't matter")]
+    let assigned_in_if: Vec<HirId> = known.iter()
+      .filter(|id| !uninit_after_if.contains_key(id) && !maybe_init_after_if.contains(id))
+      .copied().collect();
+    let maybe_init = self.join_uninit_locals(vec![
+      (Some(if_expr), uninit_after_if, maybe_init_after_if),
+      (else_expr, uninit_after_else, maybe_init_after_else),
+    ], &known);
+    // A `let x;` local the if branch assigned that may still have
+    // no value after the `if` (#244). (Not a reference: it owns
+    // nothing a drop flag could drop.)
+    let assigns_maybe_init = assigned_in_if.iter().any(|id| self.maybe_init_locals.contains(id)
+      && !self.tcx.typeck(id.owner).node_type(*id).is_ref());
+    let else_ids = if_ids.end..*self.unique_id;
+    self.exit_frames.pop();
+    // The `if let` bindings go out of scope with the `if`.
+    self.in_scope.truncate(entry_len);
+    self.inside_branch = prev_inside_branch;
+
+    // compute split and merge points
+    let line_num = expr_to_line(&guard_expr, &self.tcx);
+    let split = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line;
+    let if_end = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line;
+    let merge = match else_expr {
+      Some(e) => self.tcx.sess.source_map().lookup_char_pos(e.span.hi()).line,
+      None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line
+    };
+
+    // Bindings declared by an `if let` guard belong in the if
+    // branch's decl set (they live for the body block, same as a
+    // top-level `let` inside it).
+    let mut if_decl = get_decl_of_expr(if_expr, &self.tcx, &self.raps);
+    if_decl = &if_decl | &iflet_bindings;
+    // `if_decl` / `else_decl` are the variables this `if` ends at
+    // its branches' closing braces. The `*_scope` sets add those
+    // ended by a construct nested in the branch (it draws their
+    // GoOutOfScope itself): none of them is live across the `if`,
+    // and the branch's events for them go on their own columns.
+    let if_scope = &(&if_decl | &if_inner) | &scrutinee_temps;
+    let else_scope = &else_decl | &else_inner;
+
+    // `if cond { … }` / `if let pat = expr { … }` without an
+    // `else`. When the body moves a variable that outlives the
+    // `if`, the program has two paths: the body ran and moved it,
+    // or it didn't (the implicit empty `else`), so the variable is
+    // maybe-moved afterwards and dropped at scope end only if the
+    // body didn't run (#257). That's drawn exactly like
+    // `if cond { … } else {}`: the Branch below gets an empty
+    // `else` branch. The body's own range is the same one the
+    // if-branch filter below uses.
+    //
+    // Otherwise (reads, borrows, …: nothing that changes what the
+    // variable holds after the `if`) the body is drawn inline:
+    // its events are already in `preprocessed_events` from the
+    // body visit above, and a branch would only add columns. Just
+    // emit GoOutOfScope events for any branch-local bindings
+    // (if-let pattern bindings, body-internal let-stmts) so they
+    // wind down at the closing brace as they would inside the
+    // Branch.
+    if else_expr.is_none() {
+        let rhs = self.rhs_arm_ids.get(&if_expr.hir_id).copied();
+        let body_ev: Vec<(usize, ExternalEvent)> = self.preprocessed_events.iter()
+          .filter(|(_, e)| (if_ids.contains(&e.get_id()) && !pre_split.contains(&e.get_id()))
+            || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&e.get_id())))
+          .cloned().collect();
+        // (Borrows that ended in the condition, #688, don't make a
+        // second path: drawn inline, the condition's events are on
+        // the one path already. Their dots are taken out.)
+        let chain_fail_ev = self.preprocessed_events.iter()
+          .any(|(_, e)| else_ids.contains(&e.get_id()) && !uses_ids.contains(&e.get_id()));
+        // A body that always exits (`return`, a panic, `break` /
+        // `continue`) and drops something there is drawn as a
+        // branch too: its column ends in those drops, and the
+        // implicit `else` carries on (#429). On one line it's drawn
+        // like any other one-line branch (#360). A body that only
+        // sometimes exits (the exit is in a nested conditional drawn
+        // inline) has no column to end in them, so they aren't drawn
+        // (#410).
+        let exit_branch = self.expr_diverges(if_expr)
+          && body_ev.iter().any(|(_, e)| self.exit_drops.contains(&e.get_id()));
+        // An `if let` whose pattern matches every value always runs
+        // its body: there's no implicit empty `else` path, so what
+        // the body does to outer variables is drawn inline, not as
+        // a branch.
+        let always_runs = matches!(guard_expr.kind, ExprKind::Let(l)
+          if pat_is_irrefutable(l.pat, self.tcx.typeck(l.pat.hir_id.owner)));
+        // A body that assigns a `let x;` local is drawn as a branch
+        // too when x may have no value on the implicit `else` path
+        // (#244): the join says so.
+        let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch
+          || assigns_maybe_init;
+        // A tuple scrutinee's variables are moved whether or not the
+        // body runs (#327), so that's a second path as well.
+        if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {
+            self.preprocessed_events.retain(|(_, e)| !uses_ids.contains(&e.get_id()));
+            for evs in self.event_line_map.values_mut() {
+              evs.retain(|e| !uses_ids.contains(&e.get_id()));
+            }
+            // The body may be skipped, so a `return` / `break` /
+            // panic in it doesn't end the columns it's drawn on;
+            // its drops aren't drawn (#410).
+            self.discard_exit_drops(if_ids.clone());
+            for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
+                self.preprocessed_events.push((
+                    if_end,
+                    ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
+                ));
+                *self.unique_id += 1;
+            }
+            return;
+        }
+    }
+
+    // Take each branch's events out of the global timeline. They
+    // used to be picked by source line (the if-body's lines, then
+    // the else-body's), which put everything in the wrong place
+    // when branches share a line: a one-line `if c { take(s); }
+    // else { … }` drew the move as unconditional, and the `} else
+    // if c2 {` line put the inner `if` in the outer if-branch
+    // (#117). The guard's events were handed out before `if_ids`,
+    // so they stay on the global timeline.
+    let _ = line_num; // no longer used for guard-live extension
+    let mut if_ev = self.take_branch_events(if_ids, Some(if_expr), &pre_split);
+    let mut else_ev = self.take_branch_events(else_ids, else_expr, &HashSet::new());
+    // The arrows now inside the branches are drawn from each
+    // branch's own line map. Take them out of the global one, or an
+    // arrow that stays on the split line (a copy out of an if-let
+    // scrutinee, #496) would drag them out of their branches.
+    let in_branches: HashSet<usize> = if_ev.iter().chain(else_ev.iter()).map(|(_, e)| e.get_id()).collect();
+    for evs in self.event_line_map.values_mut() {
+      evs.retain(|e| !in_branches.contains(&e.get_id()));
+    }
+
+    // Compute liveness from the events actually inside the
+    // branches — only variables touched by a real event get a
+    // branched timeline. Avoids the previous behaviour where
+    // `get_live_of_expr(guard_expr)` always promoted guard
+    // variables (e.g. the `n` in `if n > 0 { … }`) into branched
+    // columns even when neither branch references them.
+    let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
+    collect_event_live_vars(&if_ev, &mut liveness);
+    collect_event_live_vars(&else_ev, &mut liveness);
+    // A branch of type `!` (`return`, `panic!()`) never reaches
+    // the merge (#296). Values dropped at a `return` in it (#363)
+    // are live in it.
+    let if_diverges = self.expr_diverges(if_expr);
+    let else_diverges = else_expr.is_some_and(|e| self.expr_diverges(e));
+    liveness.extend(self.keep_exit_drops(&mut if_ev, if_diverges));
+    liveness.extend(self.keep_exit_drops(&mut else_ev, else_diverges));
+    // Variables declared inside a loop in a branch already go out
+    // of scope there (see scoped_in_events). A `return`'s drops
+    // (#363) are not that: they leave the enclosing scope.
+    let if_scoped = scoped_in_events(&if_ev, &self.exit_drops);
+    let else_scoped = scoped_in_events(&else_ev, &self.exit_drops);
+    // Variables declared inside a branch (let-stmts within the
+    // body, plus if-let pattern bindings) live only for that
+    // branch — they're not pre-existing variables that need a
+    // branched timeline. Subtract them out.
+    let declared_in_branches: HashSet<ResourceAccessPoint> =
+      &(&if_scope | &else_scope) | &(&if_scoped | &else_scoped);
+    liveness = &liveness - &declared_in_branches;
+
+    // add gos events for variables declared in each block, except
+    // where every path through the branch leaves it at an exit
+    // that drops them (#630)
+    let if_left = Self::left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
+    let else_left = Self::left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
+    for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
+      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
+      *self.unique_id += 1;
+    }
+
+    for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
+      *self.unique_id += 1;
+    }
+    if_decl.extend(if_inner);
+    if_decl.extend(if_scoped);
+    let mut else_decl = else_decl;
+    else_decl.extend(else_inner);
+    else_decl.extend(else_scoped);
+    // The pattern didn't match, but the tuple literal it was matched
+    // against already took `x` / `y` (the if branch's own moves come
+    // from register_iflet_let_bindings).
+    //
+    // The tuple is dropped (#327) where an edition-2024 `if let`
+    // drops its scrutinee's temporaries: at the end of the if
+    // branch (when it leaves early, then), or, when the pattern
+    // doesn't match, before the else branch runs. It has no column,
+    // so a drop dot on each variable whose value (or part of it)
+    // is still in it says so.
+    if let Some(let_expr) = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()) {
+      let tuple_name = match self.tuple_scrutinee_target(let_expr.init) {
+        ResourceTy::Temporary { tuple: Some(t), .. } => t,
+        _ => String::new(),
+      };
+      let mut front: Vec<(usize, ExternalEvent)> = Vec::new();
+      // (A struct or tuple variable's part columns too, #627.)
+      let unbound: Vec<ResourceAccessPoint> = scrutinee_moves.iter()
+        .flat_map(|v| self.tuple_scrutinee_unbound(v, &[])).collect();
+      for r in &unbound {
+        front.push((if_end, ExternalEvent::Move {
+          from: ResourceTy::Value(r.clone()),
+          to: self.tuple_scrutinee_target(let_expr.init),
+          id: *self.unique_id,
+          is_partial: false,
+          into_closure: false,
+          loop_head: LoopHead::No,
+          break_alt: None,
+          break_out: false,
+          via_try: None,
+          closure_value: false,
+        }));
+        *self.unique_id += 1;
+        liveness.insert(r.clone());
+      }
+      let at = if else_expr.is_some() { TupleDropAt::Else } else { TupleDropAt::NoElse };
+      front.extend(self.tuple_drop_events(let_expr.init, &tuple_name, None, at).into_iter().map(|e| (if_end, e)));
+      else_ev.splice(0..0, front);
+
+      // A branch that leaves early drops it at its exit instead:
+      // see drop_locals_on_exit.
+      if !if_diverges {
+        let evs = self.tuple_drop_events(let_expr.init, &tuple_name, Some(let_expr.pat), TupleDropAt::IfEnd);
+        if_ev.extend(evs.into_iter().map(|e| (if_end, e)));
+      }
+    }
+
+    
+    let if_map = create_line_map(&if_ev);
+
+    // Per-branch "active" line ranges. Each branch is rendered
+    // solid inside its active range and dashed outside. The
+    // ranges are non-overlapping so the if-branch transitions
+    // to dashed at the line where the else-branch becomes
+    // active.
+    //
+    // For the if-branch we use its body content range
+    // (`split + 1 ..= if_end`); for the else-branch we use its
+    // body span starting at the `} else {` line so the
+    // active region has at least two rows even when the body
+    // has a single content line. Without that, an empty or
+    // single-line else (e.g. `else { println!(...) }` whose
+    // formatter doesn't emit per-event entries on `s`) would
+    // collapse to a zero-length solid segment, leaving the
+    // entire else column dashed.
+    //
+    // `merge_point - 1` is the last line each branch column is
+    // drawn on; the convergence diagonal then bridges that row
+    // to the join dot at `merge_point` (see render_timeline's
+    // Branch arm). Clamping the else-branch's end there keeps
+    // it consistent with the column-trim done in
+    // compute_branch_states.
+    //
+    // Branches that share lines (#117) are drawn on the split..merge
+    // rows themselves; each is active on its own lines.
+    let merge_minus_one = merge.saturating_sub(1);
+    let collapsed = branch_is_collapsed(split, merge);
+    let if_slice = if collapsed { (split, if_end) } else { (split + 1, if_end) };
+    let else_slice = match else_expr {
+      Some(e) if collapsed => (self.tcx.sess.source_map().lookup_char_pos(e.span.lo()).line, merge),
+      _ if collapsed => (if_end, merge),
+      _ => (if_end, merge_minus_one),
+    };
+    // A branch of type `!` (`return`, `panic!()`) never reaches
+    // the merge (#296).
+    let (if_diverges, if_exits, if_carries) = self.branch_divergence(if_expr, &if_ev, &if_decl);
+    let (else_diverges, else_exits, else_carries) = match else_expr {
+      Some(e) => self.branch_divergence(e, &else_ev, &else_decl),
+      None => (false, Vec::new(), Vec::new()),
+    };
+    let (b_labels, b_slices, b_branches) = match else_expr {
+      Some(_) => {
+        let else_map = create_line_map(&else_ev);
+        (
+          vec!["If".to_owned(), "Else".to_owned()],
+          vec![if_slice, else_slice],
+          vec![
+            ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits, break_carries: if_carries   },
+            ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits, break_carries: else_carries },
+          ],
+        )
+      }
+      // No `else` (and the body moves something, see above): the
+      // implicit empty `else` is a second path that leaves every
+      // variable as it was (#257).
+      // Its events are the scrutinee's moves (#327), or those of a
+      // let-chain condition that failed after a move (#281), if any.
+      None => {
+        let else_map = create_line_map(&else_ev);
+        (
+          vec!["If".to_owned(), "Else".to_owned()],
+          vec![if_slice, else_slice],
+          vec![
+            ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits, break_carries: if_carries },
+            ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new(), break_carries: Vec::new() },
+          ],
+        )
+      }
+    };
+    // The arm of an `if let` with pattern bindings is named so for
+    // the drawing: they bind on the split line, and the arm's column
+    // starts there (#382).
+    let mut b_labels = b_labels;
+    if !iflet_bindings.is_empty() {
+      b_labels[0] = IF_LET_ARM.to_owned();
+    }
+    let b_ty = BranchType::If(b_labels, b_slices);
+    self.note_exit_scope(expr);
+    self.add_external_event(line_num,
+      ExternalEvent::Branch {
+        live_vars: liveness,
+        branches: b_branches,
+        branch_type: b_ty,
+        split_point: split,
+        merge_point: merge,
+        maybe_init,
+        id: *self.unique_id });
+        *self.unique_id += 1;
+    // Both branches leave the function: nothing after the `if` runs.
+    if else_expr.is_some() && if_diverges && else_diverges && self.at_fn_level(expr) {
+      self.all_paths_exit = true;
+    }
+}
+
+  /// The `ExprKind::Match` arm of `visit_expr`: a `match`, and the desugarings
+  /// that lower to one (`for`, `?`).
+  fn visit_match(&mut self, expr: &'tcx Expr<'tcx>, guard_expr: &'tcx Expr<'tcx>, arms: &'tcx [rustc_hir::Arm<'tcx>], source: rustc_hir::MatchSource) {
+    // Macro-expanded `match`s — `assert!(cond)` expands to
+    // `match cond { true => {}, _ => panic!(...) }`, and several
+    // other macros (notably `?`) also desugar through Match. Walk
+    // the guard so user-written variable accesses inside it (e.g.
+    // function arguments) are recorded, then skip the arms and
+    // the Branch event entirely. Same rationale as the
+    // from_expansion check on ExprKind::If above: macro-added
+    // control flow shouldn't be rendered as branches the user
+    // didn't write.
+    //
+    // Exception: ForLoopDesugar matches. They're from_expansion
+    // (rustc marks lower_expr_for's outer span with
+    // DesugaringKind::ForLoop) but the user's body still lives
+    // inside, and the source-discriminator below has explicit
+    // handling for it.
+    if expr.span.from_expansion()
+       && !matches!(source, rustc_hir::MatchSource::ForLoopDesugar)
+    {
+      self.visit_expr(guard_expr);
+      return;
+    }
+
+    // first visit the guard expression, annotate any events that happen there
+    self.visit_expr(guard_expr);
+    let typeck_res = self.tcx.typeck(expr.hir_id.owner);
+
+    // To my knowledge a match has to either contain a singular expression or Tuple
+    // get all the 'parents' ie things being matched on and their types
+    let (parents, parents_ty) = match guard_expr.kind {
+      ExprKind::Tup(fields) => {
+        let mut res = Vec::new();
+        let mut res_ty = Vec::new();
+        for field in fields.iter() {
+          res.push(self.scrutinee_rap(&field));
+          res_ty.push(typeck_res.node_type(field.hir_id));
+        }
+        (res, res_ty)
+      }
+      _ => {
+        // `match self.kind` with self a reference (#266).
+        (vec![self.scrutinee_rap(&guard_expr)], vec![typeck_res.node_type(guard_expr.hir_id)])
+      }
+    };
+    let typeck_res = self.tcx.typeck(guard_expr.hir_id.owner);
+
+    let split = span_end_line(&guard_expr.span, &self.tcx); // TODO: might need to alter this
+    let merge = self.tcx.sess.source_map().lookup_char_pos(expr.span.hi()).line;
+
+    let mut b_ty_names: Vec<String> = Vec::new();
+    let mut b_slices: Vec<(usize, usize)> = Vec::new();
+    let mut branch_data: Vec<ExtBranchData> = Vec::new();
+    // Liveness is computed from the events actually folded into
+    // each arm's `branch_e_data` below — see the symmetric note
+    // in the If arm. Pat-decls (variables bound by the arm's
+    // pattern) are subtracted off per arm so they don't show up
+    // as branched columns of their own.
+    let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
+    // Track every binding introduced by an arm pattern so we
+    // can subtract the union from `liveness` after all arms have
+    // been processed.
+    let mut all_pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
+
+    
+    match source {
+      // A normal match (not desugared)
+      rustc_hir::MatchSource::Normal => {
+        // Single-arm match: inline. Don't filter body events
+        // out of preprocessed_events / don't emit a Branch
+        // event — same rationale as single-arm if / if-let
+        // above. The directly-built events (pattern
+        // destructures, post-arm callbacks, per-arm
+        // GoOutOfScope) get routed through add_external_event
+        // after the loop so line_map picks them up; body
+        // events are already in preprocessed_events from the
+        // arm's visit_expr below.
+        let inline = arms.len() == 1;
+        // Every arm starts from the same uninitialized `let x;`
+        // locals (#234); see join_uninit_locals.
+        let uninit_before = self.uninit_locals.clone();
+        let maybe_init_before = self.maybe_init_locals.clone();
+        let mut uninit_ends = Vec::new();
+        // An exit in an arm doesn't see the binding of any arm's
+        // value to a `let` (#410): it happens after the match. The
+        // earlier arms' own events are out of `preprocessed_events`
+        // by then (`take_branch_events` below), except a lone
+        // arm's, which has no siblings.
+        let entry_len = self.in_scope.len();
+        let match_lo = *self.unique_id;
+        let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
+        self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0 });
+        // `match (x, y) { … }` moves `x` and `y` into the tuple
+        // whatever arm is taken (#327).
+        let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
+        let into_tuple = self.tuple_scrutinee_target(guard_expr);
+        let tuple_name = match &into_tuple {
+          ResourceTy::Temporary { tuple: Some(t), .. } => t.clone(),
+          _ => String::new(),
+        };
+        // The tuple lives to the end of the statement holding the
+        // match, usually the match's own last line.
+        let past_match = self.temporary_scope_end(guard_expr).is_some_and(|(_, l, _)| l > merge);
+        let mut arm_borrows = self.arm_borrows_begin();
+        for (arm_idx, arm) in arms.iter().enumerate() {
+          if arm_idx > 0 {
+            self.arm_borrows_next(&mut arm_borrows);
+          }
+          // An arm's pattern bindings are out of scope in the next.
+          self.in_scope.truncate(entry_len);
+          let arm_hash_lo = self.rap_hashes;
+          let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
+          let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
+          // Parents this arm's pattern moves out of.
+          let mut arm_moved: Vec<ResourceTy> = Vec::new();
+
+          // get line info
+          // An arm body can be a bare macro call
+          // (`Some(s) => println!("{s}"),`), whose span lies in
+          // the macro's expansion; span_to_line / span_end_line
+          // resolve it to the user's call site.
+          let begin = span_to_line(&arm.body.span, &self.tcx);
+          let end = span_end_line(&arm.body.span, &self.tcx);
+          let pat_line = span_to_line(&arm.pat.span, &self.tcx);
+          b_slices.push((begin, end));
+          b_ty_names.push(get_name_of_pat(arm.pat, &self.tcx));
+
+          
+          // add/fetch raps that are initialized in arm expr
+          // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
+          let mut pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
+          // Struct bindings whose field columns still need their
+          // "acquires its part" events (see below).
+          let mut member_binds: Vec<ResourceAccessPoint> = Vec::new();
+          // Events the pattern adds to the global list (a struct
+          // binding's reference fields, its fields' binds) belong
+          // to this arm; see the drain below.
+          let first_pat_ev = self.preprocessed_events.len();
+          // println!("arm pat {:#?}", arm.pat);
+          // Route pattern-destructure events into either
+          // `branch_e_data` (multi-arm: events live inside the
+          // Branch's per-arm event list) or `preprocessed_events`
+          // via `add_external_event` (single-arm inline: events
+          // join the global timeline before `visit_expr` so they
+          // appear in source order with the body).
+          let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
+          // The OrAltMove dots of the names `or_conflicts` lists,
+          // added after the moves into the scrutinee tuple below
+          // (the tuple holds the values they may take).
+          let mut or_events: Vec<ExternalEvent> = Vec::new();
+          // Where the possible borrows of an or-pattern's reference
+          // end (#565); added with the arm's other end events.
+          let mut or_end_events: Vec<(usize, ExternalEvent)> = Vec::new();
+          match arm_pat.kind {
+            // (<pat>, <pat>, ..) => <expr>
+            // First need to annotate events that occur between parents (the variables being matched upon)
+            // and the pattern bindings in each arm.
+            //
+            // `parents.len() == pat_list.len()` is the
+            // "guard-was-a-tuple-literal" shape (`match (a, b)
+            // { (x, y) => … }`): each inner pattern maps to its
+            // own parent expression. Otherwise the guard is a
+            // single tuple-/enum-typed scrutinee and every
+            // inner pattern destructures out of it (`match
+            // pair { (x, y) => … }`, `match res { Ok(a, b, c)
+            // => … }`); use the single parent for all inner
+            // pattern slots. Without that fallback, `parents[i]`
+            // for i>0 panics with an index-out-of-bounds.
+            PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _)=> {
+              let same_arity = pat_list.len() == parents.len();
+              // `match t { (a, b) => … }` / `match p { P(x, y) => … }`
+              // on a variable whose parts have columns (#189, #326):
+              // each sub-pattern destructures its own part, `t.0` /
+              // `t.1`. (A tuple-literal scrutinee has one parent per
+              // element already.)
+              let part_parents = if parents.len() == 1 {
+                self.pat_parts(arm_pat, &parents[0], parents_ty[0])
+              } else {
+                None
+              };
+              // Borrows the bindings take from what the scrutinee
+              // borrows (#391) follow all the bindings, as in
+              // `register_iflet_let_bindings`.
+              let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
+              // Each sub-pattern, the parent it destructures, and the
+              // expression that is (the scrutinee, or its element).
+              let mut subs: Vec<(&'tcx rustc_hir::Pat<'tcx>, ResourceTy, rustc_middle::ty::Ty<'tcx>, &'tcx Expr<'tcx>)> = Vec::new();
+              // Whether each sub-pattern destructures a part of a
+              // variable (parallel to `subs`).
+              let mut sub_is_part: Vec<bool> = Vec::new();
+              if matches!((arm_pat.kind, guard_expr.kind), (PatKind::Tuple(..), ExprKind::Tup(_))) && !guard_expr.span.from_expansion() {
+                // `match (a, (b, c)) { (p, (x, _)) => … }`: each
+                // sub-pattern with its element, through nested tuple
+                // literals and `..` (#627).
+                subs = self.literal_pat_parents(arm_pat, guard_expr);
+                sub_is_part = vec![false; subs.len()];
+              } else {
+                for (i, p) in pat_list.iter().enumerate() {
+                  let parent_idx = if same_arity { i } else { 0 };
+                  let (parent, parent_ty) = match part_parents.as_ref().and_then(|v| v[i].1.clone()) {
+                    Some(pp) => pp,
+                    None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
+                  };
+                  let scrutinee = match guard_expr.kind {
+                    ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
+                    _ => guard_expr,
+                  };
+                  subs.push((p, parent, parent_ty, scrutinee));
+                  sub_is_part.push(part_parents.as_ref().is_some_and(|v| v[i].1.is_some()));
+                }
+              }
+              for (sub_idx, (p, parent, parent_ty, scrutinee)) in subs.into_iter().enumerate() {
+                let mut associated_ro = Vec::new();
+                self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
+                // `(p, q)` on `pair = (&c, &d)` copies the references
+                // in `pair.0` / `pair.1`: `p` borrows what `pair.0`
+                // borrows, as in `let (p, q) = pair;` (#756).
+                if sub_is_part[sub_idx] && parent_ty.is_ref() {
+                  for (r, _, _, _) in associated_ro.iter() {
+                    self.adopt_part_borrow(r.name(), &parent.name());
+                  }
+                }
+                // A `ref` binding out of `(x, y)` borrows the tuple's
+                // element, not x (#580).
+                for (r, e, from, _) in associated_ro.iter_mut() {
+                  *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
+                }
+                let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+                or_events.extend(or_evs.start);
+                or_end_events.extend(or_evs.end);
+                pat_decls.extend(or_evs.decls);
+                let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
+                let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
+                pat_decls.extend(temp2);
+                for (to_ro, e, from, partial) in associated_ro.iter() {
+                  if matches!(e, Evt::Move) {
+                    arm_moved.push(from.clone());
+                  }
+                  // If the type of the pat is not the same as the parent associated with it then it must be a partial move
+                  let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
+                  let id = *self.unique_id;
+                  *self.unique_id += 1;
+                  let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+                  // A reference copied out of a value that holds a
+                  // borrow also borrows what that value borrows (#391).
+                  pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
+                  // add_external_event gives a struct's fields their
+                  // part of a whole (non-partial) move; otherwise
+                  // that's done below.
+                  if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
+                    member_binds.push(to_ro.clone());
+                  }
+                  if inline {
+                    self.add_external_event(pat_line, ext_ev);
+                  } else {
+                    branch_e_data.push((pat_line, ext_ev));
+                  }
+                  match e {
+                    Evt::SBorrow => {
+                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
+                    }
+                    Evt::MBorrow => {
+                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
+                    }
+                    _ => {}
+                  }
+                }
+              }
+              for ev in pending_borrows {
+                if inline {
+                  self.add_external_event(pat_line, ev);
+                } else {
+                  branch_e_data.push((pat_line, ev));
+                }
+              }
+            }
+            // <expr> => <expr> (just a singleton variable)
+            _ => {
+              let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
+              for i in 0..parents.len() {
+                let mut associated_ro = Vec::new();
+                // `P { a, b } => …` on a struct variable: `a` / `b`
+                // come from `p.a` / `p.b` (#326).
+                self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
+                let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+                or_events.extend(or_evs.start);
+                or_end_events.extend(or_evs.end);
+                pat_decls.extend(or_evs.decls);
+                let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
+                let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
+                pat_decls.extend(temp2);
+                for (to_ro, e, from, partial) in associated_ro.iter() {
+                  if matches!(e, Evt::Move) {
+                    arm_moved.push(from.clone());
+                  }
+                  let id = *self.unique_id;
+                  *self.unique_id += 1;
+                  let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+                  let scrutinee = match guard_expr.kind {
+                    ExprKind::Tup(fields) if fields.len() == parents.len() => &fields[i],
+                    _ => guard_expr,
+                  };
+                  pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
+                  if matches!(e, Evt::Move | Evt::Copy) && !inline {
+                    member_binds.push(to_ro.clone());
+                  }
+                  if inline {
+                    self.add_external_event(pat_line, ext_ev);
+                  } else {
+                    branch_e_data.push((pat_line, ext_ev));
+                  }
+                  match e {               // A borrow, mut/immut must be returned at the end of the block
+                    Evt::SBorrow => {
+                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
+                    }
+                    Evt::MBorrow => {
+                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
+                    }
+                    _ => {}
+                  }
+                }
+              }
+              for ev in pending_borrows {
+                if inline {
+                  self.add_external_event(pat_line, ev);
+                } else {
+                  branch_e_data.push((pat_line, ev));
+                }
+              }
+            }
+          }
+
+          // A variable the scrutinee tuple took but this arm's
+          // pattern doesn't move out (`_ => …`, `(Some(_), b)`): it
+          // was still moved into the tuple, and isn't usable after
+          // the match (#327).
+          // (A struct or tuple variable's part columns too, but not
+          // the ones the pattern took, #627.)
+          for v in scrutinee_moves.iter() {
+            for r in self.tuple_scrutinee_unbound(v, &arm_moved) {
+              let id = *self.unique_id;
+              *self.unique_id += 1;
+              let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), id, false);
+              if inline {
+                self.add_external_event(pat_line, ext_ev);
+              } else {
+                branch_e_data.push((pat_line, ext_ev));
+              }
+            }
+          }
+          for ev in or_events {
+            if inline {
+              self.add_external_event(pat_line, ev);
+            } else {
+              branch_e_data.push((pat_line, ev));
+            }
+          }
+          // An arm that leaves early (`_ => return 0`) drops the tuple
+          // at its exit instead (#327): see drop_locals_on_exit.
+          let arm_diverges = self.expr_diverges(arm.body);
+
+          // A struct bound by the pattern (`Some(y) =>` with `y: P`)
+          // gets field columns (`y.name`, `y.n`). They receive their
+          // part of the value with `y`, go out of scope with it,
+          // and only exist in this arm (#405).
+          member_binds.sort_by_key(|r| *r.hash());
+          member_binds.dedup();
+          for r in member_binds {
+            if matches!(r, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
+              self.bind_struct_fields(pat_line, r.name());
+            }
+          }
+          pat_decls = self.with_struct_members(&pat_decls);
+          if !inline {
+            branch_e_data.extend(self.preprocessed_events.drain(first_pat_ev..));
+          }
+
+          // Match guard: `pat if cond =>` / `pat if let p = e =>`.
+          // The guard runs after the pattern matched and before
+          // the body, and only then; if it's false, matching goes
+          // on with the later arms. We show its events in this
+          // arm's own column, next to the pattern's bindings:
+          // "when this arm is taken, this happened" is always true.
+          // What that leaves out is that the guard also ran when
+          // the pattern matched but the guard failed and a later
+          // arm was taken. For borrows and reads that's harmless
+          // (they end inside the guard, so later arms start from
+          // the same state), but a move or an assignment would
+          // still be in effect in those later arms, so
+          // `visit_match_guard` refuses those rather than draw a
+          // later arm with a value it no longer has.
+          //
+          // Bindings introduced by an `if let` guard are registered
+          // like `if let` condition bindings and live until the
+          // end of the arm, like the pattern's own bindings.
+          if let Some(guard) = arm.guard {
+            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+            let outer: HashSet<ResourceAccessPoint> = self.raps.values()
+              .map(|rd| rd.rap.clone())
+              .filter(|r| !r.is_fn() && !pat_decls.contains(r))
+              .collect();
+            let first_guard_ev = self.preprocessed_events.len();
+            let mut guard_decls: HashSet<ResourceAccessPoint> = HashSet::new();
+            self.visit_match_guard(guard, true, &outer, &mut guard_decls);
+            if !inline {
+              branch_e_data.extend(self.preprocessed_events.drain(first_guard_ev..));
+            }
+            pat_decls.extend(guard_decls);
+          }
+          // While the body is visited, the pattern's and the guard's
+          // events are on the global list too, so that an exit in it
+          // sees the bindings own their values and drops them
+          // (#630). They're taken off again after the body.
+          let pat_ids: HashSet<usize> = branch_e_data.iter().map(|(_, e)| e.get_id()).collect();
+          self.preprocessed_events.extend(branch_e_data.iter().cloned());
+
+          // visit expr. inside_branch is restored, not reset: the
+          // match may sit inside another branch (#410).
+          let prev_inside_branch = self.inside_branch;
+          self.inside_branch = true;
+          self.uninit_locals = uninit_before.clone();
+          self.maybe_init_locals = maybe_init_before.clone();
+          let body_lo = *self.unique_id;
+          // An exit in the arm drops the tuple scrutinee (#327).
+          let live = !scrutinee_moves.is_empty();
+          if live {
+            self.live_tuples.push(LiveTuple {
+              frame: self.exit_frames.len() - 1,
+              len: entry_len,
+              scrutinee: guard_expr,
+              tuple: tuple_name.clone(),
+              pat: arm.pat,
+              at: TupleDropAt::MatchArmExit,
+            });
+          }
+          // A `?` in the body sees the pattern's bindings (#636).
+          let binds_at = self.preprocessed_events.len();
+          if let Some(ExitFrame::Branch { binds: b, binds_at: at, .. }) = self.exit_frames.last_mut() {
+            b.clone_from(&branch_e_data);
+            *at = binds_at;
+          }
+          self.arm_frames.push((split, merge, begin, end));
+          self.visit_expr(arm.body);
+          self.arm_frames.pop();
+          if live {
+            self.live_tuples.pop();
+          }
+          if let Some(ExitFrame::Branch { binds: b, .. }) = self.exit_frames.last_mut() {
+            b.clear();
+          }
+          let body_ids = body_lo..*self.unique_id;
+          uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals), std::mem::take(&mut self.maybe_init_locals)));
+          self.inside_branch = prev_inside_branch;
+
+          all_pat_decls = &all_pat_decls | &pat_decls;
+          let mut arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
+          // Everything declared in the arm, also inside an inline
+          // construct nested in it (`Some(x) => { if let Some(y) =
+          // b { … } }`, #501), exists only in the arm (the nested
+          // construct ends what it declares itself).
+          let arm_inner = self.raps_declared_since(arm_hash_lo, &uninit_before);
+          all_pat_decls = &all_pat_decls | &arm_inner;
+          // Variables declared inside a loop in this arm already go
+          // out of scope there (see scoped_in_events).
+          let mut arm_scoped: HashSet<ResourceAccessPoint> = HashSet::new();
+
+
+          // get events that occured in the arm: those handed out
+          // while its body was visited, plus the ones pairing its
+          // value with a `let` (see `take_branch_events`). Picking
+          // them by source line gave every event on a shared line
+          // to the first arm (#117).
+          self.preprocessed_events.retain(|(_, e)| !pat_ids.contains(&e.get_id()));
+          if !inline {
+            let body_ev = self.take_branch_events(body_ids, Some(arm.body), &HashSet::new());
+            branch_e_data.extend(body_ev);
+
+            // contribute events-touched variables to liveness; the
+            // arm's own pat-decls are subtracted at the end.
+            collect_event_live_vars(&branch_e_data, &mut liveness);
+            // Values dropped at a `return` in the arm (#363).
+            let arm_diverges = self.expr_diverges(arm.body);
+            liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
+            arm_scoped = scoped_in_events(&branch_e_data, &self.exit_drops);
+            all_pat_decls = &all_pat_decls | &arm_scoped;
+          }
+
+          // The end of an or-pattern reference's possible borrows
+          // (#565), where the borrow checker ends them: at the
+          // reference's last use, which can be before the arm ends.
+          for (line, ev) in or_end_events {
+            // Its borrow is drawn by these events, not `emit_borrow_ends`.
+            if let ExternalEvent::OrAltBorrow { into, .. } = &ev {
+              self.borrow_map.remove(into.name());
+            }
+            if inline {
+              self.add_external_event(line, ev);
+            } else {
+              let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
+              branch_e_data.insert(at, (line, ev));
+            }
+          }
+
+          // add callback events - events that need to happen at the end of an arm block
+          // ex: if a pattern binding borrows from a parent
+          let pat_end = span_end_line(&arm.pat.span, &self.tcx);
+          let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
+          for (to, from, e) in callback_events {
+            let name = from.real_name();
+            self.borrow_map.remove(&name);
+            // The borrow ends where the borrow checker ends it, at
+            // the binding's last use (#599): the end of the region
+            // of the loan MIR issues for the binding on the pattern's
+            // lines. A binding that reborrows through a shared
+            // reference (`(x, _)` on `o: &(String, String)`) has no
+            // loan of its own; its borrow lasts as long as it is
+            // live.
+            let ends_at = mir_b_data.iter()
+              .filter(|m| m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+              .map(|m| m.region.1)
+              .max()
+              .or_else(|| self.last_live_line(&name, (pat_line, end)))
+              .filter(|l| (pat_line..=end).contains(l))
+              .unwrap_or(end);
+            // When the scrutinee is itself a reference (`match o`,
+            // `o: &Option<String>`), the binding reborrows through
+            // it, so `o`'s borrow lasts at least until here (#372).
+            if to.is_ref() {
+              let floor = self.borrow_floor.entry(to.real_name()).or_insert(ends_at);
+              *floor = (*floor).max(ends_at);
+            }
+            let id = *self.unique_id;
+            *self.unique_id += 1;
+            let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
+            if inline {
+              self.add_external_event(ends_at, ext_ev);
+            } else {
+              // After the arm's events up to that line.
+              let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
+              branch_e_data.insert(at, (ends_at, ext_ev));
+            }
+          }
+
+          // add gos events, except in an arm that always leaves at
+          // an exit that drops them (#630)
+          let arm_left = Self::left_at_exits(!inline && self.ends_at_exits(arm.body, true), &arm_decls);
+          for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
+            let id = *self.unique_id;
+            *self.unique_id += 1;
+            let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
+            if inline {
+              self.add_external_event(end, gos);
+            } else {
+              branch_e_data.push((end, gos));
+            }
+          }
+
+          // The tuple is dropped after the arm, and with it what of
+          // each variable's value the pattern didn't move out
+          // (#327). It has no column: a drop dot on each such
+          // variable's says so. (An arm that leaves early drops it
+          // at its `return` / `break` / `continue` / panic.)
+          if !arm_diverges {
+            let (at, line) = if past_match {
+              (TupleDropAt::MatchArmStmt, end)
+            } else if inline {
+              (TupleDropAt::MatchHere, merge)
+            } else {
+              (TupleDropAt::MatchArm, end)
+            };
+            for ev in self.tuple_drop_events(guard_expr, &tuple_name, Some(arm.pat), at) {
+              if inline {
+                self.add_external_event(line, ev);
+              } else {
+                branch_e_data.push((line, ev));
+              }
+            }
+          }
+
+          arm_decls.extend(arm_inner);
+          arm_decls.extend(arm_scoped);
+          if !inline {
+            let branch_line_map = create_line_map(&branch_e_data);
+            // An arm of type `!` (`_ => unreachable!()`) never
+            // reaches the merge (#296).
+            let (diverges, exits, break_carries) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
+            branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
+          }
+        }
+        self.arm_borrows_end(arm_borrows);
+        #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+        let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
+        let maybe_init = self.join_uninit_locals(uninit_ends, &known);
+        self.exit_frames.pop();
+        self.in_scope.truncate(entry_len);
+        // Single-arm: events already routed through
+        // add_external_event during the loop, nothing else
+        // to do — bail out of the Normal arm before the
+        // multi-arm Branch construction below. An exit in the
+        // lone arm isn't drawn: the arm isn't a column of its
+        // own (#410).
+        if inline {
+            self.discard_exit_drops(match_lo..*self.unique_id);
+            return;
+        }
+        // Variables introduced by an arm's pattern only exist
+        // inside that arm — strip them out so they don't get a
+        // branched timeline of their own.
+        liveness = &liveness - &all_pat_decls;
+        // add branch event. merge_point is the closing-brace
+        // line of the match — same convention as If, where
+        // merge_point is the line of the else-block's closing
+        // `}`. Previously this used `merge - 1` (with a stale
+        // TODO marker), which landed the join dot one row above
+        // the `};`, on the last arm's body line.
+        if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
+          self.all_paths_exit = true;
+        }
+        self.note_exit_scope(expr);
+        self.add_external_event(split, ExternalEvent::Branch {
+          live_vars: liveness,
+          branches: branch_data,
+          branch_type: BranchType::Match(b_ty_names, b_slices),
+          split_point: split,
+          merge_point: merge,
+          maybe_init,
+          id: *self.unique_id });
+        *self.unique_id += 1;
+      }
+      rustc_hir::MatchSource::ForLoopDesugar => self.visit_for_desugar(expr, guard_expr, arms),
+      // `e?`: the `Err` / `None` arm returns from the function
+      // (#430). The scrutinee `Try::branch(e)` was visited above.
+      rustc_hir::MatchSource::TryDesugar(_) => self.note_try(expr),
+      _ => {}
+    }
+}
+
+  /// The `MatchSource::ForLoopDesugar` case of `visit_match`: a `for` loop's
+  /// desugaring, drawn as one iteration (see the comment inside).
+  fn visit_for_desugar(&mut self, expr: &'tcx Expr<'tcx>, guard_expr: &'tcx Expr<'tcx>, arms: &'tcx [rustc_hir::Arm<'tcx>]) {
+    // For-loops desugar (rustc_ast_lowering's lower_expr_for) to:
+    //
+    //   match IntoIterator::into_iter(<head>) {
+    //     mut iter => loop {
+    //       match Iterator::next(&mut iter) {
+    //         None       => break,
+    //         Some(<pat>) => <body>,
+    //       }
+    //     }
+    //   }
+    //
+    // We render this as the issue's "single-iteration view":
+    // emit one borrow/move event for <head> at the for line,
+    // register the pattern binding(s) as branch-scoped RAPs,
+    // and visit <body> with inside_branch = true so its events
+    // flow into the timeline as if the loop ran once. We don't
+    // emit a Branch event yet — the conditional-shading
+    // visualization is design work tracked alongside #78.
+    //
+    // Shape pattern-matching is defensive: if the inner HIR
+    // doesn't look like the lowering above (e.g. a future
+    // rustc tweak, or a `for await`), we silently fall back to
+    // the previous behaviour (no body events) rather than
+    // panic.
+    if let Some(head_arg) = match guard_expr.kind {
+      ExprKind::Call(_, args) if args.len() == 1 => Some(&args[0]),
+      _ => None,
+    } {
+      if let Some((user_pat, body_expr)) = arms.first()
+        .and_then(|outer_arm| match outer_arm.body.kind {
+          ExprKind::Loop(loop_block, _, rustc_hir::LoopSource::ForLoop, _) => {
+            loop_block.stmts.first().and_then(|s| match s.kind {
+              StmtKind::Expr(e) | StmtKind::Semi(e) => match e.kind {
+                ExprKind::Match(_, inner_arms, rustc_hir::MatchSource::ForLoopDesugar) => {
+                  // The Some-arm of the inner match wraps the
+                  // user pattern in a `PatKind::Struct` with a
+                  // single PatField (rustc's pat_some →
+                  // pat_lang_item_variant — the wrapper is
+                  // `Some(pat)` where pat lives in fields[0]).
+                  inner_arms.iter().find_map(|a| match a.pat.kind {
+                    PatKind::Struct(_, fields, _) if fields.len() == 1 => {
+                      Some((fields[0].pat, a.body))
+                    }
+                    _ => None,
+                  })
+                }
+                _ => None,
+              },
+              _ => None,
+            })
+          }
+          _ => None,
+        })
+      {
+        let head_from = self.in_scope.len();
+        self.note_for_head_temporary(head_arg, guard_expr, expr);
+        // Iterand event: shape of head_arg dictates the arrow.
+        //   &v       ⇒ SBorrow from v
+        //   &mut v   ⇒ MBorrow from v
+        //   v (owned, non-Copy) ⇒ Move from v
+        //   anything else (Range, call result, …) ⇒ Bind (below)
+        let for_line = self.tcx.sess.source_map()
+          .lookup_char_pos(expr.span.lo()).line;
+        let iterand_evt = match head_arg.kind {
+          ExprKind::AddrOf(_, Mutability::Not, _) => Some(Evt::SBorrow),
+          ExprKind::AddrOf(_, Mutability::Mut, _) => Some(Evt::MBorrow),
+          ExprKind::Path(_) => {
+            let head_ty = self.tcx.typeck(head_arg.hir_id.owner)
+              .node_type(head_arg.hir_id);
+            let is_copy = self.tcx.type_is_copy_modulo_regions(
+              typing_env(self.tcx, head_arg.hir_id.owner),
+              head_ty);
+            if head_ty.is_ref() { None }   // already a ref binding; skip
+            else if is_copy { None }       // Range / Copy iterand
+            else { Some(Evt::Move) }
+          }
+          _ => None,
+        };
+        let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
+        // `for x in it` where `it` is already an iterator
+        // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
+        // returns its argument unchanged, so the loop *moves*
+        // `it` into itself and each `x` is something `next()`
+        // hands out, not something `it` owns or lends (#417).
+        // Compare the head's type with the type of the
+        // `into_iter(head)` call: they are equal only for an
+        // iterator.
+        let head_is_iterator = matches!(head_arg.kind, ExprKind::Path(_))
+          && matches!(iterand_evt, Some(Evt::Move))
+          && {
+            let typeck = self.tcx.typeck(head_arg.hir_id.owner);
+            let head_ty = typeck.node_type(head_arg.hir_id);
+            !head_ty.is_ref()
+              && head_ty == typeck.node_type(guard_expr.hir_id)
+          };
+
+        // The loop owns its iterator and drops it when the loop
+        // ends: a head that is moved in (`for s in v`, `for s in
+        // it`) whose iterator has drop glue (`vec::IntoIter`)
+        // says where it goes on the move (#482). `slice::Iter`
+        // and the like have nothing to drop. The iterator built
+        // from a collection (`v`) is a `(temporary N)` column
+        // (`note_for_head_temporary`); an iterator variable
+        // (`it`) is the loop's iterator itself, so its drop is
+        // on its own column (`iterator_head`).
+        let iterator_needs_drop = matches!(iterand_evt, Some(Evt::Move))
+          && matches!(head_arg.kind, ExprKind::Path(_))
+          && self.needs_drop(
+            self.tcx.typeck(guard_expr.hir_id.owner).node_type(guard_expr.hir_id),
+            guard_expr.hir_id.owner);
+
+        // Register the user pattern binding(s) as branch-scoped
+        // RAPs so events inside the body referencing them
+        // resolve. Two cases:
+        //
+        //   `for x in &v`           — single binding, attribute
+        //                             an iterand-shaped event
+        //                             (SBorrow / MBorrow / Move)
+        //                             from the head expression.
+        //
+        //   `for (i, a) in iter`    — tuple / struct / etc. The
+        //                             iterand semantics don't
+        //                             pair element-wise against
+        //                             a tuple pattern (the
+        //                             iterator yields tuples but
+        //                             the iter expression isn't
+        //                             one), so fall back to
+        //                             `bind_walk`: register every
+        //                             binding the pattern names
+        //                             against `head_arg`. Each
+        //                             gets a best-effort event
+        //                             (a Move/Copy via
+        //                             match_rhs) — approximate,
+        //                             but the body refs to
+        //                             `i`/`a` resolve and the
+        //                             columns aren't empty.
+        let prev_inside_branch = self.inside_branch;
+        self.inside_branch = true;
+        // A `break` / `continue` names the inner `loop` as its
+        // target, and drops the loop variable too (#410).
+        let entry_len = self.in_scope.len();
+        if let Some(outer_arm) = arms.first() {
+          self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len, head_from });
+        }
+        // The variable moved into the loop as its iterator, whose
+        // drop is stated on its column (#482).
+        let mut iterator_head: Option<ResourceAccessPoint> = None;
+        if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
+          let pat_name = binding_name(&self.tcx, pat_hirid);
+          let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
+            .pat_ty(user_pat);
+            let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
+          if pat_ty.is_ref() && head_is_iterator {
+            // A reference an iterator hands out: its lender isn't
+            // known here, and nothing is "returned" to the
+            // iterator (or to anything) when it ends.
+            self.add_ref(
+              pat_name.clone(),
+              bool_of_mut(pat_ty.ref_mutability().unwrap()),
+              false,
+              for_line,
+              ResourceTy::Anonymous,
+              std::collections::VecDeque::new(),
+              self.current_scope,
+              false,
+              pointee_copy,
+            );
+            self.unlent_refs.insert(pat_name.clone());
+          } else if pat_ty.is_ref() {
+            // `for x in v.iter_mut()`: the loan came from `v`;
+            // `iter_mut` is the method that lent it, not the
+            // variable x hands the borrow back to (#749).
+            let lender = match head_arg.kind {
+              // Only an owner lends by autoref: a reference
+              // receiver (`text.split_whitespace()` with
+              // `text: &str`) is copied, so nothing is lent from it.
+              ExprKind::MethodCall(_, recv, _, _)
+                if !self.tcx.typeck(recv.hir_id.owner).node_type(recv.hir_id).is_ref() =>
+              {
+                match get_rap(recv, &self.tcx, &self.raps) {
+                  r @ ResourceTy::Value(_) => r,
+                  _ => head_rty.clone(),
+                }
+              }
+              _ => head_rty.clone(),
+            };
+            self.add_ref(
+              pat_name.clone(),
+              bool_of_mut(pat_ty.ref_mutability().unwrap()),
+              false,
+              for_line,
+              lender,
+              std::collections::VecDeque::new(),
+              self.current_scope,
+              false,
+              pointee_copy,
+            );
+          } else {
+            let is_copy = self.tcx.type_is_copy_modulo_regions(
+              typing_env(self.tcx, user_pat.hir_id.owner),
+              pat_ty);
+            self.add_owner(pat_name.clone(), false, is_copy, self.ty_is_plain(pat_ty, user_pat.hir_id.owner), self.ty_has_interior_mut(pat_ty, user_pat.hir_id.owner), self.current_scope, false);
+            self.mark_owner_type(&pat_name, pat_ty);
+          }
+          self.annotate_src(pat_name.clone(), pat_ident.span, false,
+            *self.raps.get(&pat_name).unwrap().rap.hash());
+
+          // Emit the iterand event into the user's pattern binding.
+          let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
+          if head_is_iterator {
+            // The iterator is moved into the loop; nothing is
+            // moved into (or borrowed by) the loop variable.
+            if iterator_needs_drop {
+              iterator_head = head_rty.extract_rap().cloned();
+              self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Iterator);
+            } else {
+              self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+            }
+            self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+          } else if let Some(e) = iterand_evt {
+            // `for n in a` moving a collection of Copy elements
+            // (`Vec<i32>`): `a` is moved into the loop's
+            // iterator, and each `n` is a copy `next()` hands
+            // out, not something moved from `a` (#772). Draw the
+            // move on the head and give `n` a plain binding.
+            let elem_copy = matches!(e, Evt::Move) && !pat_ty.is_ref() && self.tcx.type_is_copy_modulo_regions(
+              typing_env(self.tcx, user_pat.hir_id.owner),
+              pat_ty);
+            if elem_copy {
+              if iterator_needs_drop {
+                self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Collection);
+              } else {
+                self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+              }
+              self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+            } else if iterator_needs_drop {
+              self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::Collection);
+            } else {
+              self.add_ev(for_line, e, to_rty, head_rty, false);
+            }
+          } else {
+            // A Range or a call result (`0..n`, `s.chars()`) has
+            // no place to borrow or move from: each iteration's
+            // value comes out of the iterator's `next()`. Give the
+            // binding a plain Bind so its column starts at the
+            // `for` line (#205).
+            self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+          }
+        } else {
+          // Composite patterns: bind every name in the pattern
+          // as a branch-scoped RAP so body references resolve.
+          // Emit a Bind from Anonymous for each — we don't
+          // have a clean iterand shape (the iterator yields
+          // tuples but the iter expression isn't a tuple).
+          // Calling `match_rhs(head_arg)` would synthesize a
+          // Copy from the iter's tail Function (e.g.
+          // `enumerate`); those Function→Value events are
+          // filtered out of `event_line_map` and end up
+          // never reaching the destination's timeline, so the
+          // column wouldn't render at all. The Bind shortcut
+          // sidesteps that and matches the macro-RHS path.
+          //
+          // A head that is a variable moved into the loop
+          // (`for (n, s) in pairs`) still moves it: draw that on
+          // the head, into no particular binding, as the single
+          // binding does (#527).
+          if matches!(iterand_evt, Some(Evt::Move)) {
+            if iterator_needs_drop {
+              if head_is_iterator {
+                iterator_head = head_rty.extract_rap().cloned();
+                self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty.clone(), LoopHead::Iterator);
+              } else {
+                self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty.clone(), LoopHead::Collection);
+              }
+            } else {
+              self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty.clone(), false);
+            }
+          }
+          // `for (a, b) in &pairs` / `&mut pairs`: each reference
+          // binding borrows the head (#576).
+          if matches!(iterand_evt, Some(Evt::SBorrow) | Some(Evt::MBorrow)) {
+            self.pattern_lender = iterand_evt.clone().map(|e| (e, head_rty.clone()));
+          }
+          self.register_pattern_bindings_anon(user_pat, for_line);
+          self.pattern_lender = None;
+        }
+
+        // Visit body — events flow into the global timeline.
+        let before = self.rap_names();
+        if let Some(ro) = &iterator_head {
+          if let Some(loop_expr) = arms.first().map(|a| a.body) {
+            self.loop_iterators.push((loop_expr.hir_id, ro.clone()));
+          }
+        }
+        // The body may run no times or many (#786).
+        let inits = self.enter_loop_inits();
+        self.visit_expr(body_expr);
+        if let Some(loop_expr) = arms.first().map(|a| a.body) {
+          self.leave_loop_inits(expr, loop_expr.hir_id, inits, true);
+        }
+        if iterator_head.is_some() {
+          self.loop_iterators.pop();
+        }
+        self.inside_branch = prev_inside_branch;
+
+        // The pattern bindings are fresh each iteration and,
+        // like the body's own `let`s, go out of scope at the
+        // body's closing brace (#205, #256). They're registered
+        // with is_global = false, so print_out_of_scope won't
+        // emit this for them.
+        let body_end = self.tcx.sess.source_map()
+          .lookup_char_pos(body_expr.span.hi()).line;
+        // `for x in it`: the loop owns the iterator `it` holds a
+        // borrow in, until the loop ends, so the lender is
+        // borrowed through the whole body and its borrow ends
+        // where the loop does, not at the last use of `x`
+        // (#722). (A `break` that leaves the loop early ends it
+        // in its own branch.)
+        if head_is_iterator && arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1) {
+          if let Some(name) = expr_to_rap_name(head_arg, &self.tcx) {
+            if self.borrow_map.contains_key(&name) {
+              if self.raps.get(&name).is_some_and(|r| r.rap.holds_borrow()) {
+                self.for_moved_holders.insert(name.clone());
+              }
+              let floor = self.borrow_floor.entry(name).or_insert(body_end);
+              *floor = (*floor).max(body_end);
+            }
+          }
+        }
+        let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
+        collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut loop_decls);
+        // Not where every path breaks or continues first (#631).
+        let loop_decls = &loop_decls - &Self::left_at_exits(self.ends_at_exits(body_expr, false), &loop_decls);
+        // The loop's iterator holds the loan the head made
+        // (`&mut m`, `&pairs`) until the loop ends, so the
+        // lender is borrowed through the whole body, not just
+        // to the last use of the binding: `m.len()` after
+        // `s`'s last use is still E0499/E0502 (#739). (A
+        // `break` / `return` in the body ends it in its own
+        // branch, drawn there.)
+        // (the loop's own desugared `None => break` is the one)
+        let runs_to_the_end = arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1)
+          && !body_returns(body_expr);
+        let mut pat_decls = HashSet::new();
+        collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
+        #[expect(clippy::disallowed_methods, reason = "each binding's floor is raised on its own")]
+        for decl in pat_decls.iter().filter(|_| runs_to_the_end) {
+          let lent = self.borrow_map.get(decl.name())
+            .is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous));
+          if lent {
+            let floor = self.borrow_floor.entry(decl.name().to_owned()).or_insert(body_end);
+            *floor = (*floor).max(body_end);
+          }
+        }
+        self.emit_scope_end(loop_decls, body_end);
+        // `break`s in the body target the desugared `loop`
+        // (the outer arm's body), which also ends when the
+        // iterator runs out.
+        if let Some(loop_expr) = arms.first().map(|a| a.body) {
+          self.emit_loop_exit_moves(loop_expr, None, &before, true);
+        }
+        if arms.first().is_some() {
+          self.exit_frames.pop();
+        }
+        self.in_scope.truncate(entry_len);
+        // The loop drops its iterator where it ends, however it
+        // ends (running out, a `break`) (#482).
+        if let Some(ro) = iterator_head {
+          self.add_loop_iterator_drop(ro, span_end_line(&expr.span, &self.tcx), LoopLeft::End);
+        }
+      }
+    }
+}
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {

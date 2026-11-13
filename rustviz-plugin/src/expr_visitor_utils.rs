@@ -1005,7 +1005,7 @@ pub fn borrow_span_of(expr: &Expr) -> Option<rustc_span::Span> {
 
 /// `line` when `expr` is a call (`id(&p)`, `v.first()`): a reference it
 /// returns holds the loan issued for its lender on that line, which
-/// `print_lifetimes` finds by (line, lender) (`RefData::loan_line`).
+/// `emit_borrow_ends` finds by (line, lender) (`RefData::loan_line`).
 pub fn call_loan_line(expr: &Expr, line: usize) -> Option<usize> {
   match expr.kind {
     ExprKind::Call(..) | ExprKind::MethodCall(..) => Some(line),

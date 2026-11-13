@@ -408,7 +408,7 @@ fn main() {
         "i.p's ref-line tooltip missing — likely still modelled as a Struct field"
     );
 
-    // print_lifetimes resolves i.p's transitive lender (n) and
+    // emit_borrow_ends resolves i.p's transitive lender (n) and
     // emits the matching return-of-borrow at end of scope.
     assert!(
         timeline.contains("Return immutably borrowed resource from i.p to n"),
