@@ -246,7 +246,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "some_string is a mutable borrow from the caller",
             "some_string holds a mutable reference; it can read and write the borrowed resource",
-            "push_str reads from/writes to some_string (mutable reborrow — some_string can't be used until push_str returns)",
+            "push_str reads and writes through some_string (mutable reborrow — some_string can't be used until push_str returns)",
             "change reads from/writes to s",
             "s goes out of scope. Its resource is dropped.",
         ],

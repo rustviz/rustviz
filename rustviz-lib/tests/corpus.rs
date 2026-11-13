@@ -1265,6 +1265,7 @@ const EXPECTED_OK: &[&str] = &[
     // #813: a closure owning a std lock is a resource on every host.
     "closure_rwlock_795",
     "closure_mutex_795",
+    "mutref_call_through_812",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -1419,7 +1420,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "some_string is a mutable borrow from the caller",
             "some_string holds a mutable reference; it can read and write the borrowed resource",
-            "push_str reads from/writes to some_string (mutable reborrow — some_string can't be used until push_str returns)",
+            "push_str reads and writes through some_string (mutable reborrow — some_string can't be used until push_str returns)",
         ],
         must_not_contain: &[
             "some_string is the owner of the resource",
@@ -1617,7 +1618,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from r to s",
             // r2 is itself `&mut String`, so push_str's call-site
             // dot picks up the implicit-reborrow suffix.
-            "push_str reads from/writes to r2 (mutable reborrow — r2 can't be used until push_str returns)",
+            "push_str reads and writes through r2 (mutable reborrow — r2 can't be used until push_str returns)",
         ],
         must_not_contain: &[],
     },
@@ -1681,10 +1682,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             // `push(y)`, push: `&mut String` → `()`: implicit
             // reborrow that ends when push returns.
-            "push reads from/writes to y (mutable reborrow — y can't be used until push returns)",
+            "push reads and writes through y (mutable reborrow — y can't be used until push returns)",
             // `let w = first(y)` returns a `&mut String` derived
             // from y: the reborrow lives on in w after first returns.
-            "first reads from/writes to y (mutable reborrow — y can't be used while the reborrow is live)",
+            "first reads and writes through y (mutable reborrow — y can't be used while the reborrow is live)",
             // `take(y)` into a generic `T`: y is moved, not reborrowed
             // (#200).
             "Move from y to take",
@@ -1700,9 +1701,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's resource is immutably borrowed by show",
             "y's resource is mutably borrowed by push; y can't be used while the borrow is live",
             "y's resource is no longer mutably borrowed",
-            "first reads from/writes to y (mutable reborrow — y can't be used until first returns)",
-            "take reads from/writes to y (mutable reborrow — y can't be used until take returns)",
-            "take reads from/writes to y",
+            "first reads and writes through y (mutable reborrow — y can't be used until first returns)",
+            "take reads and writes through y (mutable reborrow — y can't be used until take returns)",
+            "take reads and writes through y",
             "show reads from x (immutable reborrow — x is read-only until show returns)",
         ],
     },
@@ -1738,8 +1739,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from z to x",
             // y and z are both `&mut String`, so the call-site
             // dot picks up the implicit-reborrow suffix.
-            "world reads from/writes to y (mutable reborrow — y can't be used until world returns)",
-            "world reads from/writes to z (mutable reborrow — z can't be used until world returns)",
+            "world reads and writes through y (mutable reborrow — y can't be used until world returns)",
+            "world reads and writes through z (mutable reborrow — z can't be used until world returns)",
         ],
         must_not_contain: &[],
     },
@@ -4133,7 +4134,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `&mut` case keeps only its reborrow note.
         must_contain: &[
             "len reads from r",
-            "push_str reads from/writes to w (mutable reborrow — w can't be used until push_str returns)",
+            "push_str reads and writes through w (mutable reborrow — w can't be used until push_str returns)",
             "is_empty reads from r",
         ],
         must_not_contain: &[
@@ -4152,7 +4153,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push_str reads from/writes to s",
             "push_str reads from/writes to s (implicitly mutably borrowed)",
             "String::push_str reads from/writes to s",
-            "push_str reads from/writes to r (mutable reborrow — r can't be used until push_str returns)",
+            "push_str reads and writes through r (mutable reborrow — r can't be used until push_str returns)",
         ],
         must_not_contain: &[
             "push_str reads from/writes to s (mutable reborrow — s can't be used until push_str returns)",
@@ -5027,7 +5028,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #201: `ru` is reborrowed for the call, once; `g` captures
         // nothing.
         must_contain: &[
-            "g reads from/writes to ru (mutable reborrow — ru can't be used until g returns)",
+            "g reads and writes through ru (mutable reborrow — ru can't be used until g returns)",
         ],
         must_not_contain: &[
             "ru's resource is captured (mutably borrowed) by closure g",
@@ -5173,8 +5174,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the owner w.
         must_contain: &[
             "Mutable reborrow from rv to e",
-            "add reads from/writes to rv (mutable reborrow — rv can't be used until add returns)",
-            "push reads from/writes to rv (mutable reborrow — rv can't be used until push returns)",
+            "add reads and writes through rv (mutable reborrow — rv can't be used until add returns)",
+            "push reads and writes through rv (mutable reborrow — rv can't be used until push returns)",
             "Mutable borrow from w to f",
             "Immutable reborrow from r to sl",
         ],
@@ -6357,14 +6358,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // moved into take, like an owner passed by value. It used to be
         // drawn as a borrow that y gets back.
         must_contain: &[
-            "push reads from/writes to y (mutable reborrow — y can't be used until push returns)",
+            "push reads and writes through y (mutable reborrow — y can't be used until push returns)",
             "Move from y to take",
             "s's resource is no longer mutably borrowed",
         ],
         must_not_contain: &[
-            "take reads from/writes to y",
+            "take reads and writes through y",
             "y's resource is mutably borrowed by take; y can't be used while the borrow is live",
-            "take reads from/writes to y (mutable reborrow — y can't be used until take returns)",
+            "take reads and writes through y (mutable reborrow — y can't be used until take returns)",
         ],
     },
     TooltipExpect {
@@ -9058,13 +9059,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r.a's resource is mutably borrowed by f; r.a can't be used while the borrow is live",
             "Return mutably borrowed resource from f to r.a",
             "s.a acquires ownership of a new resource; its previous resource is dropped",
-            "push_str reads from/writes to r.a (mutable reborrow — r.a can't be used until push_str returns)",
-            "push reads from/writes to r.inner.v (mutable reborrow — r.inner.v can't be used until push returns)",
+            "push_str reads and writes through r.a (mutable reborrow — r.a can't be used until push_str returns)",
+            "push reads and writes through r.inner.v (mutable reborrow — r.inner.v can't be used until push returns)",
             "Mutable reborrow from r.inner to q",
             "Mutable reborrow from q.v to g",
             "s.inner.v acquires ownership of a new resource; its previous resource is dropped",
             "Mutable reborrow from p.a to f",
-            "push_str reads from/writes to p.a (mutable reborrow — p.a can't be used until push_str returns)",
+            "push_str reads and writes through p.a (mutable reborrow — p.a can't be used until push_str returns)",
             "t acquires ownership of a new resource; its previous resource is dropped",
             "u.a acquires ownership of a new resource; its previous resource is dropped",
             // `*f = String::from("b")` reads like a plain assignment on
@@ -13070,16 +13071,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrows end is pinned by `loop_call_arg_borrows_end_at_the_call`.
         must_contain: &[
             "the resource ra points to is mutably borrowed by take through ra, if the loop ended with break ra; ra can't be used while the borrow is live",
-            "take reads from/writes to ra, if the loop ended with break ra (mutable reborrow — ra can't be used until take returns)",
+            "take reads and writes through ra, if the loop ended with break ra (mutable reborrow — ra can't be used until take returns)",
             "the resource rb points to is mutably borrowed by take through rb, if the loop ended with break rb; rb can't be used while the borrow is live",
-            "take reads from/writes to rb, if the loop ended with break rb (mutable reborrow — rb can't be used until take returns)",
+            "take reads and writes through rb, if the loop ended with break rb (mutable reborrow — rb can't be used until take returns)",
             "the resource re points to is immutably borrowed by look, if the loop ended with break re",
             "look reads from re, if the loop ended with break re",
             "the resource rf points to is immutably borrowed by look, if the loop ended with break rf",
             "look reads from rf, if the loop ended with break rf",
             // A single `break`: the call always gets rg.
             "the resource rg points to is mutably borrowed by take through rg; rg can't be used while the borrow is live",
-            "take reads from/writes to rg (mutable reborrow — rg can't be used until take returns)",
+            "take reads and writes through rg (mutable reborrow — rg can't be used until take returns)",
         ],
         must_not_contain: &[
             "=the resource ra points to is mutably borrowed by take through ra; ra can't be used while the borrow is live",
@@ -14480,6 +14481,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f's resource is moved",
         ],
         must_not_contain: &["f's value is immutably borrowed", "f's value is no longer", "f's value is moved"],
+    },
+    // #812: passing a `&mut` reference variable `r` to a function (or
+    // calling a `&mut self` method on it) reads and writes the value r
+    // points to, not r itself; "writes to r" read like r was reassigned.
+    TooltipExpect {
+        name: "mutref_call_through_812",
+        must_contain: &[
+            "the resource r points to is mutably borrowed by add_world through r; r can't be used while the borrow is live",
+            "add_world reads and writes through r (mutable reborrow — r can't be used until add_world returns)",
+            "push_str reads and writes through t (mutable reborrow — t can't be used until push_str returns)",
+        ],
+        must_not_contain: &[
+            "add_world reads from/writes to r",
+            "push_str reads from/writes to t",
+        ],
     },
 ];
 
@@ -19175,11 +19191,11 @@ fn loop_call_arg_borrows_end_at_the_call() {
     let rv = run_with_local_backend("loop_break_call_arg");
     let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     for (lender, kind, brk, call) in [
-        ("a", "mutably", "if c { break ra; } else { break rb; }", "take reads from/writes to ra"),
-        ("b", "mutably", "if c { break ra; } else { break rb; }", "take reads from/writes to rb"),
+        ("a", "mutably", "if c { break ra; } else { break rb; }", "take reads and writes through ra"),
+        ("b", "mutably", "if c { break ra; } else { break rb; }", "take reads and writes through rb"),
         ("e", "immutably", "if c { break re; } else { break rf; }", "look reads from re"),
         ("f", "immutably", "if c { break re; } else { break rf; }", "look reads from rf"),
-        ("g", "mutably", "if c { break rg; }", "take reads from/writes to rg"),
+        ("g", "mutably", "if c { break rg; }", "take reads and writes through rg"),
     ] {
         let brk_row = code_row_y(&code, brk);
         // The last such dot: `e.len()` before the loop also lends `e`.
@@ -19239,7 +19255,7 @@ fn loop_call_arg_unbranched_call_and_borrow_end_share_a_row() {
     let rv = run_with_local_backend("loop_break_call_arg_unbranched");
     let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     for (lender, kind, brk, call) in [
-        ("a", "mutably", "break r;", "take reads from/writes to r"),
+        ("a", "mutably", "break r;", "take reads and writes through r"),
         ("e", "immutably", "break re;", "look reads from re"),
     ] {
         let brk_row = code_row_y(&code, brk);
