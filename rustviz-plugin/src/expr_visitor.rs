@@ -3081,18 +3081,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// Whether `e` mentions a local variable declared inside `scope`.
   fn mentions_local_declared_in(&self, e: &'tcx Expr<'tcx>, scope: rustc_span::Span) -> bool {
-    struct Mentions<'a, 'tcx>(rustc_middle::ty::TyCtxt<'tcx>, rustc_span::Span, &'a mut bool);
-    impl<'a, 'tcx> rustc_hir::intravisit::Visitor<'tcx> for Mentions<'a, 'tcx> {
-      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-        if local_of_path(e).is_some_and(|l| self.1.contains(self.0.hir_span(l))) {
-          *self.2 = true;
-        }
-        rustc_hir::intravisit::walk_expr(self, e);
-      }
-    }
-    let mut found = false;
-    rustc_hir::intravisit::Visitor::visit_expr(&mut Mentions(self.tcx, scope, &mut found), e);
-    found
+    locals_in(e, ClosureLocals::Skip).iter().any(|m| scope.contains(self.tcx.hir_span(m.id)))
   }
 
   // add events for arguments in a function call
@@ -7753,22 +7742,9 @@ fn insert_in_arm(
 /// { … break ra; }`), as `branch_tails` gives a conditional's: `None`
 /// for anything else, or a loop none of whose `break`s carries a value.
 pub fn loop_break_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
-  use rustc_hir::intravisit::{self, Visitor};
-  struct Find<'tcx> { id: rustc_hir::HirId, out: Vec<&'tcx Expr<'tcx>> }
-  impl<'tcx> Visitor<'tcx> for Find<'tcx> {
-    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-      if let ExprKind::Break(dest, Some(v)) = e.kind {
-        if dest.target_id == Ok(self.id) {
-          self.out.push(v);
-        }
-      }
-      intravisit::walk_expr(self, e);
-    }
-  }
   let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = e.kind else { return None };
-  let mut f = Find { id: e.hir_id, out: Vec::new() };
-  intravisit::walk_expr(&mut f, e);
-  (!f.out.is_empty()).then_some(f.out)
+  let out: Vec<_> = breaks_to(e).into_iter().filter_map(|(_, value)| value).collect();
+  (!out.is_empty()).then_some(out)
 }
 
 /// The expressions an `if` / `match` (or a block ending in one)

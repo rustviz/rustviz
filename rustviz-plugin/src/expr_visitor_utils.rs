@@ -1932,3 +1932,73 @@ pub fn needs_drop<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, owner: rustc_hir::Owner
 pub fn needs_drop_in<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
   ty.needs_drop(tcx, env)
 }
+
+/// The `break`s inside `loop_expr` (a `loop`, or any expression that can
+/// be a `break` target, such as a labelled block) that target it, as the
+/// `break` expression and the value it carries (`break value`), in source
+/// order. Nested loops' own `break`s aren't included (they target the
+/// nested loop). A `break` can't cross a closure boundary (rustc rejects
+/// it), and a closure's body isn't visited anyway.
+pub fn breaks_to<'tcx>(loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find<'tcx> { id: HirId, out: Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> }
+  impl<'tcx> Visitor<'tcx> for Find<'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Break(dest, value) = e.kind {
+        if dest.target_id == Ok(self.id) {
+          self.out.push((e, value));
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find { id: loop_expr.hir_id, out: Vec::new() };
+  intravisit::walk_expr(&mut f, loop_expr);
+  f.out
+}
+
+/// What `locals_in` does with a closure it meets. A closure's body is a
+/// different function and is never walked; the question is whether the
+/// closure itself counts as mentioning the locals it captures.
+#[derive(Clone, Copy)]
+pub enum ClosureLocals<'tcx> {
+  /// A closure mentions nothing.
+  Skip,
+  /// A closure mentions each local it captures (`upvars_mentioned`).
+  Captures(TyCtxt<'tcx>),
+}
+
+/// One mention of a local variable found by `locals_in`.
+pub struct LocalMention<'tcx> {
+  /// The local's binding.
+  pub id: HirId,
+  /// The path expression that names it; `None` for a local a closure
+  /// captures (`ClosureLocals::Captures`).
+  pub expr: Option<&'tcx Expr<'tcx>>,
+}
+
+/// Every mention of a local variable in `e` (the path expressions naming
+/// a `let` / pattern binding, as `local_of_path` sees them), in the order
+/// a depth-first walk meets them, `e` itself first.
+pub fn locals_in<'tcx>(e: &'tcx Expr<'tcx>, closures: ClosureLocals<'tcx>) -> Vec<LocalMention<'tcx>> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find<'tcx> { closures: ClosureLocals<'tcx>, out: Vec<LocalMention<'tcx>> }
+  impl<'tcx> Visitor<'tcx> for Find<'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let Some(id) = local_of_path(e) {
+        self.out.push(LocalMention { id, expr: Some(e) });
+      }
+      if let (ExprKind::Closure(c), ClosureLocals::Captures(tcx)) = (e.kind, self.closures) {
+        if let Some(upvars) = tcx.upvars_mentioned(c.def_id) {
+          for id in upvars.keys() {
+            self.out.push(LocalMention { id: *id, expr: None });
+          }
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find { closures, out: Vec::new() };
+  f.visit_expr(e);
+  f.out
+}
