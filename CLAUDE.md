@@ -104,7 +104,12 @@ syntax (e.g. `if let` guards), which the visitor may not handle yet.
 3. Probe diff: run both builds over a set of Book-style snippets (at
    least `rustviz-plugin/tests/*.rs`; #170 used ~130) and diff the sorted
    `data-tooltip-text` attributes of each timeline SVG. Every changed
-   snippet needs an explanation.
+   snippet needs an explanation. `scripts/probe-diff.sh <old-root>
+   <new-root>` does this for every `rustviz-plugin/tests/**/*.rs` fixture
+   and Book snippet: it compares the sorted tooltips, a hash of each
+   timeline's geometry and the code panel, and any new failure, prints
+   the snippets that differ and exits 1. A refactor that must not change
+   output passes when it prints `identical`.
 4. Browser check: run the playground against the new plugin and render
    every dropdown example plus a failing snippet (the error card must
    show rustc's message, not "Unexpected output format").
