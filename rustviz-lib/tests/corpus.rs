@@ -4,8 +4,8 @@
 //! to visualize. We don't pin exact SVG output (it's noisy and changes with
 //! benign tweaks); instead we assert on three layers:
 //!
-//!   * `corpus_expected_ok_produce_well_formed_svg` — the regression floor.
-//!     Every `EXPECTED_OK` snippet returns well-formed SVG (`<svg ...`) for
+//!   * `corpus_all_fixtures_produce_well_formed_svg` — the regression floor.
+//!     Every fixture (minus `SKIP_WELL_FORMED`) returns well-formed SVG (`<svg ...`) for
 //!     both panels and the timeline carries at least one `tooltip-trigger`
 //!     element (i.e. the plugin produced *some* annotations).
 //!
@@ -25,1312 +25,43 @@
 //! `cargo install --path rustviz-plugin --locked` to have been run first.
 //! `setup.sh` does this for you. CI runs `setup.sh` before `cargo test`.
 
-use std::collections::BTreeMap;
+mod common;
+
+use common::svg::attr;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use rustviz_lib::Rustviz;
 
-/// Curated subset that should always succeed end-to-end. Each entry is the
-/// stem of a file in `../rustviz-plugin/tests/`. Keep this list small and
-/// representative; it's the regression floor.
-///
-/// Snippets are grouped by feature area in source order so a glance at
-/// the list shows which categories are covered.
-const EXPECTED_OK: &[&str] = &[
-    // — Existing canon: ownership / move / copy / basic refs.
-    "testMove",
-    "testNum",
-    "basic_ref",
-    "basic_mutref",
-    "copy2Caller",
-    "ownershipFunctions",
-    "testStaticB",
-    "testMutB",
-    // — Field-projection cases (added with #84).
-    "nested_struct_borrow",
-    "nested_struct_move",
-    "nested_struct_passref",
-    "field_method_call",
-    "field_through_ref",
-    // — References: more nuanced shapes.
-    "reborrow",
-    "reborrow_kinds",
-    "borrow_moved_on",
-    "call_reborrow_kinds",
-    "interior_mut_lend",
-    "nll_two_borrows",
-    // — Reassignment / move-out / take-and-return.
-    "reassign_with_drop",
-    "move_return",
-    "take_and_return",
-    // — Stdlib method calls.
-    "string_push_str",
-    "string_len",
-    // — Stdlib indexing / slicing (#75).
-    "vec_slice",
-    // — User-defined inherent methods.
-    "inherent_method_rectangle",
-    // — Lifetime annotations.
-    "lifetime_excerpt",
-    // — Generics.
-    "generic_fn",
-    // — Shadowing.
-    "shadowing_basic",
-    // — Marker comments (skip on let, hide on fn).
-    "skip_marker_let",
-    "hide_marker_fn",
-    // — Conditionals as expression RHS (the supported subset).
-    "if_as_let_rhs",
-    // — Smart-pointer wrappers (#76): rendered as opaque single-owner
-    //   columns rather than recursing into Unique/NonNull/PhantomData
-    //   internals.
-    "box_string",
-    "rc_clone",
-    "box_dyn",
-    // — Closure captures (#79): capture arrows render for both
-    //   `move` and borrow closures.
-    "closure_move_single",
-    "closure_move_multi",
-    "closure_borrow_imm",
-    "closure_borrow_mut",
-    // — Ref-arg call sites inside `println!` (#74): the visitor now
-    //   descends through synthetic macro scaffolding to user-spanned
-    //   subexpressions, so an inline `r.method()` / `f(&r)` inside a
-    //   formatter macro emits its call-site arrow.
-    "method_call_in_println",
-    "freefn_call_in_println",
-    // — Tuple destructuring (#86): each tuple-literal element pairs
-    //   with its sub-pattern as if it were its own `let`. The slice
-    //   variant takes the same path against an array literal RHS.
-    "tuple_destructure",
-    "slice_destructure",
-    // — Conditionals (#87, #108): match-as-rhs renders move arrows
-    //   per arm; arm labels show source-form (`0`, `_`); merge dot
-    //   carries a join-state tooltip; nested conditionals propagate;
-    //   no-else `if` doesn't synthesize an "Else" label.
-    "match_as_let_rhs",
-    "if_else_move_join",
-    "if_else_rebind_join",
-    "nested_if_move_join",
-    "if_no_else",
-    "if_else_mut_reassign",
-    "if_as_let_rhs_multiline",
-    "if_else_move_both",
-    "deep_nested_if",
-    "match_three_arms",
-    "if_let_no_else",
-    "edition2024/temporary_drop_if_let_no_else",
-    "match_one_arm",
-    "match_tuple_destructure",
-    // — Conditionals composed with iteration / capture. Verifies
-    //   the merge classifier from #116 picks the right wording
-    //   when the branches are non-trivially shaped (a closure
-    //   capture in one arm, a for-loop borrow in another, etc.).
-    //   Tooltip-level pinning lives below in EXPECTED_TOOLTIPS.
-    "cond_with_for_loop",
-    "cond_with_closure",
-    "if_inside_for",
-    "closure_with_cond",
-    "if_let_inside_for",
-    "cond_with_move_closure",
-    "match_with_closure_arms",
-    // — Borrowing the unit value of an empty block (#146). Used to
-    //   panic in fetch_mutability; pinned here so the no-crash
-    //   floor doesn't regress.
-    "borrow_empty_block",
-    // — Triaged from the previously-untracked fixture set (#140).
-    //   These are shapes the curated entries above don't directly
-    //   cover.
-    "question_mark",        // `?` desugar (used to panic)
-    "question_mark_chain",  // chained `?`
-    "aliasing1",            // multi-level reference aliasing (`&&&x`)
-    "anonymous_call",       // fn returning &'static str fed into a method
-    "vec_macro",            // `let v = vec![…]` RHS
-    "assert_call_dot",      // call inside `assert!(…)` emits its event
-    "mv_back",              // shadow-after-move pattern
-    "mutAssignOp",          // `x += 5` compound assignment
-    "mutableReferences",    // `change(&mut s)` minimal mut-ref fn call
-    // `if let` guards on match arms (stable since 1.95). Used to crash on
-    // the guard-bound variable; tooltips pinned in EXPECTED_TOOLTIPS.
-    "match_if_let_guard",
-    // `:::` in a comment and a string literal (#181): used to be taken as
-    // the plugin's panel separator, truncating the code panel mid-line.
-    "triple_colon_source",
-    // — Coverage gaps closed (#139): patterns the visitor has arms
-    //   for but which lacked corpus pinning, plus const/static and
-    //   unsafe blocks which were silently untested.
-    "match_range_pattern",
-    "match_with_guard",
-    "const_basic",
-    "static_basic",
-    "unsafe_raw_ptr",
-    "static_mut_write",     // `COUNTER += inc` / `LOG = v` (used to panic)
-    // — Union (#131): rendered as an opaque single-owner column,
-    //   same as enums. Pre-fix the plugin panicked at the
-    //   AdtKind::Union arm with "union not implemented yet".
-    "union_basic",
-    // — Enum-typed fn parameter (#131): one opaque owner column, no
-    //   phantom per-field (`s.0`) column.
-    "enum_param",
-    // — Tuple-field projections (`x.0`) used to panic in
-    //   annotated_source_gen; fixed alongside #131.
-    "tuple_struct_field",
-    "tuple_field_read",     // `let a = t.0;`: Copy from t.0 (#189)
-    // — Assignment through a deref of a method-call temporary
-    //   (`*c.borrow_mut() += 1`, `*v.last_mut().unwrap() = 5`). Used
-    //   to panic looking up a RAP for the temporary.
-    "refcell_deref_assign_op",
-    "refcell_deref_assign_move",
-    "rc_refcell_deref_assign",
-    "deref_method_result_assign",
-    // — The same fn / tuple-variant constructor receiving more than one
-    //   value: nested `Cons(1, Box::new(Cons(2, ..)))`, or `id(s1)` then
-    //   `id(s2)`. Used to panic in calc_state on the shared Function RAP.
-    "cons_list_nested",
-    "cons_list_qualified_nested",
-    "fn_called_twice",
-    // — Chained field assignment (#143). `o.inner.x = …` now
-    //   resolves through `expr_to_rap_name` to the nested field's
-    //   pre-registered RAP and emits an Acquire event on that column.
-    "chained_field_assign",
-    "chained_field_assign_move",
-    // — Assignment to a place with no column of its own (`self.f = …`,
-    //   `r.f = …` through a `&mut`, `v[i] = …`). These used to panic in
-    //   `resource_of_lhs`. Field writes through a reference are now
-    //   drawn on the reference's column (#147); index writes aren't.
-    "assign_unmodelled_place",
-    "assign_field_of_method_result",
-    // — References never own their referent: `&mut` / `&` lifelines,
-    //   writes through `*r`, and `&str` bindings use reference
-    //   wording rather than "owner" / "acquires ownership".
-    "mutref_param_push_str",
-    "mutref_after_shared_borrows",
-    "mutref_self_method",
-    "vec_for_mut_deref",
-    "hashmap_entry_count",
-    "iter_mut_deref",
-    "deref_assign_copy",
-    "move_mutref",
-    "box_deref_assign",
-    "str_literal_ref",
-    "match_str_literal_arms",
-    "cell_ref_return",
-    // — Compiler-generated code stays out of the diagram: derived
-    //   impls draw no timelines, macro-bodied match arms end on the
-    //   arm's own line, Copy returns read as copies.
-    "derive_debug",
-    "match_arm_macro_body",
-    "copy_return_param",
-    "return_shared_ref",
-    // Receivers consumed by a `self` method, and the left operand of
-    // `String + &str`, are moved into the call (#172).
-    "self_method_into_iter",
-    "self_method_option",
-    "self_method_user",
-    "self_method_ref_receiver",
-    "string_add_in_fn",
-    // Struct fields follow whole-struct moves / copies, struct update
-    // syntax and field-init shorthand (#174).
-    "struct_move_drop",
-    "struct_move_let",
-    "struct_move_fn_param",
-    "struct_update_syntax",
-    "struct_field_init_shorthand",
-    "struct_nested_whole_move",
-    "struct_copy_whole",
-    "struct_return_whole",
-    "struct_reassign_whole",
-    "struct_update_return",
-    "struct_partial_move_two",
-    "struct_literal_same_line_arrows",
-    // — Match guards (#176): reads/borrows in `pat if cond =>`, guard
-    //   reads of the arm's own bindings, `if let ... && cond` guards.
-    "match_guard_borrow",
-    "match_guard_reads_binding",
-    "match_guard_let_chain",
-    // — Macro arguments (#177): formatting macros, `dbg!`, `write!`,
-    //   `assert_eq!` and `panic!` show the borrow / move of each
-    //   argument; a brace-less match arm whose body is a macro call.
-    "macro_format_args_borrow",
-    "macro_dbg",
-    "macro_match_arm_body",
-    "macro_write_assert_eq",
-    // Struct boxes in the timeline header (#192): a `String` bound by a
-    // pattern used to become an empty struct group drawn with
-    // width="-80"; back-to-back structs shared one box; a struct with no
-    // field columns got a negative-width box. Box geometry is pinned by
-    // `struct_boxes_span_their_own_columns`.
-    "while_let_pop_string",
-    "struct_box_adjacent",
-    "if_let_struct_fields_unused",
-    // Unit / empty structs get a label-only box each (#348).
-    "unit_struct_box",
-    // Deferred initialization, `let x;` then `x = …` (#234). Used to
-    // panic in resource_of_lhs.
-    "deferred_init_copy",
-    "deferred_init_string",
-    "deferred_init_if_else",
-    "deferred_init_match",
-    "deferred_init_then_reassign",
-    "deferred_init_one_branch",
-    // A String moved into a field of a method call's result, and a
-    // nested field write through one (from closed PR #186).
-    "field_of_method_result_assign",
-    // A struct item between two fns (#231): main's variables used to
-    // reuse helper's RAP hashes, and here the renderer panicked.
-    "struct_after_fn_panic",
-    // Assigning to a plain tuple's field (`t.0 = 5`) used to panic in
-    // resource_of_lhs (#235). Renders; the write isn't drawn (#189).
-    "tuple_field_assign",
-    // A Copy result of a method chain on a reference is a plain Copy
-    // binding, also on the line where the reference's borrow ends (#190).
-    "method_chain_ref_copy_result",
-    // Straight arrows hop over the dots they cross (#252); the
-    // crossing check itself runs on every snippet in this list.
-    "arrow_hops_over_dots",
-    // Arrow tails start at the edge of their source dot (#269); the
-    // tail check runs on every snippet in this list.
-    "arrow_tail_off_source_dot",
-    // A borrow of a temporary whose borrow ends on the same line (#204).
-    "borrow_of_temporary_same_line",
-    // Odd arm counts are laid out symmetrically, the middle arm on the
-    // column (#119); the layout itself is pinned by unit tests in
-    // timeline_panel.rs, these keep the shapes rendering on-canvas.
-    "match_five_arms",
-    "match_three_arms_nested_middle",
-    // More columns than the 12-colour palette: every column still gets
-    // a stroke colour (#279).
-    "many_columns_palette",
-    // Events on one line of one column share one dot (#309); the
-    // shared-point check runs on every snippet in this list.
-    "same_line_events_one_dot",
-    // A drop and a call on one merged dot: the drop mark sits below it.
-    "drop_and_call_one_dot",
-    // A partially moved struct drops only its remaining fields (#207).
-    "struct_partial_move_all",
-    "struct_partial_move_nested",
-    // Union writes and scope end don't drop fields (#191).
-    "union_manually_drop",
-    "union_whole_assign",
-    // Reference moves/copies and Copy assignments are worded as such (#178).
-    "ref_move_copy_wording",
-    "copy_field_assign",
-    // A borrow of a string literal or a static names it when it ends.
-    "ref_static_lender",
-    "ref_static_lender_mut",
-    // Merge dots of variables no branch moves get a tooltip (#179).
-    "match_unchanged_merge",
-    // A closure capturing through a reference reborrows `*r` (#277).
-    "closure_capture_through_ref",
-    // A ManuallyDrop local / field / param never drops its value (#283).
-    "manually_drop_local",
-    // `ManuallyDrop::drop` / `take` by hand (#283).
-    "manually_drop_by_hand",
-    // `&self` calls on interior-mutable values aren't "reads" (#203).
-    "interior_mut_calls",
-    // The RefCell runtime-check sentence follows the callee's identity,
-    // not the method name `borrow_mut` (#203).
-    "interior_mut_user_borrow_mut",
-    // Operands of built-in arithmetic operators are copied in (#241).
-    "binop_operand_copies",
-    "method_autoref_receiver",
-    "method_autoref_ref_receiver",
-    // `(&mut s).method()` is a fresh borrow of s, not a reborrow (#367).
-    "method_addrof_receiver",
-    // A moved-out reference's state isn't about ownership (#292).
-    "moved_ref_state",
-    // Operands of `-x` / `!b` are copied in, or moved for an
-    // overloaded `Neg` on a non-Copy type (#262).
-    "unary_operand_copies",
-    // By-value captures of a closure passed straight to a call (#230).
-    "closure_arg_move_captures",
-    // A `move` closure copies the Copy values it captures (#311).
-    "move_closure_copy_capture",
-    // — A reference copied out of an `Option<&T>` / tuple of references
-    //   by a pattern doesn't borrow the matched value (#304).
-    "match_copy_ref_out_of_option",
-    "match_copy_ref_out_of_tuple",
-    "iflet_copy_ref_out_of_option",
-    "match_ref_binding_borrows",
-    // Copy values are "values" in copy / borrow tooltips too (#274).
-    "copy_value_wording",
-    // — An explicit `ref` / `ref mut` binding on an owned value borrows
-    //   the matched place; it isn't a copy or a move (#338).
-    "ref_binding_borrows_owned",
-    // `if` without `else` whose body moves something: drawn like an
-    // `if` with an empty `else` (#257).
-    "if_no_else_partial_move",
-    "if_let_no_else_move",
-    "if_no_else_read_only",
-    "if_else_empty_same_line",
-    "if_no_else_nested_move",
-    // A reference to a Copy value says "the borrowed value" (#312).
-    "ref_copy_referent_wording",
-    // Borrowing from a reference borrows what it points to (#313).
-    "reborrow_through_ref_wording",
-    // Comparison operators borrow their operands (#366); operator names
-    // are escaped in tooltips (#376).
-    "comparison_operand_borrows",
-    "comparison_ref_operands",
-    "operator_name_escaped",
-    // Conditionals whose branches share lines (#117, #333, #354) and
-    // an `else if` chain (#355).
-    "if_one_line_move",
-    "match_one_line",
-    "if_else_next_line",
-    "else_if_chain",
-    // A fn parameter written as a pattern (`(a, b): (String, i32)`,
-    // `P { name, .. }: P`) gives each of its names a column (#331).
-    "param_patterns",
-    // ... also when an if/match picks between literals, and for `&CONST`.
-    "ref_static_lender_branches",
-    "ref_static_lender_const",
-    // Two refs borrowing the same variable on one line (#233).
-    "two_refs_same_line",
-    "two_refs_tuple",
-    // A closure captures only the fields it uses (Rust 2021; #328).
-    "closure_disjoint_field_capture",
-    "closure_whole_struct_capture",
-    // Same for tuple elements (#634).
-    "closure_tuple_element_capture",
-    // A Copy variable bound in every branch is "bound to a value" at
-    // the merge, not "acquired ownership of a resource" (#316).
-    "merge_bound_copy",
-    // A write through `&mut` / `Box` says the old value is dropped.
-    "deref_write_drops_old",
-    // `*r = e` reads like a plain assignment (#474).
-    "deref_assign_wording",
-    // `drop(x)` states that it drops x.
-    "mem_drop_states_drop",
-    // Method chains: later calls act on temporaries, but their
-    // arguments are still moved / borrowed (#132). Same for a receiver
-    // with no column, like `self.items` (#250, #249).
-    "method_chain_temporaries",
-    "method_chain_args",
-    "method_arg_unnamed_receiver",
-    "method_call_in_unnamed_receiver_arg",
-    // Arguments to a call of a local closure (or other callable
-    // variable) go to the call, not into the closure's column
-    // (#201, #210, #258, #284).
-    "closure_call_mutref_arg",
-    "closure_call_mutref_var",
-    "closure_call_shared_ref_arg",
-    "closure_call_copy_arg",
-    "closure_call_move_arg",
-    "generic_fn_param_call",
-    "fn_item_local",
-    "fn_pointer_local_call",
-    "closure_call_result",
-    // A struct bound from an overloaded operator's result (#314).
-    "operator_result_struct_fields",
-    // Reassigning a reference variable is an assignment (#414).
-    "ref_reassign_wording",
-    "long_ref_field_label",
-    "long_ref_label_then_short",
-    // Element / slice borrows through a reference are reborrows (#407).
-    "index_reborrow_through_ref",
-    // `ref` bindings in by-value parameters borrow the value the
-    // function owns, not the caller's (#377).
-    "param_ref_binding_own",
-    // Inherent-method shapes (#136): one-field accessor, each receiver
-    // kind, unit struct, nested struct consumed by a method (#319).
-    "inherent_method_one_field",
-    "inherent_method_receivers",
-    "inherent_method_unit_struct",
-    "nested_struct_moved_into_fn",
-    // `ref` / `ref mut` in a `let` pattern borrows (#380).
-    "let_ref_binding_borrows",
-    // `let ref d = *r;` used to panic in find_lender (#422).
-    "let_ref_deref_reborrow",
-    // A match arm of type `!` (`_ => unreachable!()`, `panic!()`)
-    // binds nothing and doesn't reach the merge (#296).
-    "match_diverging_arm",
-    // An arm that calls a `-> !` function diverges too (#296).
-    "diverging_call_arm",
-    // A diverging branch's column stops at its end (#317).
-    "diverging_branch_stops",
-    // — Element writes (#144): `v[i] = …` is drawn on v's column as a
-    //   modification of v's resource, directly or through a reference.
-    "index_assign",
-    "index_assign_through_ref",
-    // A write through a reference / Box stored in an element (#396).
-    "write_through_element_ref",
-    // Nested struct fields of fn params and pattern bindings get
-    // columns (#239); a struct param's reference field borrows from
-    // the caller (#351).
-    "nested_fields_params_patterns",
-    // Values still owned at a `return` in a branch are dropped there
-    // (#363); a `let` in a match arm is dropped at the arm's end (#409).
-    "return_in_arm_drops",
-    "match_arm_with_let",
-    // A pattern-bound struct's reference fields are references (#352).
-    "pattern_struct_ref_fields",
-    // A pattern-bound struct's fields live and die with it, inside its
-    // `if let` / match arm / `while let` (#405).
-    "pattern_struct_fields_scope",
-    // A write to a place with no column states the old value's drop (#458).
-    "place_without_column",
-    // Tuples get a column per element, like struct fields (#189).
-    "tuple_element_move",
-    "tuple_create_copy",
-    "tuple_destructure_var",
-    "tuple_field_write",
-    "tuple_through_calls",
-    // A borrow stored in an element or other column-less place names
-    // its borrower and ends (#282).
-    "borrow_into_element",
-    // Destructuring a struct variable moves each field into its own
-    // name, not all of the struct (#326).
-    "struct_destructure_let",
-    "struct_destructure_match",
-    // Compound assignment (`acc += x`, `s += &t`) isn't `a = b` (#260).
-    "compound_assign",
-    // Fields moved out on some paths only: the struct's scope end says
-    // they're dropped only if no branch moved them (#395).
-    "partial_move_one_arm_tuple",
-    "partial_move_one_arm_struct",
-    "partial_move_if_branches",
-    // "resource" only for values that need drop (#484).
-    "no_drop_iter",
-    "non_copy_struct_move",
-    "string_resource_wording",
-    "sync_lock_resource",
-    "no_drop_reassign_branch",
-    "no_drop_partial_maybe",
-    // A temporary a `let` borrows gets a column to the end of the block (#400).
-    "extended_temporary",
-    // A `&mut` passed to a generic `T` is moved, not reborrowed (#200);
-    // a move into a call survives a borrow ending on the same line.
-    "mutref_moved_into_generic",
-    "move_into_call_same_line_borrow_end",
-    // — Shadowing (#173, #253): each binding gets its own column.
-    "shadow_after_move",
-    "shadow_after_move_into_fn",
-    "shadow_with_live_borrow",
-    "shadow_in_block",
-    "shadow_sibling_blocks",
-    "shadow_shared_columns",
-    "shadow_match_arm",
-    "shadow_rebind_chain",
-    // Shadowing matrix (#308 deep dive): re-lets, scopes, patterns,
-    // closures.
-    "shadow_matrix_let",
-    "shadow_matrix_scopes",
-    "shadow_header_names",
-    "shadow_matrix_patterns",
-    "shadow_matrix_closures",
-    "shadow_closure_fate",
-    // A call's result nothing takes is a temporary, dropped at the end of its statement (#457).
-    "unbound_temporary",
-    // A reference parameter's borrow end on a line shared with another
-    // arrow (#416).
-    "ref_param_end_shared_line",
-    // A reference bound by an `if` starts its bracket at the join (#489).
-    "branch_ref_bracket_if",
-    // Hovering an arm's column underlines only that arm's own lines
-    // (#369); the check is `arm_underline_off_its_lines`, run on every
-    // case above.
-    "if_else_arm_columns",
-    "let_if_else_arm_columns",
-    "match_three_arm_columns",
-    "if_body_on_split_line",
-    "else_on_join_line",
-    // Loop variables and loop-body locals start and end (#205, #256,
-    // #261).
-    "for_var_call_result",
-    "for_var_range",
-    "loop_body_local_drop",
-    "loop_var_in_branch",
-    "for_var_string_drop",
-    // A borrow by a reference declared in an arm ends in that arm
-    // (#389); `borrow_end_in_arm_is_drawn_in_the_arm` checks where.
-    "borrow_end_in_if_arm",
-    "shared_borrow_end_in_if_arm",
-    "borrow_end_in_match_arm",
-    "borrow_end_in_nested_if",
-    // One-line if / if let / match: condition events go on the split
-    // dot, events after the conditional on the join dot (#492).
-    "one_line_cond_events",
-    // A scrutinee that moves a value is evaluated before the branch
-    // (#450); one-line matches on a temporary used to panic (#459).
-    "if_let_scrutinee_move",
-    "if_let_scrutinee_move_else_move",
-    "match_scrutinee_move",
-    "match_on_temporary_one_line",
-    "match_on_temporary_variants",
-    // A borrow stored in a field through a local `&mut` (#512), or by a
-    // call whose signature lets it store the reference (#513).
-    "borrow_stored_through_local_ref",
-    "borrow_stored_by_call",
-    "match_arm_macro_ref_binding",
-    "match_arm_call_mut_ref_binding",
-    "iflet_one_line_ref_binding",
-    // An `if let` / `while let` pattern that borrows, copies or moves
-    // is drawn at the start of its arm's column (#382).
-    "if_let_binding_borrow",
-    "if_let_binding_copy",
-    "if_let_binding_move",
-    "while_let_binding_kinds",
-    // A reference declared before an if/match whose last use is in an
-    // arm: its borrow ends in each arm (#495);
-    // `outer_borrow_end_is_drawn_in_each_arm` checks where.
-    "outer_ref_end_in_match_arm",
-    "outer_ref_end_in_if_arm",
-    "outer_mut_ref_end_in_if_arm",
-    "outer_ref_end_in_nested_if",
-    // An arm written on the `if` / `match` line starts on that row (#508).
-    "if_arm_on_split_line",
-    "match_arm_on_split_line",
-    "if_arm_on_split_line_cond_event",
-    // Each segment of a branch column shows its own tooltip when
-    // hovered (#388); the check is `hover_polygons_off_their_segment`,
-    // run on every case above.
-    "branch_hover_per_segment",
-    "match_arm_hover_per_segment",
-    // A reassignment after a conditional move drops the old value only
-    // if it is still there (#335).
-    "reassign_after_maybe_move",
-    "reassign_after_maybe_move_no_else",
-    "reassign_after_maybe_move_match",
-    "reassign_after_nested_maybe_move",
-    // A moved `&mut` ends no borrow (#209); one coerced into an
-    // annotated `let` / struct field is reborrowed, not moved (#289).
-    "mutref_moved_on",
-    "mutref_coerced_reborrow",
-    // Struct boxes widen to contain their end columns' header labels
-    // (#477); pinned by `struct_box_contains_long_member_labels`.
-    "struct_box_long_last_label",
-    "struct_box_long_owner_label",
-    // — Functions returning a reference (#171): the result borrows from
-    //   the arguments its signature ties it to; tooltips pinned in
-    //   EXPECTED_TOOLTIPS.
-    "fn_ret_ref_first_word",
-    "fn_ret_ref_longest",
-    "fn_ret_ref_longest_literal",
-    "fn_ret_ref_methods",
-    "fn_ret_ref_mut",
-    "fn_ret_ref_unrelated_arg",
-    "fn_ret_ref_iter_next",
-    "fn_ret_ref_reassign",
-    "fn_ret_ref_struct_field",
-    "fn_ret_ref_arg_lists",
-    // An explicit `return v` moves `v` to the caller (#318).
-    "return_early_in_if",
-    "return_explicit_last",
-    "return_in_match_arm",
-    // A branch that moves a value and then `break`s (#344).
-    "loop_break_after_move",
-    // The merge after branches that moved a value and left early.
-    "join_after_early_exit",
-    // The same, for a value with nothing to drop (#484).
-    "return_early_no_drop",
-    // A call inside an arm adds no blank row (#419);
-    // `arm_calls_add_no_blank_rows` checks.
-    "arm_call_no_blank_row",
-    "arm_call_borrow_end_no_blank_row",
-    "match_arm_call_no_blank_row",
-    // Writes to struct fields through a reference (`p.x = …` with
-    // `p: &mut P`, `self.c = …`, `r.x = …`) are drawn on the
-    // reference's column (#147), also inside if / match arms.
-    "field_write_through_ref",
-    "field_write_through_ref_branch",
-    // `*r = e` reads like a plain assignment (#474).
-    "deref_assign_wording",
-    // `p.x += k` through a reference keeps "modified through", with no
-    // "(copied from k)" (#260).
-    "field_compound_assign_through_ref",
-    // — User macros: one that forwards to println! still renders (#342).
-    "user_macro_forwards",
-    // — A reference returned by a call (or a borrow) in an `if` /
-    //   `match` branch initializer borrows from every branch's lender
-    //   (#337); tooltips pinned below.
-    "branch_call_ref_if",
-    "branch_call_ref_match",
-    "branch_call_ref_method",
-    "branch_ref_if_addr",
-    // By-reference captures of a closure passed straight to a call (#298).
-    "closure_arg_ref_captures",
-    // A read through a reference / Box stored in an element (#438).
-    "read_through_element_ref",
-    // Thick `let mut` branch columns bend at splits and joins (#487).
-    "mut_branch_kinks",
-    "mut_branch_kinks_plain",
-    // — A variable that holds a borrow without being a reference
-    //   (`let it = v.iter();`, `let third = v.get(2);`, a struct with a
-    //   lifetime returned by a call; #336); tooltips pinned below.
-    "holder_iter_get",
-    "holder_iter_mut",
-    "holder_moved",
-    "holder_consumed",
-    "holder_reassign",
-    "holder_struct_from_call",
-    "holder_closure_capture",
-    "holder_closure_ref",
-    // A value moved into a call on a line with another arrow (#379).
-    "move_into_call_shared_line",
-    // A reassignment inside an if/else or match arm shows the previous
-    // value being dropped (#267).
-    "reassign_in_branch_drop",
-    "reassign_through_ref_in_branch",
-    // An `else if` chain / `else { match .. }` whose branches all
-    // return diverges as a whole (#491).
-    "else_if_chain_diverges",
-    // — Collections of references (`vec![&s]`, `[&a, &b]`) and
-    //   references copied out of them (`refs[0]`; #349).
-    "refs_vec_literal",
-    "refs_array_literal",
-    "refs_vec_mut",
-    "refs_index_untracked",
-    // A value or reference that borrows through a reference parameter
-    // (`v.iter()`, `first_word(s)` with `v: &Vec<i32>`, `s: &String`;
-    // #393); tooltips pinned below.
-    "holder_ref_param_iter",
-    "holder_ref_param_iter_mut",
-    "fn_ret_ref_through_param",
-    // Copy values aren't resources: a `for` element of an owned Vec<i32>
-    // (#504), a Copy parameter (#505); a reassignment says one thing (#506).
-    "for_copy_elements",
-    "copy_param_wording",
-    "reassign_one_bullet",
-    // — Destructuring assignment (#151): `(a, b) = (b, a)` draws each
-    //   variable assigned from its part of the RHS; rustc's `lhs`
-    //   temporaries get no column.
-    "tuple_destructure_assign",
-    "destructure_assign_parts",
-    // A reference read out through a reference stored in an element (#453).
-    "read_ref_through_element_ref",
-    // Calling an `FnOnce` closure moves it (#271).
-    "fnonce_call_drops_capture",
-    "fnonce_call_returns_capture",
-    "fnonce_call_conditional",
-    "fnonce_call_captures",
-    "fnonce_call_copy_result",
-    "fnonce_closure_moved_to_binding",
-    "fnmut_call_unchanged",
-    // A built-in comparison (`t < lim`) reads both operands (#497).
-    "comparison_reads",
-    // — A collection filled by `collect()` or `push(&s)` holds the
-    //   borrows of the references it stores (#392), and a reference
-    //   passed for a by-value generic parameter is carried by the
-    //   result (`id(&s)`, `Some(&s)`; #424); tooltips pinned below.
-    "collect_push_borrows",
-    "push_mut_refs",
-    "generic_by_value_ref",
-    "push_owned_not_holder",
-    // Swapping references keeps both lenders borrowed (#291).
-    "ref_swap_keeps_borrow",
-    // A write through a local `&mut` drops the old value on the
-    // lender's field column (`s.a`), also for `*w = S { .. }` (#152).
-    "field_write_through_local_ref",
-    // Rc / Arc / Weak: a drop lowers a count, clones share the value,
-    // and the callee (not the name `clone`) decides (#373).
-    "rc_handles",
-    "rc_branch",
-    "rc_clone_by_callee",
-    // The same wording for an Rc/Arc that is a struct field, and for
-    // Weak::clone (#373).
-    "rc_fields",
-    "rc_weak_clone",
-    // An Rc/Arc/Weak inside Option/Box/Vec/HashMap/RefCell/a tuple (#373).
-    "rc_inside",
-    "rc_inside_flag",
-    "rc_inside_tuple",
-    // An `if`/`else` or `match` whose branches all `return` ends the
-    // function there: no merge, no scope-end drops (#515).
-    "if_else_both_return",
-    "return_value_to_caller",
-    // Array literals, `vec![…]` elements and copies out of an index
-    // (`let first = v[0];`) (#297).
-    "array_literal_moves",
-    "vec_macro_moves",
-    "index_copy_read",
-    // A variable declared inside a branch, also in an inline `if` /
-    // `else if let` / `for` nested in it, exists only there (#501).
-    "else_if_let_binding",
-    "match_arm_nested_if_let",
-    "if_branch_nested_decls",
-    "while_let_in_branch",
-    // An `else if let` reusing the `if let` binding's name used to panic
-    // in fetch_timeline (#525).
-    "else_if_let_same_name",
-    "else_if_let_same_name_else_let",
-    // An arm's binding on the line where a nested `match` / `if` splits
-    // holds its value in every inner branch (#502).
-    "nested_match_arm_binding",
-    "match_arm_binding_if_same_line",
-    // A reference field overwritten directly (#531).
-    "borrow_field_overwrite_direct",
-    // Reads of fields through a reference (`let a = p.x;`, `&p.name`,
-    // `take(p.x)`, `p.name.len()`, a returned `self.x`) are drawn on
-    // the reference's column (#266).
-    "field_read_through_ref",
-    // Mutable borrows of fields through a `&mut` (`&mut r.a`,
-    // `r.a.push_str(..)`) are reborrows on the reference's column, and
-    // a write through them drops the owner's field (#202, #323).
-    "field_mut_borrow_through_ref",
-    // Copying out of an `if let` scrutinee doesn't branch it (#496).
-    "if_let_copy_and_move_out_of_scrutinee",
-    // A let chain's scrutinee temporary lives until the matched block
-    // ends or the `else` runs (#604). Let chains need Rust 2024: Cargo
-    // compiles each tests/*.rs as an integration test in the plugin
-    // crate's edition (2021), but doesn't look in subdirectories. The
-    // plugin builds user code in edition 2024.
-    "edition2024/temporary_let_chain_scrutinee",
-    // Or-pattern arms bind their names like a single pattern (#503).
-    "or_pattern_arm",
-    "or_pattern_arms",
-    "or_pattern_if_let",
-    "or_pattern_shadow",
-    // — A reference a pattern copies out of a value that holds a
-    //   borrow (`Some(x)` on `v.get(2)`) borrows what that value
-    //   borrows (#391); tooltips pinned below.
-    "holder_match_pattern",
-    "holder_iflet_call",
-    // A `let` inside a `match` arm lives in that arm only (#425).
-    "match_arm_let_local",
-    "match_arm_let_owned_move",
-    "match_ref_param_reborrow",
-    "match_mut_ref_param_reborrow",
-    "match_local_ref_reborrow",
-    // `if let` / `while let` chains (#198, #280). These need Rust 2024,
-    // so they live in tests/edition2024/: Cargo compiles each
-    // tests/*.rs as an integration test in the plugin crate's edition
-    // (2021), which rejects let-chains, but doesn't look in
-    // subdirectories. The plugin builds user code in edition 2024.
-    "edition2024/if_let_chain",
-    "edition2024/if_let_chain_move",
-    "edition2024/if_let_chain_first_part",
-    "edition2024/while_let_chain",
-    "anonymous_copy_source",
-    // Exits other than a `return` ending a branch drop what they leave
-    // (#410): panics, `break` / `continue`, `return s.len()`.
-    "exit_panic_drops",
-    "exit_unreachable_else",
-    "exit_break_continue_drops",
-    "exit_continue_in_match",
-    "exit_return_borrowed_value",
-    "exit_return_after_nested_if",
-    "exit_path_dependent_drops",
-    "exit_return_in_let_if",
-    // An exit drops an unbound temporary (#457) only while its
-    // statement is running.
-    "exit_temporary_drops",
-    // A reference whose lender is unknown ends its borrow without naming one (#463).
-    "ref_unknown_lender_end",
-    // The `?` operator's early return drops what the function owns
-    // there, on the error path only (#430).
-    "try_drops_owned",
-    "try_in_branch",
-    "try_in_loop_two_on_a_line",
-    // A whole struct overwritten drops its old value: the borrows its
-    // reference fields held end at the write (#538).
-    "borrow_struct_overwrite_whole",
-    // References to `[i32]` / `str` point to values (#549).
-    "slice_ref_value",
-    // Copying `&T` / moving `&mut T` says "value" or "resource" by the
-    // pointee (#551).
-    "ref_copy_value_wording",
-    // Elements a `let` pattern ignores (`..`, `_`) are still moved into
-    // the literal's temporary, which has a `(temporary N)` column (#439).
-    "let_pattern_literal_unbound_moves",
-    "let_pattern_literal_temp_scopes",
-    "edition2024/if_let_chain_cond_reads_x",
-    "edition2024/else_if_let_chain_two_bindings",
-    // A collection's drop says it drops what it holds (#542).
-    "collection_drop_holds",
-    "collection_drop_holds_flag",
-    "collection_drop_holds_exit",
-    // An array of Strings drops every String it holds (#544).
-    "array_of_strings_drop",
-    // The temporary a `ref` binding of a value extends, or a literal with
-    // only fresh elements, is a column and its drop is stated (#483).
-    "let_ref_temporary_value",
-    "let_literal_fresh_elements",
-    // A `let`-extended temporary dropped at a `return` says so (#553).
-    "let_temp_dropped_at_return",
-    "let_temp_dropped_at_return_only",
-    // ... and at a `break` / `continue` or a panic (#553 with #410).
-    "let_temp_dropped_at_break",
-    "let_temp_dropped_at_panic",
-    // `if let` with a tuple pattern binds its names; a tuple-literal
-    // scrutinee moves its variables whatever the pattern does (#327,
-    // #390).
-    "iflet_tuple_pattern",
-    "match_tuple_literal_moves",
-    // Where the tuple a tuple-literal scrutinee builds is dropped, and
-    // what of its variables' values goes with it (#327).
-    "tuple_scrutinee_drops",
-    // A `ref` binding out of `(x, y)` borrows the tuple, not x (#580).
-    "tuple_scrutinee_ref",
-    // An early exit nested in an arm / if branch drops a tuple
-    // scrutinee at the exit (#327 on #410); `process::exit` drops nothing.
-    "tuple_scrutinee_exit_drops",
-    // A reference copied out of a holder gives its borrow back at its
-    // last use while the holder still holds it (#575).
-    "holder_ref_ends_first",
-    // Same-named variables of sibling blocks share a column; each ends
-    // at its own `}` (#589).
-    "shared_column_scope_ends",
-    // A bare block nested in a branch ends its locals at its `}` (#591).
-    "nested_block_in_branch_scope_end",
-    // A let-chain part that moves an outer variable before a part that
-    // can still be false (#281).
-    "edition2024/if_let_chain_else_move",
-    "edition2024/if_let_chain_no_else_move",
-    "edition2024/if_let_chain_call_move",
-    "edition2024/if_let_chain_irrefutable_move",
-    "edition2024/if_let_chain_else_reassign",
-    "edition2024/if_let_chain_field_move",
-    "edition2024/if_let_chain_closure_move",
-    // A `ref` binding in a match arm keeps its borrow until its last use,
-    // not to the end of the arm (#599); a guard that doesn't use a `ref`
-    // binding used to panic (#611).
-    "match_ref_binding_last_use",
-    "match_ref_binding_last_use_arms",
-    "match_ref_mut_guard_last_use",
-    "match_ref_guard_unused",
-    "match_shared_ref_binding_last_use",
-    // A write through a `&mut` on the line its borrow ends (#587).
-    "deref_write_ends_borrow",
-    // Or-pattern arms that bind a name from different places (#533).
-    "or_pattern_different_places",
-    "or_pattern_different_values",
-    "or_pattern_different_places_copy",
-    "or_pattern_different_fields",
-    "or_pattern_three_places",
-    "or_pattern_tuple_scrutinee",
-    // Let-chain copies stay before the split (#583); a chain's bindings
-    // are drawn beside their sources, also in `while let` (#584).
-    "edition2024/if_let_chain_copy_first",
-    "edition2024/if_let_chain_pop_and_copy",
-    "edition2024/while_let_chain_two_bindings",
-    "edition2024/while_let_chain_two_sources",
-    "box_field_move",
-    "box_field_move_branch",
-    "box_field_move_all",
-    "box_field_move_param",
-    // A whole struct overwritten by a call or a variable (#569).
-    "borrow_struct_overwrite_call",
-    "box_contents_move",
-    "box_contents_move_string",
-    "box_contents_move_pattern",
-    "box_whole_move",
-    // Or-pattern arms that bind a reference, tuple or struct from
-    // different places (#565).
-    "or_pattern_ref_different_places",
-    "or_pattern_ref_last_use",
-    "or_pattern_ref_mut_different_places",
-    "or_pattern_ref_through_refs",
-    "or_pattern_struct_different_places",
-    "or_pattern_tuple_different_places",
-    "or_pattern_shadowed_name",
-    "or_pattern_ref_tuple_scrutinee",
-    // A struct holding a borrow, moved to another variable (#637).
-    "borrow_struct_moved_holder",
-    // A struct field of a struct overwritten by a call (#638).
-    "borrow_struct_field_overwrite_call",
-    // A struct field of a struct overwritten by another variable (#655).
-    "borrow_struct_field_overwrite_var",
-    // A `?` in a let-chain part after the first, or in a branch of an
-    // `if` with an `else`, draws the drops of its early return (#636).
-    "edition2024/if_let_chain_else_try",
-    "edition2024/if_let_chain_else_try_moved",
-    "try_in_if_else",
-    "try_in_match_arm",
-    // `*r` returned with r a reference returns a copy of the value r
-    // points to, not a reference (#670).
-    "return_deref_copy",
-    "return_deref_copy_early",
-    "return_deref_copy_param",
-    "return_deref_copy_ref",
-    // Temporaries of std macros, literals, `if let` / `while let`
-    // scrutinees and `for` heads are dropped and stated (#469).
-    "temporary_drop_macros_literals",
-    "temporary_drop_if_while_for",
-    // A `(temporary)` column still alive at an early exit is dropped
-    // there, with the exit's wording (#469 with #410).
-    "temporary_drop_early_exit",
-    // The same in `if let` / `while let` / `let` (#597).
-    "or_pattern_if_let_different_places",
-    "or_pattern_if_let_different_values_else",
-    "or_pattern_while_let_different_places",
-    "or_pattern_let_different_places",
-    "or_pattern_let_different_fields_reassign",
-    "or_pattern_let_different_places_copy",
-    "or_pattern_if_let_tuple_scrutinee",
-    "or_pattern_let_shadowed_name",
-    // Exits in an `if` without `else` drop what they leave (#429).
-    "exit_if_no_else_return",
-    "exit_if_no_else_panic",
-    "exit_if_no_else_break",
-    "exit_if_no_else_nested",
-    "exit_if_let_no_else_return",
-    "exit_if_no_else_one_line",
-    "exit_if_let_scrutinee_move_return",
-    // A `?` in a branch drawn with columns keeps its dots (#430).
-    "try_in_if_else_branch",
-    // Same-named variables in separate scopes share a column only if
-    // they are the same kind of value (#598); the first one used to panic.
-    "ref_binding_name_reused",
-    "ref_binding_name_reused_mut",
-    "let_ref_then_owner_same_name",
-    "match_macro_arm_name_reused",
-    "same_name_copy_kinds_share",
-    // An owner that needs drop and one that doesn't can't share a column:
-    // the wording ("resource" / "value") follows the type (#642).
-    "same_name_drop_kinds_split",
-    "same_name_plain_owners_share",
-    // A variable moved into a macro's or literal's temporary (#570).
-    "temporary_moves_variable",
-    // A for loop's iterator with drop glue is dropped when the loop ends (#482).
-    "for_iterator_drop",
-    // A let-chain part that assigns to an outer variable, calls an outer
-    // FnOnce closure, or moves out of a Box, before a part that can
-    // still be false (#579).
-    "edition2024/if_let_chain_assign",
-    "edition2024/if_let_chain_assign_owner",
-    "edition2024/if_let_chain_assign_no_else",
-    "edition2024/if_let_chain_fnonce_call",
-    "edition2024/if_let_chain_box_move",
-    "edition2024/if_let_chain_nested_effects",
-    // A tuple-pattern for loop moves or borrows its head (#527, #576),
-    // and a `break 'outer` drops the iterators of the loops it leaves
-    // (#592).
-    "for_tuple_pattern_move",
-    "for_tuple_pattern_borrow",
-    "for_iterator_break_outer",
-    // `let r = loop { … break k; }` gives `r` the value (#431).
-    "loop_break_value_moved",
-    "loop_break_value_outer_var",
-    "loop_break_value_labelled",
-    "loop_break_value_receivers",
-    "loop_break_value_in_branch",
-    "loop_break_value_local",
-    "loop_break_value_cond_receivers",
-    // A Result's or enum's drop says what it may hold (#684).
-    "enum_drop_holds",
-    // Borrows that rustc's checker keeps live past the holder's last use (#644).
-    "borrow_end_nll",
-    "try_moves_operand",
-    "try_in_tuple_scrutinee_arm",
-    // The same, for a loan made by a call or a value written through `*w` (#664).
-    "borrow_end_nll_call_deref",
-    // A let-chain part that writes through a reference, into an element
-    // or a Box, before a part that can still be false (#603).
-    "edition2024/if_let_chain_deref_write",
-    "edition2024/if_let_chain_elem_write",
-    "edition2024/if_let_chain_box_write",
-    "edition2024/if_let_chain_field_write",
-    // `if let Some(a) = x.as_mut() { … } else { … }` and the `match` form:
-    // the call only borrows `x`, so `x` still owns its value after the
-    // conditional (#693).
-    "iflet_call_borrow_else",
-    "match_call_borrow_arms",
-    "edition2024/if_let_chain_call_borrow_else",
-    // A let-chain's binding that reuses the name of an earlier, ended
-    // `if let`'s binding (#696), or shadows a variable in scope.
-    "edition2024/if_let_chain_reused_name",
-    "edition2024/if_let_chain_shadowing_binding",
-    // A `ref` binding of a by-value parameter borrows a `(parameter)`
-    // column of its own (#691).
-    "param_ref_value_column",
-    // What a branch declares is dropped at its exit, not at its closing
-    // brace (#630); a loop body every path of which breaks or continues
-    // drops nothing at its closing brace (#631).
-    "exit_branch_local_return",
-    "exit_arm_local_return",
-    "exit_branch_local_nested",
-    "exit_branch_local_moved",
-    "exit_loop_body_all_exit",
-    "exit_loop_body_temporary",
-    "exit_branch_local_panic",
-    "exit_if_let_local_break",
-    // A lender borrowed by a reference the exiting branch declared is
-    // dropped at the exit, after the borrow ends (#645); a `return` in
-    // an `if` in a match arm drops the arm's binding (#651).
-    "exit_borrowed_owner_return",
-    "exit_borrowed_owner_panic",
-    "exit_borrowed_owner_mut_arm",
-    "exit_arm_binding_nested_return",
-    // The value each branch of a returned `if` / `match` yields goes to
-    // the caller in that branch (#674).
-    "return_tail_if",
-    "return_tail_match",
-    "return_tail_if_nested",
-    "return_if_value",
-    "return_tail_if_refs",
-    "mutref_moved_in_branch",
-    // A reference made before a conditional and used after it gets its
-    // borrow ended on the path through an arm that leaves early (#663).
-    "exit_outer_borrow_return",
-    "exit_outer_borrow_unused",
-    "exit_outer_borrow_loop",
-    // Several `break`s that carry a value (#561): `r` gets whichever
-    // value ran, where the loop ends.
-    "loop_break_several_values",
-    "loop_break_several_receivers",
-    "loop_break_several_locals",
-    "loop_break_several_tuple",
-    "loop_break_several_fallthrough",
-    // A reference carried out by a `break` borrows what it borrowed
-    // (#585); `r = loop`'s old value is dropped where the loop ends (#586).
-    "loop_break_ref_lender",
-    "loop_break_reassign_drop",
-    // A borrow a call leaves in a variable: a closure the callee hands
-    // back (#686), references `extend` stores (#682).
-    "closure_kept_by_callee",
-    "extend_stores_borrow",
-    // A one-line arm's borrow and return arrows (#710), and a holder's early
-    // borrow end in an `if let` arm (#712).
-    "arm_one_line_borrow_return_710",
-    "if_let_holder_end_row_712",
-    // A let-chain part that lends an outer variable before a part that
-    // can still be false: the else branch says so (#688).
-    "edition2024/if_let_chain_else_borrows",
-    "edition2024/if_let_chain_else_reads",
-    "edition2024/if_let_chain_else_write_through",
-    "edition2024/if_let_chain_no_else_borrow",
-    "edition2024/if_let_chain_inline_read",
-    // A struct moved over one that holds a reference (#700).
-    "borrow_struct_moved_over",
-    // A borrow one of several `break`s makes says which (#657, #661).
-    "loop_break_borrow_alt",
-    // A reference field taken out of a struct by a pattern (#709).
-    "pattern_ref_field_let",
-    "pattern_ref_field_iflet",
-    "pattern_ref_field_match",
-    "pattern_mutref_field_let",
-    "pattern_mutref_field_iflet",
-    "pattern_mutref_field_match",
-    // A dashed arm segment explains itself on hover (#626).
-    "dashed_arm_hover",
-    // A `let` whose value is an `as` cast is bound (#729); a struct
-    // declared in an `if` arm ends its field columns (#730); a block's
-    // tail copy comes after its `let` on one line (#731).
-    "cast_let_binding",
-    "struct_in_branch_field_scope_end",
-    "block_tail_copy_order",
-    // A reference bound by a pattern borrows every variable rustc's
-    // lifetimes let it point into (#681), and a struct binding's
-    // reference field borrows what the matched value's field did (#692).
-    "pattern_ref_several_lenders",
-    "pattern_struct_ref_field",
-    // A holder's borrow end in an arm doesn't push the lines before
-    // it down a row (#712).
-    "holder_mut_moved_by_pattern",
-    // A literal aggregate passed to `Some` holds all its borrows (#711).
-    "holds_all_literal_arg",
-    // A closure called out of a struct field, or out of a call's
-    // result, used to panic (#703).
-    "closure_field_call",
-    // `let h = g;` with g a closure (#704).
-    "closure_moved_or_copied",
-    // `dyn Fn()` doesn't say whether there's interior mutability (#706).
-    "interior_mut_opaque",
-    // An `FnOnce` closure called out of a struct field (#725).
-    "closure_field_call_once",
-    // The reassignment drop-flag message names what it holds (#679).
-    "reassign_maybe_moved_holds",
-    "or_pattern_let_reassign_holds",
-    "try_two_operands_on_a_line",
-    // A `loop` as a call argument: the lenders stay borrowed until the
-    // call, and each pass says which `break` it came from (#662).
-    "loop_break_call_arg",
-    // A String lent in a loop branch that `break`s is still dropped (#759).
-    "loop_break_borrow_scope_end",
-    "field_write_in_arm_end_659",
-    // A holder moved into a `for` loop keeps its lender borrowed until
-    // the loop ends (#722).
-    "for_holder_borrow_end_722",
-    // An unbound struct update moves p's other fields into its temporary (#574).
-    "struct_update_unbound",
-    // The unbranched form: the call and the borrow's end share the
-    // loop's last row (#677).
-    "loop_break_call_arg_unbranched",
-    "return_if_in_branch",
-    "return_tail_if_mutref_param",
-    "return_tail_match_ref_param",
-    // A `for` loop's iterator is also dropped at a plain `break`, a `?`
-    // and a `panic!()` inside the loop (#740, #649).
-    "for_break_drops",
-    "for_iterator_try_panic",
-    // A field moved out of a temporary, and a scrutinee whose pattern
-    // binds parts of it by value: the rest is dropped with it (#469).
-    "temporary_field_moved_out",
-    "temporary_scrutinee_partly_moved",
-    // A for loop's loan ends with the loop; a reassigned reference's old
-    // loan ends at its last use (#739, #745).
-    "borrow_end_nll_loop",
-    // `continue 'outer` drops the inner loops' iterators (#600).
-    "for_iterator_continue_outer",
-    // A let-else scrutinee, a struct update's base, a temporary whose
-    // field is matched on: the rest is dropped with it (#605).
-    "temporary_let_else_update_matched_field",
-    // A let chain's scrutinee that its pattern moves parts out of (#605).
-    "edition2024/temporary_let_chain_partly_moved",
-    // A destructuring assignment that leaves part of a call's result (#625).
-    "destructure_assign_temporary_leftover",
-    "or_pattern_nested_match",
-    "or_pattern_nested_let",
-    "or_pattern_nested_if_let",
-    "or_pattern_nested_fields",
-    "or_pattern_nested_two",
-    "or_pattern_nested_ref",
-    // The return arrow of `for x in v.iter_mut()` names `v` (#749).
-    "for_method_head_label",
-    // References bound by a let-else, or by a match arm on a tuple of
-    // references, borrow what the value they came out of borrows
-    // (#718, #756).
-    "pattern_let_else_struct_ref",
-    "pattern_tuple_ref_elements",
-    "pattern_let_tuple_call_lenders",
-    // A `move` closure returned from a fn takes its captures with it
-    // (#760).
-    "closure_return_move",
-    // A `&s` inside an array argument is a borrow for the call (#705).
-    "take_array_ref_arg",
-    // A struct literal mixing `&` and `&mut` holds both (#708).
-    "struct_literal_mixed_borrows_pattern",
-    // A Box whose contents may have been moved still has its heap
-    // allocation freed (#736); a call's Copy result and a field of a
-    // temporary (#737); `Some(5)` in a pattern (#758).
-    "box_maybe_moved_branch",
-    "call_result_len_and_tuple_field",
-    // The Copy arrow from a call doesn't claim the call returns a value
-    // the variable only got part of (#762).
-    "copy_arrow_partial_result",
-    "tuple_scrutinee_nested",
-    "tuple_scrutinee_part_columns",
-    "or_pattern_tuple_scrutinee_nested",
-    "or_pattern_tuple_scrutinee_struct",
-    "reassign_partly_moved",
-    "return_ref_param_whole",
-    "return_ref_param_explicit",
-    "return_ref_param_reborrow",
-    // `for n in a` over Copy elements draws no move into `n` (#772).
-    "for_copy_arrow",
-    // A constructor of literals draws no arrow; a constructor is never a
-    // borrower (#768).
-    "ctor_literals_768",
-    // A reference's old loan ends where rustc ends it on the path that
-    // reaches the reassignment, also with two lenders; the right-hand
-    // side's reads come before the old borrow's end (#751, #770, #771).
-    "borrow_end_other_path",
-    "borrow_end_two_lenders",
-    "ref_reassign_reads_rhs_first",
-    "return_tail_tied_params",
-    "return_tail_untied_param",
-    // A `let` assigned on only some paths is maybe-initialized after
-    // the conditional; a drop flag decides its drops (#244).
-    "deferred_init_maybe",
-    "deferred_init_two_ifs",
-    "deferred_init_then_moved",
-    // A `let` first assigned in a loop body: later iterations drop the
-    // earlier value, and after the loop a drop flag decides (#786).
-    "deferred_init_loop",
-    "deferred_init_loop_break",
-    // A Copy value's scope end never mentions a drop (#793).
-    "copy_scope_end_uniform",
-    // A closure holding only references is a value, not a resource (#791).
-    "closure_value_not_resource",
-    "closure_owning_still_resource",
-    // A returned reborrow through a reference parameter (`&self.s`) hands
-    // the parameter's borrow to the caller (#784).
-    "return_reborrow_tail_784",
-    // A reference reassigned on one branch only: the old lender stays
-    // borrowed until the latest end over the paths (#778).
-    "borrow_end_join_one_branch",
-    "borrow_end_join_else",
-    // #801: read in the `if` arm, re-pointed in the `else` arm; one segment per row.
-    "borrow_read_in_arm_repoint_else",
-    // #803: a dot that ends two of a reference's loans names each lender.
-    "borrow_end_two_loans_mut",
-    // A call's result inside a returned constructor goes to the caller; a
-    // temporary constructor takes the call's result (#783).
-    "ctor_call_result_783",
-    "scrutinee_temp_wording_794",
-    // A borrow made inside one arm ends only on that arm (#800).
-    "borrow_made_in_arm_if",
-    "borrow_made_in_arm_match",
-    // A bare call's result returned goes to the caller (#792).
-    "bare_call_return_792",
-    // #806: a reference re-pointed in two or more arms of an `if` / `match`.
-    "borrow_made_in_arm_else",
-    "repoint_match_arms_806",
-    "repoint_if_chain_806",
-    "repoint_match_read_first_806",
-    "repoint_if_chain_read_middle_806",
-    // #813: a closure owning a std lock is a resource on every host.
-    "closure_rwlock_795",
-    "closure_mutex_795",
-    "mutref_call_through_812",
-    // #817: variables inside assert!(..) arguments are coloured.
-    "assert_macro_args_817",
-    // #824: variables inside println!/format!/write!/panic! arguments are coloured.
-    "fmt_macro_args_824",
-    // — Fixtures that no test ran until now (all render well-formed SVG).
-    "advanced_deref3",
-    "anonymous_copy2caller",
-    "anonymous_deref",
-    "anonymous_fnparam",
-    "basic_alias",
-    "basic_deref2",
-    "basic_deref4",
-    "basic_deref5",
-    "basic_deref6",
-    "basic_for",
-    "basic_for2",
-    "basic_for3",
-    "basic_if",
-    "basic_if10",
-    "basic_if11",
-    "basic_if2",
-    "basic_if3",
-    "basic_if4",
-    "basic_if5",
-    "basic_if6",
-    "basic_if8",
-    "basic_if9",
-    "basic_match",
-    "basic_match3",
-    "basic_match4",
-    "basic_mutref2",
-    "basic_mutref3",
-    "basic_ref2",
-    "basic_ref3",
-    "basic_ref4",
-    "basic_ref5",
-    "basic_struct",
-    "blocks_basic",
-    "box",
-    "calcLength",
-    "copy_owner_tooltip",
-    "deref_basic",
-    "for_array_borrow",
-    "for_range",
-    "if_borrow_in_body",
-    "if_let_inside_body",
-    "if_let_with_macro",
-    "labeled_loop",
-    "loop_body",
-    "loop_break_value",
-    "macro_rhs_acquire_line",
-    "mutRef",
-    "returningOwnership",
-    "returnValues",
-    "struct_impl",
-    "testBorrow",
-    "testScope",
-    "testShadow",
-    "variablesMutability",
-    "while_body",
-    "while_let_body",
-    "while_let_pattern_annotation",
-    "hide_items_814",
-    "hide_misplaced_814",
-];
+/// Fixtures the well-formedness test does not render, each with the reason.
+/// Every other `.rs` file in `rustviz-plugin/tests/` (and `edition2024/`) is
+/// rendered by `corpus_all_fixtures_produce_well_formed_svg`, so a new
+/// fixture is run automatically and a crash in it can't go unnoticed. A
+/// fixture that crashes the plugin gets a `crash` issue (CLAUDE.md) and an
+/// entry here naming it.
+const SKIP_WELL_FORMED: &[(&str, &str)] = &[];
+
+/// Stems of every fixture, sorted; `edition2024/x` for the subdirectory.
+fn all_fixtures() -> Vec<String> {
+    let mut names = Vec::new();
+    for dir in ["", "edition2024"] {
+        let d = corpus_dir().join(dir);
+        for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("read {:?}: {}", d, e)) {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let stem = path.file_stem().unwrap().to_str().unwrap();
+            names.push(if dir.is_empty() { stem.to_string() } else { format!("{}/{}", dir, stem) });
+        }
+    }
+    names.sort();
+    names
+}
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
 /// appear verbatim as a `data-tooltip-text` value somewhere in the rendered
@@ -12086,7 +10817,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     // #696: refused before, because the chain's `a` was taken for the
-    // first `if let`'s `a`, whose scope has ended. (EXPECTED_OK checks
+    // first `if let`'s `a`, whose scope has ended. (the well-formedness test checks
     // that it renders.)
     TooltipExpect {
         name: "edition2024/if_let_chain_reused_name",
@@ -14604,14 +13335,56 @@ fn ensure_plugin_installed() {
     );
 }
 
-fn run_with_local_backend(name: &str) -> Rustviz {
+fn render_uncached(name: &str) -> Result<Rustviz, String> {
     ensure_plugin_installed();
-    // Tests share env between threads; setting this once per test is fine
-    // because we only ever set it to the same value. The library reads
-    // RV_RUNNER on each Rustviz::new call.
+    // Tests share env between threads; setting this once is fine because
+    // we only ever set it to the same value. The library reads RV_RUNNER
+    // on each Rustviz::new call.
     env::set_var("RV_RUNNER", "local");
     let src = read_corpus(name);
-    Rustviz::new(&src).unwrap_or_else(|e| panic!("{} failed: {}", name, e))
+    Rustviz::new(&src).map_err(|e| format!("{} failed: {}", name, e))
+}
+
+type RenderCell = Arc<OnceLock<Result<Arc<Rustviz>, String>>>;
+
+/// Each fixture is rendered once per test binary, however many tests look
+/// at it. (`plugin_output_is_deterministic` uses `render_uncached`.)
+fn run_with_local_backend(name: &str) -> Arc<Rustviz> {
+    match render_cell(name) {
+        Ok(rv) => rv,
+        Err(e) => panic!("{}", e),
+    }
+}
+
+/// Distinct fixtures render concurrently; a second caller of the same
+/// fixture waits for the first one's render.
+fn render_cell(name: &str) -> Result<Arc<Rustviz>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, RenderCell>>> = OnceLock::new();
+    let cell = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(name.to_string())
+        .or_default()
+        .clone();
+    cell.get_or_init(|| render_uncached(name).map(Arc::new)).clone()
+}
+
+/// Render `names` on all cores so the serial loops that follow hit the cache.
+/// Failures are cached and reported by the caller that asks for the fixture.
+fn prerender<'a>(names: impl IntoIterator<Item = &'a str>) {
+    let names: Vec<&str> = names.into_iter().collect();
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).min(names.len());
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(name) = names.get(i) else { break };
+                let _ = render_cell(name);
+            });
+        }
+    });
 }
 
 fn assert_well_formed(name: &str, rv: &Rustviz) {
@@ -14757,14 +13530,14 @@ fn hover_polygons_off_their_segment(timeline_svg: &str) -> Vec<String> {
         };
         // (midpoint, tooltip, endpoints) of each line longer than a bevel.
         let all_lines: Vec<((f64, f64), &str, [i64; 4])> = tags("<line ").into_iter().filter_map(|tag| {
-            let n = |a: &str| tag_attr(tag, a).and_then(|v| v.parse::<f64>().ok());
+            let n = |a: &str| attr(tag, a).and_then(|v| v.parse::<f64>().ok());
             let (x1, y1, x2, y2) = (n("x1")?, n("y1")?, n("x2")?, n("y2")?);
             if (x2 - x1).hypot(y2 - y1) < 4.0 { return None; }
             // Endpoints in a direction-free order, to 0.1px.
             let q = |v: f64| (v * 10.0).round() as i64;
             let (p, r) = ((q(x1), q(y1)), (q(x2), q(y2)));
             let (p, r) = if p <= r { (p, r) } else { (r, p) };
-            Some((((x1 + x2) / 2.0, (y1 + y2) / 2.0), tag_attr(tag, "data-tooltip-text")?, [p.0, p.1, r.0, r.1]))
+            Some((((x1 + x2) / 2.0, (y1 + y2) / 2.0), attr(tag, "data-tooltip-text")?, [p.0, p.1, r.0, r.1]))
         }).collect();
         // Two segments with different tooltips drawn on exactly the same
         // spot can't be told apart by position (the old padding of an
@@ -14782,8 +13555,8 @@ fn hover_polygons_off_their_segment(timeline_svg: &str) -> Vec<String> {
             .map(|(_, l)| l.0)
             .collect();
         for tag in tags("<polygon ") {
-            let Some(title) = tag_attr(tag, "data-tooltip-text") else { continue };
-            let poly: Vec<(f64, f64)> = tag_attr(tag, "points").unwrap_or("")
+            let Some(title) = attr(tag, "data-tooltip-text") else { continue };
+            let poly: Vec<(f64, f64)> = attr(tag, "points").unwrap_or("")
                 .split_whitespace()
                 .filter_map(|p| {
                     let (x, y) = p.split_once(',')?;
@@ -14810,13 +13583,6 @@ fn hover_polygons_off_their_segment(timeline_svg: &str) -> Vec<String> {
     out
 }
 
-/// The value of attribute `name` in the tag `tag` (`<line ... y1="..." ...>`).
-fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let key = format!(" {}=\"", name);
-    let start = tag.find(&key)? + key.len();
-    Some(&tag[start..start + tag[start..].find('"')?])
-}
-
 /// #369: hovering an arm of an `if`/`else` or `match` underlines only
 /// that arm's own lines. Its column is also drawn beside the other
 /// arms' code (dashed), and the diagonals from the split and to the
@@ -14832,7 +13598,7 @@ fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String
     let row_y: Vec<f64> = code_svg
         .split("<text class=\"code\"")
         .skip(1)
-        .filter_map(|chunk| tag_attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "y"))
+        .filter_map(|chunk| attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "y"))
         .filter_map(|y| y.parse::<f64>().ok())
         .map(|y| y - 5.0)
         .collect();
@@ -14842,7 +13608,7 @@ fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String
     for group in timeline_svg.split("<g class=\"branch-group\"").skip(1) {
         let group = &group[..group.find("</g>").unwrap_or(group.len())];
         let head = &group[..group.find('>').unwrap_or(group.len())];
-        let rows: Vec<usize> = tag_attr(head, "data-arm-rows")
+        let rows: Vec<usize> = attr(head, "data-arm-rows")
             .map(|r| r.split(' ').filter_map(|n| n.parse().ok()).collect())
             .unwrap_or_default();
         let (Some(first), Some(last)) = (rows.first().and_then(y_of), rows.get(1).and_then(y_of)) else {
@@ -14851,11 +13617,11 @@ fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String
             // it may underline (#626); only its diagonals must opt out.
             for tag in group.split(|c| c == '<').skip(1) {
                 let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
-                let n = |a: &str| tag_attr(tag, a).and_then(|v| v.parse::<f64>().ok());
+                let n = |a: &str| attr(tag, a).and_then(|v| v.parse::<f64>().ok());
                 let diagonal = tag.starts_with("line ")
                     && matches!((n("x1"), n("x2")), (Some(x1), Some(x2)) if (x1 - x2).abs() > 0.01
                         && (n("y1") != n("y2")));
-                if diagonal && tag_attr(tag, "data-underline") != Some("none") {
+                if diagonal && attr(tag, "data-underline") != Some("none") {
                     out.push(format!("arm without own lines: <{}", tag));
                 }
             }
@@ -14864,10 +13630,10 @@ fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String
         for el in ["line ", "polygon "] {
             for seg in group.split(&format!("<{}", el)).skip(1) {
                 let tag = &seg[..seg.find('>').unwrap_or(seg.len())];
-                let range: Vec<f64> = tag_attr(tag, "data-underline-y")
+                let range: Vec<f64> = attr(tag, "data-underline-y")
                     .map(|r| r.split(' ').filter_map(|v| v.parse().ok()).collect())
                     .unwrap_or_default();
-                let n = |a: &str| tag_attr(tag, a).and_then(|v| v.parse::<f64>().ok());
+                let n = |a: &str| attr(tag, a).and_then(|v| v.parse::<f64>().ok());
                 let diagonal = el == "line "
                     && matches!((n("x1"), n("x2")), (Some(x1), Some(x2)) if (x1 - x2).abs() > 0.01
                         && (n("y1") != n("y2")));
@@ -14881,7 +13647,7 @@ fn arm_underline_off_its_lines(code_svg: &str, timeline_svg: &str) -> Vec<String
                         let off = hi < *first - TOL || lo > *last + TOL;
                         !diagonal && (within || off)
                     }
-                    _ => tag_attr(tag, "data-underline") == Some("none"),
+                    _ => attr(tag, "data-underline") == Some("none"),
                 };
                 if !ok {
                     out.push(format!(
@@ -15042,14 +13808,6 @@ fn off_canvas_ys(svg: &str) -> Vec<String> {
         rest = &after[end.min(after.len())..];
     }
     out
-}
-
-/// Value of attribute `name` in the start tag `tag` (`<circle cx=".." ..`).
-fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let key = format!(" {}=\"", name);
-    let start = tag.find(&key)? + key.len();
-    let len = tag[start..].find('"')?;
-    Some(&tag[start..start + len])
 }
 
 /// Start tags of every `<kind ...>` element in `svg`.
@@ -16365,9 +15123,12 @@ fn shared_reborrow_keeps_param_column_to_its_end() {
 }
 
 #[test]
-fn corpus_expected_ok_produce_well_formed_svg() {
+fn corpus_all_fixtures_produce_well_formed_svg() {
+    let skipped: Vec<&str> = SKIP_WELL_FORMED.iter().map(|(n, _)| *n).collect();
+    let names: Vec<String> = all_fixtures().into_iter().filter(|n| !skipped.contains(&n.as_str())).collect();
+    prerender(names.iter().map(|n| n.as_str()));
     let mut failures = Vec::new();
-    for name in EXPECTED_OK {
+    for name in &names {
         // Don't unwind across cases — collect all failures so a single broken
         // case doesn't mask others.
         match std::panic::catch_unwind(|| {
@@ -16389,9 +15150,20 @@ fn corpus_expected_ok_produce_well_formed_svg() {
         failures.is_empty(),
         "{} of {} corpus cases regressed:\n  {}",
         failures.len(),
-        EXPECTED_OK.len(),
+        names.len(),
         failures.join("\n  ")
     );
+}
+
+/// Every skip-list entry names a real fixture (so the list can't go stale
+/// or hide a typo) and gives a reason.
+#[test]
+fn every_fixture_is_run_by_some_test() {
+    let all = all_fixtures();
+    for (name, why) in SKIP_WELL_FORMED {
+        assert!(all.iter().any(|n| n == name), "SKIP_WELL_FORMED names {:?}, which is not a fixture", name);
+        assert!(!why.trim().is_empty(), "SKIP_WELL_FORMED entry {:?} has no reason", name);
+    }
 }
 
 /// `name` is the fixture's file stem, so several entries may pin one
@@ -16410,6 +15182,7 @@ fn entry_label(idx: usize) -> String {
 
 #[test]
 fn corpus_expected_tooltips_present() {
+    prerender(EXPECTED_TOOLTIPS.iter().map(|e| e.name).chain(KNOWN_STILL_PRINTED.iter().map(|k| k.0)));
     let mut failures = Vec::new();
     for (idx, expect) in EXPECTED_TOOLTIPS.iter().enumerate() {
         let label = entry_label(idx);
@@ -16510,10 +15283,10 @@ const DETERMINISM_RUNS: usize = 6;
 fn plugin_output_is_deterministic() {
     let mut failures = Vec::new();
     for name in DETERMINISM_CASES {
-        let first = run_with_local_backend(name);
+        let first = render_uncached(name).unwrap_or_else(|e| panic!("{}", e));
         assert_well_formed(name, &first);
         for run in 2..=DETERMINISM_RUNS {
-            let again = run_with_local_backend(name);
+            let again = render_uncached(name).unwrap_or_else(|e| panic!("{}", e));
             if again.code_panel_string() != first.code_panel_string()
                 || again.timeline_panel_string() != first.timeline_panel_string()
             {
@@ -16553,7 +15326,7 @@ fn same_line_return_arrows_follow_source_order() {
 /// A match arm whose body is a bare macro call used to take its line
 /// range from the macro's expansion span (a line inside libstd), so
 /// the binding's drop and borrow-end were drawn far below the panel.
-/// `assert_well_formed` checks the same bound for every EXPECTED_OK
+/// `assert_well_formed` checks the same bound for every fixture
 /// snippet; this names the regression directly.
 #[test]
 fn match_arm_macro_body_stays_on_canvas() {
@@ -18822,7 +17595,7 @@ fn rows_in_underline_range(code_svg: &str, ys: (f64, f64)) -> Vec<usize> {
     code_svg
         .split("<text class=\"code\"")
         .skip(1)
-        .filter_map(|chunk| tag_attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "y"))
+        .filter_map(|chunk| attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "y"))
         .filter_map(|y| y.parse::<f64>().ok())
         .enumerate()
         .filter(|(_, y)| y - 5.0 >= ys.0 - 2.0 && y - 5.0 <= ys.1 + 2.0)
@@ -18845,7 +17618,7 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
     for group in timeline.split("<g class=\"branch-group\"").skip(1) {
         let group = &group[..group.find("</g>").unwrap_or(group.len())];
         let head = &group[..group.find('>').unwrap_or(group.len())];
-        let rows: Vec<usize> = tag_attr(head, "data-arm-rows")
+        let rows: Vec<usize> = attr(head, "data-arm-rows")
             .map(|r| r.split(' ').filter_map(|n| n.parse().ok()).collect())
             .unwrap_or_default();
         let [first, last] = rows[..] else {
@@ -18855,7 +17628,7 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
             let mut skipped = Vec::new();
             for seg in group.split("<polygon ").skip(1) {
                 let tag = &seg[..seg.find('>').unwrap_or(seg.len())];
-                let Some(r) = tag_attr(tag, "data-underline-y") else { continue };
+                let Some(r) = attr(tag, "data-underline-y") else { continue };
                 let ys: Vec<f64> = r.split(' ').filter_map(|v| v.parse().ok()).collect();
                 skipped.extend(rows_in_underline_range(&code, (ys[0], ys[1])));
             }
@@ -18865,7 +17638,7 @@ fn dashed_and_solid_arm_stretches_underline_separate_lines() {
         let (mut on_own, mut off_own) = (Vec::new(), Vec::new());
         for seg in group.split("<polygon ").skip(1) {
             let tag = &seg[..seg.find('>').unwrap_or(seg.len())];
-            let Some(r) = tag_attr(tag, "data-underline-y") else { continue };
+            let Some(r) = attr(tag, "data-underline-y") else { continue };
             let ys: Vec<f64> = r.split(' ').filter_map(|v| v.parse().ok()).collect();
             for row in rows_in_underline_range(&code, (ys[0], ys[1])) {
                 let own = first <= row && row <= last;
@@ -19501,35 +18274,6 @@ fn misplaced_hide_marker_keeps_the_line() {
     let rv = run_with_local_backend("hide_misplaced_814");
     let code = rv.code_panel_string();
     assert!(code.contains("hi") && !code.contains("rustviz"), "{}", code);
-}
-
-/// Every fixture in `rustviz-plugin/tests/` (and `edition2024/`) is named
-/// somewhere in this file, so a crash in it can't go unnoticed. Add a new
-/// fixture to `EXPECTED_OK` or `EXPECTED_TOOLTIPS`; a fixture that crashes
-/// the plugin gets a `crash` issue (CLAUDE.md) and a comment naming it here.
-#[test]
-fn every_fixture_is_run_by_some_test() {
-    let src = include_str!("corpus.rs");
-    let mut unrun = Vec::new();
-    for dir in ["", "edition2024"] {
-        let d = corpus_dir().join(dir);
-        for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("read {:?}: {}", d, e)) {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let stem = path.file_stem().unwrap().to_str().unwrap();
-            let name = if dir.is_empty() { stem.to_string() } else { format!("{}/{}", dir, stem) };
-            // The quoted-name pattern is built at run time so this test's own
-            // text doesn't count as a mention.
-            let quoted = format!("{}{}{}", '"', name, '"');
-            if !src.contains(&quoted) {
-                unrun.push(name);
-            }
-        }
-    }
-    unrun.sort();
-    assert!(unrun.is_empty(), "fixtures no test runs (add to EXPECTED_OK): {:?}", unrun);
 }
 
 /// #817: the variables inside the arguments of `assert!` and its
