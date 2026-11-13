@@ -166,12 +166,14 @@ function displayTooltip(tooltip, classname) {
         // only set time once, prevent from changing every time mouse moves
         if (!time_start) time_start = Date.now();
 
-        let mouse = mousePos(e, tl_obj);
-        tooltip.style.transform = "translate(" + mouse.x + "px, " + mouse.y + "px)";
-        tooltip.style.display = "block";
-
+        // Fill in the text and show the box first: its size decides where it
+        // can go without leaving the viewport.
         let text = e.currentTarget.getAttributeNS(null, "data-tooltip-text");
         tooltip.innerHTML = text;
+        tooltip.style.display = "block";
+
+        let pos = placeTooltip(tooltip, mousePos(e, tl_obj));
+        tooltip.style.transform = "translate(" + pos.x + "px, " + pos.y + "px)";
     }
 
     function hideTooltip(e) {
@@ -296,21 +298,39 @@ function displayTooltip(tooltip, classname) {
     }
 }
 
-// track mouse movement. With <object> embedding, evt.clientX/Y are local to
-// the SVG document, so we add the panel's bounding rect to map back to the
-// page. With inline SVG (the playground), evt.clientX/Y are already in
-// viewport coordinates — we only need to add scroll to anchor against
-// document.body (since the tooltip is position:absolute with no positioned
-// ancestor).
+// Where the pointer is, in viewport coordinates. With <object> embedding
+// (mdbook-rustviz), evt.clientX/Y are local to the SVG document, so the
+// panel's bounding rect maps them into the viewport. With inline SVG
+// (`rustviz html`, the playground), they already are viewport coordinates.
 function mousePos(evt, obj) {
     if (obj && obj.contentDocument) {
-        let x_pos = evt.clientX + obj.getBoundingClientRect().x + 15;
-        let y_pos = evt.clientY + obj.getBoundingClientRect().y + window.scrollY + 45;
-        return { x: Math.round(x_pos), y: Math.round(y_pos) };
+        let r = obj.getBoundingClientRect();
+        return { x: evt.clientX + r.x, y: evt.clientY + r.y };
     }
-    let x_pos = evt.clientX + window.scrollX + 15;
-    let y_pos = evt.clientY + window.scrollY + 25;
-    return { x: Math.round(x_pos), y: Math.round(y_pos) };
+    return { x: evt.clientX, y: evt.clientY };
+}
+
+// Gaps between the pointer and the tooltip box, like a native tooltip: by
+// default 12px right of and 16px below the pointer; flipped left its right
+// edge is 12px left of the pointer, flipped up its bottom edge 8px above it.
+const TOOLTIP_DX = 12, TOOLTIP_DY = 16, TOOLTIP_UP_GAP = 8;
+
+function placeTooltip(tooltip, mouse) {
+    const margin = 8;
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const w = tooltip.offsetWidth;
+    const h = tooltip.offsetHeight;
+    let x = mouse.x + TOOLTIP_DX;
+    if (x + w > vw - margin) x = mouse.x - w;
+    x = Math.max(margin, Math.min(x, vw - margin - w));
+    let y = mouse.y + TOOLTIP_DY;
+    if (y + h > vh - margin) y = mouse.y - TOOLTIP_UP_GAP - h;
+    y = Math.max(margin, Math.min(y, vh - margin - h));
+    return {
+        x: Math.round(x + window.scrollX),
+        y: Math.round(y + window.scrollY)
+    };
 }
 
 function removeUnderline(e, classname, code_obj) {
