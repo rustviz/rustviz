@@ -2149,7 +2149,7 @@ impl std::fmt::Display for State {
 // one with nothing to drop), whose tooltips say "value" rather than
 // "resource" (#274, #484). A `*r`
 // place isn't: what it holds belongs to r's lender.
-fn holds_copy_value(rty: &ResourceTy) -> bool {
+pub(crate) fn holds_copy_value(rty: &ResourceTy) -> bool {
     matches!(rty, ResourceTy::Value(r) if r.holds_value())
         // A borrow from / returned to a reference r (or `*r`) is of
         // what r points to (#313), a value if that's Copy (#312).
@@ -2964,11 +2964,11 @@ impl Event {
             // `n` in `let n = r?;` (#652).
             Event::Acquire{ from: ResourceTy::Value(from), is, via_try: Some(kind), ..} => {
                 let holds = match is.extract_rap() {
-                    Some(r) if r.is_mutref() => "is bound to the mutable reference",
-                    Some(r) if r.is_ref() => "is bound to the immutable reference",
-                    Some(r) if r.is_copy_owner() => "is initialized with the value",
-                    _ if is_plain(is) => "is bound to the value",
-                    _ => "acquires ownership of the resource",
+                    Some(r) if r.is_mutref() => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::MutRef),
+                    Some(r) if r.is_ref() => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Ref),
+                    Some(r) if r.is_copy_owner() => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::CopyOwner),
+                    _ if is_plain(is) => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Plain),
+                    _ => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Resource),
                 };
                 hover_messages::event_dot_acquire_from_try(&self.deref_name(my_name), from.name(), *kind, holds)
             }
@@ -3302,78 +3302,6 @@ pub fn returned_closure(via: &Option<BorrowVia>) -> bool {
     matches!(via, Some(BorrowVia { carrier: ViaCarrier::ReturnedClosure { .. }, .. }))
 }
 
-/// Whether `r` is a function (a call's result comes from it).
-fn is_fn_rap(r: &ResourceTy) -> bool {
-    r.extract_rap().is_some_and(|rap| rap.is_fn())
-}
-
-pub fn string_of_external_event(e: &ExternalEvent) -> String {
-    match e {
-        ExternalEvent::Bind{ .. } => {
-            String::from("Bind")
-        },
-        ExternalEvent::Copy{ is_partial, from, to, closure_value, .. } => {
-            if *is_partial { String::from("Partial copy") }
-            // `let g = keep(|| s.len());`: the call returns the closure
-            // (#686); nothing is captured from `keep`.
-            else if to.is_closure() && is_fn_rap(from) { String::from("Closure returned") }
-            else if to.is_closure() && !*closure_value { String::from("Closure capture (copy)") }
-            else { String::from("Copy") }
-        },
-        // Move/StaticBorrow/MutableBorrow into a closure binding are
-        // closure captures — the renderer's `from … to …` template
-        // (in render_arrow) reads e.g. "Closure capture (move)" as
-        // "Closure capture (move) from s to f", which scans more
-        // clearly than a bare "Move" arrow into a closure.
-        ExternalEvent::Move{ is_partial, from, to, closure_value, .. } => {
-            if *is_partial { String::from("Partial move") }
-            else if to.is_closure() && is_fn_rap(from) { String::from("Closure returned") }
-            else if to.is_closure() && !*closure_value { String::from("Closure capture (move)") }
-            else { String::from("Move") }
-        },
-        ExternalEvent::StaticBorrow{ is_partial, is_reborrow, to, via, .. } => {
-            if *is_partial { String::from("Partial immutable borrow") }
-            // A closure capturing `*r` through a reference r (#277).
-            // A closure a call returned keeps the borrow (#686); its
-            // suffix says why (`arrow_borrow_via_call_suffix`).
-            else if to.is_closure() && *is_reborrow && !returned_closure(via) { String::from("Closure capture (immutable reborrow)") }
-            else if to.is_closure() && !returned_closure(via) { String::from("Closure capture (immutable borrow)") }
-            else if *is_reborrow { String::from("Immutable reborrow") }
-            else { String::from("Immutable borrow") }
-        },
-        ExternalEvent::StaticDie{ to, .. } => {
-            format!("Return immutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
-        },
-        ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, via, .. } => {
-            if *is_partial { String::from("Partial Mutable borrow") }
-            else if to.is_closure() && *is_reborrow && !returned_closure(via) { String::from("Closure capture (mutable reborrow)") }
-            else if to.is_closure() && !returned_closure(via) { String::from("Closure capture (mutable borrow)") }
-            // Reborrow: `let r2 = &mut *r;` with r: `&mut T` borrows
-            // *through* r — r can't be used while r2 is live and usable
-            // again afterwards. Distinct from `&mut r`, which is a
-            // fresh borrow of the variable r itself (r2: `&mut &mut T`).
-            else if *is_reborrow { String::from("Mutable reborrow") }
-            else { String::from("Mutable borrow") }
-        },
-        ExternalEvent::MutableDie{ to, .. } => {
-           format!("Return mutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
-        },
-        // Reached only when the callee isn't a Function RAP — a call
-        // through a closure variable (`f(&x)`, `g(r)`); calls to real
-        // fns get their "f reads from x" title from render_arrow's
-        // function-target arm instead. Deliberately no "reborrow"
-        // wording here: whether `g(r)` reborrows or moves `r` depends
-        // on the callee's parameter type, which this event doesn't
-        // carry for the closure case, and passing a `&T` is a copy.
-        ExternalEvent::PassByMutableReference{ .. } => {
-            String::from("Pass by mutable reference")
-        },
-        ExternalEvent::PassByStaticReference{ .. } => {
-            String::from("Pass by immutable reference")
-        },
-        _ => panic!("internal state: external event has no pass-by-reference title"),
-    }
-}
 
 // fulfills the promise that we can support all the methods that a
 // frontend would need.

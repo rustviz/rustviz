@@ -1,15 +1,12 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, rc_call_of, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, string_of_external_event, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, ImplicitRef, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, StoredIn, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
-use crate::svg_generator::hover_messages;
+use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Serialize;
 use std::cmp::{self, max};
 
-// set style for code string
-static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
-static SPAN_END : &'static str = "&lt;/span&gt;";
 
 /// Centres `(x, y)` of the event dots drawn so far. Ordered, so the
 /// SVG doesn't depend on hash iteration order.
@@ -219,11 +216,6 @@ fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
     )
 }
 
-/// A name in code font for a tooltip, escaped (see
-/// `hover_messages::escape_tooltip_name`).
-fn styled_name_html(name: &str) -> String {
-    SPAN_BEGIN.to_string() + &hover_messages::escape_tooltip_name(name) + SPAN_END
-}
 static BRANCH_WEIGHT: i64 = 25;
 #[derive(Debug, Clone)]
 pub struct TimelineColumnData {
@@ -1333,7 +1325,7 @@ fn render_dot(
             dot_x: timeline_data.x_val,
             dot_y: event_y,
             // default value if print_message_with_name() fails
-            title: "Unknown Resource Owner Value".to_owned()
+            title: hover_messages::event_dot_unknown_owner()
         };
         if let Some(mut name) = visualization_data.get_name_from_hash(hash) {
             match event {
@@ -1388,7 +1380,7 @@ fn render_dot(
                         }
                         data.title = event.print_message_with_name(&mut name);
                         if move_count > 0 {
-                            data.title.push_str(". No resource is dropped.");
+                            data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix());
                         }
                     } else if ro.is_manually_drop() && !never_drops
                         && visualization_data.timelines[hash].history.iter()
@@ -1504,7 +1496,7 @@ fn render_dot(
                             match all_moved_at_end(history) {
                                 Some(some_diverge) => data.title.push_str(
                                     &hover_messages::event_dot_go_out_of_scope_all_moved_suffix(&name, some_diverge)),
-                                None => data.title.push_str(". No resource is dropped."),
+                                None => data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix()),
                             }
                         }
                     } else if let Some(split) = struct_partial_move_split(visualization_data, *hash) {
@@ -1561,9 +1553,7 @@ fn render_dot(
                             if ro.holds_borrow() && !holder_never_borrows(visualization_data, ro) {
                                 title.push_str(&hover_messages::event_dot_holder_drop_suffix());
                             } else {
-                                title.push_str(". Its resource is dropped");
-                                title.push_str(&ro.drop_note());
-                                title.push('.');
+                                title.push_str(&hover_messages::event_dot_resource_dropped_suffix(&ro.drop_note()));
                             }
                             title
                         };
@@ -2191,34 +2181,34 @@ fn collect_closure_captures(
             ExternalEvent::Move { closure_value: true, .. } | ExternalEvent::Copy { closure_value: true, .. } => {}
             ExternalEvent::Move { from, to, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
-                    out.push((name, "moved"));
+                    out.push((name, hover_messages::capture_verb_moved()));
                 }
             }
             // A capture of `*r` through a reference r is a reborrow
             // of what r points to, not a borrow of r (#277).
             ExternalEvent::StaticBorrow { from, to, is_reborrow: true, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
-                    out.push((format!("*{}", name), "immutably reborrowed"));
+                    out.push((format!("*{}", name), hover_messages::capture_verb_immutably_reborrowed()));
                 }
             }
             ExternalEvent::MutableBorrow { from, to, is_reborrow: true, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
-                    out.push((format!("*{}", name), "mutably reborrowed"));
+                    out.push((format!("*{}", name), hover_messages::capture_verb_mutably_reborrowed()));
                 }
             }
             ExternalEvent::Copy { from, to, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
-                    out.push((name, "copied"));
+                    out.push((name, hover_messages::capture_verb_copied()));
                 }
             }
             ExternalEvent::StaticBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
-                    out.push((name, "immutably borrowed"));
+                    out.push((name, hover_messages::capture_verb_immutably_borrowed()));
                 }
             }
             ExternalEvent::MutableBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
-                    out.push((name, "mutably borrowed"));
+                    out.push((name, hover_messages::capture_verb_mutably_borrowed()));
                 }
             }
             _ => {}
@@ -3236,11 +3226,7 @@ fn render_arrow (
             let styled_fn = styled_name_html(&f.name);
             let last = f.name.rsplit("::").next().unwrap_or(&f.name);
             let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
-            let title = match (external_event, named_call) {
-                (ExternalEvent::Copy { .. }, true) => format!("Copy of the value {}() returns to the caller", styled_fn),
-                (ExternalEvent::Copy { .. }, false) => format!("Copy from {} to the caller", styled_fn),
-                _ => format!("Move from {} to the caller", styled_fn),
-            };
+            let title = hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn);
             let rendered = format!(
                 "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
                     \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{source_x} {y} {bend_x} {y} {bend_x} {head_end_y}\" style=\"fill: none;\"/>\n\
@@ -3388,71 +3374,7 @@ fn render_arrow (
                  | ExternalEvent::MutableDie { static_lender: Some(StaticLender::TupleTemporary), .. } = external_event {
                 return;
             }
-            let mut title = string_of_external_event(external_event);
-            // complete title
-            let styled_from_string = styled_name_html(&from.name());
-            title = format!("{} from {}", title, styled_from_string);
-            let styled_to_string = styled_name_html(&to.name());
-            // A by-value capture of a closure literal passed to a call
-            // goes into the closure, which is then passed to the callee.
-            let into_closure = matches!(external_event,
-                ExternalEvent::Move { into_closure: true, .. } | ExternalEvent::Copy { into_closure: true, .. });
-            title = if into_closure {
-                format!("{} into the closure passed to {}", title, styled_to_string)
-            } else {
-                format!("{} to {}", title, styled_to_string)
-            };
-            // A Copy-typed value a call returns (`let n = v.len();`): the
-            // source is the call's result, not a variable (or anything)
-            // named like the callee (#737). Constructors (`Some(5)`) and
-            // macros keep the plain label.
-            if let (ExternalEvent::Copy { into_closure: false, .. }, ResourceTy::Value(f @ ResourceAccessPoint::Function(_))) = (external_event, from) {
-                let callee = f.name();
-                let last = callee.rsplit("::").next().unwrap_or(&callee);
-                if !last.starts_with(|c: char| c.is_uppercase()) && !callee.ends_with('!') && title.starts_with("Copy from ") {
-                    // When `to` gets only part of the result (a pattern or
-                    // `?`), mirror the dot's wording (#733): never claim the
-                    // call returns the copied value itself.
-                    let inside = match from { ResourceTy::Value(ResourceAccessPoint::Function(f)) => f.inside.as_deref(), _ => None };
-                    title = match inside {
-                        None => format!("Copy of the value {}() returns to {}", styled_from_string, styled_to_string),
-                        Some("") => format!("Copy to {}", styled_to_string),
-                        Some(w @ ("Ok" | "Some")) => format!("Copy of the value inside the {} that {}() returns to {}", w, styled_from_string, styled_to_string),
-                        Some(w) => format!("Copy of the value inside the {} {}() returns to {}", w, styled_from_string, styled_to_string),
-                    };
-                }
-            }
-            // `Rc::clone(&a)` / `a.clone()` / `Rc::downgrade(&a)` make
-            // another owner of the same value; the value isn't moved
-            // or copied (#373).
-            if matches!(external_event, ExternalEvent::Move { .. }) {
-                if let Some(call) = rc_call_of(from) {
-                    title = hover_messages::arrow_rc_call(&from.name(), &to.name(), call);
-                }
-            }
-            // A borrow "returned" from `s` to `*s`: the lender has no
-            // column, so don't describe it as returned to itself.
-            // When the visitor knows it borrowed 'static data (a string
-            // literal, a static), name that instead.
-            if let ExternalEvent::StaticDie { static_lender, .. } | ExternalEvent::MutableDie { static_lender, .. } = external_event {
-                if from.is_same_underlying(to) {
-                    let is_mut = matches!(external_event, ExternalEvent::MutableDie { .. });
-                    title = match static_lender {
-                        Some(lender) => hover_messages::arrow_borrow_of_static_ends(&from.name(), is_mut, lender),
-                        None => hover_messages::arrow_borrow_ends_lender_not_drawn(&from.name(), is_mut),
-                    };
-                }
-            }
-            if let ExternalEvent::Move { break_alt: Some(alt), .. }
-                 | ExternalEvent::Copy { break_alt: Some(alt), .. }
-                 | ExternalEvent::StaticBorrow { break_alt: Some(alt), .. }
-                 | ExternalEvent::MutableBorrow { break_alt: Some(alt), .. } = external_event {
-                title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));
-            }
-            if let ExternalEvent::StaticBorrow { via: Some(via), .. }
-                 | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
-                title.push_str(&hover_messages::arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier));
-            }
+            let title = hover_messages::arrow_full_title(external_event, from, to);
 
             // order of points is to -> from
             let mut data = ArrowData {
@@ -3533,106 +3455,10 @@ fn render_arrow (
                 (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByStaticReference { .. })
                 | (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByMutableReference { .. }) => { 
                     // (Some(variable), Some(function), PassByRef)
-                    let styled_fn_name = styled_name_html(&function.name);
-                    let styled_from_name = styled_name_html(&from_variable.name());
-
                     // get position of to_variable
                     let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
-                    let title_fn = match external_event {
-                        ExternalEvent::PassByStaticReference { .. } => " reads from ",
-                        // `r` is itself a `&mut` reference (#812): f
-                        // reads and writes the value r points to, not r,
-                        // so say "through" like the other `&mut` writes.
-                        ExternalEvent::PassByMutableReference { is_reborrow: true, .. } => " reads and writes through ",
-                        ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
-                        _ => panic!("internal state: expected a pass-by-reference event here")
-                    };
-
-                    // Reborrow note for the call-dot tooltip. `f(r)`
-                    // with r: `&mut T` and f taking `&mut T` is
-                    // compiler-rewritten to `f(&mut *r)`: r isn't
-                    // moved, it's unusable while the reborrow is live
-                    // and usable again afterwards. When f's result
-                    // can't carry a borrow, the reborrow ends when f
-                    // returns; otherwise (`let w = first(r);`) it can
-                    // last as long as the result, so don't promise
-                    // "until f returns". No note for `&T` arguments:
-                    // passing a shared reference copies it, and r is
-                    // read-only before, during and after the call.
-                    let reborrow_suffix: String = match external_event {
-                        ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: false, .. } => format!(
-                            " (mutable reborrow — {} can't be used until {} returns)",
-                            styled_from_name, styled_fn_name,
-                        ),
-                        ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: true, .. } => format!(
-                            " (mutable reborrow — {} can't be used while the reborrow is live)",
-                            styled_from_name,
-                        ),
-                        _ => String::new(),
-                    };
-                    // The `&` / `&mut` was inserted by Rust, not written
-                    // (`println!("{}", s)` takes `&s`, `s.len()` is
-                    // `String::len(&s)`): say so, or the call reads like
-                    // it moves s. Method calls are everywhere, so their
-                    // note is the shorter one.
-                    let implicit_suffix: String = match external_event {
-                        ExternalEvent::PassByStaticReference { implicit: ImplicitRef::MacroArg, .. } => format!(
-                            " through an implicit reference, so {} isn't moved", styled_from_name),
-                        ExternalEvent::PassByMutableReference { implicit: ImplicitRef::MacroArg, .. } => format!(
-                            " through an implicit mutable reference, so {} isn't moved", styled_from_name),
-                        ExternalEvent::PassByStaticReference { implicit: ImplicitRef::Autoref, .. } =>
-                            " (implicitly borrowed)".to_string(),
-                        // A reborrow through a reference (`rv[0].push(..)`
-                        // with rv: &mut Vec) already says "mutable
-                        // reborrow"; "implicitly mutably borrowed" would
-                        // stack a second parenthetical, and describes an
-                        // autoref of an owner, which this isn't.
-                        ExternalEvent::PassByMutableReference { implicit: ImplicitRef::Autoref, is_reborrow: false, .. } =>
-                            " (implicitly mutably borrowed)".to_string(),
-                        _ => String::new(),
-                    };
-
-                    // `&self` method on a value with interior mutability
-                    // (`c.set(2)` on a Cell, `cell.borrow_mut()`,
-                    // `m.lock()`, atomics): the borrow checker sees a
-                    // shared borrow, but the value inside can change,
-                    // so "reads from" would be false (#203).
-                    let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: ImplicitRef::No | ImplicitRef::Autoref, .. })
-                        && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
-                    // The callee's signature lets it store the reference
-                    // (`point(&mut hold, &t)`, #513): the borrow lasts past
-                    // the call, until the borrow checker ends it.
-                    let stored_suffix: String = match external_event {
-                        ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place)), .. }
-                        | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place)), .. } => {
-                            let styled_place = styled_name_html(place);
-                            format!(
-                                "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use",
-                                styled_fn_name, styled_place, styled_from_name, styled_place,
-                            )
-                        }
-                        _ => String::new(),
-                    };
-                    // The argument is one of several `break` values of a
-                    // `loop` (`take(loop { if c { break ra; } else {
-                    // break rb; } })`, #662): passed only if that `break`
-                    // ended the loop. Said right after the argument, as
-                    // the reborrow note holds whichever `break` ran.
-                    let alt = match external_event {
-                        ExternalEvent::PassByStaticReference { break_alt: Some(alt), .. }
-                        | ExternalEvent::PassByMutableReference { break_alt: Some(alt), .. } => Some(alt),
-                        _ => None,
-                    };
-                    let alt_suffix = alt.map_or(String::new(), |a| hover_messages::break_alt_if_suffix(&a.brk));
-                    let title = if interior_mut {
-                        let msg = hover_messages::fn_dot_shared_borrow_interior_mut(
-                            &function.name, &from_variable.name(),
-                            matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
-                        alt.map_or(msg.clone(), |a| hover_messages::with_break_alt_lend(&msg, &a.brk)) + &stored_suffix
-                    } else {
-                        format!("{}{}{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, alt_suffix, implicit_suffix, reborrow_suffix, stored_suffix)
-                    };
+                    let title = hover_messages::arrow_call_title(external_event, function, from_variable);
 
                     // The call icon shares the dot of the borrow it makes
                     // (see `DotLayer::add_call`).
@@ -5078,11 +4904,7 @@ fn render_ref_line(
                                 data.y1 = start_y(*line_start);
 
                                 let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
-                                data.title = match ro {
-                                    ResourceAccessPoint::MutRef(_) =>
-                                        format!("{} holds a mutable reference", styled),
-                                    _ => format!("{} holds a reference", styled),
-                                };
+                                data.title = hover_messages::ref_line_holds_reference(&styled, matches!(ro, ResourceAccessPoint::MutRef(_)));
                                 data.line_class = String::from("solid");
                                 alive = true;
                             }
@@ -5095,7 +4917,7 @@ fn render_ref_line(
                                 data.y1 = start_y(*line_start);
 
                                 let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
-                                data.title = format!("{} holds an immutable reference", styled);
+                                data.title = hover_messages::ref_line_holds_immutable_reference(&styled);
                                 data.line_class = String::from("solid");
                                 alive = true;
                             }

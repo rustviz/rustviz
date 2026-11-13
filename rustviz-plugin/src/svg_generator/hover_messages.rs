@@ -3369,3 +3369,337 @@ pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: 
         if by_cond { "nothing above moved or called it" } else { "no branch above called it" }
     )
 }
+
+
+/* Arrow titles, and the other tooltip prose the renderers used to build
+ * inline. The renderers (`data.rs`, `timeline_panel.rs`) choose
+ * geometry; the words live here, so every message can be checked
+ * against Rust's semantics in one file. */
+
+use crate::svg_generator::data::{ExternalEvent, Function, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
+
+// set style for code string
+static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
+static SPAN_END : &'static str = "&lt;/span&gt;";
+
+/// A name in code font for a tooltip, escaped (see
+/// `escape_tooltip_name`).
+pub fn styled_name_html(name: &str) -> String {
+    SPAN_BEGIN.to_string() + &escape_tooltip_name(name) + SPAN_END
+}
+
+/// Whether `r` is a function (a call's result comes from it).
+fn is_fn_rap(r: &ResourceTy) -> bool {
+    r.extract_rap().is_some_and(|rap| rap.is_fn())
+}
+
+pub fn arrow_title(e: &ExternalEvent) -> String {
+    match e {
+        ExternalEvent::Bind{ .. } => {
+            String::from("Bind")
+        },
+        ExternalEvent::Copy{ is_partial, from, to, closure_value, .. } => {
+            if *is_partial { String::from("Partial copy") }
+            // `let g = keep(|| s.len());`: the call returns the closure
+            // (#686); nothing is captured from `keep`.
+            else if to.is_closure() && is_fn_rap(from) { String::from("Closure returned") }
+            else if to.is_closure() && !*closure_value { String::from("Closure capture (copy)") }
+            else { String::from("Copy") }
+        },
+        // Move/StaticBorrow/MutableBorrow into a closure binding are
+        // closure captures — the renderer's `from … to …` template
+        // (in render_arrow, via `arrow_full_title`) reads e.g. "Closure capture (move)" as
+        // "Closure capture (move) from s to f", which scans more
+        // clearly than a bare "Move" arrow into a closure.
+        ExternalEvent::Move{ is_partial, from, to, closure_value, .. } => {
+            if *is_partial { String::from("Partial move") }
+            else if to.is_closure() && is_fn_rap(from) { String::from("Closure returned") }
+            else if to.is_closure() && !*closure_value { String::from("Closure capture (move)") }
+            else { String::from("Move") }
+        },
+        ExternalEvent::StaticBorrow{ is_partial, is_reborrow, to, via, .. } => {
+            if *is_partial { String::from("Partial immutable borrow") }
+            // A closure capturing `*r` through a reference r (#277).
+            // A closure a call returned keeps the borrow (#686); its
+            // suffix says why (`arrow_borrow_via_call_suffix`).
+            else if to.is_closure() && *is_reborrow && !returned_closure(via) { String::from("Closure capture (immutable reborrow)") }
+            else if to.is_closure() && !returned_closure(via) { String::from("Closure capture (immutable borrow)") }
+            else if *is_reborrow { String::from("Immutable reborrow") }
+            else { String::from("Immutable borrow") }
+        },
+        ExternalEvent::StaticDie{ to, .. } => {
+            format!("Return immutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
+        },
+        ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, via, .. } => {
+            if *is_partial { String::from("Partial Mutable borrow") }
+            else if to.is_closure() && *is_reborrow && !returned_closure(via) { String::from("Closure capture (mutable reborrow)") }
+            else if to.is_closure() && !returned_closure(via) { String::from("Closure capture (mutable borrow)") }
+            // Reborrow: `let r2 = &mut *r;` with r: `&mut T` borrows
+            // *through* r — r can't be used while r2 is live and usable
+            // again afterwards. Distinct from `&mut r`, which is a
+            // fresh borrow of the variable r itself (r2: `&mut &mut T`).
+            else if *is_reborrow { String::from("Mutable reborrow") }
+            else { String::from("Mutable borrow") }
+        },
+        ExternalEvent::MutableDie{ to, .. } => {
+           format!("Return mutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
+        },
+        // Reached only when the callee isn't a Function RAP — a call
+        // through a closure variable (`f(&x)`, `g(r)`); calls to real
+        // fns get their "f reads from x" title from render_arrow's
+        // function-target arm instead. Deliberately no "reborrow"
+        // wording here: whether `g(r)` reborrows or moves `r` depends
+        // on the callee's parameter type, which this event doesn't
+        // carry for the closure case, and passing a `&T` is a copy.
+        ExternalEvent::PassByMutableReference{ .. } => {
+            String::from("Pass by mutable reference")
+        },
+        ExternalEvent::PassByStaticReference{ .. } => {
+            String::from("Pass by immutable reference")
+        },
+        _ => panic!("internal state: external event has no pass-by-reference title"),
+    }
+}
+
+/// The title of the arrow from a function to the caller (`f` returns a
+/// value): `copy` for a Copy-typed value, `named_call` when the callee is
+/// a real function rather than a constructor or macro.
+pub fn arrow_fn_return_title(copy: bool, named_call: bool, styled_fn: &str) -> String {
+    match (copy, named_call) {
+        (true, true) => format!("Copy of the value {}() returns to the caller", styled_fn),
+        (true, false) => format!("Copy from {} to the caller", styled_fn),
+        _ => format!("Move from {} to the caller", styled_fn),
+    }
+}
+
+/// The full title of an arrow between two columns: `arrow_title`, then
+/// where it comes from and goes to, then the special cases (a returned
+/// call result, an `Rc` call, a borrow ending, a `break` alternative, a
+/// borrow a call result keeps).
+pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy) -> String {
+    let mut title = arrow_title(external_event);
+    // complete title
+    let styled_from_string = styled_name_html(&from.name());
+    title = format!("{} from {}", title, styled_from_string);
+    let styled_to_string = styled_name_html(&to.name());
+    // A by-value capture of a closure literal passed to a call
+    // goes into the closure, which is then passed to the callee.
+    let into_closure = matches!(external_event,
+        ExternalEvent::Move { into_closure: true, .. } | ExternalEvent::Copy { into_closure: true, .. });
+    title = if into_closure {
+        format!("{} into the closure passed to {}", title, styled_to_string)
+    } else {
+        format!("{} to {}", title, styled_to_string)
+    };
+    // A Copy-typed value a call returns (`let n = v.len();`): the
+    // source is the call's result, not a variable (or anything)
+    // named like the callee (#737). Constructors (`Some(5)`) and
+    // macros keep the plain label.
+    if let (ExternalEvent::Copy { into_closure: false, .. }, ResourceTy::Value(f @ ResourceAccessPoint::Function(_))) = (external_event, from) {
+        let callee = f.name();
+        let last = callee.rsplit("::").next().unwrap_or(&callee);
+        if !last.starts_with(|c: char| c.is_uppercase()) && !callee.ends_with('!') && title.starts_with("Copy from ") {
+            // When `to` gets only part of the result (a pattern or
+            // `?`), mirror the dot's wording (#733): never claim the
+            // call returns the copied value itself.
+            let inside = match from { ResourceTy::Value(ResourceAccessPoint::Function(f)) => f.inside.as_deref(), _ => None };
+            title = match inside {
+                None => format!("Copy of the value {}() returns to {}", styled_from_string, styled_to_string),
+                Some("") => format!("Copy to {}", styled_to_string),
+                Some(w @ ("Ok" | "Some")) => format!("Copy of the value inside the {} that {}() returns to {}", w, styled_from_string, styled_to_string),
+                Some(w) => format!("Copy of the value inside the {} {}() returns to {}", w, styled_from_string, styled_to_string),
+            };
+        }
+    }
+    // `Rc::clone(&a)` / `a.clone()` / `Rc::downgrade(&a)` make
+    // another owner of the same value; the value isn't moved
+    // or copied (#373).
+    if matches!(external_event, ExternalEvent::Move { .. }) {
+        if let Some(call) = rc_call_of(from) {
+            title = arrow_rc_call(&from.name(), &to.name(), call);
+        }
+    }
+    // A borrow "returned" from `s` to `*s`: the lender has no
+    // column, so don't describe it as returned to itself.
+    // When the visitor knows it borrowed 'static data (a string
+    // literal, a static), name that instead.
+    if let ExternalEvent::StaticDie { static_lender, .. } | ExternalEvent::MutableDie { static_lender, .. } = external_event {
+        if from.is_same_underlying(to) {
+            let is_mut = matches!(external_event, ExternalEvent::MutableDie { .. });
+            title = match static_lender {
+                Some(lender) => arrow_borrow_of_static_ends(&from.name(), is_mut, lender),
+                None => arrow_borrow_ends_lender_not_drawn(&from.name(), is_mut),
+            };
+        }
+    }
+    if let ExternalEvent::Move { break_alt: Some(alt), .. }
+         | ExternalEvent::Copy { break_alt: Some(alt), .. }
+         | ExternalEvent::StaticBorrow { break_alt: Some(alt), .. }
+         | ExternalEvent::MutableBorrow { break_alt: Some(alt), .. } = external_event {
+        title.push_str(&break_alt_if_suffix(&alt.brk));
+    }
+    if let ExternalEvent::StaticBorrow { via: Some(via), .. }
+         | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
+        title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier));
+    }
+    title
+}
+
+/// The title of the call icon on the dot of an argument passed by
+/// reference (`f(&s)`, `f(&mut s)`): `from_variable` is lent to
+/// `function`.
+pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, from_variable: &ResourceTy) -> String {
+    let styled_fn_name = styled_name_html(&function.name);
+    let styled_from_name = styled_name_html(&from_variable.name());
+
+        let title_fn = match external_event {
+            ExternalEvent::PassByStaticReference { .. } => " reads from ",
+            // `r` is itself a `&mut` reference (#812): f
+            // reads and writes the value r points to, not r,
+            // so say "through" like the other `&mut` writes.
+            ExternalEvent::PassByMutableReference { is_reborrow: true, .. } => " reads and writes through ",
+            ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
+            _ => panic!("internal state: expected a pass-by-reference event here")
+        };
+
+        // Reborrow note for the call-dot tooltip. `f(r)`
+        // with r: `&mut T` and f taking `&mut T` is
+        // compiler-rewritten to `f(&mut *r)`: r isn't
+        // moved, it's unusable while the reborrow is live
+        // and usable again afterwards. When f's result
+        // can't carry a borrow, the reborrow ends when f
+        // returns; otherwise (`let w = first(r);`) it can
+        // last as long as the result, so don't promise
+        // "until f returns". No note for `&T` arguments:
+        // passing a shared reference copies it, and r is
+        // read-only before, during and after the call.
+        let reborrow_suffix: String = match external_event {
+            ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: false, .. } => format!(
+                " (mutable reborrow — {} can't be used until {} returns)",
+                styled_from_name, styled_fn_name,
+            ),
+            ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: true, .. } => format!(
+                " (mutable reborrow — {} can't be used while the reborrow is live)",
+                styled_from_name,
+            ),
+            _ => String::new(),
+        };
+        // The `&` / `&mut` was inserted by Rust, not written
+        // (`println!("{}", s)` takes `&s`, `s.len()` is
+        // `String::len(&s)`): say so, or the call reads like
+        // it moves s. Method calls are everywhere, so their
+        // note is the shorter one.
+        let implicit_suffix: String = match external_event {
+            ExternalEvent::PassByStaticReference { implicit: ImplicitRef::MacroArg, .. } => format!(
+                " through an implicit reference, so {} isn't moved", styled_from_name),
+            ExternalEvent::PassByMutableReference { implicit: ImplicitRef::MacroArg, .. } => format!(
+                " through an implicit mutable reference, so {} isn't moved", styled_from_name),
+            ExternalEvent::PassByStaticReference { implicit: ImplicitRef::Autoref, .. } =>
+                " (implicitly borrowed)".to_string(),
+            // A reborrow through a reference (`rv[0].push(..)`
+            // with rv: &mut Vec) already says "mutable
+            // reborrow"; "implicitly mutably borrowed" would
+            // stack a second parenthetical, and describes an
+            // autoref of an owner, which this isn't.
+            ExternalEvent::PassByMutableReference { implicit: ImplicitRef::Autoref, is_reborrow: false, .. } =>
+                " (implicitly mutably borrowed)".to_string(),
+            _ => String::new(),
+        };
+
+        // `&self` method on a value with interior mutability
+        // (`c.set(2)` on a Cell, `cell.borrow_mut()`,
+        // `m.lock()`, atomics): the borrow checker sees a
+        // shared borrow, but the value inside can change,
+        // so "reads from" would be false (#203).
+        let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: ImplicitRef::No | ImplicitRef::Autoref, .. })
+            && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
+        // The callee's signature lets it store the reference
+        // (`point(&mut hold, &t)`, #513): the borrow lasts past
+        // the call, until the borrow checker ends it.
+        let stored_suffix: String = match external_event {
+            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place)), .. }
+            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place)), .. } => {
+                let styled_place = styled_name_html(place);
+                format!(
+                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use",
+                    styled_fn_name, styled_place, styled_from_name, styled_place,
+                )
+            }
+            _ => String::new(),
+        };
+        // The argument is one of several `break` values of a
+        // `loop` (`take(loop { if c { break ra; } else {
+        // break rb; } })`, #662): passed only if that `break`
+        // ended the loop. Said right after the argument, as
+        // the reborrow note holds whichever `break` ran.
+        let alt = match external_event {
+            ExternalEvent::PassByStaticReference { break_alt: Some(alt), .. }
+            | ExternalEvent::PassByMutableReference { break_alt: Some(alt), .. } => Some(alt),
+            _ => None,
+        };
+        let alt_suffix = alt.map_or(String::new(), |a| break_alt_if_suffix(&a.brk));
+        if interior_mut {
+            let msg = fn_dot_shared_borrow_interior_mut(
+                &function.name, &from_variable.name(),
+                matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
+            alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, &a.brk)) + &stored_suffix
+        } else {
+            format!("{}{}{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, alt_suffix, implicit_suffix, reborrow_suffix, stored_suffix)
+        }
+}
+
+/// A column's name when no message could be built for it (a fallback the
+/// dot's own text normally replaces).
+pub fn event_dot_unknown_owner() -> String {
+    "Unknown Resource Owner Value".to_owned()
+}
+
+/// A scope end after the resource was moved out on every path that
+/// reaches it: there is nothing left to drop.
+pub fn event_dot_no_resource_dropped_suffix() -> String {
+    ". No resource is dropped.".to_owned()
+}
+
+/// A scope end that drops the column's resource; `drop_note` is the
+/// column's own addition (see `ResourceAccessPoint::drop_note`).
+pub fn event_dot_resource_dropped_suffix(drop_note: &str) -> String {
+    format!(". Its resource is dropped{}.", drop_note)
+}
+
+/// What a closure does with a variable it mentions, as the verb the
+/// capture list names it by.
+pub fn capture_verb_moved() -> &'static str { "moved" }
+pub fn capture_verb_copied() -> &'static str { "copied" }
+pub fn capture_verb_immutably_borrowed() -> &'static str { "immutably borrowed" }
+pub fn capture_verb_mutably_borrowed() -> &'static str { "mutably borrowed" }
+pub fn capture_verb_immutably_reborrowed() -> &'static str { "immutably reborrowed" }
+pub fn capture_verb_mutably_reborrowed() -> &'static str { "mutably reborrowed" }
+
+/// The title of the line drawn while a reference column is live and can
+/// write (`mutable`) or only read what it points to.
+pub fn ref_line_holds_reference(styled_name: &str, mutable: bool) -> String {
+    if mutable {
+        format!("{} holds a mutable reference", styled_name)
+    } else {
+        format!("{} holds a reference", styled_name)
+    }
+}
+
+/// The title of the line drawn while a reference column is live and its
+/// referent can't be written through it.
+pub fn ref_line_holds_immutable_reference(styled_name: &str) -> String {
+    format!("{} holds an immutable reference", styled_name)
+}
+
+/// What `n` in `let n = r?;` holds, by the kind of column `n` is (#652).
+pub enum TryHolds { MutRef, Ref, CopyOwner, Plain, Resource }
+
+pub fn acquire_from_try_holds(kind: TryHolds) -> &'static str {
+    match kind {
+        TryHolds::MutRef => "is bound to the mutable reference",
+        TryHolds::Ref => "is bound to the immutable reference",
+        TryHolds::CopyOwner => "is initialized with the value",
+        TryHolds::Plain => "is bound to the value",
+        TryHolds::Resource => "acquires ownership of the resource",
+    }
+}
