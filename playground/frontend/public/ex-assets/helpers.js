@@ -166,12 +166,14 @@ function displayTooltip(tooltip, classname) {
         // only set time once, prevent from changing every time mouse moves
         if (!time_start) time_start = Date.now();
 
-        let mouse = mousePos(e, tl_obj);
-        tooltip.style.transform = "translate(" + mouse.x + "px, " + mouse.y + "px)";
-        tooltip.style.display = "block";
-
+        // Fill in the text and show the box first: its size decides where it
+        // can go without leaving the viewport.
         let text = e.currentTarget.getAttributeNS(null, "data-tooltip-text");
         tooltip.innerHTML = text;
+        tooltip.style.display = "block";
+
+        let pos = placeTooltip(tooltip, mousePos(e, tl_obj));
+        tooltip.style.transform = "translate(" + pos.x + "px, " + pos.y + "px)";
     }
 
     function hideTooltip(e) {
@@ -296,21 +298,43 @@ function displayTooltip(tooltip, classname) {
     }
 }
 
-// track mouse movement. With <object> embedding, evt.clientX/Y are local to
-// the SVG document, so we add the panel's bounding rect to map back to the
-// page. With inline SVG (the playground), evt.clientX/Y are already in
-// viewport coordinates — we only need to add scroll to anchor against
-// document.body (since the tooltip is position:absolute with no positioned
-// ancestor).
+// Where the pointer is, in viewport coordinates, plus the gaps the tooltip
+// keeps from it. With <object> embedding (mdbook-rustviz), evt.clientX/Y are
+// local to the SVG document, so the panel's bounding rect maps them into the
+// viewport. With inline SVG (`rustviz html`, the playground), they already
+// are viewport coordinates.
 function mousePos(evt, obj) {
     if (obj && obj.contentDocument) {
-        let x_pos = evt.clientX + obj.getBoundingClientRect().x + 15;
-        let y_pos = evt.clientY + obj.getBoundingClientRect().y + window.scrollY + 45;
-        return { x: Math.round(x_pos), y: Math.round(y_pos) };
+        let r = obj.getBoundingClientRect();
+        return { x: evt.clientX + r.x, y: evt.clientY + r.y, dx: 15, dy: 45 };
     }
-    let x_pos = evt.clientX + window.scrollX + 15;
-    let y_pos = evt.clientY + window.scrollY + 25;
-    return { x: Math.round(x_pos), y: Math.round(y_pos) };
+    return { x: evt.clientX, y: evt.clientY, dx: 15, dy: 25 };
+}
+
+// Top-left of the tooltip, in page coordinates (it is position:absolute), so
+// that its whole box stays inside the visible viewport. By default it sits
+// below and to the right of the pointer; if that would cross the right edge it
+// flips to the left of the pointer, and if it would cross the bottom it flips
+// above. A box still too big for either side (or a very narrow viewport) is
+// clamped to the margin. It never crosses the left or top edge. Works whatever
+// the page scroll or an mdbook sidebar does to the layout, because the
+// decision is made in viewport coordinates and the scroll offset is added last.
+function placeTooltip(tooltip, mouse) {
+    const margin = 8;
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const w = tooltip.offsetWidth;
+    const h = tooltip.offsetHeight;
+    let x = mouse.x + mouse.dx;
+    if (x + w > vw - margin) x = mouse.x - mouse.dx - w;
+    x = Math.max(margin, Math.min(x, vw - margin - w));
+    let y = mouse.y + mouse.dy;
+    if (y + h > vh - margin) y = mouse.y - 15 - h;
+    y = Math.max(margin, Math.min(y, vh - margin - h));
+    return {
+        x: Math.round(x + window.scrollX),
+        y: Math.round(y + window.scrollY)
+    };
 }
 
 function removeUnderline(e, classname, code_obj) {
