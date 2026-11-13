@@ -39,8 +39,8 @@ fn fmt_style(plain: &String) -> String {
 // "resource" means something that needs cleaning up. Callers pass
 // `holds_value()` (Copy, or non-Copy with nothing to drop).
 // Everything else keeps RustViz's "resource".
-fn held(is_copy: bool) -> &'static str {
-    if is_copy { "value" } else { "resource" }
+fn held(holds_value: bool) -> &'static str {
+    if holds_value { "value" } else { "resource" }
 }
 
 /* The Event dot does not connect to any arrows, we typically follow the following format:
@@ -1227,19 +1227,19 @@ pub fn event_dot_ref_copied(my_name: &String, pointee_copy: bool) -> String {
 // `RefCell`, `cell.set(..)`, `m.lock()`): those methods take `&self`
 // and mutate X through the shared borrow, so "read-only" would be
 // false.
-// `is_copy`: X is a Copy-typed owner, so its "value" is borrowed (#274).
-pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_only: bool, is_copy: bool) -> String {
+// `holds_value`: X is a Copy-typed owner, so its "value" is borrowed (#274).
+pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_only: bool, holds_value: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
     if omit_read_only {
         format!(
             "{0}'s {2} is immutably borrowed by {1}",
-            my_name_fmt, target_name_fmt, held(is_copy)
+            my_name_fmt, target_name_fmt, held(holds_value)
         )
     } else {
         format!(
             "{0}'s {2} is immutably borrowed by {1}; {0} is read-only while the borrow is live",
-            my_name_fmt, target_name_fmt, held(is_copy)
+            my_name_fmt, target_name_fmt, held(holds_value)
         )
     }
 }
@@ -1255,12 +1255,12 @@ pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_o
 // "while the borrow is live" phrasing as `event_dot_static_lend`,
 // for the same reason, so a reader can spot the read-only-vs-unusable
 // distinction by hovering both kinds.
-pub fn event_dot_mut_lend(my_name: &String, target_name: &String, is_copy: bool) -> String {
+pub fn event_dot_mut_lend(my_name: &String, target_name: &String, holds_value: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_name_fmt = fmt_style(target_name);
     format!(
         "{0}'s {2} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
-        my_name_fmt, target_name_fmt, held(is_copy)
+        my_name_fmt, target_name_fmt, held(holds_value)
     )
 }
 
@@ -1316,12 +1316,12 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
 // borrow ends (`n` in `while let Some(n) = it.next()`, #575): n's part
 // of the borrow is given back, but `holders` (`it`) still hold it, so
 // the lender is still borrowed.
-pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, holders: &[String], mutable: bool, is_copy: bool) -> String {
+pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, holders: &[String], mutable: bool, holds_value: bool) -> String {
     let holders: Vec<String> = holders.iter().map(fmt_style).collect();
     format!(
         "{0}'s {1} is no longer borrowed by {2}, but is still {3} borrowed by {4}",
         fmt_style(my_name),
-        held(is_copy),
+        held(holds_value),
         fmt_style(from_name),
         if mutable { "mutably" } else { "immutably" },
         holders.join(" and "),
@@ -1687,14 +1687,14 @@ pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Opti
 //     |
 // *<--o   the star event (&mut)
 // |   |
-// `lender_is_copy`: the lender is a Copy-typed owner (#274).
-pub fn event_dot_mut_borrow(my_name: &String, lender_is_copy: bool) -> String {
+// `holds_value`: the lender is a Copy-typed owner (#274).
+pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} mutably borrows a {1}",
-        my_name_fmt, held(lender_is_copy)
+        my_name_fmt, held(holds_value)
     )
 }
 
@@ -1702,13 +1702,13 @@ pub fn event_dot_mut_borrow(my_name: &String, lender_is_copy: bool) -> String {
 //     |
 // *<--o   the star event (&)
 // |   |
-pub fn event_dot_static_borrow(my_name: &String, lender_is_copy: bool) -> String {
+pub fn event_dot_static_borrow(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0} immutably borrows a {1}",
-        my_name_fmt, held(lender_is_copy)
+        my_name_fmt, held(holds_value)
     )
 }
 
@@ -1749,22 +1749,22 @@ pub fn event_dot_capture_copy_to_closure(my_name: &String, target_name: &String,
 }
 
 // Source dot for an immutably captured upvar. Mirrors event_dot_static_lend.
-pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String, is_copy: bool) -> String {
+pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String, holds_value: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_fmt = fmt_style(target_name);
     format!(
         "{0}'s {2} is captured (immutably borrowed) by closure {1}",
-        my_name_fmt, target_fmt, held(is_copy)
+        my_name_fmt, target_fmt, held(holds_value)
     )
 }
 
 // Source dot for a mutably captured upvar. Mirrors event_dot_mut_lend.
-pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &String, is_copy: bool) -> String {
+pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &String, holds_value: bool) -> String {
     let my_name_fmt = fmt_style(my_name);
     let target_fmt = fmt_style(target_name);
     format!(
         "{0}'s {2} is captured (mutably borrowed) by closure {1}",
-        my_name_fmt, target_fmt, held(is_copy)
+        my_name_fmt, target_fmt, held(holds_value)
     )
 }
 
@@ -1879,13 +1879,13 @@ pub fn event_dot_closure_capture_mut_borrow(my_name: &String, from_name: &String
 // o<--o
 // |   |
 // o-->*   the star event (&)
-pub fn event_dot_static_reacquire(my_name: &String, is_copy: bool) -> String {
+pub fn event_dot_static_reacquire(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s {1} is no longer immutably borrowed",
-        my_name_fmt, held(is_copy)
+        my_name_fmt, held(holds_value)
     )
 }
 
@@ -1894,13 +1894,13 @@ pub fn event_dot_static_reacquire(my_name: &String, is_copy: bool) -> String {
 // o<--o
 // |
 // o-->*   the star event (&mut)
-pub fn event_dot_mut_reacquire(my_name: &String, is_copy: bool) -> String {
+pub fn event_dot_mut_reacquire(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s {1} is no longer mutably borrowed",
-        my_name_fmt, held(is_copy)
+        my_name_fmt, held(holds_value)
     )
 }
 
@@ -2360,11 +2360,11 @@ pub fn state_holder_starts_empty(my_name: &String) -> String {
 // in `let it = v.iter();`; #393), the value borrows the data `from`
 // points to, not the reference. A lender with nothing to drop (an
 // `i32`) holds a "value", not a "resource" (#484).
-pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool, from_is_copy: bool) -> String {
+pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool, holds_value: bool) -> String {
     let what = if from_is_ref {
         format!("the data {} points to", fmt_style(from_name))
     } else {
-        format!("{}'s {}", fmt_style(from_name), if from_is_copy { "value" } else { "resource" })
+        format!("{}'s {}", fmt_style(from_name), if holds_value { "value" } else { "resource" })
     };
     format!(
         "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",
@@ -2421,13 +2421,13 @@ pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
 //      When a static reference goes out of scope, decrement this value by 1;
 //      When a decrement happens while the borrow_count is 1, the state becomes
 //          FullPrivilege once again.
-pub fn state_partial_privilege(my_name: &String, is_copy: bool) -> String {
+pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = fmt_style(my_name);
     
     format!(
         "{0}'s {1} is being shared by one or more variables",
-        my_name_fmt, held(is_copy)
+        my_name_fmt, held(holds_value)
     )
 }
 
@@ -3096,7 +3096,7 @@ pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]
 // one of them (#565). Only the alternative that matches borrows its
 // place, but which one that is is decided at run time, so the borrow
 // checker treats every one of them as borrowed while `into` is live.
-pub fn event_dot_or_alt_lend(my_name: &String, into: &String, sources: &[String], mutable: bool, is_copy: bool) -> String {
+pub fn event_dot_or_alt_lend(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool) -> String {
     let me = fmt_style(my_name);
     let x = fmt_style(into);
     let while_live = if mutable {
@@ -3108,16 +3108,16 @@ pub fn event_dot_or_alt_lend(my_name: &String, into: &String, sources: &[String]
         "{1} borrows {2}, whichever alternative of the pattern matches. If it's the alternative that binds \
          {1} from {0}, {0}'s {3} is {4} borrowed by {1} here. Which alternative matches is decided at run \
          time, so the borrow checker treats {0} as borrowed either way: {5}.",
-        me, x, or_list(sources), held(is_copy), if mutable { "mutably" } else { "immutably" }, while_live
+        me, x, or_list(sources), held(holds_value), if mutable { "mutably" } else { "immutably" }, while_live
     )
 }
 
 // The end of the borrow `event_dot_or_alt_lend` started (#565).
-pub fn event_dot_or_alt_reacquire(my_name: &String, into: &String, mutable: bool, is_copy: bool) -> String {
+pub fn event_dot_or_alt_reacquire(my_name: &String, into: &String, mutable: bool, holds_value: bool) -> String {
     format!(
         "{1}'s borrow ends here, so {0}'s {2} is no longer {3} borrowed (the borrow checker counted it as \
          borrowed whichever alternative of the pattern matched)",
-        fmt_style(my_name), fmt_style(into), held(is_copy), if mutable { "mutably" } else { "immutably" }
+        fmt_style(my_name), fmt_style(into), held(holds_value), if mutable { "mutably" } else { "immutably" }
     )
 }
 
@@ -3132,20 +3132,20 @@ pub fn event_dot_or_alt_borrow(my_name: &String, sources: &[String], mutable: bo
 
 // Line segment of a place while the borrow `event_dot_or_alt_lend`
 // started is live (#565).
-pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, is_copy: bool) -> String {
+pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, holds_value: bool) -> String {
     let me = fmt_style(my_name);
     let x = fmt_style(into);
     if mutable {
         format!(
             "{0}'s {2} is mutably borrowed by {1} if the alternative that binds {1} from {0} matched; \
              either way, {0} can't be used until {1}'s borrow ends",
-            me, x, held(is_copy)
+            me, x, held(holds_value)
         )
     } else {
         format!(
             "{0}'s {2} is immutably borrowed by {1} if the alternative that binds {1} from {0} matched; \
              either way, {0} is read-only until {1}'s borrow ends",
-            me, x, held(is_copy)
+            me, x, held(holds_value)
         )
     }
 }

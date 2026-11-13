@@ -1339,13 +1339,13 @@ fn render_dot(
             match event {
                 Event::OwnerGoOutOfScope => {
                     let ro = &visualization_data.timelines[hash].resource_access_point;
-                    let is_copy = ro.is_copy();
+                    let never_drops = ro.never_drops();
                     // Not Copy but nothing to drop (#484): a value, so
                     // no drop triangle and no "resource" wording.
                     // (A Copy field of a struct moved on some paths only
                     // is a value to the drop flag too: nothing to drop.)
                     let is_plain = ro.is_plain_value()
-                        || (is_copy && !resource_hold && maybe_moved_at_end(history));
+                        || (never_drops && !resource_hold && maybe_moved_at_end(history));
                     let is_closure = ro.is_closure();
                     let is_box = matches!(ro, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
                     if is_closure {
@@ -1390,7 +1390,7 @@ fn render_dot(
                         if move_count > 0 {
                             data.title.push_str(". No resource is dropped.");
                         }
-                    } else if ro.is_manually_drop() && !is_copy
+                    } else if ro.is_manually_drop() && !never_drops
                         && visualization_data.timelines[hash].history.iter()
                             .any(|(_, e)| matches!(e, Event::ManuallyDropByHand)) {
                         // Dropped by hand earlier: still nothing is
@@ -1500,7 +1500,7 @@ fn render_dot(
                         // drop, so its scope end reads the same whatever
                         // its borrow history was (#793).
                         data.title = event.print_message_with_name(& mut name);
-                        if !is_copy {
+                        if !never_drops {
                             match all_moved_at_end(history) {
                                 Some(some_diverge) => data.title.push_str(
                                     &hover_messages::event_dot_go_out_of_scope_all_moved_suffix(&name, some_diverge)),
@@ -1532,13 +1532,13 @@ fn render_dot(
                             append_drop_dot(drop_data, timeline_data, dots);
                             continue;
                         }
-                    } else if ro.is_union() && !is_copy {
+                    } else if ro.is_union() && !never_drops {
                         // A union never drops its fields (#191).
                         data.title = hover_messages::event_dot_union_go_out_of_scope(&name);
-                    } else if ro.is_manually_drop() && !is_copy {
+                    } else if ro.is_manually_drop() && !never_drops {
                         // Nor does a ManuallyDrop drop its contents (#283).
                         data.title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
-                    } else if is_copy {
+                    } else if never_drops {
                         // Copy types have no Drop glue — going out of
                         // scope just reclaims storage. Render a plain
                         // dot (no drop triangle) and skip the
@@ -2121,7 +2121,7 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
                 hover_messages::event_dot_branch_merge_bound_ref(var_name, rap.is_mutref(), &diverged),
             // A Copy value (`let n = match x { 0 => 1, _ => 2 };`) isn't
             // a resource anyone owns (#316).
-            Some(rap) if rap.is_copy() || rap.is_plain_value() =>
+            Some(rap) if rap.never_drops() || rap.is_plain_value() =>
                 hover_messages::event_dot_branch_merge_bound_copy(var_name, &diverged),
             _ => hover_messages::event_dot_branch_merge_bound(var_name, &diverged),
         },
@@ -2286,17 +2286,17 @@ fn kept_closure_lend_title(event: &Event, name: &String, visualization_data: &Vi
         _ => None,
     })?;
     let r = is.extract_rap()?;
-    let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
+    let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
     if reborrow {
         return Some(hover_messages::event_dot_lend_through_ref(r.name(), &to.name(), mutable, r.is_mutref(), r.points_to_copy()));
     }
     if mutable {
-        return Some(hover_messages::event_dot_mut_lend(name, &to.name(), is_copy));
+        return Some(hover_messages::event_dot_mut_lend(name, &to.name(), holds_value));
     }
     // A `&T` lender was read-only already; a RefCell / Cell lender isn't
     // read-only at all (as in Event::StaticLend's own message).
     let omit_read_only = (r.is_ref() && !r.is_mutref()) || r.has_interior_mut();
-    Some(hover_messages::event_dot_static_lend(name, &to.name(), omit_read_only, is_copy))
+    Some(hover_messages::event_dot_static_lend(name, &to.name(), omit_read_only, holds_value))
 }
 
 // Count of upvars move-captured by the closure identified by

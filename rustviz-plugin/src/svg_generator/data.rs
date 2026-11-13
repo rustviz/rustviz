@@ -769,10 +769,13 @@ impl ResourceAccessPoint {
         }
     }
 
-    /// True iff this RAP's type implements Copy. References are
-    /// always Copy; functions don't model resources at all, so we
-    /// say Copy too (no drop indicator would ever apply to them).
-    pub fn is_copy(&self) -> bool {
+    /// True iff dropping this binding never drops a resource. That holds
+    /// when its type is `Copy` (no drop glue), for any reference (`&T` or
+    /// `&mut T`: a reference never owns what it points to, so nothing is
+    /// dropped when it goes out of scope, although `&mut T` is not itself
+    /// `Copy`), and for functions, which model no resource at all. Not
+    /// the same as "has a `Copy` type": see `is_copy_owner`.
+    pub fn never_drops(&self) -> bool {
         match self {
             ResourceAccessPoint::Owner(Owner{is_copy, ..}) => *is_copy,
             ResourceAccessPoint::Struct(Struct{is_copy, ..}) => *is_copy,
@@ -2743,11 +2746,11 @@ impl Event {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
             }
             Event::OrAltLend { into, is, sources, mutable, end } => {
-                let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 if *end {
-                    hover_messages::event_dot_or_alt_reacquire(my_name, into.name(), *mutable, is_copy)
+                    hover_messages::event_dot_or_alt_reacquire(my_name, into.name(), *mutable, holds_value)
                 } else {
-                    hover_messages::event_dot_or_alt_lend(my_name, into.name(), sources, *mutable, is_copy)
+                    hover_messages::event_dot_or_alt_lend(my_name, into.name(), sources, *mutable, holds_value)
                 }
             }
             Event::OrAltBorrow { sources, mutable, end, .. } => {
@@ -2952,10 +2955,10 @@ impl Event {
             Event::StaticLend{ to, is, ..} => {
                 // Only an owner's own Copy value here: a reference
                 // lender is handled by event_dot_lend_through_ref.
-                let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 if to.is_closure() {
                     let target_name = target_name(to);
-                    hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
+                    hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
                 } else {
                     // `is` is the lender. A `&T` lender was read-only
                     // already, and a `RefCell` / `Cell` / `Mutex` lender
@@ -2967,18 +2970,18 @@ impl Event {
                     if let Some(r) = ref_lender(is) {
                         return hover_messages::event_dot_lend_through_ref(r.name(), &target_name, false, r.is_mutref(), r.points_to_copy());
                     }
-                    hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, omit_read_only, is_copy)
+                    hover_messages::event_dot_static_lend(&self.deref_name(my_name), &target_name, omit_read_only, holds_value)
                 }
             }
             Event::MutableLend{ to, is, ..} => {
-                let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 let target_name = target_name(to);
                 if to.is_closure() {
-                    hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
+                    hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
                 } else if let Some(r) = ref_lender(is) {
                     hover_messages::event_dot_lend_through_ref(r.name(), &target_name, true, r.is_mutref(), r.points_to_copy())
                 } else {
-                    hover_messages::event_dot_mut_lend(&self.deref_name(my_name), &target_name, is_copy)
+                    hover_messages::event_dot_mut_lend(&self.deref_name(my_name), &target_name, holds_value)
                 }
             }
             Event::StaticDie{ .. } => {

@@ -1684,7 +1684,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let mut out = Vec::new();
     for child in self.struct_children(parent) {
       let name = child.name().clone();
-      if !child.is_copy() && self.rap_holds_resource_now(&name) {
+      if !child.never_drops() && self.rap_holds_resource_now(&name) {
         out.push(child);
       }
       out.extend(self.struct_fields_holding_resource(&name));
@@ -1762,7 +1762,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   fn collect_reassign_parts(&self, parent: &str, out: &mut ReassignParts) {
     for c in self.struct_children(parent) {
-      if c.is_copy() || c.is_plain_value() {
+      if c.never_drops() || c.is_plain_value() {
         continue;
       }
       let name = c.name().clone();
@@ -2961,7 +2961,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let mut stack = self.struct_children(&name);
         while let Some(child) = stack.pop() {
           stack.extend(self.struct_children(child.name()));
-          if !child.is_copy() {
+          if !child.never_drops() {
             self.add_ev(line_num, Evt::Move, ResourceTy::Anonymous, ResourceTy::Value(child), false);
           }
         }
@@ -5271,7 +5271,7 @@ pub fn tuple_scrutinee_unbound(&self, var: &ResourceAccessPoint, taken: &[Resour
     }
     let mut out = vec![var.clone()];
     for c in self.struct_children(var.name()) {
-        if !c.is_copy() {
+        if !c.never_drops() {
             out.extend(self.tuple_scrutinee_unbound(&c, taken));
         }
     }
@@ -5340,7 +5340,7 @@ pub fn tuple_scrutinee_left(&self, scrutinee: &'tcx Expr<'tcx>, pat: Option<&'tc
     let places: Vec<(ResourceAccessPoint, Vec<String>)> = if matches!(var, ResourceAccessPoint::Struct(_)) {
       let parts: Vec<ResourceAccessPoint> = self.struct_members_deep(var.name());
       parts.iter()
-        .filter(|p| !p.is_copy() && !p.is_plain_value())
+        .filter(|p| !p.never_drops() && !p.is_plain_value())
         .filter(|p| !parts.iter().any(|q| q.name().starts_with(&format!("{}.", p.name()))))
         .map(|p| {
           let mut full = path.clone();
@@ -6052,12 +6052,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => {
             let prefix = rap.name().clone();
             (self.struct_children(&prefix).iter()
-              .map(|c| (c.name()[prefix.len() + 1..].to_owned(), c.is_copy()))
+              .map(|c| (c.name()[prefix.len() + 1..].to_owned(), c.never_drops()))
               .collect(), Some(prefix))
           }
           ResourceTy::Caller => match &base_name {
             Some(b) => (self.struct_children(b).iter()
-              .map(|c| (c.name()[b.len() + 1..].to_owned(), c.is_copy()))
+              .map(|c| (c.name()[b.len() + 1..].to_owned(), c.never_drops()))
               .collect(), None),
             None => (Vec::new(), None),
           },
@@ -6555,7 +6555,7 @@ pub fn print_out_of_scope(&mut self){
     // Every path left the function at a `return` / panic above, where
     // owners were dropped or moved out (#515); a reference has no
     // such event, and keeps its scope end.
-    let left_already = self.all_paths_exit && !rap.rap.is_copy() && !rap.rap.is_ref();
+    let left_already = self.all_paths_exit && !rap.rap.never_drops() && !rap.rap.is_ref();
     // An unbound temporary is dropped by its own `TemporaryDrop`, which
     // may sit in a branch (a let chain's later part, #604): no scope end.
     if !rap.rap.is_fn() && rap.is_global && !left_already && !rap.rap.is_unbound_temporary() {
