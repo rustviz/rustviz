@@ -322,7 +322,7 @@ function placeTooltip(tooltip, mouse) {
     const w = tooltip.offsetWidth;
     const h = tooltip.offsetHeight;
     let x = mouse.x + TOOLTIP_DX;
-    if (x + w > vw - margin) x = mouse.x - TOOLTIP_DX - w;
+    if (x + w > vw - margin) x = mouse.x - w;
     x = Math.max(margin, Math.min(x, vw - margin - w));
     let y = mouse.y + TOOLTIP_DY;
     if (y + h > vh - margin) y = mouse.y - TOOLTIP_UP_GAP - h;
