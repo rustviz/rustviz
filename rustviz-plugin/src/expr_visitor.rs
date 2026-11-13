@@ -698,9 +698,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `Struct::is_copy`.
   pub fn ty_is_copy(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
     self.tcx.type_is_copy_modulo_regions(
-      rustc_middle::ty::TypingEnv::post_analysis(self.tcx, owner),
+      typing_env(self.tcx, owner),
       ty,
     )
+  }
+
+  /// Whether a value of type `ty` has drop glue, judged in the typing
+  /// environment of `owner` (an `expr.hir_id.owner` or `pat.hir_id.owner`).
+  /// The one entry point for the raw question; see `needs_drop` in
+  /// `expr_visitor_utils` for what it does not decide.
+  pub fn needs_drop(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
+    needs_drop(self.tcx, ty, owner)
+  }
+
+  /// Like `needs_drop`, for code that already carries a typing
+  /// environment (it threads `env` through helpers that also ask whether
+  /// a type is `Copy`).
+  pub fn needs_drop_in(&self, ty: Ty<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
+    needs_drop_in(self.tcx, ty, env)
+  }
+
+  /// Like `needs_drop`, for a type from a std or library definition (a
+  /// field of `Rc`, a const's type) that has no owner body to judge it in.
+  pub fn needs_drop_mono(&self, ty: Ty<'tcx>) -> bool {
+    needs_drop_in(self.tcx, ty, rustc_middle::ty::TypingEnv::fully_monomorphized())
   }
 
   /// `try_expr` is `r?` (a `MatchSource::TryDesugar` match) with `r` a
@@ -814,7 +835,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => InteriorMut::No,
       }
     }
-    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, owner);
+    let env = typing_env(self.tcx, owner);
     go(self.tcx, env, ty, 0, &mut HashSet::new())
   }
 
@@ -848,11 +869,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let adt = ty.ty_adt_def().filter(|d| d.is_struct())?;
     if adt.has_dtor(self.tcx) || adt.is_manually_drop() { return None; }
     let rustc_middle::ty::TyKind::Adt(_, args) = ty.kind() else { return None };
-    let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
     let mut kind = None;
     for field in adt.all_fields() {
       let fty = field.ty(self.tcx, args);
-      if !fty.needs_drop(self.tcx, typing_env) { continue; }
+      if !self.needs_drop_mono(fty) { continue; }
       let k = self.rc_kind(fty)?;
       if kind.is_some_and(|o| o != k) { return None; }
       kind = Some(k);
@@ -874,8 +894,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     struct Acc { kind: Option<RcKind>, count: usize, buffer: bool }
     fn go<'tcx>(me: &ExprVisitor<'_, 'tcx>, ty: Ty<'tcx>, acc: &mut Acc, depth: usize) -> bool {
       let tcx = me.tcx;
-      let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
-      if !ty.needs_drop(tcx, env) { return true; }
+      if !me.needs_drop_mono(ty) { return true; }
       if depth > 8 { return false; }
       if let Some(k) = me.rc_kind(ty) {
         if acc.kind.is_some_and(|o| o != k) { return false; }
@@ -949,8 +968,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     use rustc_span::sym;
     use rustc_middle::ty::TyKind;
     let tcx = self.tcx;
-    let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
-    let needs = |t: Ty<'tcx>| t.needs_drop(tcx, env);
+    let needs = |t: Ty<'tcx>| self.needs_drop_mono(t);
     if !needs(ty) { return None; }
     let TyKind::Adt(def, args) = ty.kind() else {
       return match ty.kind() {
@@ -1008,7 +1026,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     for v in def.variants() {
       let held: Vec<String> = v.fields.iter()
         .map(|f| tcx.normalize_erasing_regions(env, rustc_middle::ty::Unnormalized::new(f.ty(tcx, args))))
-        .filter(|t| t.needs_drop(tcx, env))
+        .filter(|t| self.needs_drop_mono(*t))
         .map(|t| self.short_ty_name(t))
         .collect();
       if held.is_empty() { some_variant_empty = true; }
@@ -1553,7 +1571,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     matches!(e.kind, ExprKind::Call(..) | ExprKind::Path(..))
       && crate::visitor::is_literal_value(e, typeck)
       && self.tcx.type_is_copy_modulo_regions(
-        rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner),
+        typing_env(self.tcx, e.hir_id.owner),
         typeck.expr_ty(e),
       )
   }
@@ -2160,7 +2178,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let captures: Vec<_> = closure_typeck.closure_min_captures_flattened(closure_local).collect();
     let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(self.tcx, closure_local);
     let ends = closure_capture_ends(self.tcx, &bwf.body, captures.len());
-    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, callee.hir_id.owner);
+    let env = typing_env(self.tcx, callee.hir_id.owner);
     let mut fates = Vec::new();
     for (capture, end) in captures.iter().zip(ends) {
       let by_value = matches!(capture.info.capture_kind,
@@ -2179,7 +2197,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       fates.push(CapturedFate {
         name: rap.name().to_owned(),
         end,
-        needs_drop: capture.place.ty().needs_drop(self.tcx, env),
+        needs_drop: self.needs_drop(capture.place.ty(), callee.hir_id.owner),
       });
     }
     let id = *self.unique_id;
@@ -2284,10 +2302,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // and an owned value with nothing to drop just acquires the
         // new one. The caller turns this into `Update` for `op=`, which
         // calls the operator method and overwrites nothing.
-        let typing_env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+        let typing_env = typing_env(self.tcx, expr.hir_id.owner);
         let write = if self.tcx.type_is_copy_modulo_regions(typing_env, elem_ty) {
           PlaceWrite::AssignCopy
-        } else if elem_ty.needs_drop(self.tcx, typing_env) {
+        } else if self.needs_drop(elem_ty, expr.hir_id.owner) {
           PlaceWrite::AssignDropsOld
         } else {
           PlaceWrite::AssignOwned
@@ -2377,7 +2395,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let line_num = expr_to_line(&arg, &self.tcx);
     let last_line = self.tcx.sess.source_map().lookup_char_pos(arg.span.hi()).line;
     let typeck = self.tcx.typeck(closure.def_id);
-    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner);
+    let env = typing_env(self.tcx, arg.hir_id.owner);
     let mut mir_b_data = None;
     let mut drew_any = false;
     for capture in typeck.closure_min_captures_flattened(closure.def_id) {
@@ -2479,10 +2497,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // A plain `=` assigns to the place (Copy: "assigned a new value";
     // owned over a value that needs drop: drops it; owned with nothing
     // to drop: acquires). The caller turns this into `Update` for `op=`.
-    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+    let env = typing_env(self.tcx, expr.hir_id.owner);
     let write = if self.tcx.type_is_copy_modulo_regions(env, ty) {
       PlaceWrite::AssignCopy
-    } else if ty.needs_drop(self.tcx, env) {
+    } else if self.needs_drop(ty, expr.hir_id.owner) {
       PlaceWrite::AssignDropsOld
     } else {
       PlaceWrite::AssignOwned
@@ -2770,10 +2788,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // A plain `=` assigns to the place `*slots[0]` (the caller turns
     // this into `Update` for `op=`; reads ignore it).
     let pointee_ty = self.tcx.typeck(expr.hir_id.owner).expr_ty(expr);
-    let typing_env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
+    let typing_env = typing_env(self.tcx, expr.hir_id.owner);
     let write = if self.tcx.type_is_copy_modulo_regions(typing_env, pointee_ty) {
       PlaceWrite::AssignCopy
-    } else if pointee_ty.needs_drop(self.tcx, typing_env) {
+    } else if self.needs_drop(pointee_ty, expr.hir_id.owner) {
       PlaceWrite::AssignDropsOld
     } else {
       PlaceWrite::AssignOwned
@@ -3174,7 +3192,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let line_num = expr_to_line(&arg, &self.tcx);
     let tycheck_results = self.tcx.typeck(arg.hir_id.owner);
     let arg_ty = tycheck_results.node_type(arg.hir_id);
-    let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner), arg_ty);
+    let is_copyable = self.ty_is_copy(arg_ty, arg.hir_id.owner);
     // `take(p.x)` / `look(&p.name)` with p a reference (#266).
     let from_ro = self.rap_or_field_through_ref(arg);
     // Extend the lifetime of any reference RAP this arg touches so a
@@ -3192,7 +3210,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // `drop(x)` is where x's value is dropped: say so on the move,
     // unless its type has nothing to drop.
     if !arg_ty.is_ref() && !is_copyable && self.is_mem_drop_arg(arg)
-      && arg_ty.needs_drop(self.tcx, rustc_middle::ty::TypingEnv::post_analysis(self.tcx, arg.hir_id.owner))
+      && self.needs_drop(arg_ty, arg.hir_id.owner)
     {
       if let ResourceTy::Value(rap) = &to_ro {
         to_ro = ResourceTy::Value(rap.with_drops_arg());
@@ -3310,7 +3328,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             Res::Def(DefKind::Const { .. }, def_id) => {
               let ty = self.tcx.type_of(def_id).instantiate_identity().skip_normalization();
               let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
-              if ty.is_freeze(self.tcx, env) && !ty.needs_drop(self.tcx, env) {
+              if ty.is_freeze(self.tcx, env) && !self.needs_drop_mono(ty) {
                 item_name(p).map(StaticLender::PromotedConst)
               } else {
                 None
@@ -3751,8 +3769,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // (#484, #791).
       // A captured std lock counts as a resource on every host, as
       // for `ty_is_plain` (#813).
-      let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, expr.hir_id.owner);
-      let plain = !ty.needs_drop(self.tcx, env) && !ty_has_std_sync_primitive(self.tcx, ty);
+      let plain = !self.needs_drop(ty, expr.hir_id.owner) && !ty_has_std_sync_primitive(self.tcx, ty);
       self.add_closure_owner(name, mutability, plain, self.current_scope, !self.inside_branch);
     }
     else {
@@ -4610,7 +4627,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 if bool_of_mut(parent_ty.ref_mutability().unwrap()) { Evt::MBorrow }
                 else { Evt::SBorrow }
             } else {
-                if self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, pat.hir_id.owner), ty) { Evt::Copy }
+                if self.ty_is_copy(ty, pat.hir_id.owner) { Evt::Copy }
                 else { Evt::Move }
             };
 
@@ -5299,10 +5316,10 @@ pub fn tuple_scrutinee_target(&self, scrutinee: &'tcx Expr<'tcx>) -> ResourceTy 
 /// parts that are (#627).
 pub fn tuple_scrutinee_left(&self, scrutinee: &'tcx Expr<'tcx>, pat: Option<&'tcx Pat<'tcx>>) -> Vec<(ResourceAccessPoint, TupleLeft)> {
   let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
-  let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, scrutinee.hir_id.owner);
+  let env = typing_env(self.tcx, scrutinee.hir_id.owner);
   let mut out = Vec::new();
   for (var, path, ty) in self.tuple_scrutinee_vars(scrutinee) {
-    if !ty.needs_drop(self.tcx, env) {
+    if !self.needs_drop(ty, scrutinee.hir_id.owner) {
       continue;
     }
     // The places that need drop: the variable, or its leaf parts.
@@ -5409,7 +5426,7 @@ fn path_left(&self, pat: &'tcx Pat<'tcx>, path: &[String],
 /// time. Empty otherwise.
 fn path_takers(&self, pat: &'tcx Pat<'tcx>, path: &[String],
   typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> Vec<String> {
-  let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, pat.hir_id.owner);
+  let env = typing_env(self.tcx, pat.hir_id.owner);
   let mut out: Vec<String> = Vec::new();
   match pat.kind {
     PatKind::Or(alts) => {
@@ -5551,7 +5568,7 @@ fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::
   use rustc_middle::ty::TyKind;
   let tcx = self.tcx;
   let ty = typeck.node_type(pat.hir_id);
-  if !ty.needs_drop(tcx, env) {
+  if !self.needs_drop_in(ty, env) {
     return false;
   }
   // Whether a field the pattern skips with `..` needs drop: `tys` are
@@ -5559,7 +5576,7 @@ fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::
   // ones from index `d` on.
   let skipped_drop = |d: usize, m: usize, tys: Vec<Ty<'tcx>>| {
     let gap = tys.len().saturating_sub(m);
-    tys.into_iter().skip(d).take(gap).any(|t| t.needs_drop(tcx, env))
+    tys.into_iter().skip(d).take(gap).any(|t| self.needs_drop_in(t, env))
   };
   match pat.kind {
     PatKind::Binding(..) => {
@@ -5593,7 +5610,7 @@ fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::
       let variant = adt.variant_of_res(typeck.qpath_res(qpath, pat.hir_id));
       variant.fields.iter()
         .filter(|f| !fields.iter().any(|fp| fp.ident.name == f.name))
-        .any(|f| f.ty(tcx, args).needs_drop(tcx, env))
+        .any(|f| self.needs_drop_in(f.ty(tcx, args), env))
     }
     PatKind::Or(alts) => alts.iter().any(|a| self.pat_leaves_drop(a, typeck, env)),
     // `_`, a literal, a unit variant, a `box` / deref pattern: what
@@ -5969,7 +5986,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             None => continue,
           };
           let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
-          let is_copyable = self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, field.expr.hir_id.owner), field_ty);
+          let is_copyable = self.ty_is_copy(field_ty, field.expr.hir_id.owner);
           let e = if field_ty.is_ref() {
             match field_ty.ref_mutability().unwrap() {
               Mutability::Not => Evt::Copy,
@@ -6394,7 +6411,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         // closure (#311): `m` is still usable afterwards and the
         // closure has nothing of m's to drop. A Copy field
         // (`move || p.x`) is drawn on its own column (#328).
-        let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, rhs.hir_id.owner);
+        let env = typing_env(self.tcx, rhs.hir_id.owner);
         let copied = by_value && self.tcx.type_is_copy_modulo_regions(env, capture.place.ty());
         let upvar_rap = match self.capture_rap(&capture.place, &upvar_name) {
           Some(rap) => rap,
@@ -7831,9 +7848,8 @@ fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, 
 
 /// See `ExprVisitor::ty_is_plain`.
 pub fn ty_is_plain<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
-  let env = rustc_middle::ty::TypingEnv::post_analysis(tcx, owner);
-  !tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(tcx, owner), ty)
-    && !ty.needs_drop(tcx, env)
+  !tcx.type_is_copy_modulo_regions(typing_env(tcx, owner), ty)
+    && !needs_drop(tcx, ty, owner)
     && !ty_has_std_sync_primitive(tcx, ty)
     && !ty.is_union()
     && !ty.is_closure()
