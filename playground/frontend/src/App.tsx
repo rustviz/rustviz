@@ -247,9 +247,10 @@ const Description: React.FC = () => (
         the item stays in the source but is omitted from the trace.
       </li>
       <li>
-        <code>// rustviz: hide</code> on a <code>fn</code> line — additionally
-        removes the entire fn from the rendered code panel; call sites still draw
-        their arrows.
+        <code>// rustviz: hide</code> on a <code>fn</code>, <code>struct</code>,{" "}
+        <code>enum</code>, <code>impl</code>, <code>trait</code> or <code>use</code>{" "}
+        line (the line the item starts on) — removes the entire item from the
+        rendered code panel; call sites still draw their arrows.
       </li>
     </ul>
     <h3>Known limitations</h3>

@@ -189,6 +189,34 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
     if is_generated_item(item) || !in_target(item.span) {
       continue;
     }
+    // `// rustviz: hide` on a struct, enum, union, impl, use, trait, type
+    // alias, const or static (#814): drop the whole item (leading
+    // attributes, so `#[derive(..)]`, included) from the code panel, as for
+    // a hidden fn. A hidden `impl` is not traced either, like a hidden fn.
+    // `fn`s handle their own marker below; a marker on a `mod` or anywhere
+    // else hides nothing.
+    if !matches!(item.kind, ItemKind::Fn { .. } | ItemKind::Mod(..)) {
+      let sm = tcx.sess.source_map();
+      let first = sm.lookup_char_pos(item.span.lo()).line;
+      let last = sm.lookup_char_pos(item.span.hi()).line;
+      let mut start = first;
+      while start >= 2
+        && a_map.get(&(start - 1)).map(|l| l.trim_start().starts_with("#[")).unwrap_or(false)
+      {
+        start -= 1;
+      }
+      if let Some(m) = (start..=first).find(|l| hide_marker_lines.contains(l)) {
+        for l in start..=last {
+          hidden_source_lines.insert(l);
+        }
+        if start >= 2 && a_map.get(&(start - 1)).map(|l| l.trim().is_empty()).unwrap_or(false) {
+          hidden_source_lines.insert(start - 1);
+        }
+        if matches!(item.kind, ItemKind::Impl(_)) {
+          continue;
+        }
+      }
+    }
     match &item.kind {
       ItemKind::Struct(_ident, _generics, vardata) => {
         match vardata {

@@ -1328,6 +1328,8 @@ const EXPECTED_OK: &[&str] = &[
     "while_body",
     "while_let_body",
     "while_let_pattern_annotation",
+    "hide_items_814",
+    "hide_misplaced_814",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -14559,6 +14561,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push_str reads from/writes to t",
         ],
     },
+    // #814: the hidden items vanish from the code panel (checked by
+    // `hide_marker_hides_struct_enum_impl_use`); the tooltips of the rest of
+    // the program stay, including the struct instance's field.
+    TooltipExpect {
+        name: "hide_items_814",
+        must_contain: &[
+            "Move from String::from to g.s",
+            "Move from Mood::Happy to _m",
+        ],
+        must_not_contain: &[
+            "struct Greeter",
+            "use std::fmt::Write",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -19459,6 +19475,32 @@ fn old_lender_ends_once_per_arm_when_repointed_in_several_arms() {
         let empty: Vec<_> = tooltip_lines(&timeline).into_iter().filter(|l| l.iter().all(|t| t.trim().is_empty())).collect();
         assert!(empty.is_empty(), "{}: {} dot(s) with an empty tooltip", name, empty.len());
     }
+}
+
+/// #814: `// rustviz: hide` on a struct, enum, impl or `use` line (and on a
+/// `#[derive]` line above an item) removes the whole item from the code
+/// panel, like a hidden fn. Main stripped the marker text and hid nothing.
+/// The rest of the program still renders: the struct's instance `g` and its
+/// `s` field keep their tooltips.
+#[test]
+fn hide_marker_hides_struct_enum_impl_use() {
+    let rv = run_with_local_backend("hide_items_814");
+    let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+    for gone in ["struct Greeter", "enum Mood", "impl Greeter", "use std::fmt::Write", "derive", "Sad", "rustviz"] {
+        assert!(!code.contains(gone), "`{}` should be hidden from the code panel:\n{}", gone, code);
+    }
+    assert!(code.contains("fn") && code.contains("main") && code.contains("Ferris"), "main must stay:\n{}", code);
+    assert!(timeline.contains("g.s"), "g.s's column must survive:\n{}", timeline);
+}
+
+/// #814: a `hide` marker that hides nothing (here on a `let`) is not an
+/// error and changes nothing in the code panel apart from the stripped
+/// marker.
+#[test]
+fn misplaced_hide_marker_keeps_the_line() {
+    let rv = run_with_local_backend("hide_misplaced_814");
+    let code = rv.code_panel_string();
+    assert!(code.contains("hi") && !code.contains("rustviz"), "{}", code);
 }
 
 /// Every fixture in `rustviz-plugin/tests/` (and `edition2024/`) is named

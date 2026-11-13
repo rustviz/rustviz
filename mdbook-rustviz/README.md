@@ -47,6 +47,23 @@ fn main() {
 ```
 ````
 
+### Keeping boilerplate out of the diagram
+
+Two comment markers, written at the end of the line an item starts on, work
+in ` ```rv ` blocks (the marker is stripped from the displayed code):
+
+- `// rustviz: skip` on a `let` or `fn` line: the item stays in the source
+  but is left out of the trace.
+- `// rustviz: hide` removes the whole item from the code panel; the
+  following lines move up. Supported items: `fn` (free fns and methods),
+  `struct`, `enum`, `union`, `impl` (the whole block; its methods aren't
+  traced), `trait`, `use`, `type`, `const` and `static`. For an item with
+  attributes, put the marker on the item line or on an attribute line
+  (`#[derive(..)]`); the attributes are hidden with it. Calls into a
+  hidden fn still draw their arrows, and a hidden struct's fields still get
+  columns where an instance is used. On any other line (a `let`, a `mod`)
+  `hide` hides nothing.
+
 Run `mdbook build` (or `mdbook serve`) as usual. For verbose logs, set
 `RUST_LOG=info`.
 
