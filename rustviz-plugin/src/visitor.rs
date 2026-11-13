@@ -1723,7 +1723,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .filter(|n| seen.insert(n.as_str()))
       .filter(|n| moved_some.contains(n.split('.').next().unwrap_or(n)))
       .filter_map(|n| self.raps.get(n))
-      .filter(|rd| !rd.rap.is_copy() && !rd.rap.is_fn() && !rd.rap.is_ref() && !self.skip_raps.contains(&rd.rap.name().to_string()))
+      .filter(|rd| !rd.rap.never_drops() && !rd.rap.is_fn() && !rd.rap.is_ref() && !self.skip_raps.contains(&rd.rap.name().to_string()))
       .map(|rd| rd.rap.clone())
       .collect();
     for rap in maybe_dropped {
@@ -1776,7 +1776,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .map(|(i, n)| (from + i, n)).filter(|(_, n)| seen.insert(n.as_str())) {
       let base = name.split('.').next().unwrap_or(name);
       let Some(rd) = self.raps.get(name) else { continue };
-      if rd.rap.is_copy() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
+      if rd.rap.never_drops() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
         || moved.contains(base) || self.skip_raps.contains(name) {
         continue;
       }
@@ -2175,7 +2175,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return HashSet::new();
     }
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-    let left = decls.iter().filter(|v| !v.is_copy()).cloned().collect();
+    let left = decls.iter().filter(|v| !v.never_drops()).cloned().collect();
     left
   }
 
@@ -6394,7 +6394,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let rap = rd.rap.clone();
         self.add_ev(line, Evt::Bind, ResourceTy::Value(rap), ResourceTy::Anonymous, false);
         let mut children: Vec<String> = self.struct_children(&name).into_iter()
-          .filter(|c| !c.is_copy())
+          .filter(|c| !c.never_drops())
           .map(|c| c.name().clone())
           .collect();
         children.reverse();
