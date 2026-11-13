@@ -507,15 +507,11 @@ const Description: React.FC = () => (
       . RustViz is an independent academic project and has no formal
       affiliation with the Rust project or the Rust Foundation.
     </p>
-    {/* TODO(maintainer): confirm this list of names before release.
-        Names come from `git log` and the GitHub profiles of the rustviz/rustviz
-        and rustviz/rustviz2 contributors. GitHub user h-yyyue shows no real
-        name (git author "hyy"); fill in the real name or drop the entry. */}
     <p>
       RustViz is led by Cyrus Omar. RustViz 2, which compiles real Rust
       programs through <code>rustc</code>, was built by Andrew Mahler, with
       early contributions from Yifan Liu, Zesen (SenmiaoORZ), Arnav Shah,
-      Chenglin Li, and h-yyyue. Later contributors include Marcelo Almeida,
+      Chenglin Li, and Yue Huang. Later contributors include Marcelo Almeida,
       Vishnu Reddy, Yu Pan, and Jay Soh. The authors of the original
       RustViz paper are listed below.
     </p>
