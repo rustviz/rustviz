@@ -17,18 +17,6 @@ pub fn escape_tooltip_name(name: &str) -> String {
         .replace('"', "&amp;quot;")
 }
 
-// Add styling to string name with <span>
-fn fmt_style(plain: &String) -> String {
-    let span_begin = String::from(
-        "&lt;span style=&quot;font-family: 'Source Code Pro',
-        Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono',
-        monospace, monospace !important;&quot;&gt;"
-    );
-    let span_end = "&lt;/span&gt;";
-
-    span_begin + &escape_tooltip_name(plain) + span_end
-}
-
 // What a column holds, as named in tooltips (#274). A Copy type (`i32`,
 // `bool`, a `#[derive(Clone, Copy)]` struct) can't implement `Drop`
 // (rustc rejects `Copy` + `Drop`, E0184), so it has nothing to clean up
@@ -58,7 +46,7 @@ fn held(holds_value: bool) -> &'static str {
 //   // it refers to, nothing happens.
 pub fn event_dot_ref_go_out_of_scope(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0} goes out of scope",
@@ -72,7 +60,7 @@ pub fn event_dot_ref_go_out_of_scope(my_name: &String) -> String {
 //
 pub fn event_dot_owner_go_out_of_scope(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
 
     format!(
         "{0} goes out of scope", //we shouldn't say "the resource is dropped"
@@ -87,7 +75,7 @@ pub fn event_dot_owner_go_out_of_scope(my_name: &String) -> String {
 // take the plain owner-OOS path), so the singular/plural branch
 // only needs to handle ≥1.
 pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: usize) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     let (noun, verb) = if move_capture_count == 1 {
         ("resource", "is")
     } else {
@@ -105,7 +93,7 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
 pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String {
     format!(
         "{} goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -143,7 +131,7 @@ pub fn event_dot_struct_partial_go_out_of_scope(
 ) -> String {
     const FREED: &str = " The Box's heap allocation is freed.";
     fn join(names: &[String]) -> (String, bool) {
-        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         let s = match fmt.len() {
             0 | 1 => fmt.concat(),
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
@@ -153,7 +141,7 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     if plain {
         // Nothing here needs drop, so nothing is "dropped" whichever
         // fields moved (#484).
-        let mut out = format!("{} goes out of scope.", fmt_style(my_name));
+        let mut out = format!("{} goes out of scope.", styled_name_html(my_name));
         if !moved.is_empty() {
             let (moved_s, moved_plural) = join(moved);
             out.push_str(&format!(" {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
@@ -169,7 +157,7 @@ pub fn event_dot_struct_partial_go_out_of_scope(
         return out;
     }
     if !maybe_moved.is_empty() {
-        let mut out = format!("{} goes out of scope.", fmt_style(my_name));
+        let mut out = format!("{} goes out of scope.", styled_name_html(my_name));
         if !moved.is_empty() {
             let (moved_s, moved_plural) = join(moved);
             out.push_str(&format!(" {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
@@ -212,7 +200,7 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     };
     format!(
         "{0} goes out of scope. {1} {2} moved out earlier, so {3}.{4}",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         moved_s,
         if moved_plural { "were" } else { "was" },
         rest,
@@ -228,7 +216,7 @@ pub fn event_dot_struct_partial_go_out_of_scope(
 pub fn event_dot_union_go_out_of_scope(my_name: &String) -> String {
     format!(
         "{0} goes out of scope. A union's fields are never dropped automatically.",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -238,7 +226,7 @@ pub fn event_dot_union_go_out_of_scope(my_name: &String) -> String {
 pub fn event_dot_manually_drop_go_out_of_scope(my_name: &String) -> String {
     format!(
         "{0} goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -247,7 +235,7 @@ pub fn event_dot_manually_drop_go_out_of_scope(my_name: &String) -> String {
 pub fn event_dot_manually_drop_by_hand(my_name: &String) -> String {
     format!(
         "ManuallyDrop::drop drops the value inside {0} (by hand)",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -256,7 +244,7 @@ pub fn event_dot_manually_drop_by_hand(my_name: &String) -> String {
 pub fn state_dropped_by_hand(my_name: &String) -> String {
     format!(
         "{0}'s value was dropped by hand; it must not be used again",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -280,17 +268,17 @@ pub fn event_dot_union_write(my_name: &String, is_copy: bool, source: Option<&St
 // timeline visually anchors that "from outside this scope" origin;
 // this is its tooltip and the matching dot tooltip.
 pub fn event_dot_owner_init_from_caller_value(my_name: &String) -> String {
-    format!("{0} is bound to a value from the caller", fmt_style(my_name))
+    format!("{0} is bound to a value from the caller", styled_name_html(my_name))
 }
 
 // A Copy parameter (`n: i32`, `c: bool`, `a: Option<i32>`): the caller's
 // value is copied in; nothing is owned or moved (#505).
 pub fn event_dot_copy_init_from_caller(my_name: &String) -> String {
-    format!("{0} is a copy of the caller's value", fmt_style(my_name))
+    format!("{0} is a copy of the caller's value", styled_name_html(my_name))
 }
 
 pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!("{0} acquires ownership from the caller", my_name_fmt)
 }
 
@@ -299,8 +287,8 @@ pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
 // moved (or copied) into `f`, which owns it; the binding borrows that,
 // so it mustn't say "from the caller" (#377).
 pub fn event_dot_ref_init_own_param(my_name: &String, fn_name: &String, whole: bool, is_mut: bool, drops: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let fn_fmt = fmt_style(fn_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let fn_fmt = styled_name_html(fn_name);
     let kind = if is_mut { "a mutable" } else { "an immutable" };
     let what = if whole { "the value" } else { "part of the value" };
     let base = format!("{0} is {1} borrow of {2} passed to {3}, which {3} owns", my_name_fmt, kind, what, fn_fmt);
@@ -318,8 +306,8 @@ pub fn event_dot_ref_init_own_param(my_name: &String, fn_name: &String, whole: b
 // held; what that borrows isn't tracked at the pattern, so the message
 // doesn't name a lender, and never says "owns" (#352).
 pub fn event_dot_ref_init_in_pattern(my_name: &String, bound: &String, is_mut: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let bound_fmt = fmt_style(bound);
+    let my_name_fmt = styled_name_html(my_name);
+    let bound_fmt = styled_name_html(bound);
     let kind = if is_mut { "a mutable" } else { "an immutable" };
     format!("{0} holds {1} reference (it came with the value matched into {2})", my_name_fmt, kind, bound_fmt)
 }
@@ -330,7 +318,7 @@ pub fn event_dot_ref_init_in_pattern(my_name: &String, bound: &String, is_mut: b
 pub fn event_dot_param_value_init(my_name: &String, fn_name: &String, whole: bool) -> String {
     format!(
         "{0} is {2} the value the caller passed to {1}. {1} owns it, and a ref binding borrows it",
-        fmt_style(my_name), fmt_style(fn_name), if whole { "" } else { "part of" }
+        styled_name_html(my_name), styled_name_html(fn_name), if whole { "" } else { "part of" }
     ).replace("  ", " ")
 }
 
@@ -338,7 +326,7 @@ pub fn event_dot_param_value_init(my_name: &String, fn_name: &String, whole: boo
 // Mirror message to `event_dot_owner_init_from_caller` for the ref
 // side: makes it clear that the lender lives outside this fn scope.
 pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     if is_mut {
         format!("{0} is a mutable borrow from the caller", my_name_fmt)
     } else {
@@ -352,7 +340,7 @@ pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String 
 // so this tooltip is the only one a user can hover; it has to
 // communicate both events.
 pub fn event_dot_owner_drop_at_reassign(my_name: &String, note: &str) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource; its previous resource{1} is dropped{2}",
@@ -372,7 +360,7 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
          {3} moved it (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), holds, rest, moved_above(by_cond)
+        styled_name_html(my_name), holds, rest, moved_above(by_cond)
     )
 }
 
@@ -391,14 +379,14 @@ pub fn moved_above(by_cond: bool) -> &'static str {
 // the old value's part, not the new one.
 pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate::svg_generator::data::ReassignParts) -> String {
     fn join(names: &[String]) -> (String, bool) {
-        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         let s = match fmt.len() {
             0 | 1 => fmt.concat(),
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
         };
         (s, names.len() > 1)
     }
-    let mut out = format!("{} acquires ownership of a new resource.", fmt_style(my_name));
+    let mut out = format!("{} acquires ownership of a new resource.", styled_name_html(my_name));
     let (moved_s, moved_plural) = join(&parts.moved);
     let (dropped_s, dropped_plural) = join(&parts.dropped);
     if parts.maybe_moved.is_empty() {
@@ -451,11 +439,11 @@ pub fn event_dot_unbound_temporary_acquire(from_name: &String) -> String {
 // (`P { .. }`, `(..)`, `[..]`) (#469).
 fn temporary_source(from_name: &String) -> String {
     if from_name.ends_with('!') {
-        format!("the {0} macro produces", fmt_style(from_name))
+        format!("the {0} macro produces", styled_name_html(from_name))
     } else if from_name.ends_with(" { .. }") || from_name == "(..)" || from_name == "[..]" {
-        format!("the literal {0} builds", fmt_style(from_name))
+        format!("the literal {0} builds", styled_name_html(from_name))
     } else {
-        format!("{0} returns", fmt_style(from_name))
+        format!("{0} returns", styled_name_html(from_name))
     }
 }
 
@@ -468,7 +456,7 @@ pub fn event_dot_unbound_temporary_part_acquire(from_name: &String, part: &TempP
     match part {
         TempPart::Field(f) => format!(
             "A temporary holds the value that {0}. Its field {1} is moved out of it; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
-            source, fmt_style(f)
+            source, styled_name_html(f)
         ),
         // `P { n: 1, ..make_p() }` (#605).
         TempPart::UpdateBase(fs) => format!(
@@ -482,7 +470,7 @@ pub fn event_dot_unbound_temporary_part_acquire(from_name: &String, part: &TempP
         // `match make_p().name { .. }` (#605).
         TempPart::Match(Some(f)) => format!(
             "A temporary holds the value that {0}, for the match to inspect its field {1}. The pattern of the arm that runs can move that field, or parts of it, into its bindings; what is left in the temporary is dropped with it after the match",
-            source, fmt_style(f)
+            source, styled_name_html(f)
         ),
         // `let (a, _) = pair();` (#623): the pattern can't fail.
         TempPart::Let(None) => format!(
@@ -491,7 +479,7 @@ pub fn event_dot_unbound_temporary_part_acquire(from_name: &String, part: &TempP
         ),
         TempPart::Let(Some(f)) => format!(
             "A temporary holds the value that {0}, for the `let` pattern to take its field {1} apart. The pattern moves parts of that field into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
-            source, fmt_style(f)
+            source, styled_name_html(f)
         ),
         // `(m, _) = pair();` (#625).
         TempPart::Assign(None) => format!(
@@ -500,7 +488,7 @@ pub fn event_dot_unbound_temporary_part_acquire(from_name: &String, part: &TempP
         ),
         TempPart::Assign(Some(f)) => format!(
             "A temporary holds the value that {0}, for the destructuring assignment to take its field {1} apart. It moves parts of that field to the places on the left; nothing takes the rest, so Rust drops the temporary, and what is left in it, before those places get their new values",
-            source, fmt_style(f)
+            source, styled_name_html(f)
         ),
         TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) | TempPart::LetChain(None) => format!(
             "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves parts of it into its bindings; what is left in it (all of it, if the pattern doesn't match) is dropped with the temporary",
@@ -508,7 +496,7 @@ pub fn event_dot_unbound_temporary_part_acquire(from_name: &String, part: &TempP
         ),
         TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) | TempPart::LetChain(Some(f)) => format!(
             "A temporary holds the value that {0}, for the {1} to match its field {2} against. If the pattern matches, it can move that field, or parts of it, into its bindings; what is left in the temporary (all of it, if the pattern doesn't match) is dropped with it",
-            source, let_kind(part), fmt_style(f)
+            source, let_kind(part), styled_name_html(f)
         ),
     }
 }
@@ -525,7 +513,7 @@ fn let_kind(part: &TempPart) -> &'static str {
 
 // "its field a", "its fields a and b", "its fields a, b and c".
 fn its_fields(fs: &[String]) -> String {
-    let names: Vec<String> = fs.iter().map(fmt_style).collect();
+    let names: Vec<String> = fs.iter().map(|n| styled_name_html(n)).collect();
     match names.as_slice() {
         [one] => format!("its field {}", one),
         [rest @ .., last] => format!("its fields {} and {}", rest.join(", "), last),
@@ -536,14 +524,14 @@ fn its_fields(fs: &[String]) -> String {
 // The move out of such a temporary, on its column.
 pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part: &TempPart) -> String {
     match part {
-        TempPart::Field(f) => format!("{0}'s field {1} is moved to {2}", fmt_style(my_name), fmt_style(f), fmt_style(to_name)),
+        TempPart::Field(f) => format!("{0}'s field {1} is moved to {2}", styled_name_html(my_name), styled_name_html(f), styled_name_html(to_name)),
         // `let q = P { n: 1, ..make_p() };`: a field of the base goes to
         // the field of the same name (`q.name`, #605).
         TempPart::UpdateBase(_) => {
             let f = to_name.rsplit('.').next().unwrap_or(to_name).to_owned();
-            format!("The struct update `..` moves {0}'s field {1} to {2}", fmt_style(my_name), fmt_style(&f), fmt_style(to_name))
+            format!("The struct update `..` moves {0}'s field {1} to {2}", styled_name_html(my_name), styled_name_html(&f), styled_name_html(to_name))
         }
-        _ => format!("The pattern moves {0}'s value, or part of it, into {1}", fmt_style(my_name), fmt_style(to_name)),
+        _ => format!("The pattern moves {0}'s value, or part of it, into {1}", styled_name_html(my_name), styled_name_html(to_name)),
     }
 }
 
@@ -553,7 +541,7 @@ pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part:
 pub fn event_dot_unbound_temporary_takes(from_name: &String) -> String {
     format!(
         "This temporary takes the value of {0}, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
-        fmt_style(from_name)
+        styled_name_html(from_name)
     )
 }
 
@@ -572,7 +560,7 @@ pub fn event_dot_unbound_temporary_takes_result(from_name: &String) -> String {
 pub fn event_dot_temporary_go_out_of_scope(my_name: &String) -> String {
     format!(
         "{0} goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -582,7 +570,7 @@ pub fn event_dot_temporary_go_out_of_scope(my_name: &String) -> String {
 pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> String {
     format!(
         "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. Its resource is dropped.",
-        fmt_style(my_name), when
+        styled_name_html(my_name), when
     )
 }
 
@@ -591,12 +579,12 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool) -> St
         // `let (x, _) = (m, n);`: m went into x, n stayed in the literal.
         return format!(
             "This temporary {0}, built by the literal on the right of the let, is dropped {1}. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
-            fmt_style(ty), when
+            styled_name_html(ty), when
         );
     }
     format!(
         "This temporary {0} is dropped {1}: nothing bound it to a variable or moved it on. Its resource is dropped",
-        fmt_style(ty), when
+        styled_name_html(ty), when
     )
 }
 
@@ -608,43 +596,43 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
     match part {
         TempPart::Field(f) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but its field {2}, which was moved out of it",
-            fmt_style(ty), when, fmt_style(f)
+            styled_name_html(ty), when, styled_name_html(f)
         ),
         TempPart::UpdateBase(fs) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but {2}, which the struct update moved out of it",
-            fmt_style(ty), when, its_fields(fs)
+            styled_name_html(ty), when, its_fields(fs)
         ),
         TempPart::Match(None) => format!(
             "This temporary {0} is dropped {1}, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
-            fmt_style(ty), when
+            styled_name_html(ty), when
         ),
         TempPart::Match(Some(f)) => format!(
             "This temporary {0} is dropped {1}, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field {2}",
-            fmt_style(ty), when, fmt_style(f)
+            styled_name_html(ty), when, styled_name_html(f)
         ),
         TempPart::Assign(None) => format!(
             "This temporary {0} is dropped {1}, and with it whatever the assignment didn't move out of it",
-            fmt_style(ty), when
+            styled_name_html(ty), when
         ),
         TempPart::Assign(Some(f)) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but what the assignment moved out of its field {2}",
-            fmt_style(ty), when, fmt_style(f)
+            styled_name_html(ty), when, styled_name_html(f)
         ),
         TempPart::Let(None) => format!(
             "This temporary {0} is dropped {1}, and with it whatever the pattern didn't move out of it",
-            fmt_style(ty), when
+            styled_name_html(ty), when
         ),
         TempPart::Let(Some(f)) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2}",
-            fmt_style(ty), when, fmt_style(f)
+            styled_name_html(ty), when, styled_name_html(f)
         ),
         TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) | TempPart::LetChain(None) => format!(
             "This temporary {0} is dropped {1}, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
-            fmt_style(ty), when
+            styled_name_html(ty), when
         ),
         TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) | TempPart::LetChain(Some(f)) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2} (all of it, if the pattern didn't match)",
-            fmt_style(ty), when, fmt_style(f)
+            styled_name_html(ty), when, styled_name_html(f)
         ),
     }
 }
@@ -730,7 +718,7 @@ pub fn rc_drop_note(rc: Option<RcDrop>) -> String {
 // `let b = Rc::clone(&a);` / `a.clone()` / `Rc::downgrade(&a)`: the new
 // owner points to the same value; nothing is copied (#373).
 pub fn event_dot_rc_call_acquire(my_name: &String, call: RcCall) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     match call {
         RcCall::Clone(k) if k.is_weak() => format!(
             "{0} is another Weak pointing to the same value (Weak::clone increases the weak count; nothing is copied)",
@@ -745,7 +733,7 @@ pub fn event_dot_rc_call_acquire(my_name: &String, call: RcCall) -> String {
 }
 
 pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String {
-    let (fn_fmt, to_fmt) = (fmt_style(fn_name), fmt_style(to_name));
+    let (fn_fmt, to_fmt) = (styled_name_html(fn_name), styled_name_html(to_name));
     match call {
         RcCall::Clone(k) if k.is_weak() => format!(
             "{0} makes another Weak pointing to the same value (nothing is copied), now owned by {1}",
@@ -766,9 +754,9 @@ pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String
 // the error (converted with `From`) or the `None` goes to the caller.
 // `value`: what `r` holds needs no drop (#484).
 pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: TryMove, value: bool) -> String {
-    let name = fmt_style(my_name);
+    let name = styled_name_html(my_name);
     let gets = match target {
-        Some(t) => format!("{} gets the value inside it", fmt_style(t)),
+        Some(t) => format!("{} gets the value inside it", styled_name_html(t)),
         None => format!("`{}?` gives the value inside it", my_name),
     };
     let what = if value { "value" } else { "resource" };
@@ -790,11 +778,11 @@ pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: 
 // resource", "is bound to the mutable reference", …
 pub fn event_dot_acquire_from_try(my_name: &String, from: &String, kind: TryMove, holds: &str) -> String {
     let inside = match kind {
-        TryMove::Result => format!("{}'s `Ok`", fmt_style(from)),
-        TryMove::Option => format!("{}'s `Some`", fmt_style(from)),
-        TryMove::Other => fmt_style(from),
+        TryMove::Result => format!("{}'s `Ok`", styled_name_html(from)),
+        TryMove::Option => format!("{}'s `Some`", styled_name_html(from)),
+        TryMove::Other => styled_name_html(from),
     };
-    format!("{} {holds} the `?` takes out of {inside}", fmt_style(my_name))
+    format!("{} {holds} the `?` takes out of {inside}", styled_name_html(my_name))
 }
 
 // `x?` returns from the function on `Err` / `None`; every value the
@@ -802,7 +790,7 @@ pub fn event_dot_acquire_from_try(my_name: &String, from: &String, kind: TryMove
 // owner's column, which goes on: on success nothing happens here.
 // `note`: what else the drop drops, or an Rc's count note (#542).
 pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
         "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
@@ -833,7 +821,7 @@ pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
 // `value`: p holds a value with nothing to drop. `note`: see
 // event_dot_owner_drop_if_try_returns.
 pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, note: &str) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     if value {
         return format!(
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. \
@@ -864,7 +852,7 @@ pub fn event_dot_literal_temporary_acquire(from_name: &String, ends_with_stateme
     };
     format!(
         "The temporary that the literal on the right of this let builds takes the value of {0}. {1}",
-        fmt_style(from_name), when
+        styled_name_html(from_name), when
     )
 }
 
@@ -885,7 +873,7 @@ pub fn event_dot_literal_temporary_start() -> String {
 // }
 pub fn event_dot_init_param(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0} is initialized as the function argument",
@@ -906,7 +894,7 @@ pub fn event_dot_init_param(my_name: &String) -> String {
 // `&T` being copied has its own message (event_dot_ref_copied).
 pub fn event_dot_copy_to(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s value is copied",
@@ -919,7 +907,7 @@ pub fn event_dot_copy_to(my_name: &String) -> String {
 // o<--*   the star event
 // |
 pub fn event_dot_move_to(my_name: &String, holds_value: bool) -> String {
-    format!("{0}'s {1} is moved", fmt_style(my_name), held(holds_value))
+    format!("{0}'s {1} is moved", styled_name_html(my_name), held(holds_value))
 }
 
 // Source dot for the head of a `for` loop that is moved into the
@@ -930,7 +918,7 @@ pub fn event_dot_move_to(my_name: &String, holds_value: bool) -> String {
 pub fn event_dot_move_into_loop_iterator(my_name: &String) -> String {
     format!(
         "{0}'s resource is moved into the `for` loop's iterator",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -941,7 +929,7 @@ pub fn event_dot_move_into_loop_iterator(my_name: &String) -> String {
 pub fn event_dot_move_iterator_into_loop(my_name: &String) -> String {
     format!(
         "{0}'s resource is moved into the `for` loop, which uses it as its iterator",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -954,27 +942,27 @@ pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft) -> String 
     match left {
         LoopLeft::Return => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped here: the function returns from inside the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
-            fmt_style(my_name)
+            styled_name_html(my_name)
         ),
         LoopLeft::Break => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
-            fmt_style(my_name)
+            styled_name_html(my_name)
         ),
         LoopLeft::Try => format!(
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and {0}'s former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
-            fmt_style(my_name)
+            styled_name_html(my_name)
         ),
         LoopLeft::Panic => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
-            fmt_style(my_name)
+            styled_name_html(my_name)
         ),
         LoopLeft::Continue => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped here: this `continue` leaves the `for` loop and goes on to the next iteration of the outer loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
-            fmt_style(my_name)
+            styled_name_html(my_name)
         ),
         LoopLeft::End => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
-            fmt_style(my_name)
+            styled_name_html(my_name)
         ),
     }
 }
@@ -986,14 +974,14 @@ pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String, value:
     if value {
         return format!(
             "{0}'s value is moved into a closure passed to {1}",
-            fmt_style(my_name),
-            fmt_style(callee)
+            styled_name_html(my_name),
+            styled_name_html(callee)
         );
     }
     format!(
         "{0}'s resource is moved into a closure passed to {1}; it's dropped when that closure is dropped",
-        fmt_style(my_name),
-        fmt_style(callee)
+        styled_name_html(my_name),
+        styled_name_html(callee)
     )
 }
 
@@ -1003,7 +991,7 @@ pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String, value:
 pub fn event_dot_move_into_returned_closure(my_name: &String, value: bool) -> String {
     format!(
         "{0}'s {1} is moved into the returned closure, which goes to the caller",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         held(value)
     )
 }
@@ -1011,15 +999,15 @@ pub fn event_dot_move_into_returned_closure(my_name: &String, value: bool) -> St
 pub fn event_dot_copy_into_returned_closure(my_name: &String) -> String {
     format!(
         "{0}'s value is copied into the returned closure",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
 pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> String {
     format!(
         "{0}'s value is copied into a closure passed to {1}",
-        fmt_style(my_name),
-        fmt_style(callee)
+        styled_name_html(my_name),
+        styled_name_html(callee)
     )
 }
 
@@ -1027,8 +1015,8 @@ pub fn event_dot_copy_into_closure_arg(my_name: &String, callee: &String) -> Str
 pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool, note: &str) -> String {
     format!(
         "{0}'s {2} is moved into {1}, which drops it{3}",
-        fmt_style(my_name),
-        fmt_style(fn_name),
+        styled_name_html(my_name),
+        styled_name_html(fn_name),
         held(value),
         note
     )
@@ -1041,7 +1029,7 @@ pub fn event_dot_move_to_drop(my_name: &String, fn_name: &String, value: bool, n
 pub fn event_dot_move_to_temporary(my_name: &String, extended: bool) -> String {
     format!(
         "{0}'s resource is moved into a temporary that is dropped at the end of {1}",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if extended { "the block (a `ref` binding borrows from it)" } else { "this statement" }
     )
 }
@@ -1053,7 +1041,7 @@ pub fn event_dot_move_to_temporary(my_name: &String, extended: bool) -> String {
 pub fn event_dot_move_to_scrutinee_temporary(my_name: &String, what: &str, when: &str) -> String {
     format!(
         "{0}'s resource is moved into a temporary that this {1} examines; the temporary is dropped {2}",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         what,
         when
     )
@@ -1065,7 +1053,7 @@ fn temporary_tuple(tuple: &String) -> String {
     if tuple.is_empty() {
         "the temporary tuple".to_owned()
     } else {
-        format!("the temporary tuple {}", fmt_style(tuple))
+        format!("the temporary tuple {}", styled_name_html(tuple))
     }
 }
 
@@ -1073,7 +1061,7 @@ fn temporary_tuple(tuple: &String) -> String {
 // tuple moves p into it (#327). Where the tuple is dropped, a
 // TupleTempDrop dot says so (event_dot_tuple_temp_drop).
 pub fn event_dot_move_to_tuple_temporary(my_name: &String, tuple: &String, value: bool) -> String {
-    format!("{0}'s {1} is moved into {2}", fmt_style(my_name), held(value), temporary_tuple(tuple))
+    format!("{0}'s {1} is moved into {2}", styled_name_html(my_name), held(value), temporary_tuple(tuple))
 }
 
 // The scrutinee tuple is dropped, and with it whatever of each
@@ -1110,13 +1098,13 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
     // after the others ("c's resource and whatever of …").
     let (plain, taken): (Vec<&TupleLeft>, Vec<&TupleLeft>) = with.iter().partition(|w| w.takers.is_empty());
     let mut parts: Vec<String> = if plain.len() > 1 && plain.iter().all(|w| !w.rest && w.rc.is_none()) {
-        let names: Vec<String> = plain.iter().map(|w| format!("{}'s", fmt_style(&w.name))).collect();
+        let names: Vec<String> = plain.iter().map(|w| format!("{}'s", styled_name_html(&w.name))).collect();
         vec![format!("{} resources", join_and(&names))]
     } else {
         plain.iter().map(|w| format!(
             "{}{}'s resource{}",
             if w.rest { "the rest of " } else { "" },
-            fmt_style(&w.name),
+            styled_name_html(&w.name),
             rc_drop_note(w.rc),
         )).collect()
     };
@@ -1129,9 +1117,9 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
         }
     }
     for (takers, ws) in groups {
-        let names: Vec<String> = ws.iter().map(|w| format!("{}'s", fmt_style(&w.name))).collect();
+        let names: Vec<String> = ws.iter().map(|w| format!("{}'s", styled_name_html(&w.name))).collect();
         let notes: String = ws.iter().map(|w| rc_drop_note(w.rc)).collect();
-        let takers: Vec<String> = takers.iter().map(fmt_style).collect();
+        let takers: Vec<String> = takers.iter().map(|n| styled_name_html(n)).collect();
         parts.push(format!("whatever of {} resource{}{} {} didn't take",
             join_and(&names), if ws.len() > 1 { "s" } else { "" }, notes, join_and(&takers)));
     }
@@ -1148,23 +1136,23 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
 //  *-->   the return event
 //
 pub fn event_dot_move_to_caller(my_name: &String, holds_value: bool) -> String {
-    format!("{0}'s {1} is moved to the caller", fmt_style(my_name), held(holds_value))
+    format!("{0}'s {1} is moved to the caller", styled_name_html(my_name), held(holds_value))
 }
 
 /// `let n = *slots[0];`: `place` is `*slots[0]`; the resource copied is
 /// the one the reference stored in `slots[0]` points to, not slots's own.
 pub fn event_dot_copy_through_element(place: &String) -> String {
     let elem = place.strip_prefix('*').unwrap_or(place).trim_start();
-    format!("the resource {0} points to is copied", fmt_style(&elem.to_owned()))
+    format!("the resource {0} points to is copied", styled_name_html(&elem.to_owned()))
 }
 
 pub fn event_dot_move_through_element(place: &String) -> String {
     let elem = place.strip_prefix('*').unwrap_or(place).trim_start();
-    format!("the resource {0} points to is moved", fmt_style(&elem.to_owned()))
+    format!("the resource {0} points to is moved", styled_name_html(&elem.to_owned()))
 }
 
 pub fn event_dot_copy_to_caller(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!(
         "{0}'s value is copied to the caller",
         my_name_fmt
@@ -1174,7 +1162,7 @@ pub fn event_dot_copy_to_caller(my_name: &String) -> String {
 /// Returning a shared reference (`&T` is Copy) copies the reference,
 /// never the data behind it, so don't say "s's resource is copied".
 pub fn event_dot_copy_ref_to_caller(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!(
         "a reference from {0} is returned to the caller; the data it points to is not copied",
         my_name_fmt
@@ -1192,7 +1180,7 @@ pub fn event_dot_copy_ref_to_caller(my_name: &String) -> String {
 pub fn event_dot_ref_moved(my_name: &String, to_caller: bool, pointee_copy: bool, is_mut: bool) -> String {
     format!(
         "{0}'s {3} reference is moved{1} (not the {2} it points to)",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if to_caller { " to the caller" } else { "" },
         held(pointee_copy),
         if is_mut { "mutable" } else { "immutable" }
@@ -1202,7 +1190,7 @@ pub fn event_dot_ref_moved(my_name: &String, to_caller: bool, pointee_copy: bool
 pub fn event_dot_ref_copied(my_name: &String, pointee_copy: bool) -> String {
     format!(
         "{0}'s reference is copied (not the {1} it points to)",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         held(pointee_copy)
     )
 }
@@ -1229,8 +1217,8 @@ pub fn event_dot_ref_copied(my_name: &String, pointee_copy: bool) -> String {
 // false.
 // `holds_value`: X is a Copy-typed owner, so its "value" is borrowed (#274).
 pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_only: bool, holds_value: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let target_name_fmt = fmt_style(target_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let target_name_fmt = styled_name_html(target_name);
     if omit_read_only {
         format!(
             "{0}'s {2} is immutably borrowed by {1}",
@@ -1256,8 +1244,8 @@ pub fn event_dot_static_lend(my_name: &String, target_name: &String, omit_read_o
 // for the same reason, so a reader can spot the read-only-vs-unusable
 // distinction by hovering both kinds.
 pub fn event_dot_mut_lend(my_name: &String, target_name: &String, holds_value: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let target_name_fmt = fmt_style(target_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let target_name_fmt = styled_name_html(target_name);
     format!(
         "{0}'s {2} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
         my_name_fmt, target_name_fmt, held(holds_value)
@@ -1273,8 +1261,8 @@ pub fn event_dot_mut_lend(my_name: &String, target_name: &String, holds_value: b
 // (`&mut r` on a `let mut r: &T`) borrows the reference r itself.
 // `pointee_copy`: r points to a Copy type, so it's a "value" (#312).
 pub fn event_dot_lend_through_ref(ref_name: &String, target_name: &String, mutable: bool, ref_is_mut: bool, pointee_copy: bool) -> String {
-    let r = fmt_style(ref_name);
-    let t = fmt_style(target_name);
+    let r = styled_name_html(ref_name);
+    let t = styled_name_html(target_name);
     let noun = held(pointee_copy);
     match (mutable, ref_is_mut) {
         (true, true) => format!(
@@ -1301,13 +1289,13 @@ pub fn event_dot_lend_through_ref(ref_name: &String, target_name: &String, mutab
 // parameter moves it; #200), and the borrow can live on in the call's
 // result (`let w = first(r);`).
 pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&String>, mutable: bool, ref_is_mut: bool, pointee_copy: bool) -> String {
-    let r = fmt_style(ref_name);
+    let r = styled_name_html(ref_name);
     let noun = held(pointee_copy);
     if mutable && !ref_is_mut {
         return format!("{0} is no longer mutably borrowed", r);
     }
     match borrower {
-        Some(b) => format!("{1} no longer borrows the {2} {0} points to", r, fmt_style(b), noun),
+        Some(b) => format!("{1} no longer borrows the {2} {0} points to", r, styled_name_html(b), noun),
         None => format!("the {1} {0} points to is no longer borrowed through {0}", r, noun),
     }
 }
@@ -1317,12 +1305,12 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
 // of the borrow is given back, but `holders` (`it`) still hold it, so
 // the lender is still borrowed.
 pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, holders: &[String], mutable: bool, holds_value: bool) -> String {
-    let holders: Vec<String> = holders.iter().map(fmt_style).collect();
+    let holders: Vec<String> = holders.iter().map(|n| styled_name_html(n)).collect();
     format!(
         "{0}'s {1} is no longer borrowed by {2}, but is still {3} borrowed by {4}",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         held(holds_value),
-        fmt_style(from_name),
+        styled_name_html(from_name),
         if mutable { "mutably" } else { "immutably" },
         holders.join(" and "),
     )
@@ -1337,7 +1325,7 @@ pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, 
 // `lender_holds_value`: X holds a "value" (Copy, or nothing to drop), not
 // a "resource" (#484).
 pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read_only: bool, through_ref: Option<bool>, lender_holds_value: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     let kind = if is_mut { "mutably" } else { "immutably" };
     let subject = match through_ref {
         Some(pointee_copy) => format!("the {} {} points to", held(pointee_copy), my_name_fmt),
@@ -1363,7 +1351,7 @@ pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read
 // *-->o   the star event (&)
 pub fn event_dot_static_return(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s immutable borrow ends",
@@ -1378,7 +1366,7 @@ pub fn event_dot_static_return(my_name: &String) -> String {
 // *-->o   the star event (&mut)
 pub fn event_dot_mut_return(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s mutable borrow ends",
@@ -1392,8 +1380,8 @@ pub fn event_dot_mut_return(my_name: &String) -> String {
 pub fn event_dot_borrow_of_ends(my_name: &String, lender: &String, is_mut: bool) -> String {
     format!(
         "{0}'s {2} borrow of {1} ends",
-        fmt_style(my_name),
-        fmt_style(lender),
+        styled_name_html(my_name),
+        styled_name_html(lender),
         if is_mut { "mutable" } else { "immutable" }
     )
 }
@@ -1412,15 +1400,15 @@ pub fn event_dot_copy_out_of_element(holder: &String, place: &String, holder_is_
     if holder_is_ref {
         format!(
             "{0} is copied out of the {2} {1} points to",
-            fmt_style(place),
-            fmt_style(holder),
+            styled_name_html(place),
+            styled_name_html(holder),
             held(holds_value)
         )
     } else {
         format!(
             "{0} is copied out of {1}'s {2}",
-            fmt_style(place),
-            fmt_style(holder),
+            styled_name_html(place),
+            styled_name_html(holder),
             held(holds_value)
         )
     }
@@ -1442,22 +1430,22 @@ pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: b
     if let Some(elem) = place.strip_prefix('*').map(|e| e.trim_start().to_owned()) {
         format!(
             "the {2} {0} points to is modified through {1}",
-            fmt_style(&elem),
-            fmt_style(place),
+            styled_name_html(&elem),
+            styled_name_html(place),
             held(holds_value)
         )
     } else if holder_is_ref {
         format!(
             "the {2} {0} points to is modified through {1}",
-            fmt_style(holder),
-            fmt_style(place),
+            styled_name_html(holder),
+            styled_name_html(place),
             held(holds_value)
         )
     } else {
         format!(
             "{0}'s {2} is modified through {1}",
-            fmt_style(holder),
-            fmt_style(place),
+            styled_name_html(holder),
+            styled_name_html(place),
             held(holds_value)
         )
     }
@@ -1468,12 +1456,12 @@ pub fn event_dot_write_element(holder: &String, place: &String, holder_is_ref: b
 // o-->*   or   o-->*     the star event
 // |   |            |
 pub fn event_dot_acquire_value(my_name: &String) -> String {
-    format!("{0} is bound to a value", fmt_style(my_name))
+    format!("{0} is bound to a value", styled_name_html(my_name))
 }
 
 pub fn event_dot_acquire(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
 
     format!(
         "{0} acquires ownership of a resource",
@@ -1489,7 +1477,7 @@ pub fn event_dot_acquire(my_name: &String) -> String {
 pub fn event_dot_temporary_acquire(my_name: &String) -> String {
     format!(
         "{0} acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -1500,7 +1488,7 @@ pub fn event_dot_temporary_acquire(my_name: &String) -> String {
 // language for primitives. Used for both fresh `let n = 5;` bindings
 // and reassignments like `n += 1;`.
 pub fn event_dot_acquire_copyable(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
 
     format!(
         "{0} is bound to a copyable value",
@@ -1512,14 +1500,14 @@ pub fn event_dot_acquire_copyable(my_name: &String) -> String {
 // (`n += 1;`, `p.x = 5;`, `n = m;`). Nothing is acquired or
 // initialized: the old value is overwritten in place (#178).
 pub fn event_dot_copyable_assign(my_name: &String) -> String {
-    format!("{0} is assigned a new value", fmt_style(my_name))
+    format!("{0} is assigned a new value", styled_name_html(my_name))
 }
 
 pub fn event_dot_copyable_assign_copy(my_name: &String, from_name: &String) -> String {
     format!(
         "{0} is assigned a copy of {1}",
-        fmt_style(my_name),
-        fmt_style(from_name)
+        styled_name_html(my_name),
+        styled_name_html(from_name)
     )
 }
 
@@ -1539,8 +1527,8 @@ pub fn event_dot_copyable_assign_copy(my_name: &String, from_name: &String) -> S
 //   (`let spaces = "  "; let spaces = spaces.len();`).
 // None for any other source; the caller keeps its usual wording.
 pub fn event_dot_ref_assign(my_name: &String, from: &ResourceAccessPoint, copied: bool, is_mut: bool) -> Option<String> {
-    let r = fmt_style(my_name);
-    let f = fmt_style(from.name());
+    let r = styled_name_html(my_name);
+    let f = styled_name_html(from.name());
     let kind = if is_mut { "mutable" } else { "immutable" };
     if from.is_fn() {
         Some(format!("{0} is assigned the result of {1}", r, f))
@@ -1558,7 +1546,7 @@ pub fn event_dot_ref_assign(my_name: &String, from: &ResourceAccessPoint, copied
 // reference never owns what it points to, so "acquires ownership"
 // would be false; say what the variable is bound to instead.
 pub fn event_dot_ref_acquire(my_name: &String, is_mut: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     if is_mut {
         format!("{0} is bound to a mutable reference", my_name_fmt)
     } else {
@@ -1577,8 +1565,8 @@ pub fn event_dot_ref_acquire(my_name: &String, is_mut: bool) -> String {
 pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, pointee_copy: bool) -> String {
     format!(
         "the {2} {0} points to is modified through {1}",
-        fmt_style(ref_name),
-        fmt_style(deref_name),
+        styled_name_html(ref_name),
+        styled_name_html(deref_name),
         held(pointee_copy)
     )
 }
@@ -1597,8 +1585,8 @@ pub fn event_dot_reborrow_to_caller(ref_name: &String, place: &String) -> String
     };
     format!(
         "{what} to {0}, reborrowed through {1}, is returned to the caller; the data it points to is not copied",
-        fmt_style(&target.trim().to_owned()),
-        fmt_style(ref_name)
+        styled_name_html(&target.trim().to_owned()),
+        styled_name_html(ref_name)
     )
 }
 
@@ -1607,17 +1595,17 @@ pub fn event_dot_copy_deref_to_caller(ref_name: &String, place: &String) -> Stri
     match depth {
         0 | 1 => format!(
             "a copy of the value {0} points to is returned to the caller",
-            fmt_style(ref_name)
+            styled_name_html(ref_name)
         ),
         2 => format!(
             "a copy of {0}, the value behind the reference {1} points to, is returned to the caller",
-            fmt_style(place),
-            fmt_style(ref_name)
+            styled_name_html(place),
+            styled_name_html(ref_name)
         ),
         _ => format!(
             "a copy of {0}, the value reached by following {1}'s references, is returned to the caller",
-            fmt_style(place),
-            fmt_style(ref_name)
+            styled_name_html(place),
+            styled_name_html(ref_name)
         ),
     }
 }
@@ -1629,9 +1617,9 @@ pub fn event_dot_copy_deref_to_caller(ref_name: &String, place: &String) -> Stri
 pub fn event_dot_copy_through_deref_field(ref_name: &String, place: &String, target_name: &String, pointee_copy: bool) -> String {
     format!(
         "the {3} {0} points to is read through {1} (copied to {2})",
-        fmt_style(ref_name),
-        fmt_style(place),
-        fmt_style(target_name),
+        styled_name_html(ref_name),
+        styled_name_html(place),
+        styled_name_html(target_name),
         held(pointee_copy)
     )
 }
@@ -1690,7 +1678,7 @@ pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Opti
 // `holds_value`: the lender is a Copy-typed owner (#274).
 pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0} mutably borrows a {1}",
@@ -1704,7 +1692,7 @@ pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
 // |   |
 pub fn event_dot_static_borrow(my_name: &String, holds_value: bool) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0} immutably borrows a {1}",
@@ -1723,7 +1711,7 @@ pub fn event_dot_static_borrow(my_name: &String, holds_value: bool) -> String {
 pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String, holds_value: bool) -> String {
     format!(
         "{0}'s {2} is captured (moved) by closure {1}",
-        fmt_style(my_name), fmt_style(target_name), held(holds_value)
+        styled_name_html(my_name), styled_name_html(target_name), held(holds_value)
     )
 }
 
@@ -1733,8 +1721,8 @@ pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String,
 // Copy too: the closure gets a copy of the reference, and the data it
 // points to isn't copied.
 pub fn event_dot_capture_copy_to_closure(my_name: &String, target_name: &String, is_ref: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let target_fmt = fmt_style(target_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let target_fmt = styled_name_html(target_name);
     if is_ref {
         format!(
             "{0}'s reference is captured (copied) by closure {1}; the data it points to is not copied",
@@ -1750,8 +1738,8 @@ pub fn event_dot_capture_copy_to_closure(my_name: &String, target_name: &String,
 
 // Source dot for an immutably captured upvar. Mirrors event_dot_static_lend.
 pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &String, holds_value: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let target_fmt = fmt_style(target_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let target_fmt = styled_name_html(target_name);
     format!(
         "{0}'s {2} is captured (immutably borrowed) by closure {1}",
         my_name_fmt, target_fmt, held(holds_value)
@@ -1760,8 +1748,8 @@ pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &
 
 // Source dot for a mutably captured upvar. Mirrors event_dot_mut_lend.
 pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &String, holds_value: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let target_fmt = fmt_style(target_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let target_fmt = styled_name_html(target_name);
     format!(
         "{0}'s {2} is captured (mutably borrowed) by closure {1}",
         my_name_fmt, target_fmt, held(holds_value)
@@ -1776,14 +1764,14 @@ pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &Str
 pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, ref_is_mut: bool) -> String {
     let base = format!(
         "the resource {0} points to is captured by closure {1} ({2} reborrow through {0})",
-        fmt_style(ref_name),
-        fmt_style(closure_name),
+        styled_name_html(ref_name),
+        styled_name_html(closure_name),
         if mutable { "a mutable" } else { "an immutable" }
     );
     if mutable {
-        format!("{0}; {1} can't be used while the borrow is live", base, fmt_style(ref_name))
+        format!("{0}; {1} can't be used while the borrow is live", base, styled_name_html(ref_name))
     } else if ref_is_mut {
-        format!("{0}; {1} is read-only while the borrow is live", base, fmt_style(ref_name))
+        format!("{0}; {1} is read-only while the borrow is live", base, styled_name_html(ref_name))
     } else {
         base
     }
@@ -1799,14 +1787,14 @@ pub fn event_dot_closure_bind_with_captures(
     my_name: &String,
     captures: &[(String, &'static str)],
 ) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     if captures.is_empty() {
         // Closure with no captures (e.g. `let f = || println!("hi")`).
         return format!("Closure {0} is bound", my_name_fmt);
     }
     let parts: Vec<String> = captures
         .iter()
-        .map(|(name, kind)| format!("{} ({})", fmt_style(name), kind))
+        .map(|(name, kind)| format!("{} ({})", styled_name_html(name), kind))
         .collect();
     format!(
         "Closure {0} captures: {1}",
@@ -1825,8 +1813,8 @@ pub fn event_dot_closure_returned(
     func: &String,
     captures: &[(String, &'static str)],
 ) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let func_fmt = fmt_style(func);
+    let my_name_fmt = styled_name_html(my_name);
+    let func_fmt = styled_name_html(func);
     if captures.is_empty() {
         return format!("{0} is bound to the closure {1} returned", my_name_fmt, func_fmt);
     }
@@ -1834,7 +1822,7 @@ pub fn event_dot_closure_returned(
         .iter()
         .map(|(name, kind)| {
             let how = if kind.starts_with("mutably") { "mutably" } else { "immutably" };
-            format!("{} ({})", fmt_style(name), how)
+            format!("{} ({})", styled_name_html(name), how)
         })
         .collect();
     format!(
@@ -1850,14 +1838,14 @@ pub fn event_dot_closure_returned(
 pub fn event_dot_closure_capture_acquire(my_name: &String, from_name: &String, holds_value: bool) -> String {
     format!(
         "Closure {0} captures (moves) {1}'s {2}",
-        fmt_style(my_name), fmt_style(from_name), held(holds_value)
+        styled_name_html(my_name), styled_name_html(from_name), held(holds_value)
     )
 }
 
 // Closure-side dot for an immutable capture. Mirrors event_dot_static_borrow.
 pub fn event_dot_closure_capture_static_borrow(my_name: &String, from_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let from_fmt = fmt_style(from_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let from_fmt = styled_name_html(from_name);
     format!(
         "Closure {0} captures an immutable reference to {1}",
         my_name_fmt, from_fmt
@@ -1866,8 +1854,8 @@ pub fn event_dot_closure_capture_static_borrow(my_name: &String, from_name: &Str
 
 // Closure-side dot for a mutable capture. Mirrors event_dot_mut_borrow.
 pub fn event_dot_closure_capture_mut_borrow(my_name: &String, from_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
-    let from_fmt = fmt_style(from_name);
+    let my_name_fmt = styled_name_html(my_name);
+    let from_fmt = styled_name_html(from_name);
     format!(
         "Closure {0} captures a mutable reference to {1}",
         my_name_fmt, from_fmt
@@ -1881,7 +1869,7 @@ pub fn event_dot_closure_capture_mut_borrow(my_name: &String, from_name: &String
 // o-->*   the star event (&)
 pub fn event_dot_static_reacquire(my_name: &String, holds_value: bool) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s {1} is no longer immutably borrowed",
@@ -1896,7 +1884,7 @@ pub fn event_dot_static_reacquire(my_name: &String, holds_value: bool) -> String
 // o-->*   the star event (&mut)
 pub fn event_dot_mut_reacquire(my_name: &String, holds_value: bool) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s {1} is no longer mutably borrowed",
@@ -1916,8 +1904,8 @@ pub fn event_dot_mut_reacquire(my_name: &String, holds_value: bool) -> String {
 // can't know which one it points into, so all of them stay borrowed
 // for as long as the result is used.
 pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier) -> String {
-    let func_fmt = fmt_style(func);
-    let to_fmt = fmt_style(to_name);
+    let func_fmt = styled_name_html(func);
+    let to_fmt = styled_name_html(to_name);
     if carrier == ViaCarrier::StoredBy {
         // `refs.push(&s)` (#392): `func` is the method.
         return format!(
@@ -1930,7 +1918,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         if lenders.len() <= 1 {
             return format!(": {0} is a reference copied out of {1}", to_fmt, func_fmt);
         }
-        let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+        let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
         let list = match names.len() {
             2 => format!("{} and {}", names[0], names[1]),
             n => format!("{}, and {}", names[..n - 1].join(", "), names[n - 1]),
@@ -1950,11 +1938,11 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         return match lenders.first() {
             Some(l) if through_ref => format!(
                 ": {0} holds the closure {1} returned, which {3} what {2} points to, so that data stays borrowed while {0} is in use",
-                to_fmt, func_fmt, fmt_style(l), how
+                to_fmt, func_fmt, styled_name_html(l), how
             ),
             Some(l) => format!(
                 ": {0} holds the closure {1} returned, which {3} {2}, so {2} stays borrowed while {0} is in use",
-                to_fmt, func_fmt, fmt_style(l), how
+                to_fmt, func_fmt, styled_name_html(l), how
             ),
             None => String::new(),
         };
@@ -1969,15 +1957,15 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         let head = match (field_of, from_call) {
             (false, true) => format!(": {0} is a reference {1} out of the value {2} returned", to_fmt, how, func_fmt),
             (false, false) => format!(": {0} is a reference {1} out of {2}", to_fmt, how, func_fmt),
-            (true, true) => format!(": {0} is a reference that came with the value {1} returned, {2} into {3}", to_fmt, func_fmt, how, fmt_style(&bound.to_owned())),
-            (true, false) => format!(": {0} is a reference that came with the value {1} out of {2} into {3}", to_fmt, how, func_fmt, fmt_style(&bound.to_owned())),
+            (true, true) => format!(": {0} is a reference that came with the value {1} returned, {2} into {3}", to_fmt, func_fmt, how, styled_name_html(&bound.to_owned())),
+            (true, false) => format!(": {0} is a reference that came with the value {1} out of {2} into {3}", to_fmt, how, func_fmt, styled_name_html(&bound.to_owned())),
         };
         // Several lenders, or a signature that also ties the value to
         // an argument with no column: rustc's lifetimes let the
         // reference point into any of them (#681).
         // `tie` is set only when every reference in the value has the
         // lifetime it describes.
-        let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+        let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
         let tied = !tie.tied.is_empty();
         return if tied && (names.len() >= 2 || tie.tied.len() >= 2 || also_unnamed) {
             format!("{}; {}", head, signature_tie(&func_fmt, "that value", "point into", to_name, &names, also_unnamed, tie))
@@ -2002,7 +1990,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
     let point = if carrier == ViaCarrier::Value { "borrow from" } else { "point into" };
-    let names: Vec<String> = lenders.iter().map(fmt_style).collect();
+    let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
     // `Some(Pair { l: &s, r: &t })` / `Some([&s, &t])`: the one argument
     // holds every borrow itself; the signature merges nothing.
     if tie.holds_all && names.len() >= 2 && !also_unnamed && tie.unnamed == 0 {
@@ -2087,7 +2075,7 @@ fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, name
             (k, _) => format!(" ({} of them are values with no column here)", count_word(k)),
         });
     }
-    let to_fmt = fmt_style(to_name);
+    let to_fmt = styled_name_html(to_name);
     let unnamed_slots = tie.unnamed.max(usize::from(also_unnamed));
     let tail = if names.len() >= 2 {
         let either = either_word(names.len() + unnamed_slots);
@@ -2111,7 +2099,7 @@ fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, name
 pub fn arrow_borrow_ends_lender_not_drawn(from_name: &String, is_mut: bool) -> String {
     format!(
         "{0}'s {1} borrow ends (what it borrows from isn't shown)",
-        fmt_style(from_name),
+        styled_name_html(from_name),
         if is_mut { "mutable" } else { "immutable" }
     )
 }
@@ -2126,20 +2114,20 @@ pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &St
         StaticLender::Literal { noun } =>
             format!("the {0} ends ({0}s live for the whole program)", noun),
         StaticLender::Static(name) =>
-            format!("the static {} ends (statics live for the whole program)", fmt_style(name)),
+            format!("the static {} ends (statics live for the whole program)", styled_name_html(name)),
         StaticLender::PointeeOfStatic(name) =>
-            format!("what the static {} points to ends (it lives for the whole program)", fmt_style(name)),
+            format!("what the static {} points to ends (it lives for the whole program)", styled_name_html(name)),
         StaticLender::PointeeOfConst(name) =>
-            format!("what the constant {} points to ends (it lives for the whole program)", fmt_style(name)),
+            format!("what the constant {} points to ends (it lives for the whole program)", styled_name_html(name)),
         // Never drawn as an arrow (see the renderer).
         StaticLender::TupleTemporary =>
             "the temporary tuple ends".to_string(),
         StaticLender::PromotedConst(name) =>
-            format!("the constant {} ends (Rust stores the borrowed value for the whole program)", fmt_style(name)),
+            format!("the constant {} ends (Rust stores the borrowed value for the whole program)", styled_name_html(name)),
     };
     format!(
         "{0}'s {1}borrow of {2}",
-        fmt_style(from_name),
+        styled_name_html(from_name),
         if is_mut { "mutable " } else { "" },
         what
     )
@@ -2153,8 +2141,8 @@ pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &St
 // "reads from" would be false for `c.set(2)`. For `RefCell::borrow_mut`
 // the exclusivity a `&mut` would give is checked at runtime instead.
 pub fn fn_dot_shared_borrow_interior_mut(fn_name: &String, my_name: &String, refcell_borrow_mut: bool) -> String {
-    let f = fmt_style(fn_name);
-    let x = fmt_style(my_name);
+    let f = styled_name_html(fn_name);
+    let x = styled_name_html(my_name);
     if refcell_borrow_mut {
         format!(
             "{0} borrows {1} immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second {0} while this one is live would panic)",
@@ -2173,7 +2161,7 @@ pub fn fn_dot_shared_borrow_interior_mut(fn_name: &String, my_name: &String, ref
 // The viable is no longer in the scope after this line.
 pub fn state_out_of_scope(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0} is out of scope",
@@ -2184,17 +2172,17 @@ pub fn state_out_of_scope(my_name: &String) -> String {
 // The resource is transferred on this line or before this line due to move,
 // thus it is impossible to access this variable anymore. This is an invisible line in the timeline.
 pub fn state_value_moved(my_name: &String) -> String {
-    format!("{0}'s value was moved, so {0} can't be used until it's assigned again", fmt_style(my_name))
+    format!("{0}'s value was moved, so {0} can't be used until it's assigned again", styled_name_html(my_name))
 }
 
 // Mutably borrowed, for a column holding a value with nothing to drop.
 pub fn state_value_revoked(my_name: &String) -> String {
-    format!("{0}'s value is mutably borrowed, so it cannot access the value", fmt_style(my_name))
+    format!("{0}'s value is mutably borrowed, so it cannot access the value", styled_name_html(my_name))
 }
 
 pub fn state_resource_moved(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s resource was moved, so {0} no longer has ownership",
@@ -2210,7 +2198,7 @@ pub fn state_resource_moved(my_name: &String) -> String {
 pub fn state_ref_moved(my_name: &String, is_mut: bool) -> String {
     format!(
         "{0}'s {1} was moved out, so {0} can't be used until it's assigned again",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if is_mut { "mutable reference" } else { "reference" }
     )
 }
@@ -2219,7 +2207,7 @@ pub fn state_ref_moved(my_name: &String, is_mut: bool) -> String {
 // the privilege will come back. Occurs when mutably borrowed. This is an invisible line in the timeline.
 pub fn state_resource_revoked(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s resource is mutably borrowed, so it cannot access the resource",
@@ -2230,7 +2218,7 @@ pub fn state_resource_revoked(my_name: &String) -> String {
 // This ResourceOwner is the unique object that holds the ownership to the underlying resource.
 pub fn state_full_privilege(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
 
     format!(
         "{0} is the owner of the resource", //not necessarily write if let was used rather than let mut
@@ -2242,7 +2230,7 @@ pub fn state_full_privilege(my_name: &String) -> String {
 // before a `let s;` is assigned in a branch, or before the branch of
 // a `let s = if …` produces the value (#234).
 pub fn state_uninitialized(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
 
     format!(
         "{0} has no value yet",
@@ -2256,7 +2244,7 @@ pub fn state_uninitialized(my_name: &String) -> String {
 pub fn state_maybe_uninitialized(my_name: &String) -> String {
     format!(
         "{0} may have no value here: it was assigned in only some of the branches above",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -2273,7 +2261,7 @@ pub fn state_inactive_arm(label: &str) -> String {
     };
     format!(
         "This segment is for the {} branch. The underlined code is not part of that branch.",
-        fmt_style(&name)
+        styled_name_html(&name)
     )
 }
 
@@ -2283,11 +2271,11 @@ pub fn state_inactive_arm(label: &str) -> String {
 // tooltip and the vertical lifeline.
 // A non-Copy owner with nothing to drop: also a value, not a resource (#484).
 pub fn state_full_privilege_value(my_name: &String) -> String {
-    format!("{0} holds a value", fmt_style(my_name))
+    format!("{0} holds a value", styled_name_html(my_name))
 }
 
 pub fn state_full_privilege_copyable(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
 
     format!(
         "{0} holds a copyable value",
@@ -2301,7 +2289,7 @@ pub fn state_full_privilege_copyable(my_name: &String) -> String {
 // the referent type is Copy (`&mut i32`), so it's "the borrowed
 // value", matching the lender's own column (#312).
 pub fn state_mut_ref_full_privilege(my_name: &String, pointee_copy: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!(
         "{0} holds a mutable reference; it can read and write the borrowed {1}",
         my_name_fmt, held(pointee_copy)
@@ -2309,7 +2297,7 @@ pub fn state_mut_ref_full_privilege(my_name: &String, pointee_copy: bool) -> Str
 }
 
 pub fn state_static_ref_full_privilege(my_name: &String, pointee_copy: bool) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!(
         "{0} holds an immutable reference; it can read the borrowed {1}",
         my_name_fmt, held(pointee_copy)
@@ -2324,7 +2312,7 @@ pub fn state_static_ref_full_privilege(my_name: &String, pointee_copy: bool) -> 
 // the count of move-captured upvars so the tooltip is honest
 // about whether the closure owns one or many resources.
 pub fn state_closure_full_privilege_with_resource(my_name: &String, move_capture_count: usize) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     let noun = if move_capture_count == 1 { "resource" } else { "resources" };
     format!(
         "{0} owns a closure which owns {1} {2} via capture",
@@ -2337,7 +2325,7 @@ pub fn state_closure_full_privilege_with_resource(my_name: &String, move_capture
 // iterator, an Option), but not the data the value borrows, so the
 // generic "is the owner of the resource" is avoided.
 pub fn state_holder_full_privilege(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!(
         "{0} holds a value that contains a reference ({0} isn't a reference itself)",
         my_name_fmt
@@ -2348,7 +2336,7 @@ pub fn state_holder_full_privilege(my_name: &String) -> String {
 // = Vec::new();`, filled later by `refs.push(&s)`; #392). Its type can
 // hold references; whether it holds one depends on the line.
 pub fn state_holder_starts_empty(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!(
         "{0} owns a value that can hold references ({0} isn't a reference itself)",
         my_name_fmt
@@ -2362,13 +2350,13 @@ pub fn state_holder_starts_empty(my_name: &String) -> String {
 // `i32`) holds a "value", not a "resource" (#484).
 pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool, holds_value: bool) -> String {
     let what = if from_is_ref {
-        format!("the data {} points to", fmt_style(from_name))
+        format!("the data {} points to", styled_name_html(from_name))
     } else {
-        format!("{}'s {}", fmt_style(from_name), if holds_value { "value" } else { "resource" })
+        format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" })
     };
     format!(
         "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if is_mut { "mutably" } else { "immutably" },
         what
     )
@@ -2379,7 +2367,7 @@ pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: boo
 pub fn event_dot_holder_acquire(my_name: &String, from_name: &String) -> String {
     format!(
         "{0} takes over {1}'s value, and the borrow it holds",
-        fmt_style(my_name), fmt_style(from_name)
+        styled_name_html(my_name), styled_name_html(from_name)
     )
 }
 
@@ -2390,7 +2378,7 @@ pub fn event_dot_holder_acquire(my_name: &String, from_name: &String) -> String 
 // too, a moved-to h holds them instead of g.
 // `assigned`: `h = g;` over a value h had (only for a copy).
 pub fn event_dot_closure_value_acquire(my_name: &String, from_name: &String, is_copy: bool, borrows: usize, assigned: bool) -> String {
-    let (h, g) = (fmt_style(my_name), fmt_style(from_name));
+    let (h, g) = (styled_name_html(my_name), styled_name_html(from_name));
     let s = if borrows == 1 { "" } else { "s" };
     let copy = if assigned { "is assigned a copy of" } else { "is initialized with a copy of" };
     match (is_copy, borrows) {
@@ -2407,7 +2395,7 @@ pub fn event_dot_holder_drop_suffix() -> String {
 }
 
 pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!("{0} owns a closure", my_name_fmt)
 }
 
@@ -2423,7 +2411,7 @@ pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
 //          FullPrivilege once again.
 pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "{0}'s {1} is being shared by one or more variables",
@@ -2438,14 +2426,14 @@ pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
 pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> String {
     format!(
         "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only read it",
-        fmt_style(my_name), held(pointee_copy)
+        styled_name_html(my_name), held(pointee_copy)
     )
 }
 
 // should not appear for visualization in a correct program
 pub fn state_invalid(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     
     format!(
         "something is wrong with the timeline of {0}",
@@ -2455,7 +2443,7 @@ pub fn state_invalid(my_name: &String) -> String {
 
 pub fn structure(my_name: &String) -> String {
     // update styling
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
 
     format!(
         "the components in the box belong to struct {0}",
@@ -2478,7 +2466,7 @@ pub fn structure(my_name: &String) -> String {
 /// one branch above. After the conditional Rust treats it as
 /// possibly-moved → can't be used.
 pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     format!(
         "{0} may have been moved (consumed in at least one branch above)",
         my_name_fmt
@@ -2505,7 +2493,7 @@ pub fn branch_never_reaches_merge() -> String {
 pub fn event_dot_go_out_of_scope_all_moved_suffix(my_name: &String, some_diverge: bool) -> String {
     format!(
         ". No resource is dropped: {0} was moved or dropped in every branch above{1}.",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if some_diverge { " that reaches this point" } else { "" }
     )
 }
@@ -2521,7 +2509,7 @@ pub fn event_dot_go_out_of_scope_all_moved_suffix(my_name: &String, some_diverge
 pub fn event_dot_branch_merge_bound(my_name: &String, diverged: &[(String, Vec<BranchExit>)]) -> String {
     format!(
         "{0} acquired ownership of a resource{1}",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         bound_in_branches(diverged)
     )
 }
@@ -2532,7 +2520,7 @@ pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool, diverged
     let kind = if is_mut { "a mutable" } else { "an immutable" };
     format!(
         "{0} is bound to {1} reference{2}",
-        fmt_style(my_name), kind,
+        styled_name_html(my_name), kind,
         bound_in_branches(diverged)
     )
 }
@@ -2543,7 +2531,7 @@ pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool, diverged
 pub fn event_dot_branch_merge_bound_copy(my_name: &String, diverged: &[(String, Vec<BranchExit>)]) -> String {
     format!(
         "{0} is bound to a value{1}",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         bound_in_branches(diverged)
     )
 }
@@ -2565,11 +2553,11 @@ fn how_branches_left(diverged: &[(String, Vec<BranchExit>)]) -> String {
     let noun = |name: &String| match name.as_str() {
         "If" => "the if branch".to_owned(),
         "Else" => "the else branch".to_owned(),
-        _ => format!("the {} arm", fmt_style(name)),
+        _ => format!("the {} arm", styled_name_html(name)),
     };
     let same_way = diverged.iter().all(|(_, e)| *e == diverged[0].1);
     if same_way && diverged.iter().all(|(n, _)| n != "If" && n != "Else") && diverged.len() > 1 {
-        let names: Vec<String> = diverged.iter().map(|(n, _)| fmt_style(n)).collect();
+        let names: Vec<String> = diverged.iter().map(|(n, _)| styled_name_html(n)).collect();
         format!("the {} arms {}", join_and(&names), exits_verb(&diverged[0].1, true))
     } else {
         diverged.iter()
@@ -2626,7 +2614,7 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // says that (`event_dot_go_out_of_scope_maybe_moved`). `value`: it holds
 // a value or a reference, which owns nothing to drop.
 pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, note: &str) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     if value {
         return format!(
             "{0} was moved in at least one branch above, so it can't be used after the branches \
@@ -2651,7 +2639,7 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String 
         "{0} was moved in at least one branch above, so it can't be used after the branches \
          until it's assigned again. If the branch that ran didn't move it, its resource is \
          dropped when {0} is assigned again.",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -2675,7 +2663,7 @@ fn assigned_in_branch_that_ran(moved: bool) -> &'static str {
 // dropped. `mutable`: s can be assigned again (an immutable `let s;`
 // can't be: a second assignment is E0384).
 pub fn event_dot_branch_merge_maybe_init(my_name: &String, value: bool, mutable: bool, moved: bool, note: &str) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     let mut out = format!(
         "{0} was assigned a value in only some of the branches above, so it can't be used after \
          the branches{1}.",
@@ -2701,7 +2689,7 @@ pub fn event_dot_branch_merge_maybe_init_then_reassigned(my_name: &String, maybe
         "{0} was assigned a value in only some of the branches above, so it can't be used after \
          the branches until it's assigned again. If the branch that ran {2}, its resource \
          is dropped when {0} is assigned again{1}.",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if maybe { " (or, if it isn't, when it goes out of scope)" } else { "" },
         assigned_in_branch_that_ran(moved)
     )
@@ -2714,7 +2702,7 @@ pub fn event_dot_owner_drop_at_reassign_maybe_init(my_name: &String, note: &str,
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only \
          if {0} was assigned in the branch that ran{3} (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), holds, rest,
+        styled_name_html(my_name), holds, rest,
         if moved { " and wasn't moved there" } else { "" }
     )
 }
@@ -2726,7 +2714,7 @@ pub fn event_dot_go_out_of_scope_maybe_init(my_name: &String, note: &str, moved:
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} was assigned in the \
          branch that ran{3} (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), holds, rest,
+        styled_name_html(my_name), holds, rest,
         if moved { " and wasn't moved there" } else { "" }
     )
 }
@@ -2737,7 +2725,7 @@ pub fn event_dot_branch_merge_init_all_moved(my_name: &String, mutable: bool) ->
     format!(
         "{0} was assigned a value in only some of the branches above, and each of them moved it \
          away, so {0} holds nothing after the branches{1}.",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if mutable { " (until it's assigned again)" } else { "" }
     )
 }
@@ -2746,7 +2734,7 @@ pub fn event_dot_branch_merge_init_all_moved(my_name: &String, mutable: bool) ->
 pub fn event_dot_go_out_of_scope_init_all_moved(my_name: &String) -> String {
     format!(
         "{0} goes out of scope. No resource is dropped: each branch above that assigned {0} moved it away.",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -2765,7 +2753,7 @@ pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
     format!(
         "On a later iteration of the loop, the resource an earlier iteration gave {0} is dropped \
          here first, if {0} still holds it (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -2774,7 +2762,7 @@ pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
 // again before its scope ends, on every path (`Some(true)`) or only in
 // a branch of a later conditional (`Some(false)`).
 pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>) -> String {
-    let my_name_fmt = fmt_style(my_name);
+    let my_name_fmt = styled_name_html(my_name);
     let mut out = format!(
         "{0} may have no value after the loop: the loop may end before assigning it, so it can't be \
          used after the loop{1}.",
@@ -2801,7 +2789,7 @@ pub fn event_dot_owner_drop_at_reassign_after_loop(my_name: &String, note: &str)
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only \
          if the loop above assigned {0} (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), holds, rest
+        styled_name_html(my_name), holds, rest
     )
 }
 
@@ -2811,7 +2799,7 @@ pub fn event_dot_go_out_of_scope_after_loop(my_name: &String, note: &str) -> Str
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if the loop above assigned \
          {0} (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name), holds, rest
+        styled_name_html(my_name), holds, rest
     )
 }
 
@@ -2827,7 +2815,7 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_co
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it \
          (Rust tracks this with a runtime drop flag).{4}",
-        fmt_style(my_name), holds, rest, moved_above(by_cond),
+        styled_name_html(my_name), holds, rest, moved_above(by_cond),
         if boxed { " The Box's heap allocation is freed either way." } else { "" }
     )
 }
@@ -2839,17 +2827,17 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_co
 pub fn event_dot_break_out_move(my_name: &String, to: &String, value: bool) -> String {
     format!(
         "{0}'s {1} is moved to {2} by the {3} that ends the loop",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if value { "value" } else { "resource" },
-        fmt_style(to),
-        fmt_style(&"break".to_owned())
+        styled_name_html(to),
+        styled_name_html(&"break".to_owned())
     )
 }
 
 pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
     format!(
         "{0} goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
-        fmt_style(my_name)
+        styled_name_html(my_name)
     )
 }
 
@@ -2858,7 +2846,7 @@ pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
 pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
     format!(
         "{0} isn't returned on this path, but its borrow lasts as long as the result (same lifetime {1})",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         lifetime
     )
 }
@@ -2866,7 +2854,7 @@ pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
 // Merge dot for a variable that no branch above moved (#179; this used
 // to be an empty tooltip).
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
-    format!("{0} isn't moved in any of the branches above", fmt_style(my_name))
+    format!("{0} isn't moved in any of the branches above", styled_name_html(my_name))
 }
 // Extra text for a column label: for a subscript (`s₂`), a variable
 // that shadows an earlier one of the same name (`let s` while the first
@@ -2880,17 +2868,17 @@ pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::dat
     if let (Some((base, _)), Some(shadowed)) = (crate::expr_visitor_utils::split_numbered_name(name), &note.shadows) {
         let base = String::from(crate::expr_visitor_utils::written_name(base));
         let declared = match note.lines.as_slice() {
-            [one] => format!("a new variable named {}, declared on line {}", fmt_style(&base), one),
+            [one] => format!("a new variable named {}, declared on line {}", styled_name_html(&base), one),
             many => {
                 let (last, init) = many.split_last().unwrap();
                 let init: Vec<String> = init.iter().map(|l| l.to_string()).collect();
                 format!(
                     "a new variable named {}, declared on lines {} and {} (in different branches or blocks, so only one exists at a time)",
-                    fmt_style(&base), init.join(", "), last
+                    styled_name_html(&base), init.join(", "), last
                 )
             }
         };
-        out += &format!(". {0} shadows {1}: it is {2}", fmt_style(name), fmt_style(shadowed), declared);
+        out += &format!(". {0} shadows {1}: it is {2}", styled_name_html(name), styled_name_html(shadowed), declared);
     }
     if let Some((last, init)) = note.apart_from.split_last() {
         let lines = if init.is_empty() {
@@ -2901,7 +2889,7 @@ pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::dat
         };
         out += &format!(
             ". A different variable from the {0} declared on {1} (separate scopes, so only one exists at a time)",
-            fmt_style(name), lines
+            styled_name_html(name), lines
         );
     }
     out
@@ -2911,13 +2899,13 @@ pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::dat
 // borrow ended in each arm, at its last use there or, in an arm that
 // doesn't use it, as the arm starts.
 pub fn event_dot_branch_merge_borrow_ended(my_name: &String) -> String {
-    format!("{0}'s borrow ended in each branch above", fmt_style(my_name))
+    format!("{0}'s borrow ended in each branch above", styled_name_html(my_name))
 }
 
 // Dashed rest of an `if` / `match` arm after the borrow held by a
 // reference declared before the conditional has ended in that arm.
 pub fn state_ref_borrow_ended(my_name: &String) -> String {
-    format!("{0}'s borrow has ended on this path", fmt_style(my_name))
+    format!("{0}'s borrow has ended on this path", styled_name_html(my_name))
 }
 
 // Merge dot for a variable that was moved only in branches of type `!`
@@ -2926,7 +2914,7 @@ pub fn state_ref_borrow_ended(my_name: &String) -> String {
 // each such branch left. A reference never owns anything, so it
 // "holds its reference" instead.
 pub fn event_dot_branch_merge_kept(my_name: &String, is_ref: Option<bool>, value: bool, leavers: &[Vec<BranchExit>]) -> String {
-    let name = fmt_style(my_name);
+    let name = styled_name_html(my_name);
     let holds = match is_ref {
         Some(true) => format!("{} still holds its mutable reference here", name),
         Some(false) => format!("{} still holds its reference here", name),
@@ -2955,8 +2943,8 @@ pub fn event_dot_branch_merge_kept(my_name: &String, is_ref: Option<bool>, value
 // `labeled_block`: the same at the end of a labeled block (`'a: { …
 // break 'a; … }`).
 pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block: bool) -> String {
-    let name = fmt_style(my_name);
-    let brk = fmt_style(&"break".to_owned());
+    let name = styled_name_html(my_name);
+    let brk = styled_name_html(&"break".to_owned());
     let what = if labeled_block { "block" } else { "loop" };
     if definite {
         format!(
@@ -2989,7 +2977,7 @@ pub fn event_dot_chain_fail_move(
     how: &ChainFailHow,
 ) -> String {
     fn join(names: &[String]) -> String {
-        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         match fmt.len() {
             0 | 1 => fmt.concat(),
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
@@ -2998,8 +2986,8 @@ pub fn event_dot_chain_fail_move(
     // What is moved: the variable, or for `take(*b)` the place `*b`
     // (#579).
     let name = match how {
-        ChainFailHow::Out(place) => fmt_style(place),
-        _ => fmt_style(my_name),
+        ChainFailHow::Out(place) => styled_name_html(place),
+        _ => styled_name_html(my_name),
     };
     // A call of an FnOnce closure moves it into the call (#579).
     let (moves, act) = match how {
@@ -3008,7 +2996,7 @@ pub fn event_dot_chain_fail_move(
         _ if to.is_empty() => (format!("the condition moves {}", name), "move"),
         _ => (format!("the condition moves {} to {}", name, join(to)), "move"),
     };
-    let if_kw = fmt_style(&"if".to_owned());
+    let if_kw = styled_name_html(&"if".to_owned());
     let mut out = match (definite, no_else) {
         (false, false) => format!(
             "{0} may have been moved: when {1} and then turns out false, the else branch runs \
@@ -3043,7 +3031,7 @@ pub fn event_dot_chain_fail_move(
 // "t.0 or t.1", "t.0, t.1 or t.2": the places an or-pattern binds a
 // name from (#533).
 fn or_list(sources: &[String]) -> String {
-    let names: Vec<String> = sources.iter().map(|n| fmt_style(n)).collect();
+    let names: Vec<String> = sources.iter().map(|n| styled_name_html(n)).collect();
     match names.as_slice() {
         [] => String::new(),
         [one] => one.clone(),
@@ -3066,17 +3054,17 @@ fn or_list(sources: &[String]) -> String {
 // `x`'s matching field (#565). `value`: what's moved has nothing to
 // drop, so there's no drop flag either (#484).
 pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String], tuple: Option<&str>, part_of: Option<&(String, String)>, value: bool) -> String {
-    let me = fmt_style(my_name);
+    let me = styled_name_html(my_name);
     let (bound, bound_from) = match part_of {
-        Some((x, p)) => (fmt_style(x), fmt_style(p)),
-        None => (fmt_style(into), me.clone()),
+        Some((x, p)) => (styled_name_html(x), styled_name_html(p)),
+        None => (styled_name_html(into), me.clone()),
     };
     if let Some(tuple) = tuple {
         return format!(
             "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
              that binds {1} from {3}, {0}'s {4} is moved out of {5} into {6} here; otherwise it stays \
              in the tuple",
-            me, bound, or_list(sources), bound_from, held(value), temporary_tuple(&tuple.to_owned()), fmt_style(into)
+            me, bound, or_list(sources), bound_from, held(value), temporary_tuple(&tuple.to_owned()), styled_name_html(into)
         );
     }
     let otherwise = if value {
@@ -3087,7 +3075,7 @@ pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]
     format!(
         "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
          that binds {1} from {3}, {0}'s {4} is moved into {5} here; {6}.",
-        me, bound, or_list(sources), bound_from, held(value), fmt_style(into), otherwise
+        me, bound, or_list(sources), bound_from, held(value), styled_name_html(into), otherwise
     )
 }
 
@@ -3097,8 +3085,8 @@ pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]
 // place, but which one that is is decided at run time, so the borrow
 // checker treats every one of them as borrowed while `into` is live.
 pub fn event_dot_or_alt_lend(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool) -> String {
-    let me = fmt_style(my_name);
-    let x = fmt_style(into);
+    let me = styled_name_html(my_name);
+    let x = styled_name_html(into);
     let while_live = if mutable {
         format!("{} can't be used while {}'s borrow is live", me, x)
     } else {
@@ -3117,7 +3105,7 @@ pub fn event_dot_or_alt_reacquire(my_name: &String, into: &String, mutable: bool
     format!(
         "{1}'s borrow ends here, so {0}'s {2} is no longer {3} borrowed (the borrow checker counted it as \
          borrowed whichever alternative of the pattern matched)",
-        fmt_style(my_name), fmt_style(into), held(holds_value), if mutable { "mutably" } else { "immutably" }
+        styled_name_html(my_name), styled_name_html(into), held(holds_value), if mutable { "mutably" } else { "immutably" }
     )
 }
 
@@ -3126,15 +3114,15 @@ pub fn event_dot_or_alt_reacquire(my_name: &String, into: &String, mutable: bool
 pub fn event_dot_or_alt_borrow(my_name: &String, sources: &[String], mutable: bool) -> String {
     format!(
         "{0} {1} borrows {2}, whichever alternative of the pattern matches",
-        fmt_style(my_name), if mutable { "mutably" } else { "immutably" }, or_list(sources)
+        styled_name_html(my_name), if mutable { "mutably" } else { "immutably" }, or_list(sources)
     )
 }
 
 // Line segment of a place while the borrow `event_dot_or_alt_lend`
 // started is live (#565).
 pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, holds_value: bool) -> String {
-    let me = fmt_style(my_name);
-    let x = fmt_style(into);
+    let me = styled_name_html(my_name);
+    let x = styled_name_html(into);
     if mutable {
         format!(
             "{0}'s {2} is mutably borrowed by {1} if the alternative that binds {1} from {0} matched; \
@@ -3166,13 +3154,13 @@ pub fn event_dot_chain_fail_use(
     is_ref: bool,
 ) -> String {
     fn join(names: &[String]) -> String {
-        let fmt: Vec<String> = names.iter().map(fmt_style).collect();
+        let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         match fmt.len() {
             0 | 1 => fmt.concat(),
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
         }
     }
-    let name = fmt_style(my_name);
+    let name = styled_name_html(my_name);
     let (what, obj) = if is_ref {
         (format!("the resource {} points to", name), "it".to_owned())
     } else {
@@ -3212,9 +3200,9 @@ pub fn event_dot_chain_fail_use(
     };
     // A mutable borrow can have changed it on the way.
     let by: Vec<String> = uses.iter().filter(|u| u.changes && !u.binding && !u.to.is_empty())
-        .map(|u| format!("by {}", fmt_style(&u.to))).collect();
+        .map(|u| format!("by {}", styled_name_html(&u.to))).collect();
     let through: Vec<String> = uses.iter().filter(|u| u.changes && u.binding && !u.to.is_empty())
-        .map(|u| format!("through {}", fmt_style(&u.to))).collect();
+        .map(|u| format!("through {}", styled_name_html(&u.to))).collect();
     let agents: Vec<String> = by.into_iter().chain(through).collect();
     if !agents.is_empty() {
         out.push_str(&format!(". By then, {} may have been changed {}.", what, agents.join(" or ")));
@@ -3236,14 +3224,14 @@ pub fn event_dot_chain_fail_assign(
     rc: Option<RcDrop>,
     no_else: bool,
 ) -> String {
-    let name = fmt_style(my_name);
+    let name = styled_name_html(my_name);
     let what = if drops_old { "resource" } else { "value" };
     let mut out = if no_else {
         format!(
             "{0} may have been assigned a new {1}: when the condition assigns to {0} and then \
              turns out false, the body is skipped but the assignment has happened, so after the \
              {2} {0} holds either its previous {1} or the new one.",
-            name, what, fmt_style(&"if".to_owned()))
+            name, what, styled_name_html(&"if".to_owned()))
     } else {
         format!(
             "{0} may have been assigned a new {1}: when the condition assigns to {0} and then \
@@ -3268,7 +3256,7 @@ pub fn event_dot_chain_fail_assign(
 
 fn quoted_break(brk: &Option<String>) -> String {
     match brk {
-        Some(b) => fmt_style(b),
+        Some(b) => styled_name_html(b),
         None => "the break that carries it".to_owned(),
     }
 }
@@ -3276,7 +3264,7 @@ fn quoted_break(brk: &Option<String>) -> String {
 /// Appended to the receiver's dot: it got the value of one `break`,
 /// whichever ran.
 pub fn break_alt_receiver_suffix() -> String {
-    format!(" (from whichever {} ended the loop)", fmt_style(&"break".to_owned()))
+    format!(" (from whichever {} ended the loop)", styled_name_html(&"break".to_owned()))
 }
 
 /// Appended to the source's dot and to the arrow: the copy or move
@@ -3309,8 +3297,8 @@ pub fn with_break_alt_lend(title: &str, brk: &Option<String>) -> String {
 /// loop goes out of scope with it anyway, so it is only said where it
 /// went.
 pub fn event_dot_break_alt_move(my_name: &String, to: &String, alt: &crate::svg_generator::data::BreakAlt, what: &str) -> String {
-    let name = fmt_style(my_name);
-    let to = fmt_style(to);
+    let name = styled_name_html(my_name);
+    let to = styled_name_html(to);
     let brk = &alt.brk;
     let moved = if what == "reference" {
         format!("the reference in {0}", name)
@@ -3336,11 +3324,11 @@ pub fn event_dot_closure_call_once(
     fates: &[crate::svg_generator::data::CapturedFate],
 ) -> String {
     use crate::svg_generator::data::CapturedEnd;
-    let f = fmt_style(my_name);
+    let f = styled_name_html(my_name);
     let mut msg = format!(
         "{0} is moved into the call (an FnOnce closure can only be called once)", f);
     for fate in fates {
-        let s = fmt_style(&fate.name);
+        let s = styled_name_html(&fate.name);
         let tail = match fate.end {
             CapturedEnd::Dropped if fate.needs_drop =>
                 "is dropped during the call",
@@ -3365,7 +3353,7 @@ pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: 
     format!(
         "{0} goes out of scope. Its captured resources are dropped here only if {1} \
          (Rust tracks this with a runtime drop flag).",
-        fmt_style(my_name),
+        styled_name_html(my_name),
         if by_cond { "nothing above moved or called it" } else { "no branch above called it" }
     )
 }
