@@ -1376,6 +1376,48 @@ struct OrArmEvents {
   end: Vec<(usize, ExternalEvent)>,
   decls: Vec<ResourceAccessPoint>,
 }
+/// What the pattern of one `match` arm is drawn from: the scrutinee, the
+/// arm, and where it sits (see `visit_match_normal`).
+#[derive(Clone, Copy)]
+struct MatchArmCtx<'c, 'tcx> {
+  guard_expr: &'tcx Expr<'tcx>,
+  typeck_res: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+  parents: &'c [ResourceTy],
+  parents_ty: &'c [rustc_middle::ty::Ty<'tcx>],
+  scrutinee_moves: &'c [ResourceAccessPoint],
+  tuple_name: &'c str,
+  or_conflicts: &'c [OrConflict],
+  arm_pat: &'tcx Pat<'tcx>,
+  pat_line: usize,
+  end: usize,
+  inline: bool,
+}
+
+/// What an arm's pattern adds while it is drawn (`match_arm_tuple_pat` /
+/// `match_arm_singleton_pat`).
+#[derive(Default)]
+struct MatchArmPat {
+  /// Variables the pattern binds.
+  pat_decls: HashSet<ResourceAccessPoint>,
+  /// Struct bindings whose field columns still need their
+  /// "acquires its part" events.
+  member_binds: Vec<ResourceAccessPoint>,
+  /// The arm's events (multi-arm: they live inside the Branch's per-arm
+  /// event list).
+  branch_e_data: Vec<(usize, ExternalEvent)>,
+  /// Events that happen at the end of the arm (a borrow's end).
+  callback_events: Vec<(ResourceTy, ResourceTy, Evt)>,
+  /// Parents this arm's pattern moves out of.
+  arm_moved: Vec<ResourceTy>,
+  /// The OrAltMove dots of the names `or_conflicts` lists, added after
+  /// the moves into the scrutinee tuple (the tuple holds the values they
+  /// may take).
+  or_events: Vec<ExternalEvent>,
+  /// Where the possible borrows of an or-pattern's reference end (#565);
+  /// added with the arm's other end events.
+  or_end_events: Vec<(usize, ExternalEvent)>,
+}
+
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// If `fn_expr` names the inherent `ManuallyDrop::drop` or
@@ -4322,6 +4364,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     // first visit the guard expression, annotate any events that happen there
     self.visit_expr(guard_expr);
+
+    match source {
+      // A normal match (not desugared)
+      rustc_hir::MatchSource::Normal => self.visit_match_normal(expr, guard_expr, arms),
+      rustc_hir::MatchSource::ForLoopDesugar => self.visit_for_desugar(expr, guard_expr, arms),
+      // `e?`: the `Err` / `None` arm returns from the function
+      // (#430). The scrutinee `Try::branch(e)` was visited above.
+      rustc_hir::MatchSource::TryDesugar(_) => self.note_try(expr),
+      _ => {}
+    }
+}
+
+  /// The `MatchSource::Normal` case of `visit_match`: a `match` the user
+  /// wrote. One arm at a time, it draws the pattern's bindings, the guard,
+  /// the body and the arm's scope ends; several arms become a Branch event.
+  fn visit_match_normal(&mut self, expr: &'tcx Expr<'tcx>, guard_expr: &'tcx Expr<'tcx>, arms: &'tcx [rustc_hir::Arm<'tcx>]) {
     let typeck_res = self.tcx.typeck(expr.hir_id.owner);
 
     // To my knowledge a match has to either contain a singular expression or Tuple
@@ -4360,578 +4418,584 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // been processed.
     let mut all_pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
 
-    
-    match source {
-      // A normal match (not desugared)
-      rustc_hir::MatchSource::Normal => {
-        // Single-arm match: inline. Don't filter body events
-        // out of preprocessed_events / don't emit a Branch
-        // event — same rationale as single-arm if / if-let
-        // above. The directly-built events (pattern
-        // destructures, post-arm callbacks, per-arm
-        // GoOutOfScope) get routed through add_external_event
-        // after the loop so line_map picks them up; body
-        // events are already in preprocessed_events from the
-        // arm's visit_expr below.
-        let inline = arms.len() == 1;
-        // Every arm starts from the same uninitialized `let x;`
-        // locals (#234); see join_uninit_locals.
-        let uninit_before = self.uninit_locals.clone();
-        let maybe_init_before = self.maybe_init_locals.clone();
-        let mut uninit_ends = Vec::new();
-        // An exit in an arm doesn't see the binding of any arm's
-        // value to a `let` (#410): it happens after the match. The
-        // earlier arms' own events are out of `preprocessed_events`
-        // by then (`take_branch_events` below), except a lone
-        // arm's, which has no siblings.
-        let entry_len = self.in_scope.len();
-        let match_lo = *self.unique_id;
-        let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
-        self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0 });
-        // `match (x, y) { … }` moves `x` and `y` into the tuple
-        // whatever arm is taken (#327).
-        let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
-        let into_tuple = self.tuple_scrutinee_target(guard_expr);
-        let tuple_name = match &into_tuple {
-          ResourceTy::Temporary { tuple: Some(t), .. } => t.clone(),
-          _ => String::new(),
-        };
-        // The tuple lives to the end of the statement holding the
-        // match, usually the match's own last line.
-        let past_match = self.temporary_scope_end(guard_expr).is_some_and(|(_, l, _)| l > merge);
-        let mut arm_borrows = self.arm_borrows_begin();
-        for (arm_idx, arm) in arms.iter().enumerate() {
-          if arm_idx > 0 {
-            self.arm_borrows_next(&mut arm_borrows);
-          }
-          // An arm's pattern bindings are out of scope in the next.
-          self.in_scope.truncate(entry_len);
-          let arm_hash_lo = self.rap_hashes;
-          let mut branch_e_data: Vec<(usize, ExternalEvent)> = Vec::new();
-          let mut callback_events: Vec<(ResourceTy, ResourceTy, Evt)> = Vec::new();
-          // Parents this arm's pattern moves out of.
-          let mut arm_moved: Vec<ResourceTy> = Vec::new();
-
-          // get line info
-          // An arm body can be a bare macro call
-          // (`Some(s) => println!("{s}"),`), whose span lies in
-          // the macro's expansion; span_to_line / span_end_line
-          // resolve it to the user's call site.
-          let begin = span_to_line(&arm.body.span, &self.tcx);
-          let end = span_end_line(&arm.body.span, &self.tcx);
-          let pat_line = span_to_line(&arm.pat.span, &self.tcx);
-          b_slices.push((begin, end));
-          b_ty_names.push(get_name_of_pat(arm.pat, &self.tcx));
-
-          
-          // add/fetch raps that are initialized in arm expr
-          // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
-          let mut pat_decls: HashSet<ResourceAccessPoint> = HashSet::new();
-          // Struct bindings whose field columns still need their
-          // "acquires its part" events (see below).
-          let mut member_binds: Vec<ResourceAccessPoint> = Vec::new();
-          // Events the pattern adds to the global list (a struct
-          // binding's reference fields, its fields' binds) belong
-          // to this arm; see the drain below.
-          let first_pat_ev = self.preprocessed_events.len();
-          // println!("arm pat {:#?}", arm.pat);
-          // Route pattern-destructure events into either
-          // `branch_e_data` (multi-arm: events live inside the
-          // Branch's per-arm event list) or `preprocessed_events`
-          // via `add_external_event` (single-arm inline: events
-          // join the global timeline before `visit_expr` so they
-          // appear in source order with the body).
-          let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
-          // The OrAltMove dots of the names `or_conflicts` lists,
-          // added after the moves into the scrutinee tuple below
-          // (the tuple holds the values they may take).
-          let mut or_events: Vec<ExternalEvent> = Vec::new();
-          // Where the possible borrows of an or-pattern's reference
-          // end (#565); added with the arm's other end events.
-          let mut or_end_events: Vec<(usize, ExternalEvent)> = Vec::new();
-          match arm_pat.kind {
-            // (<pat>, <pat>, ..) => <expr>
-            // First need to annotate events that occur between parents (the variables being matched upon)
-            // and the pattern bindings in each arm.
-            //
-            // `parents.len() == pat_list.len()` is the
-            // "guard-was-a-tuple-literal" shape (`match (a, b)
-            // { (x, y) => … }`): each inner pattern maps to its
-            // own parent expression. Otherwise the guard is a
-            // single tuple-/enum-typed scrutinee and every
-            // inner pattern destructures out of it (`match
-            // pair { (x, y) => … }`, `match res { Ok(a, b, c)
-            // => … }`); use the single parent for all inner
-            // pattern slots. Without that fallback, `parents[i]`
-            // for i>0 panics with an index-out-of-bounds.
-            PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _)=> {
-              let same_arity = pat_list.len() == parents.len();
-              // `match t { (a, b) => … }` / `match p { P(x, y) => … }`
-              // on a variable whose parts have columns (#189, #326):
-              // each sub-pattern destructures its own part, `t.0` /
-              // `t.1`. (A tuple-literal scrutinee has one parent per
-              // element already.)
-              let part_parents = if parents.len() == 1 {
-                self.pat_parts(arm_pat, &parents[0], parents_ty[0])
-              } else {
-                None
-              };
-              // Borrows the bindings take from what the scrutinee
-              // borrows (#391) follow all the bindings, as in
-              // `register_iflet_let_bindings`.
-              let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
-              // Each sub-pattern, the parent it destructures, and the
-              // expression that is (the scrutinee, or its element).
-              let mut subs: Vec<(&'tcx rustc_hir::Pat<'tcx>, ResourceTy, rustc_middle::ty::Ty<'tcx>, &'tcx Expr<'tcx>)> = Vec::new();
-              // Whether each sub-pattern destructures a part of a
-              // variable (parallel to `subs`).
-              let mut sub_is_part: Vec<bool> = Vec::new();
-              if matches!((arm_pat.kind, guard_expr.kind), (PatKind::Tuple(..), ExprKind::Tup(_))) && !guard_expr.span.from_expansion() {
-                // `match (a, (b, c)) { (p, (x, _)) => … }`: each
-                // sub-pattern with its element, through nested tuple
-                // literals and `..` (#627).
-                subs = self.literal_pat_parents(arm_pat, guard_expr);
-                sub_is_part = vec![false; subs.len()];
-              } else {
-                for (i, p) in pat_list.iter().enumerate() {
-                  let parent_idx = if same_arity { i } else { 0 };
-                  let (parent, parent_ty) = match part_parents.as_ref().and_then(|v| v[i].1.clone()) {
-                    Some(pp) => pp,
-                    None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
-                  };
-                  let scrutinee = match guard_expr.kind {
-                    ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
-                    _ => guard_expr,
-                  };
-                  subs.push((p, parent, parent_ty, scrutinee));
-                  sub_is_part.push(part_parents.as_ref().is_some_and(|v| v[i].1.is_some()));
-                }
-              }
-              for (sub_idx, (p, parent, parent_ty, scrutinee)) in subs.into_iter().enumerate() {
-                let mut associated_ro = Vec::new();
-                self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
-                // `(p, q)` on `pair = (&c, &d)` copies the references
-                // in `pair.0` / `pair.1`: `p` borrows what `pair.0`
-                // borrows, as in `let (p, q) = pair;` (#756).
-                if sub_is_part[sub_idx] && parent_ty.is_ref() {
-                  for (r, _, _, _) in associated_ro.iter() {
-                    self.adopt_part_borrow(r.name(), &parent.name());
-                  }
-                }
-                // A `ref` binding out of `(x, y)` borrows the tuple's
-                // element, not x (#580).
-                for (r, e, from, _) in associated_ro.iter_mut() {
-                  *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
-                }
-                let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
-                or_events.extend(or_evs.start);
-                or_end_events.extend(or_evs.end);
-                pat_decls.extend(or_evs.decls);
-                let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
-                let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
-                pat_decls.extend(temp2);
-                for (to_ro, e, from, partial) in associated_ro.iter() {
-                  if matches!(e, Evt::Move) {
-                    arm_moved.push(from.clone());
-                  }
-                  // If the type of the pat is not the same as the parent associated with it then it must be a partial move
-                  let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
-                  let id = *self.unique_id;
-                  *self.unique_id += 1;
-                  let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
-                  // A reference copied out of a value that holds a
-                  // borrow also borrows what that value borrows (#391).
-                  pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
-                  // add_external_event gives a struct's fields their
-                  // part of a whole (non-partial) move; otherwise
-                  // that's done below.
-                  if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
-                    member_binds.push(to_ro.clone());
-                  }
-                  if inline {
-                    self.add_external_event(pat_line, ext_ev);
-                  } else {
-                    branch_e_data.push((pat_line, ext_ev));
-                  }
-                  match e {
-                    Evt::SBorrow => {
-                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
-                    }
-                    Evt::MBorrow => {
-                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
-                    }
-                    _ => {}
-                  }
-                }
-              }
-              for ev in pending_borrows {
-                if inline {
-                  self.add_external_event(pat_line, ev);
-                } else {
-                  branch_e_data.push((pat_line, ev));
-                }
-              }
-            }
-            // <expr> => <expr> (just a singleton variable)
-            _ => {
-              let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
-              for i in 0..parents.len() {
-                let mut associated_ro = Vec::new();
-                // `P { a, b } => …` on a struct variable: `a` / `b`
-                // come from `p.a` / `p.b` (#326).
-                self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
-                let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
-                or_events.extend(or_evs.start);
-                or_end_events.extend(or_evs.end);
-                pat_decls.extend(or_evs.decls);
-                let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
-                let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
-                pat_decls.extend(temp2);
-                for (to_ro, e, from, partial) in associated_ro.iter() {
-                  if matches!(e, Evt::Move) {
-                    arm_moved.push(from.clone());
-                  }
-                  let id = *self.unique_id;
-                  *self.unique_id += 1;
-                  let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
-                  let scrutinee = match guard_expr.kind {
-                    ExprKind::Tup(fields) if fields.len() == parents.len() => &fields[i],
-                    _ => guard_expr,
-                  };
-                  pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
-                  if matches!(e, Evt::Move | Evt::Copy) && !inline {
-                    member_binds.push(to_ro.clone());
-                  }
-                  if inline {
-                    self.add_external_event(pat_line, ext_ev);
-                  } else {
-                    branch_e_data.push((pat_line, ext_ev));
-                  }
-                  match e {               // A borrow, mut/immut must be returned at the end of the block
-                    Evt::SBorrow => {
-                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
-                    }
-                    Evt::MBorrow => {
-                      callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
-                    }
-                    _ => {}
-                  }
-                }
-              }
-              for ev in pending_borrows {
-                if inline {
-                  self.add_external_event(pat_line, ev);
-                } else {
-                  branch_e_data.push((pat_line, ev));
-                }
-              }
-            }
-          }
-
-          // A variable the scrutinee tuple took but this arm's
-          // pattern doesn't move out (`_ => …`, `(Some(_), b)`): it
-          // was still moved into the tuple, and isn't usable after
-          // the match (#327).
-          // (A struct or tuple variable's part columns too, but not
-          // the ones the pattern took, #627.)
-          for v in scrutinee_moves.iter() {
-            for r in self.tuple_scrutinee_unbound(v, &arm_moved) {
-              let id = *self.unique_id;
-              *self.unique_id += 1;
-              let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), id, false);
-              if inline {
-                self.add_external_event(pat_line, ext_ev);
-              } else {
-                branch_e_data.push((pat_line, ext_ev));
-              }
-            }
-          }
-          for ev in or_events {
-            if inline {
-              self.add_external_event(pat_line, ev);
-            } else {
-              branch_e_data.push((pat_line, ev));
-            }
-          }
-          // An arm that leaves early (`_ => return 0`) drops the tuple
-          // at its exit instead (#327): see drop_locals_on_exit.
-          let arm_diverges = self.expr_diverges(arm.body);
-
-          // A struct bound by the pattern (`Some(y) =>` with `y: P`)
-          // gets field columns (`y.name`, `y.n`). They receive their
-          // part of the value with `y`, go out of scope with it,
-          // and only exist in this arm (#405).
-          member_binds.sort_by_key(|r| *r.hash());
-          member_binds.dedup();
-          for r in member_binds {
-            if matches!(r, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
-              self.bind_struct_fields(pat_line, r.name());
-            }
-          }
-          pat_decls = self.with_struct_members(&pat_decls);
-          if !inline {
-            branch_e_data.extend(self.preprocessed_events.drain(first_pat_ev..));
-          }
-
-          // Match guard: `pat if cond =>` / `pat if let p = e =>`.
-          // The guard runs after the pattern matched and before
-          // the body, and only then; if it's false, matching goes
-          // on with the later arms. We show its events in this
-          // arm's own column, next to the pattern's bindings:
-          // "when this arm is taken, this happened" is always true.
-          // What that leaves out is that the guard also ran when
-          // the pattern matched but the guard failed and a later
-          // arm was taken. For borrows and reads that's harmless
-          // (they end inside the guard, so later arms start from
-          // the same state), but a move or an assignment would
-          // still be in effect in those later arms, so
-          // `visit_match_guard` refuses those rather than draw a
-          // later arm with a value it no longer has.
-          //
-          // Bindings introduced by an `if let` guard are registered
-          // like `if let` condition bindings and live until the
-          // end of the arm, like the pattern's own bindings.
-          if let Some(guard) = arm.guard {
-            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-            let outer: HashSet<ResourceAccessPoint> = self.raps.values()
-              .map(|rd| rd.rap.clone())
-              .filter(|r| !r.is_fn() && !pat_decls.contains(r))
-              .collect();
-            let first_guard_ev = self.preprocessed_events.len();
-            let mut guard_decls: HashSet<ResourceAccessPoint> = HashSet::new();
-            self.visit_match_guard(guard, true, &outer, &mut guard_decls);
-            if !inline {
-              branch_e_data.extend(self.preprocessed_events.drain(first_guard_ev..));
-            }
-            pat_decls.extend(guard_decls);
-          }
-          // While the body is visited, the pattern's and the guard's
-          // events are on the global list too, so that an exit in it
-          // sees the bindings own their values and drops them
-          // (#630). They're taken off again after the body.
-          let pat_ids: HashSet<usize> = branch_e_data.iter().map(|(_, e)| e.get_id()).collect();
-          self.preprocessed_events.extend(branch_e_data.iter().cloned());
-
-          // visit expr. inside_branch is restored, not reset: the
-          // match may sit inside another branch (#410).
-          let prev_inside_branch = self.inside_branch;
-          self.inside_branch = true;
-          self.uninit_locals = uninit_before.clone();
-          self.maybe_init_locals = maybe_init_before.clone();
-          let body_lo = *self.unique_id;
-          // An exit in the arm drops the tuple scrutinee (#327).
-          let live = !scrutinee_moves.is_empty();
-          if live {
-            self.live_tuples.push(LiveTuple {
-              frame: self.exit_frames.len() - 1,
-              len: entry_len,
-              scrutinee: guard_expr,
-              tuple: tuple_name.clone(),
-              pat: arm.pat,
-              at: TupleDropAt::MatchArmExit,
-            });
-          }
-          // A `?` in the body sees the pattern's bindings (#636).
-          let binds_at = self.preprocessed_events.len();
-          if let Some(ExitFrame::Branch { binds: b, binds_at: at, .. }) = self.exit_frames.last_mut() {
-            b.clone_from(&branch_e_data);
-            *at = binds_at;
-          }
-          self.arm_frames.push((split, merge, begin, end));
-          self.visit_expr(arm.body);
-          self.arm_frames.pop();
-          if live {
-            self.live_tuples.pop();
-          }
-          if let Some(ExitFrame::Branch { binds: b, .. }) = self.exit_frames.last_mut() {
-            b.clear();
-          }
-          let body_ids = body_lo..*self.unique_id;
-          uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals), std::mem::take(&mut self.maybe_init_locals)));
-          self.inside_branch = prev_inside_branch;
-
-          all_pat_decls = &all_pat_decls | &pat_decls;
-          let mut arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
-          // Everything declared in the arm, also inside an inline
-          // construct nested in it (`Some(x) => { if let Some(y) =
-          // b { … } }`, #501), exists only in the arm (the nested
-          // construct ends what it declares itself).
-          let arm_inner = self.raps_declared_since(arm_hash_lo, &uninit_before);
-          all_pat_decls = &all_pat_decls | &arm_inner;
-          // Variables declared inside a loop in this arm already go
-          // out of scope there (see scoped_in_events).
-          let mut arm_scoped: HashSet<ResourceAccessPoint> = HashSet::new();
-
-
-          // get events that occured in the arm: those handed out
-          // while its body was visited, plus the ones pairing its
-          // value with a `let` (see `take_branch_events`). Picking
-          // them by source line gave every event on a shared line
-          // to the first arm (#117).
-          self.preprocessed_events.retain(|(_, e)| !pat_ids.contains(&e.get_id()));
-          if !inline {
-            let body_ev = self.take_branch_events(body_ids, Some(arm.body), &HashSet::new());
-            branch_e_data.extend(body_ev);
-
-            // contribute events-touched variables to liveness; the
-            // arm's own pat-decls are subtracted at the end.
-            collect_event_live_vars(&branch_e_data, &mut liveness);
-            // Values dropped at a `return` in the arm (#363).
-            let arm_diverges = self.expr_diverges(arm.body);
-            liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
-            arm_scoped = scoped_in_events(&branch_e_data, &self.exit_drops);
-            all_pat_decls = &all_pat_decls | &arm_scoped;
-          }
-
-          // The end of an or-pattern reference's possible borrows
-          // (#565), where the borrow checker ends them: at the
-          // reference's last use, which can be before the arm ends.
-          for (line, ev) in or_end_events {
-            // Its borrow is drawn by these events, not `emit_borrow_ends`.
-            if let ExternalEvent::OrAltBorrow { into, .. } = &ev {
-              self.borrow_map.remove(into.name());
-            }
-            if inline {
-              self.add_external_event(line, ev);
-            } else {
-              let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
-              branch_e_data.insert(at, (line, ev));
-            }
-          }
-
-          // add callback events - events that need to happen at the end of an arm block
-          // ex: if a pattern binding borrows from a parent
-          let pat_end = span_end_line(&arm.pat.span, &self.tcx);
-          let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
-          for (to, from, e) in callback_events {
-            let name = from.real_name();
-            self.borrow_map.remove(&name);
-            // The borrow ends where the borrow checker ends it, at
-            // the binding's last use (#599): the end of the region
-            // of the loan MIR issues for the binding on the pattern's
-            // lines. A binding that reborrows through a shared
-            // reference (`(x, _)` on `o: &(String, String)`) has no
-            // loan of its own; its borrow lasts as long as it is
-            // live.
-            let ends_at = mir_b_data.iter()
-              .filter(|m| m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
-              .map(|m| m.region.1)
-              .max()
-              .or_else(|| self.last_live_line(&name, (pat_line, end)))
-              .filter(|l| (pat_line..=end).contains(l))
-              .unwrap_or(end);
-            // When the scrutinee is itself a reference (`match o`,
-            // `o: &Option<String>`), the binding reborrows through
-            // it, so `o`'s borrow lasts at least until here (#372).
-            if to.is_ref() {
-              let floor = self.borrow_floor.entry(to.real_name()).or_insert(ends_at);
-              *floor = (*floor).max(ends_at);
-            }
-            let id = *self.unique_id;
-            *self.unique_id += 1;
-            let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
-            if inline {
-              self.add_external_event(ends_at, ext_ev);
-            } else {
-              // After the arm's events up to that line.
-              let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
-              branch_e_data.insert(at, (ends_at, ext_ev));
-            }
-          }
-
-          // add gos events, except in an arm that always leaves at
-          // an exit that drops them (#630)
-          let arm_left = Self::left_at_exits(!inline && self.ends_at_exits(arm.body, true), &arm_decls);
-          for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
-            let id = *self.unique_id;
-            *self.unique_id += 1;
-            let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
-            if inline {
-              self.add_external_event(end, gos);
-            } else {
-              branch_e_data.push((end, gos));
-            }
-          }
-
-          // The tuple is dropped after the arm, and with it what of
-          // each variable's value the pattern didn't move out
-          // (#327). It has no column: a drop dot on each such
-          // variable's says so. (An arm that leaves early drops it
-          // at its `return` / `break` / `continue` / panic.)
-          if !arm_diverges {
-            let (at, line) = if past_match {
-              (TupleDropAt::MatchArmStmt, end)
-            } else if inline {
-              (TupleDropAt::MatchHere, merge)
-            } else {
-              (TupleDropAt::MatchArm, end)
-            };
-            for ev in self.tuple_drop_events(guard_expr, &tuple_name, Some(arm.pat), at) {
-              if inline {
-                self.add_external_event(line, ev);
-              } else {
-                branch_e_data.push((line, ev));
-              }
-            }
-          }
-
-          arm_decls.extend(arm_inner);
-          arm_decls.extend(arm_scoped);
-          if !inline {
-            let branch_line_map = create_line_map(&branch_e_data);
-            // An arm of type `!` (`_ => unreachable!()`) never
-            // reaches the merge (#296).
-            let (diverges, exits, break_carries) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
-            branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
-          }
-        }
-        self.arm_borrows_end(arm_borrows);
-        #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-        let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
-        let maybe_init = self.join_uninit_locals(uninit_ends, &known);
-        self.exit_frames.pop();
-        self.in_scope.truncate(entry_len);
-        // Single-arm: events already routed through
-        // add_external_event during the loop, nothing else
-        // to do — bail out of the Normal arm before the
-        // multi-arm Branch construction below. An exit in the
-        // lone arm isn't drawn: the arm isn't a column of its
-        // own (#410).
-        if inline {
-            self.discard_exit_drops(match_lo..*self.unique_id);
-            return;
-        }
-        // Variables introduced by an arm's pattern only exist
-        // inside that arm — strip them out so they don't get a
-        // branched timeline of their own.
-        liveness = &liveness - &all_pat_decls;
-        // add branch event. merge_point is the closing-brace
-        // line of the match — same convention as If, where
-        // merge_point is the line of the else-block's closing
-        // `}`. Previously this used `merge - 1` (with a stale
-        // TODO marker), which landed the join dot one row above
-        // the `};`, on the last arm's body line.
-        if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
-          self.all_paths_exit = true;
-        }
-        self.note_exit_scope(expr);
-        self.add_external_event(split, ExternalEvent::Branch {
-          live_vars: liveness,
-          branches: branch_data,
-          branch_type: BranchType::Match(b_ty_names, b_slices),
-          split_point: split,
-          merge_point: merge,
-          maybe_init,
-          id: *self.unique_id });
-        *self.unique_id += 1;
+    // Single-arm match: inline. Don't filter body events
+    // out of preprocessed_events / don't emit a Branch
+    // event — same rationale as single-arm if / if-let
+    // above. The directly-built events (pattern
+    // destructures, post-arm callbacks, per-arm
+    // GoOutOfScope) get routed through add_external_event
+    // after the loop so line_map picks them up; body
+    // events are already in preprocessed_events from the
+    // arm's visit_expr below.
+    let inline = arms.len() == 1;
+    // Every arm starts from the same uninitialized `let x;`
+    // locals (#234); see join_uninit_locals.
+    let uninit_before = self.uninit_locals.clone();
+    let maybe_init_before = self.maybe_init_locals.clone();
+    let mut uninit_ends = Vec::new();
+    // An exit in an arm doesn't see the binding of any arm's
+    // value to a `let` (#410): it happens after the match. The
+    // earlier arms' own events are out of `preprocessed_events`
+    // by then (`take_branch_events` below), except a lone
+    // arm's, which has no siblings.
+    let entry_len = self.in_scope.len();
+    let match_lo = *self.unique_id;
+    let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
+    self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0 });
+    // `match (x, y) { … }` moves `x` and `y` into the tuple
+    // whatever arm is taken (#327).
+    let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
+    let into_tuple = self.tuple_scrutinee_target(guard_expr);
+    let tuple_name = match &into_tuple {
+      ResourceTy::Temporary { tuple: Some(t), .. } => t.clone(),
+      _ => String::new(),
+    };
+    // The tuple lives to the end of the statement holding the
+    // match, usually the match's own last line.
+    let past_match = self.temporary_scope_end(guard_expr).is_some_and(|(_, l, _)| l > merge);
+    let mut arm_borrows = self.arm_borrows_begin();
+    for (arm_idx, arm) in arms.iter().enumerate() {
+      if arm_idx > 0 {
+        self.arm_borrows_next(&mut arm_borrows);
       }
-      rustc_hir::MatchSource::ForLoopDesugar => self.visit_for_desugar(expr, guard_expr, arms),
-      // `e?`: the `Err` / `None` arm returns from the function
-      // (#430). The scrutinee `Try::branch(e)` was visited above.
-      rustc_hir::MatchSource::TryDesugar(_) => self.note_try(expr),
-      _ => {}
+      // An arm's pattern bindings are out of scope in the next.
+      self.in_scope.truncate(entry_len);
+      let arm_hash_lo = self.rap_hashes;
+
+      // get line info
+      // An arm body can be a bare macro call
+      // (`Some(s) => println!("{s}"),`), whose span lies in
+      // the macro's expansion; span_to_line / span_end_line
+      // resolve it to the user's call site.
+      let begin = span_to_line(&arm.body.span, &self.tcx);
+      let end = span_end_line(&arm.body.span, &self.tcx);
+      let pat_line = span_to_line(&arm.pat.span, &self.tcx);
+      b_slices.push((begin, end));
+      b_ty_names.push(get_name_of_pat(arm.pat, &self.tcx));
+
+      
+      // Events the pattern adds to the global list (a struct
+      // binding's reference fields, its fields' binds) belong
+      // to this arm; see the drain below.
+      let first_pat_ev = self.preprocessed_events.len();
+      // println!("arm pat {:#?}", arm.pat);
+      // Route pattern-destructure events into either
+      // `branch_e_data` (multi-arm: events live inside the
+      // Branch's per-arm event list) or `preprocessed_events`
+      // via `add_external_event` (single-arm inline: events
+      // join the global timeline before `visit_expr` so they
+      // appear in source order with the body).
+      let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
+      // add/fetch raps that are initialized in arm expr
+      // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
+      let mut pat_out = MatchArmPat::default();
+      let cx = MatchArmCtx { guard_expr, typeck_res, parents: &parents, parents_ty: &parents_ty, scrutinee_moves: &scrutinee_moves, tuple_name: &tuple_name, or_conflicts: &or_conflicts, arm_pat, pat_line, end, inline };
+      match arm_pat.kind {
+        PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _) => self.match_arm_tuple_pat(cx, pat_list, &mut pat_out),
+        _ => self.match_arm_singleton_pat(cx, &mut pat_out),
+      }
+      let MatchArmPat { mut pat_decls, mut member_binds, mut branch_e_data, callback_events, arm_moved, or_events, or_end_events } = pat_out;
+
+      // A variable the scrutinee tuple took but this arm's
+      // pattern doesn't move out (`_ => …`, `(Some(_), b)`): it
+      // was still moved into the tuple, and isn't usable after
+      // the match (#327).
+      // (A struct or tuple variable's part columns too, but not
+      // the ones the pattern took, #627.)
+      for v in scrutinee_moves.iter() {
+        for r in self.tuple_scrutinee_unbound(v, &arm_moved) {
+          let id = *self.unique_id;
+          *self.unique_id += 1;
+          let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), id, false);
+          if inline {
+            self.add_external_event(pat_line, ext_ev);
+          } else {
+            branch_e_data.push((pat_line, ext_ev));
+          }
+        }
+      }
+      for ev in or_events {
+        if inline {
+          self.add_external_event(pat_line, ev);
+        } else {
+          branch_e_data.push((pat_line, ev));
+        }
+      }
+      // An arm that leaves early (`_ => return 0`) drops the tuple
+      // at its exit instead (#327): see drop_locals_on_exit.
+      let arm_diverges = self.expr_diverges(arm.body);
+
+      // A struct bound by the pattern (`Some(y) =>` with `y: P`)
+      // gets field columns (`y.name`, `y.n`). They receive their
+      // part of the value with `y`, go out of scope with it,
+      // and only exist in this arm (#405).
+      member_binds.sort_by_key(|r| *r.hash());
+      member_binds.dedup();
+      for r in member_binds {
+        if matches!(r, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
+          self.bind_struct_fields(pat_line, r.name());
+        }
+      }
+      pat_decls = self.with_struct_members(&pat_decls);
+      if !inline {
+        branch_e_data.extend(self.preprocessed_events.drain(first_pat_ev..));
+      }
+
+      self.match_arm_guard(arm, inline, &mut pat_decls, &mut branch_e_data);
+      // While the body is visited, the pattern's and the guard's
+      // events are on the global list too, so that an exit in it
+      // sees the bindings own their values and drops them
+      // (#630). They're taken off again after the body.
+      let pat_ids: HashSet<usize> = branch_e_data.iter().map(|(_, e)| e.get_id()).collect();
+      self.preprocessed_events.extend(branch_e_data.iter().cloned());
+
+      // visit expr. inside_branch is restored, not reset: the
+      // match may sit inside another branch (#410).
+      let prev_inside_branch = self.inside_branch;
+      self.inside_branch = true;
+      self.uninit_locals = uninit_before.clone();
+      self.maybe_init_locals = maybe_init_before.clone();
+      let body_lo = *self.unique_id;
+      // An exit in the arm drops the tuple scrutinee (#327).
+      let live = !scrutinee_moves.is_empty();
+      if live {
+        self.live_tuples.push(LiveTuple {
+          frame: self.exit_frames.len() - 1,
+          len: entry_len,
+          scrutinee: guard_expr,
+          tuple: tuple_name.clone(),
+          pat: arm.pat,
+          at: TupleDropAt::MatchArmExit,
+        });
+      }
+      // A `?` in the body sees the pattern's bindings (#636).
+      let binds_at = self.preprocessed_events.len();
+      if let Some(ExitFrame::Branch { binds: b, binds_at: at, .. }) = self.exit_frames.last_mut() {
+        b.clone_from(&branch_e_data);
+        *at = binds_at;
+      }
+      self.arm_frames.push((split, merge, begin, end));
+      self.visit_expr(arm.body);
+      self.arm_frames.pop();
+      if live {
+        self.live_tuples.pop();
+      }
+      if let Some(ExitFrame::Branch { binds: b, .. }) = self.exit_frames.last_mut() {
+        b.clear();
+      }
+      let body_ids = body_lo..*self.unique_id;
+      uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals), std::mem::take(&mut self.maybe_init_locals)));
+      self.inside_branch = prev_inside_branch;
+
+      all_pat_decls = &all_pat_decls | &pat_decls;
+      let mut arm_decls: HashSet<ResourceAccessPoint> = &pat_decls | &get_decl_of_expr(arm.body, &self.tcx, &self.raps);
+      // Everything declared in the arm, also inside an inline
+      // construct nested in it (`Some(x) => { if let Some(y) =
+      // b { … } }`, #501), exists only in the arm (the nested
+      // construct ends what it declares itself).
+      let arm_inner = self.raps_declared_since(arm_hash_lo, &uninit_before);
+      all_pat_decls = &all_pat_decls | &arm_inner;
+      // Variables declared inside a loop in this arm already go
+      // out of scope there (see scoped_in_events).
+      let mut arm_scoped: HashSet<ResourceAccessPoint> = HashSet::new();
+
+
+      // get events that occured in the arm: those handed out
+      // while its body was visited, plus the ones pairing its
+      // value with a `let` (see `take_branch_events`). Picking
+      // them by source line gave every event on a shared line
+      // to the first arm (#117).
+      self.preprocessed_events.retain(|(_, e)| !pat_ids.contains(&e.get_id()));
+      if !inline {
+        let body_ev = self.take_branch_events(body_ids, Some(arm.body), &HashSet::new());
+        branch_e_data.extend(body_ev);
+
+        // contribute events-touched variables to liveness; the
+        // arm's own pat-decls are subtracted at the end.
+        collect_event_live_vars(&branch_e_data, &mut liveness);
+        // Values dropped at a `return` in the arm (#363).
+        let arm_diverges = self.expr_diverges(arm.body);
+        liveness.extend(self.keep_exit_drops(&mut branch_e_data, arm_diverges));
+        arm_scoped = scoped_in_events(&branch_e_data, &self.exit_drops);
+        all_pat_decls = &all_pat_decls | &arm_scoped;
+      }
+
+      self.match_arm_borrow_ends(cx, arm, or_end_events, callback_events, &mut branch_e_data);
+
+      // add gos events, except in an arm that always leaves at
+      // an exit that drops them (#630)
+      let arm_left = Self::left_at_exits(!inline && self.ends_at_exits(arm.body, true), &arm_decls);
+      for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
+        if inline {
+          self.add_external_event(end, gos);
+        } else {
+          branch_e_data.push((end, gos));
+        }
+      }
+
+      // The tuple is dropped after the arm, and with it what of
+      // each variable's value the pattern didn't move out
+      // (#327). It has no column: a drop dot on each such
+      // variable's says so. (An arm that leaves early drops it
+      // at its `return` / `break` / `continue` / panic.)
+      if !arm_diverges {
+        let (at, line) = if past_match {
+          (TupleDropAt::MatchArmStmt, end)
+        } else if inline {
+          (TupleDropAt::MatchHere, merge)
+        } else {
+          (TupleDropAt::MatchArm, end)
+        };
+        for ev in self.tuple_drop_events(guard_expr, &tuple_name, Some(arm.pat), at) {
+          if inline {
+            self.add_external_event(line, ev);
+          } else {
+            branch_e_data.push((line, ev));
+          }
+        }
+      }
+
+      arm_decls.extend(arm_inner);
+      arm_decls.extend(arm_scoped);
+      if !inline {
+        let branch_line_map = create_line_map(&branch_e_data);
+        // An arm of type `!` (`_ => unreachable!()`) never
+        // reaches the merge (#296).
+        let (diverges, exits, break_carries) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
+        branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
+      }
     }
-}
+    self.arm_borrows_end(arm_borrows);
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
+    let maybe_init = self.join_uninit_locals(uninit_ends, &known);
+    self.exit_frames.pop();
+    self.in_scope.truncate(entry_len);
+    // Single-arm: events already routed through
+    // add_external_event during the loop, nothing else
+    // to do — bail out of the Normal arm before the
+    // multi-arm Branch construction below. An exit in the
+    // lone arm isn't drawn: the arm isn't a column of its
+    // own (#410).
+    if inline {
+        self.discard_exit_drops(match_lo..*self.unique_id);
+        return;
+    }
+    // Variables introduced by an arm's pattern only exist
+    // inside that arm — strip them out so they don't get a
+    // branched timeline of their own.
+    liveness = &liveness - &all_pat_decls;
+    self.add_match_branch(expr, (split, merge), liveness, branch_data, BranchType::Match(b_ty_names, b_slices), maybe_init);
+  }
+
+  /// A `match` arm's tuple-like pattern (`(a, b) =>`, `Ok(x) =>`):
+  ///
+  /// (<pat>, <pat>, ..) => <expr>
+  /// First need to annotate events that occur between parents (the variables being matched upon)
+  /// and the pattern bindings in each arm.
+  ///
+  /// `parents.len() == pat_list.len()` is the
+  /// "guard-was-a-tuple-literal" shape (`match (a, b)
+  /// { (x, y) => … }`): each inner pattern maps to its
+  /// own parent expression. Otherwise the guard is a
+  /// single tuple-/enum-typed scrutinee and every
+  /// inner pattern destructures out of it (`match
+  /// pair { (x, y) => … }`, `match res { Ok(a, b, c)
+  /// => … }`); use the single parent for all inner
+  /// pattern slots. Without that fallback, `parents[i]`
+  /// for i>0 panics with an index-out-of-bounds.
+  fn match_arm_tuple_pat(&mut self, cx: MatchArmCtx<'_, 'tcx>, pat_list: &'tcx [Pat<'tcx>], out: &mut MatchArmPat) {
+    let MatchArmCtx { guard_expr, typeck_res, parents, parents_ty, scrutinee_moves, tuple_name, or_conflicts, arm_pat, pat_line, end, inline } = cx;
+    let MatchArmPat { pat_decls, member_binds, branch_e_data, callback_events, arm_moved, or_events, or_end_events } = out;
+    let same_arity = pat_list.len() == parents.len();
+    // `match t { (a, b) => … }` / `match p { P(x, y) => … }`
+    // on a variable whose parts have columns (#189, #326):
+    // each sub-pattern destructures its own part, `t.0` /
+    // `t.1`. (A tuple-literal scrutinee has one parent per
+    // element already.)
+    let part_parents = if parents.len() == 1 {
+      self.pat_parts(arm_pat, &parents[0], parents_ty[0])
+    } else {
+      None
+    };
+    // Borrows the bindings take from what the scrutinee
+    // borrows (#391) follow all the bindings, as in
+    // `register_iflet_let_bindings`.
+    let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
+    // Each sub-pattern, the parent it destructures, and the
+    // expression that is (the scrutinee, or its element).
+    let mut subs: Vec<(&'tcx rustc_hir::Pat<'tcx>, ResourceTy, rustc_middle::ty::Ty<'tcx>, &'tcx Expr<'tcx>)> = Vec::new();
+    // Whether each sub-pattern destructures a part of a
+    // variable (parallel to `subs`).
+    let mut sub_is_part: Vec<bool> = Vec::new();
+    if matches!((arm_pat.kind, guard_expr.kind), (PatKind::Tuple(..), ExprKind::Tup(_))) && !guard_expr.span.from_expansion() {
+      // `match (a, (b, c)) { (p, (x, _)) => … }`: each
+      // sub-pattern with its element, through nested tuple
+      // literals and `..` (#627).
+      subs = self.literal_pat_parents(arm_pat, guard_expr);
+      sub_is_part = vec![false; subs.len()];
+    } else {
+      for (i, p) in pat_list.iter().enumerate() {
+        let parent_idx = if same_arity { i } else { 0 };
+        let (parent, parent_ty) = match part_parents.as_ref().and_then(|v| v[i].1.clone()) {
+          Some(pp) => pp,
+          None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
+        };
+        let scrutinee = match guard_expr.kind {
+          ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
+          _ => guard_expr,
+        };
+        subs.push((p, parent, parent_ty, scrutinee));
+        sub_is_part.push(part_parents.as_ref().is_some_and(|v| v[i].1.is_some()));
+      }
+    }
+    for (sub_idx, (p, parent, parent_ty, scrutinee)) in subs.into_iter().enumerate() {
+      let mut associated_ro = Vec::new();
+      self.get_dec_of_pat_parts(p, &typeck_res, &parent, parent_ty, end, & mut associated_ro);
+      // `(p, q)` on `pair = (&c, &d)` copies the references
+      // in `pair.0` / `pair.1`: `p` borrows what `pair.0`
+      // borrows, as in `let (p, q) = pair;` (#756).
+      if sub_is_part[sub_idx] && parent_ty.is_ref() {
+        for (r, _, _, _) in associated_ro.iter() {
+          self.adopt_part_borrow(r.name(), &parent.name());
+        }
+      }
+      // A `ref` binding out of `(x, y)` borrows the tuple's
+      // element, not x (#580).
+      for (r, e, from, _) in associated_ro.iter_mut() {
+        *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
+      }
+      let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+      or_events.extend(or_evs.start);
+      or_end_events.extend(or_evs.end);
+      pat_decls.extend(or_evs.decls);
+      let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
+      let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
+      pat_decls.extend(temp2);
+      for (to_ro, e, from, partial) in associated_ro.iter() {
+        if matches!(e, Evt::Move) {
+          arm_moved.push(from.clone());
+        }
+        // If the type of the pat is not the same as the parent associated with it then it must be a partial move
+        let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+        // A reference copied out of a value that holds a
+        // borrow also borrows what that value borrows (#391).
+        pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
+        // add_external_event gives a struct's fields their
+        // part of a whole (non-partial) move; otherwise
+        // that's done below.
+        if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
+          member_binds.push(to_ro.clone());
+        }
+        if inline {
+          self.add_external_event(pat_line, ext_ev);
+        } else {
+          branch_e_data.push((pat_line, ext_ev));
+        }
+        match e {
+          Evt::SBorrow => {
+            callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
+          }
+          Evt::MBorrow => {
+            callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
+          }
+          _ => {}
+        }
+      }
+    }
+    for ev in pending_borrows {
+      if inline {
+        self.add_external_event(pat_line, ev);
+      } else {
+        branch_e_data.push((pat_line, ev));
+      }
+    }
+  }
+
+  /// A `match` arm's pattern that is not tuple-like (`<expr> => <expr>`,
+  /// just a singleton variable, or a struct pattern).
+  fn match_arm_singleton_pat(&mut self, cx: MatchArmCtx<'_, 'tcx>, out: &mut MatchArmPat) {
+    let MatchArmCtx { guard_expr, typeck_res, parents, parents_ty, scrutinee_moves, tuple_name, or_conflicts, arm_pat, pat_line, end, inline } = cx;
+    let MatchArmPat { pat_decls, member_binds, branch_e_data, callback_events, arm_moved, or_events, or_end_events } = out;
+    let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
+    for i in 0..parents.len() {
+      let mut associated_ro = Vec::new();
+      // `P { a, b } => …` on a struct variable: `a` / `b`
+      // come from `p.a` / `p.b` (#326).
+      self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
+      let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+      or_events.extend(or_evs.start);
+      or_end_events.extend(or_evs.end);
+      pat_decls.extend(or_evs.decls);
+      let temp: Vec<ResourceAccessPoint> = associated_ro.iter().map(|(r, _, _, _)| {r.clone()}).collect();
+      let temp2: HashSet<ResourceAccessPoint> = temp.into_iter().collect();
+      pat_decls.extend(temp2);
+      for (to_ro, e, from, partial) in associated_ro.iter() {
+        if matches!(e, Evt::Move) {
+          arm_moved.push(from.clone());
+        }
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+        let scrutinee = match guard_expr.kind {
+          ExprKind::Tup(fields) if fields.len() == parents.len() => &fields[i],
+          _ => guard_expr,
+        };
+        pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
+        if matches!(e, Evt::Move | Evt::Copy) && !inline {
+          member_binds.push(to_ro.clone());
+        }
+        if inline {
+          self.add_external_event(pat_line, ext_ev);
+        } else {
+          branch_e_data.push((pat_line, ext_ev));
+        }
+        match e {               // A borrow, mut/immut must be returned at the end of the block
+          Evt::SBorrow => {
+            callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::SDie));
+          }
+          Evt::MBorrow => {
+            callback_events.push((from.clone(), ResourceTy::Value(to_ro.clone()), Evt::MDie));
+          }
+          _ => {}
+        }
+      }
+    }
+    for ev in pending_borrows {
+      if inline {
+        self.add_external_event(pat_line, ev);
+      } else {
+        branch_e_data.push((pat_line, ev));
+      }
+    }
+  }
+
+  /// A `match` arm's guard (`pat if cond =>`): its events join the arm's
+  /// column, and its bindings are declared in the arm.
+  fn match_arm_guard(&mut self, arm: &'tcx rustc_hir::Arm<'tcx>, inline: bool, pat_decls: &mut HashSet<ResourceAccessPoint>, branch_e_data: &mut Vec<(usize, ExternalEvent)>) {
+    // Match guard: `pat if cond =>` / `pat if let p = e =>`.
+    // The guard runs after the pattern matched and before
+    // the body, and only then; if it's false, matching goes
+    // on with the later arms. We show its events in this
+    // arm's own column, next to the pattern's bindings:
+    // "when this arm is taken, this happened" is always true.
+    // What that leaves out is that the guard also ran when
+    // the pattern matched but the guard failed and a later
+    // arm was taken. For borrows and reads that's harmless
+    // (they end inside the guard, so later arms start from
+    // the same state), but a move or an assignment would
+    // still be in effect in those later arms, so
+    // `visit_match_guard` refuses those rather than draw a
+    // later arm with a value it no longer has.
+    //
+    // Bindings introduced by an `if let` guard are registered
+    // like `if let` condition bindings and live until the
+    // end of the arm, like the pattern's own bindings.
+    if let Some(guard) = arm.guard {
+      #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+      let outer: HashSet<ResourceAccessPoint> = self.raps.values()
+        .map(|rd| rd.rap.clone())
+        .filter(|r| !r.is_fn() && !pat_decls.contains(r))
+        .collect();
+      let first_guard_ev = self.preprocessed_events.len();
+      let mut guard_decls: HashSet<ResourceAccessPoint> = HashSet::new();
+      self.visit_match_guard(guard, true, &outer, &mut guard_decls);
+      if !inline {
+        branch_e_data.extend(self.preprocessed_events.drain(first_guard_ev..));
+      }
+      pat_decls.extend(guard_decls);
+    }
+  }
+
+  /// The end of the borrows an arm's pattern takes: an or-pattern's
+  /// references (#565) and the bindings that borrow from the scrutinee.
+  fn match_arm_borrow_ends(&mut self, cx: MatchArmCtx<'_, 'tcx>, arm: &'tcx rustc_hir::Arm<'tcx>, or_end_events: Vec<(usize, ExternalEvent)>, callback_events: Vec<(ResourceTy, ResourceTy, Evt)>, branch_e_data: &mut Vec<(usize, ExternalEvent)>) {
+    let MatchArmCtx { pat_line, end, inline, .. } = cx;
+    // The end of an or-pattern reference's possible borrows
+    // (#565), where the borrow checker ends them: at the
+    // reference's last use, which can be before the arm ends.
+    for (line, ev) in or_end_events {
+      // Its borrow is drawn by these events, not `emit_borrow_ends`.
+      if let ExternalEvent::OrAltBorrow { into, .. } = &ev {
+        self.borrow_map.remove(into.name());
+      }
+      if inline {
+        self.add_external_event(line, ev);
+      } else {
+        let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
+        branch_e_data.insert(at, (line, ev));
+      }
+    }
+
+    // add callback events - events that need to happen at the end of an arm block
+    // ex: if a pattern binding borrows from a parent
+    let pat_end = span_end_line(&arm.pat.span, &self.tcx);
+    let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
+    for (to, from, e) in callback_events {
+      let name = from.real_name();
+      self.borrow_map.remove(&name);
+      // The borrow ends where the borrow checker ends it, at
+      // the binding's last use (#599): the end of the region
+      // of the loan MIR issues for the binding on the pattern's
+      // lines. A binding that reborrows through a shared
+      // reference (`(x, _)` on `o: &(String, String)`) has no
+      // loan of its own; its borrow lasts as long as it is
+      // live.
+      let ends_at = mir_b_data.iter()
+        .filter(|m| m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+        .map(|m| m.region.1)
+        .max()
+        .or_else(|| self.last_live_line(&name, (pat_line, end)))
+        .filter(|l| (pat_line..=end).contains(l))
+        .unwrap_or(end);
+      // When the scrutinee is itself a reference (`match o`,
+      // `o: &Option<String>`), the binding reborrows through
+      // it, so `o`'s borrow lasts at least until here (#372).
+      if to.is_ref() {
+        let floor = self.borrow_floor.entry(to.real_name()).or_insert(ends_at);
+        *floor = (*floor).max(ends_at);
+      }
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
+      if inline {
+        self.add_external_event(ends_at, ext_ev);
+      } else {
+        // After the arm's events up to that line.
+        let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
+        branch_e_data.insert(at, (ends_at, ext_ev));
+      }
+    }
+  }
+
+  /// The Branch event of a multi-arm `match`, once every arm is drawn.
+  fn add_match_branch(&mut self, expr: &'tcx Expr<'tcx>, (split, merge): (usize, usize), liveness: HashSet<ResourceAccessPoint>, branch_data: Vec<ExtBranchData>, branch_type: BranchType, maybe_init: HashSet<ResourceAccessPoint>) {
+    // add branch event. merge_point is the closing-brace
+    // line of the match — same convention as If, where
+    // merge_point is the line of the else-block's closing
+    // `}`. Previously this used `merge - 1` (with a stale
+    // TODO marker), which landed the join dot one row above
+    // the `};`, on the last arm's body line.
+    if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
+      self.all_paths_exit = true;
+    }
+    self.note_exit_scope(expr);
+    self.add_external_event(split, ExternalEvent::Branch {
+      live_vars: liveness,
+      branches: branch_data,
+      branch_type,
+      split_point: split,
+      merge_point: merge,
+      maybe_init,
+      id: *self.unique_id });
+    *self.unique_id += 1;
+  }
 
   /// The `MatchSource::ForLoopDesugar` case of `visit_match`: a `for` loop's
   /// desugaring, drawn as one iteration (see the comment inside).

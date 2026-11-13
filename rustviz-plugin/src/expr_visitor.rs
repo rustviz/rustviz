@@ -4379,7 +4379,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   /// The bindings of `pat` matched against `parent`, like
-  /// [`get_dec_of_pat2`], except that a sub-pattern matching a part of
+  /// [`collect_pat_binding_events`], except that a sub-pattern matching a part of
   /// `parent` with a column of its own (see [`pat_parts`]) binds from
   /// that part: `P { a, b }` on `p` moves `p.a` into `a` and `p.b` into
   /// `b`, rather than both "from p" (#326). Each result names the
@@ -4428,7 +4428,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             // before.
             None => {
               let mut sub = Vec::new();
-              self.get_dec_of_pat2(sp, ty_results, parent, &parent_ty, scope, &mut sub);
+              self.collect_pat_binding_events(sp, ty_results, parent, &parent_ty, scope, &mut sub);
               res.extend(sub.into_iter().map(|(r, e, _)| (r, e, parent.clone(), None)));
             }
           }
@@ -4436,7 +4436,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       None => {
         let mut sub = Vec::new();
-        self.get_dec_of_pat2(pat, ty_results, parent, &parent_ty, scope, &mut sub);
+        self.collect_pat_binding_events(pat, ty_results, parent, &parent_ty, scope, &mut sub);
         res.extend(sub.into_iter().map(|(r, e, _)| (r, e, parent.clone(), None)));
       }
     }
@@ -4458,7 +4458,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   // Add a RAP for each variable bound in a pattern
-  pub fn get_dec_of_pat2<'t>(
+  pub fn collect_pat_binding_events<'t>(
     &mut self,
     pat: &Pat,
     ty_results: &'tcx TypeckResults<'tcx>,
@@ -4473,7 +4473,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // destructures out of the same parent.
         PatKind::TupleStruct(_, tuple_members, _) | PatKind::Tuple(tuple_members, _) => {
             for p in tuple_members.iter() {
-                self.get_dec_of_pat2(p, ty_results, parent, parent_ty, scope, res);
+                self.collect_pat_binding_events(p, ty_results, parent, parent_ty, scope, res);
             }
         }
         // `Some(x)` / `None` lower to `PatKind::Struct(QPath::LangItem(...))`
@@ -4483,7 +4483,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // a different HIR shape.
         PatKind::Struct(_, fields, _) => {
             for field in fields.iter() {
-                self.get_dec_of_pat2(field.pat, ty_results, parent, parent_ty, scope, res);
+                self.collect_pat_binding_events(field.pat, ty_results, parent, parent_ty, scope, res);
             }
         }
         PatKind::Binding(mode, id, ident, _) => {
@@ -4628,7 +4628,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // alternative's (#503).
         PatKind::Or(alts) => {
             if let Some(first) = alts.first() {
-                self.get_dec_of_pat2(first, ty_results, parent, parent_ty, scope, res);
+                self.collect_pat_binding_events(first, ty_results, parent, parent_ty, scope, res);
             }
         }
         _ => {}
@@ -4710,7 +4710,7 @@ pub fn register_iflet_let_bindings(
 
     let let_line = crate::expr_visitor_utils::span_to_line(&let_expr.span, &self.tcx);
     // Body-end is only needed if we're going to emit a GoOutOfScope.
-    // get_dec_of_pat2 also takes a `scope` param; pass let_line as a
+    // collect_pat_binding_events also takes a `scope` param; pass let_line as a
     // safe default for the if-let case (the renderer ignores it for
     // the binding's own RAP since is_global=false).
     let scope = emit_gos_at.unwrap_or(let_line);

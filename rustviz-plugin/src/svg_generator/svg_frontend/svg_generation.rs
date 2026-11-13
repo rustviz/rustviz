@@ -463,23 +463,11 @@ fn collect_collapsed_branches(ev: &ExternalEvent, out: &mut Vec<(usize, usize)>)
     }
 }
 
-pub fn render_svg(
-    annotated_src_str: &str,
-    source_rs_str: &str,
-    visualization_data: &mut VisualizationData,
-    hide_lines: &HashSet<usize>,
-) -> (String, String, i32){
-    info!("preprocessed events : {:#?}", visualization_data.preprocess_external_events);
-    info!("ev_line_map: {:#?}", visualization_data.event_line_map);
-
-    // First, drop any source lines that the plugin marked with the
-    // `// rustviz: hide` form (the whole fn body, plus its leading
-    // blank line) and shift every line-keyed structure down to
-    // close the gap. Done before the fn-blank-line padding pass
-    // below so that pass operates on the post-hide layout — `prev`
-    // checks for fn neighbours, etc., reflect what the user will
-    // actually see.
-    let (post_hide_a, post_hide_s) = if hide_lines.is_empty() {
+/// Drop the source lines the plugin marked `// rustviz: hide` (the whole fn
+/// body, plus its leading blank line) and shift every line-keyed structure
+/// down to close the gap.
+fn hide_source_lines(annotated_src_str: &str, source_rs_str: &str, visualization_data: &mut VisualizationData, hide_lines: &HashSet<usize>) -> (String, String) {
+    if hide_lines.is_empty() {
         (annotated_src_str.to_string(), source_rs_str.to_string())
     } else {
         #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
@@ -541,10 +529,14 @@ pub fn render_svg(
         visualization_data.event_line_map = shifted_elm;
 
         (pruned_a, pruned_s)
-    };
-    let annotated_src_str: &str = post_hide_a.as_str();
-    let source_rs_str: &str = post_hide_s.as_str();
+    }
+}
 
+/// Force a blank source line before each non-first fn that doesn't already
+/// have one, and around a conditional whose branches share lines. Returns
+/// the padded annotated and plain sources and the visual rows of the blanks
+/// inserted.
+fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization_data: &mut VisualizationData) -> (String, String, HashSet<usize>) {
     // Force a blank source line before each non-first fn that doesn't
     // already have one. Without this, per-fn labels (which are placed
     // one row above the fn signature) land on top of the previous
@@ -647,9 +639,12 @@ pub fn render_svg(
             .collect();
         visualization_data.event_line_map = shifted_elm;
     }
-    let annotated_src_str: &str = new_a_str.as_str();
-    let source_rs_str: &str = new_s_str.as_str();
+    (new_a_str, new_s_str, synthetic_blank_rows)
+}
 
+/// Give every external event its row, inserting the extra rows stacked arrows
+/// need. Returns the number of rows inserted below each line.
+fn place_external_events(source_rs_str: &str, visualization_data: &mut VisualizationData) -> HashMap<usize, usize> {
     //-----------------------update line number for external events------------------
     // This might be the worst part of the code-base
     // extra lines need to be 'inserted' when two (or more) events that produce an arrow
@@ -983,8 +978,12 @@ pub fn render_svg(
             .sum();
         *src_line += extras_before;
     }
+    line_insertion_map
+}
 
-
+/// Sort the events of each line (and of each branch's lines) into the order
+/// they are drawn in.
+fn sort_line_map_events(visualization_data: &mut VisualizationData) {
     //------------------------sort HashMap<usize, Vec<ExternalEvent>>----------------------
     // We need to sort the event line map (the data structure that holds the events that produce arrows between timelines) by hash 
     // because when rendering the arrow we need some way to determine the direction of the arrow
@@ -1027,6 +1026,35 @@ pub fn render_svg(
             _ => {}
         }
     }
+}
+
+pub fn render_svg(
+    annotated_src_str: &str,
+    source_rs_str: &str,
+    visualization_data: &mut VisualizationData,
+    hide_lines: &HashSet<usize>,
+) -> (String, String, i32){
+    info!("preprocessed events : {:#?}", visualization_data.preprocess_external_events);
+    info!("ev_line_map: {:#?}", visualization_data.event_line_map);
+
+    // First, drop any source lines that the plugin marked with the
+    // `// rustviz: hide` form (the whole fn body, plus its leading
+    // blank line) and shift every line-keyed structure down to
+    // close the gap. Done before the fn-blank-line padding pass
+    // below so that pass operates on the post-hide layout — `prev`
+    // checks for fn neighbours, etc., reflect what the user will
+    // actually see.
+    let (post_hide_a, post_hide_s) = hide_source_lines(annotated_src_str, source_rs_str, visualization_data, hide_lines);
+    let annotated_src_str: &str = post_hide_a.as_str();
+    let source_rs_str: &str = post_hide_s.as_str();
+
+    let (new_a_str, new_s_str, synthetic_blank_rows) = insert_blank_rows(annotated_src_str, source_rs_str, visualization_data);
+    let annotated_src_str: &str = new_a_str.as_str();
+    let source_rs_str: &str = new_s_str.as_str();
+
+    let line_insertion_map = place_external_events(source_rs_str, visualization_data);
+
+    sort_line_map_events(visualization_data);
     info!("processed line map {:#?}", visualization_data.event_line_map);
 
     let svg_code_template = CODE_PANEL_TEMPLATE;

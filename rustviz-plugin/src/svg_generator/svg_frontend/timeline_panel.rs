@@ -3172,124 +3172,14 @@ fn render_arrow (
         // ownership transfers); falls through to the generic
         // logic below for those, which sees an (Anonymous,
         // Anonymous) extraction and early-returns.
-        ExternalEvent::InitRefParam { param, id, .. } => {
-            let is_owned = matches!(
-                param,
-                ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)
-            );
-            if !is_owned {
-                return;
-            }
-            let timeline = fetch_timeline(param.hash(), visualization_data, resource_owners_layout, *id);
-            let cx = timeline.x_val as f64;
-            let cy = column_event_y(visualization_data, param.hash(), *id, *line_number) as f64;
-
-            // L sized so the visible horizontal span equals
-            // `target_visible` from the bend out to the arrow
-            // tip. The vertical leg is shortened to a third of
-            // that so it doesn't poke up into the row above —
-            // the param dot sits at the same y as the function-
-            // header line, and the variable's bold name label is
-            // drawn just above the dot. A leg the full
-            // `target_visible` tall would cut across the label.
-            let leg: f64 = 10.0;
-            let head_offset: f64 = 18.0;
-            let arrow_tip_protrusion: f64 = 12.75;
-            let target_visible: f64 = leg + arrow_tip_protrusion;
-            let vertical_line: f64 = target_visible / 3.0;
-            let bend_x = cx + head_offset + leg;
-            let top_y = cy - vertical_line;
-            // Horizontal head end after pullback: the leg of the
-            // polyline runs from (bend_x, cy) leftward; pulling
-            // back by 18 puts the polyline endpoint at cx + 18.
-            // The arrow head's tip then extends 12.75 further
-            // leftward, landing 0.25px past the dot's right edge.
-            let head_x = cx + head_offset;
-            let head_y = cy;
-
-            // Polyline string in render order (source → bend → head).
-            let polyline_pts = format!(
-                "{} {} {} {} {} {}",
-                bend_x, top_y,   // source = top of vertical leg
-                bend_x, cy,      // bend
-                head_x, head_y,  // head end (pulled-back)
-            );
-
-            // Arrowhead at the polyline endpoint, tip extends
-            // 12.75 leftward into the dot's right edge; base is 6
-            // above and below. Same geometry the other arrow arms
-            // produce.
-            let bot_v1 = (head_x, head_y + 6.0);
-            let bot_v2 = (head_x - 12.75, head_y);
-            let bot_v3 = (head_x, head_y - 6.0);
-
-            let title = if param.is_copy_owner() {
-                hover_messages::event_dot_copy_init_from_caller(&param.name().to_string())
-            } else if param.is_plain_value() {
-                hover_messages::event_dot_owner_init_from_caller_value(&param.name().to_string())
-            } else {
-                hover_messages::event_dot_owner_init_from_caller(&param.name().to_string())
-            };
-
-            // Reuses the regular arrow_template shape (one polygon
-            // for the head) but emitted inline because we already
-            // have ArrowData populated and assembling the template
-            // is overkill for one site.
-            let rendered = format!(
-                "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
-                    \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
-                    \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
-                    \x20       </g>\n",
-                bot_v1.0, bot_v1.1, bot_v2.0, bot_v2.1, bot_v3.0, bot_v3.1,
-                title = title,
-                polyline_pts = polyline_pts,
-            );
-
-            if timeline.is_struct_group {
-                let owner_entry = ensure_owner_entry(output, timeline.owner as i64);
-                if timeline.is_member {
-                    owner_entry.1.arrows.push_str(&rendered);
-                } else {
-                    owner_entry.0.arrows.push_str(&rendered);
-                }
-            } else {
-                output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
-            }
-        }
+        ExternalEvent::InitRefParam { param, id, .. } => render_init_param_arrow(line_number, param, id, output, visualization_data, resource_owners_layout),
         // A call's result handed to the caller (`Err(String::from(..))`
         // as the returned value, #783). A function has no column to
         // return from, so its logo is drawn in the gutter left of the
         // fn's first column (columns start at x = 70), with the same L
         // up to the caller as a returned variable's.
         ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. }
-        | ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. } => {
-            let y = get_y_axis_pos(*line_number) as f64;
-            let logo_x: f64 = 14.0;
-            let source_x = logo_x + 16.0;
-            let bend_x = source_x + 14.0;
-            let head_end_y = y - 5.0;
-            let tip: f64 = 12.75;
-            let styled_fn = styled_name_html(&f.name);
-            let last = f.name.rsplit("::").next().unwrap_or(&f.name);
-            let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
-            let title = hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn);
-            let rendered = format!(
-                "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
-                    \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{source_x} {y} {bend_x} {y} {bend_x} {head_end_y}\" style=\"fill: none;\"/>\n\
-                    \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
-                    \x20       </g>\n",
-                bend_x - 6.0, head_end_y, bend_x, head_end_y - tip, bend_x + 6.0, head_end_y,
-            );
-            let logo = FunctionLogoData {
-                x: logo_x as i64,
-                y: y as i64 + 5,
-                hash: f.hash as u64,
-                title: styled_fn,
-            };
-            let out = &mut output.get_mut(&-1).unwrap().0;
-            out.arrows.push_str(&rendered);
-            out.dots.push_str(&registry.render("function_logo_template", &logo).unwrap());
-        }
+        | ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. } => render_function_result_arrow(line_number, external_event, f, output, registry),
         // Move/Copy out to the caller (function tail expression):
         // L on the dot's *right* side, matching the InitRefParam
         // L's positioning so callers and returns occupy the same
@@ -3308,434 +3198,594 @@ fn render_arrow (
         // the vertical sits beyond that as an extra cap so neither
         // leg is visually amputated by the head's body.
         ExternalEvent::Move { from, to: ResourceTy::Caller, id, .. }
-        | ExternalEvent::Copy { from, to: ResourceTy::Caller, id, .. } => {
-            let rap = match from.extract_rap() {
-                Some(r) => r,
-                None => return,
-            };
-            let timeline = fetch_timeline(rap.hash(), visualization_data, resource_owners_layout, *id);
-            let cx = timeline.x_val as f64;
-            let cy = column_event_y(visualization_data, rap.hash(), *id, *line_number) as f64;
+        | ExternalEvent::Copy { from, to: ResourceTy::Caller, id, .. } => render_return_to_caller_arrow(line_number, external_event, from, id, output, visualization_data, resource_owners_layout),
+        _ => render_generic_arrow(line_number, external_event, output, visualization_data, resource_owners_layout, dots, registry),
+    }
+}
 
-            let leg: f64 = 10.0;
-            let head_offset: f64 = 18.0;
-            let arrow_tip_protrusion: f64 = 12.75;
-            // Bend at the same x as the InitRefParam L's bend
-            // (cx + head_offset + leg), so caller-in and caller-
-            // out arrows have their vertical legs at the same
-            // column. Vertical stroke is half the input L's leg
-            // length to keep the L compact (matches the spirit
-            // of the input L's shortened vertical, which clears
-            // the label above the param dot).
-            let source_x = cx + 5.25;
-            let bend_x = cx + head_offset + leg;
-            let vertical_line: f64 = leg / 2.0;
-            let head_end_y = cy - vertical_line;
+/// `render_arrow` for every other event: an arrow from one column to
+/// another, or a function logo with its short arrow.
+fn render_generic_arrow(
+    line_number : &usize,
+    external_event: &ExternalEvent,
+    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars
+) {
+    // get the resource owners involved in the event
+    let (from, to) = ResourceAccessPoint_extract(external_event);
+    if arrow_is_undrawn(external_event, from, to) {
+        return;
+    }
+    let title = hover_messages::arrow_full_title(external_event, from, to);
 
-            let polyline_pts = format!(
-                "{} {} {} {} {} {}",
-                source_x, cy,        // source = dot's right edge (open end)
-                bend_x, cy,          // bend
-                bend_x, head_end_y,  // head end (top of vertical line)
-            );
+    // order of points is to -> from
+    let mut data = ArrowData {
+        coordinates: Vec::new(),
+        coordinates_hbs: String::new(),
+        head_points: String::new(),
+        title: title
+    };
 
-            // Arrowhead at the top of the vertical, pointing UP.
-            // Direction at endpoint = (0, -1), tip extends 12.75
-            // upward; base half-width 6 to either side.
-            let head_v1 = (bend_x - 6.0, head_end_y);
-            let head_v2 = (bend_x, head_end_y - arrow_tip_protrusion);
-            let head_v3 = (bend_x + 6.0, head_end_y);
+    let arrow_length = 20;
 
-            // Returning a Copy value (i32, bool, ..) copies it out;
-            // only non-Copy values are moved. Same wording as the
-            // dot tooltip for this event (data.rs).
-            // A returned `&T` is a copy of the reference, not of the data.
-            // A returned `&mut T` moves the reference, not the data.
-            let ptc = rap.points_to_copy();
-            let message: Box<dyn Fn(&String) -> String> = match external_event {
-                ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::StaticRef(_)), .. } =>
-                    Box::new(hover_messages::event_dot_copy_ref_to_caller),
-                ExternalEvent::Copy { .. } => Box::new(hover_messages::event_dot_copy_to_caller),
-                ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), .. } =>
-                    Box::new(move |name: &String| hover_messages::event_dot_ref_moved(name, true, ptc, true)),
-                _ => { let v = rap.holds_value(); Box::new(move |name: &String| hover_messages::event_dot_move_to_caller(name, v)) }
-            };
-            let title = match external_event {
-                // `&self.s` returned: a reborrow through `self` (#784).
-                ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('&') =>
-                    hover_messages::event_dot_reborrow_to_caller(r.name(), place),
-                // `*r` returned with r a reference: a copy of the value
-                // r points to (#670).
-                ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('*') =>
-                    hover_messages::event_dot_copy_deref_to_caller(r.name(), place),
-                // `p.x` returned from behind a reference p: the field
-                // is copied, not p's resource (#266).
-                ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } =>
-                    hover_messages::event_dot_copy_through_deref_field(
-                        r.name(), place, &"the caller".to_string(), r.points_to_copy()),
-                _ => message(&rap.name().to_string()),
-            };
+    // How far to pull the polyline endpoint back along the
+    // arrow's direction before drawing, so the marker-end
+    // arrow head's tip lands on the destination's near edge
+    // rather than over its center.
+    //
+    // arrowHead marker geometry: viewBox 0 0 10 10, refX=0,
+    // markerWidth=3 × strokeWidth=5 = 15 user units, tip at
+    // viewBox x=8.5 → ~12.75px past the polyline endpoint.
+    //
+    //   - For arrows ending on a 5px-radius event dot we want
+    //     12.75 + 5 = ~17.75 of pullback. 18 leaves a hairline
+    //     gap so the head doesn't touch the dot.
+    //   - For arrows ending at a function logo (no dot to
+    //     overlap, the head should sit close to the `f`)
+    //     the long-standing 10px works visually.
+    //
+    // Each arm of the match below sets this based on what its
+    // marker-end actually points at.
+    let mut head_offset: f64 = 18.0;
 
-            let rendered = format!(
-                "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
-                    \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
-                    \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
-                    \x20       </g>\n",
-                head_v1.0, head_v1.1, head_v2.0, head_v2.1, head_v3.0, head_v3.1,
-                title = title,
-                polyline_pts = polyline_pts,
-            );
-
-            if timeline.is_struct_group {
-                let owner_entry = ensure_owner_entry(output, timeline.owner as i64);
-                if timeline.is_member {
-                    owner_entry.1.arrows.push_str(&rendered);
-                } else {
-                    owner_entry.0.arrows.push_str(&rendered);
-                }
+    match (from, to, external_event) {
+        (ResourceTy::Value(ResourceAccessPoint::Function(from_function)), to_variable, _)  => {  // (Some(function), Some(variable), _)
+            // ro1 (to_variable) <- ro2 (from_function)
+            // arrow go from (x2, y2) -> (x1, y1)
+            // get position of to_variable
+            let to_timeline = fetch_timeline(to_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
+            // Anchor the polyline endpoint on the dot center;
+            // the post-match `head_offset` pullback (18px)
+            // moves it the right distance to land the tip on
+            // the dot's near edge. The historical `+ 3` was
+            // a hand-tuned partial fix for the same problem.
+            let x1 = to_timeline.x_val;
+            let y1 = column_event_y(visualization_data, to_variable.hash(), external_event.get_id(), *line_number);
+            let y2 = y1;
+            // The arrow is mostly its head; when the dot also
+            // carries a call icon the head stops farther out (see
+            // `head_lands_on_call_icon`), so the shaft and the
+            // function's logo move out with it.
+            let clearance = if head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) {
+                CALL_ICON_CLEARANCE as i64
             } else {
-                output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
+                0
+            };
+            let x2 = x1 + arrow_length + clearance;
+            data.coordinates.push((x1 as f64, y1 as f64));
+            data.coordinates.push((x2 as f64, y2 as f64));
+    
+            let function_data = FunctionLogoData {
+                x: x2 + 3,
+                y: y2 + 5,
+                hash: from_function.hash.to_owned() as u64,
+                title: styled_name_html(&from_function.name),
+            };
+    
+            if to_timeline.is_struct_group {
+                let owner_entry = ensure_owner_entry(output, to_timeline.owner as i64);
+                if to_timeline.is_member {
+                    owner_entry.1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                } else {
+                    owner_entry.0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                }
+            }
+            else {
+                output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
             }
         }
-        _ => {
-            // get the resource owners involved in the event
-            let (from, to) = ResourceAccessPoint_extract(external_event);
-            match (from, to) { // don't render arrow for anything to caller or anonymous or fn -> fn
-                (ResourceTy::Anonymous, _) | (_, ResourceTy::Caller) | (_, ResourceTy::Anonymous) | (_, ResourceTy::Temporary { .. })
-                | (ResourceTy::Value(ResourceAccessPoint::Function(_)), ResourceTy::Value(ResourceAccessPoint::Function(_))) => return,
-                // A borrow stored in an element (`v[0] = &u`) and its
-                // end are drawn on the lender's column only (#282).
-                // (A read through an element, `let n = *slots[0];`, is an
-                // arrow out of the collection's column: #438.)
-                (ResourceTy::Index(..), _)
-                    if matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) => return,
-                (_, ResourceTy::Index(..))
-                    if matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => return,
-                _ => {}
+        (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByStaticReference { .. })
+        | (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByMutableReference { .. }) => { 
+            // (Some(variable), Some(function), PassByRef)
+            // get position of to_variable
+            let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
+
+            let title = hover_messages::arrow_call_title(external_event, function, from_variable);
+
+            // The call icon shares the dot of the borrow it makes
+            // (see `DotLayer::add_call`).
+            dots.add_call(
+                from_variable.hash().to_owned() as u64,
+                from_timeline.x_val,
+                column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number),
+                from_timeline,
+                title,
+                external_event.get_id(),
+            );
+        }
+        (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(to_function)), _e) => { // (Some(variable), Some(function), _)
+            let styled_fn_name = styled_name_html(&to_function.name);
+            //  ro1 (to_function) <- ro2 (from_variable)
+            let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
+            // Marker-end terminates near the function logo
+            // (no dot to clear) so the gentler 10px pullback
+            // looks better than the dot-clearing 18px.
+            head_offset = 10.0;
+            let x2 = from_timeline.x_val - 5;
+            let x1 = x2 - arrow_length;
+            let y1 = column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number);
+            let y2 = y1;
+            data.coordinates.push((x1 as f64, y1 as f64));
+            data.coordinates.push((x2 as f64, y2 as f64));
+    
+            let function_data = FunctionLogoData {
+                // adjust Function logo pos
+                x: x1 - 10,  
+                y: y1 + 5,
+                hash: to_function.hash.to_owned() as u64,
+                title: styled_fn_name,
+            };
+    
+            if from_timeline.is_struct_group {
+                let owner_entry = ensure_owner_entry(output, from_timeline.owner as i64);
+                if from_timeline.is_member {
+                    owner_entry.1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                } else {
+                    owner_entry.0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+                }
             }
-            // The end of a borrow of a temporary tuple's element: the
-            // tuple has no column, so there's nothing to draw an arrow
-            // to; only the end dot on the reference's column (#658).
-            if let ExternalEvent::StaticDie { static_lender: Some(StaticLender::TupleTemporary), .. }
-                 | ExternalEvent::MutableDie { static_lender: Some(StaticLender::TupleTemporary), .. } = external_event {
+            else {
+                output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
+            }
+        },
+        (from_variable, to_variable, _) => {
+            if plan_variable_arrow(line_number, external_event, from_variable, to_variable, &mut data, head_offset, output, visualization_data, resource_owners_layout, dots) {
                 return;
             }
-            let title = hover_messages::arrow_full_title(external_event, from, to);
+        }
+    }
 
-            // order of points is to -> from
-            let mut data = ArrowData {
-                coordinates: Vec::new(),
-                coordinates_hbs: String::new(),
-                head_points: String::new(),
-                title: title
-            };
+    finish_arrow(data, head_offset, from, output, resource_owners_layout, dots, registry);
+}
 
-            let arrow_length = 20;
+/// `render_arrow` for an owned function parameter's init (see the comment
+/// in `render_arrow`): the L-shaped arrow from outside the scope.
+fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id: &usize, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>) {
+        let is_owned = matches!(
+            param,
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)
+        );
+        if !is_owned {
+            return;
+        }
+        let timeline = fetch_timeline(param.hash(), visualization_data, resource_owners_layout, *id);
+        let cx = timeline.x_val as f64;
+        let cy = column_event_y(visualization_data, param.hash(), *id, *line_number) as f64;
 
-            // How far to pull the polyline endpoint back along the
-            // arrow's direction before drawing, so the marker-end
-            // arrow head's tip lands on the destination's near edge
-            // rather than over its center.
-            //
-            // arrowHead marker geometry: viewBox 0 0 10 10, refX=0,
-            // markerWidth=3 × strokeWidth=5 = 15 user units, tip at
-            // viewBox x=8.5 → ~12.75px past the polyline endpoint.
-            //
-            //   - For arrows ending on a 5px-radius event dot we want
-            //     12.75 + 5 = ~17.75 of pullback. 18 leaves a hairline
-            //     gap so the head doesn't touch the dot.
-            //   - For arrows ending at a function logo (no dot to
-            //     overlap, the head should sit close to the `f`)
-            //     the long-standing 10px works visually.
-            //
-            // Each arm of the match below sets this based on what its
-            // marker-end actually points at.
-            let mut head_offset: f64 = 18.0;
+        // L sized so the visible horizontal span equals
+        // `target_visible` from the bend out to the arrow
+        // tip. The vertical leg is shortened to a third of
+        // that so it doesn't poke up into the row above —
+        // the param dot sits at the same y as the function-
+        // header line, and the variable's bold name label is
+        // drawn just above the dot. A leg the full
+        // `target_visible` tall would cut across the label.
+        let leg: f64 = 10.0;
+        let head_offset: f64 = 18.0;
+        let arrow_tip_protrusion: f64 = 12.75;
+        let target_visible: f64 = leg + arrow_tip_protrusion;
+        let vertical_line: f64 = target_visible / 3.0;
+        let bend_x = cx + head_offset + leg;
+        let top_y = cy - vertical_line;
+        // Horizontal head end after pullback: the leg of the
+        // polyline runs from (bend_x, cy) leftward; pulling
+        // back by 18 puts the polyline endpoint at cx + 18.
+        // The arrow head's tip then extends 12.75 further
+        // leftward, landing 0.25px past the dot's right edge.
+        let head_x = cx + head_offset;
+        let head_y = cy;
 
-            match (from, to, external_event) {
-                (ResourceTy::Value(ResourceAccessPoint::Function(from_function)), to_variable, _)  => {  // (Some(function), Some(variable), _)
-                    // ro1 (to_variable) <- ro2 (from_function)
-                    // arrow go from (x2, y2) -> (x1, y1)
-                    // get position of to_variable
-                    let to_timeline = fetch_timeline(to_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
-                    // Anchor the polyline endpoint on the dot center;
-                    // the post-match `head_offset` pullback (18px)
-                    // moves it the right distance to land the tip on
-                    // the dot's near edge. The historical `+ 3` was
-                    // a hand-tuned partial fix for the same problem.
-                    let x1 = to_timeline.x_val;
-                    let y1 = column_event_y(visualization_data, to_variable.hash(), external_event.get_id(), *line_number);
-                    let y2 = y1;
-                    // The arrow is mostly its head; when the dot also
-                    // carries a call icon the head stops farther out (see
-                    // `head_lands_on_call_icon`), so the shaft and the
-                    // function's logo move out with it.
-                    let clearance = if head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) {
-                        CALL_ICON_CLEARANCE as i64
-                    } else {
-                        0
-                    };
-                    let x2 = x1 + arrow_length + clearance;
-                    data.coordinates.push((x1 as f64, y1 as f64));
-                    data.coordinates.push((x2 as f64, y2 as f64));
-    
-                    let function_data = FunctionLogoData {
-                        x: x2 + 3,
-                        y: y2 + 5,
-                        hash: from_function.hash.to_owned() as u64,
-                        title: styled_name_html(&from_function.name),
-                    };
-    
-                    if to_timeline.is_struct_group {
-                        let owner_entry = ensure_owner_entry(output, to_timeline.owner as i64);
-                        if to_timeline.is_member {
-                            owner_entry.1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
-                        } else {
-                            owner_entry.0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
-                        }
-                    }
-                    else {
-                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
-                    }
-                }
-                (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByStaticReference { .. })
-                | (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(function)), ExternalEvent::PassByMutableReference { .. }) => { 
-                    // (Some(variable), Some(function), PassByRef)
-                    // get position of to_variable
-                    let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
+        // Polyline string in render order (source → bend → head).
+        let polyline_pts = format!(
+            "{} {} {} {} {} {}",
+            bend_x, top_y,   // source = top of vertical leg
+            bend_x, cy,      // bend
+            head_x, head_y,  // head end (pulled-back)
+        );
 
-                    let title = hover_messages::arrow_call_title(external_event, function, from_variable);
+        // Arrowhead at the polyline endpoint, tip extends
+        // 12.75 leftward into the dot's right edge; base is 6
+        // above and below. Same geometry the other arrow arms
+        // produce.
+        let bot_v1 = (head_x, head_y + 6.0);
+        let bot_v2 = (head_x - 12.75, head_y);
+        let bot_v3 = (head_x, head_y - 6.0);
 
-                    // The call icon shares the dot of the borrow it makes
-                    // (see `DotLayer::add_call`).
-                    dots.add_call(
-                        from_variable.hash().to_owned() as u64,
-                        from_timeline.x_val,
-                        column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number),
-                        from_timeline,
-                        title,
-                        external_event.get_id(),
-                    );
-                }
-                (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(to_function)), _e) => { // (Some(variable), Some(function), _)
-                    let styled_fn_name = styled_name_html(&to_function.name);
-                    //  ro1 (to_function) <- ro2 (from_variable)
-                    let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
-                    // Marker-end terminates near the function logo
-                    // (no dot to clear) so the gentler 10px pullback
-                    // looks better than the dot-clearing 18px.
-                    head_offset = 10.0;
-                    let x2 = from_timeline.x_val - 5;
-                    let x1 = x2 - arrow_length;
-                    let y1 = column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number);
-                    let y2 = y1;
-                    data.coordinates.push((x1 as f64, y1 as f64));
-                    data.coordinates.push((x2 as f64, y2 as f64));
-    
-                    let function_data = FunctionLogoData {
-                        // adjust Function logo pos
-                        x: x1 - 10,  
-                        y: y1 + 5,
-                        hash: to_function.hash.to_owned() as u64,
-                        title: styled_fn_name,
-                    };
-    
-                    if from_timeline.is_struct_group {
-                        let owner_entry = ensure_owner_entry(output, from_timeline.owner as i64);
-                        if from_timeline.is_member {
-                            owner_entry.1.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
-                        } else {
-                            owner_entry.0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
-                        }
-                    }
-                    else {
-                        output.get_mut(&-1).unwrap().0.dots.push_str(&registry.render("function_logo_template", &function_data).unwrap());
-                    }
-                },
-                (from_variable, to_variable, e) => {
-                    let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, e.get_id());
-                    let to_timeline = fetch_timeline(to_variable.hash(), visualization_data, resource_owners_layout, e.get_id());
+        let title = if param.is_copy_owner() {
+            hover_messages::event_dot_copy_init_from_caller(&param.name().to_string())
+        } else if param.is_plain_value() {
+            hover_messages::event_dot_owner_init_from_caller_value(&param.name().to_string())
+        } else {
+            hover_messages::event_dot_owner_init_from_caller(&param.name().to_string())
+        };
 
-                    let x1 = to_timeline.x_val;
-                    let x2 = from_timeline.x_val;
-                    let y1 = column_event_y(visualization_data, to_variable.hash(), e.get_id(), *line_number);
-                    let y2 = column_event_y(visualization_data, from_variable.hash(), e.get_id(), *line_number);
-                    // A return whose source is where another return on this
-                    // row ends (`s` gives back to `r`, `r` to `x`) would be
-                    // drawn level with it and read as one long arrow
-                    // through `r`'s dot (#577). It dips half a row instead.
-                    let dip = arrow_dip_of(visualization_data, *line_number, external_event);
-                    // The same goes for a return that retraces a borrow on its
-                    // row (#710).
-                    let chained = dip == 0 && y1 == y2
-                        && (returns_chain_on_row(visualization_data, *line_number, external_event)
-                            || return_overlaps_borrow_on_row(visualization_data, *line_number, external_event));
-                    let row_drop = if chained { LINE_SPACE / 2 } else { dip };
-                    let y_row = if chained { y1 + row_drop } else { get_y_axis_pos(*line_number) + row_drop };
-                    if row_drop > 0 && x2 <= x1{ // trapezoid
-                        let x3 = from_timeline.x_val + 20;
-                        let x4 = to_timeline.x_val - 20;
-                        let y3 = y_row;
-                        let y4 = y_row;
-    
-                        data.coordinates.push((x1 as f64, y1 as f64));
-                        data.coordinates.push((x4 as f64, y4 as f64));
-                        data.coordinates.push((x3 as f64, y3 as f64));
-                        data.coordinates.push((x2 as f64, y2 as f64));
-    
-                    } else if row_drop > 0 && x2 > x1 { // deeper trapezoid
-                        let x3 = from_timeline.x_val - 20;
-                        let x4 = to_timeline.x_val + 20;
-                        let y3 = y_row;
-                        let y4 = y_row;
-    
-                        data.coordinates.push((x1 as f64, y1 as f64));
-                        data.coordinates.push((x4 as f64, y4 as f64));
-                        data.coordinates.push((x3 as f64, y3 as f64));
-                        data.coordinates.push((x2 as f64, y2 as f64));
-    
-                    } else { // straight line
-                        // Hop over any event dot that sits between the
-                        // arrow's source and target columns at this line.
-                        // Without the hop the arrow's polyline runs
-                        // straight through those middle dots, visually
-                        // overlapping them and (more importantly) eating
-                        // their hover events because the arrow's <g>
-                        // tooltip-trigger sits on top. (Not when one end
-                        // is on a split dot and the other isn't, see
-                        // `event_dot_y`: that arrow isn't level.)
-                        if let Some(rendered) = (y1 == y2).then(|| render_hopping_arrow(
-                            x1, y1, x2,
-                            &data.title,
-                            &dots.positions,
-                            if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
-                        )).flatten() {
-                            // Inline render done; push to the right
-                            // output bucket and bypass the post-match
-                            // polyline pipeline by leaving coordinates
-                            // empty.
-                            if resource_owners_layout.contains_key(from.hash()) && resource_owners_layout[from.hash()].is_struct_group {
-                                let is_member = resource_owners_layout[from.hash()].is_member;
-                                let owner_key = resource_owners_layout[from.hash()].owner as i64;
-                                let owner_entry = ensure_owner_entry(output, owner_key);
-                                if is_member {
-                                    owner_entry.1.arrows.push_str(&rendered);
-                                } else {
-                                    owner_entry.0.arrows.push_str(&rendered);
-                                }
-                            } else {
-                                output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
-                            }
-                            return;
-                        }
-                        data.coordinates.push((x1 as f64, y1 as f64));
-                        data.coordinates.push((x2 as f64, y2 as f64));
-                    }
-                }
+        // Reuses the regular arrow_template shape (one polygon
+        // for the head) but emitted inline because we already
+        // have ArrowData populated and assembling the template
+        // is overkill for one site.
+        let rendered = format!(
+            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+                \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
+                \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+                \x20       </g>\n",
+            bot_v1.0, bot_v1.1, bot_v2.0, bot_v2.1, bot_v3.0, bot_v3.1,
+            title = title,
+            polyline_pts = polyline_pts,
+        );
+
+        if timeline.is_struct_group {
+            let owner_entry = ensure_owner_entry(output, timeline.owner as i64);
+            if timeline.is_member {
+                owner_entry.1.arrows.push_str(&rendered);
+            } else {
+                owner_entry.0.arrows.push_str(&rendered);
             }
+        } else {
+            output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
+        }
+}
 
-            // draw arrow only if data.x1 is not default value
-            if !data.coordinates.is_empty() {
-                let last_index = data.coordinates.len() - 1;
-                if head_offset == 18.0 && data.coordinates[last_index].0 > data.coordinates[0].0
-                    && head_lands_on_call_icon(&data.coordinates[0], dots) {
-                    head_offset += CALL_ICON_CLEARANCE;
-                }
+/// `render_arrow` for a call's result handed to the caller (#783): the
+/// function's logo in the gutter and the L up to the caller.
+fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEvent, f: &crate::svg_generator::data::Function, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, registry: &Handlebars) {
+        let y = get_y_axis_pos(*line_number) as f64;
+        let logo_x: f64 = 14.0;
+        let source_x = logo_x + 16.0;
+        let bend_x = source_x + 14.0;
+        let head_end_y = y - 5.0;
+        let tip: f64 = 12.75;
+        let styled_fn = styled_name_html(&f.name);
+        let last = f.name.rsplit("::").next().unwrap_or(&f.name);
+        let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
+        let title = hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn);
+        let rendered = format!(
+            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+                \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{source_x} {y} {bend_x} {y} {bend_x} {head_end_y}\" style=\"fill: none;\"/>\n\
+                \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+                \x20       </g>\n",
+            bend_x - 6.0, head_end_y, bend_x, head_end_y - tip, bend_x + 6.0, head_end_y,
+        );
+        let logo = FunctionLogoData {
+            x: logo_x as i64,
+            y: y as i64 + 5,
+            hash: f.hash as u64,
+            title: styled_fn,
+        };
+        let out = &mut output.get_mut(&-1).unwrap().0;
+        out.arrows.push_str(&rendered);
+        out.dots.push_str(&registry.render("function_logo_template", &logo).unwrap());
+}
 
-                if data.coordinates.len() == 2 && data.coordinates[0].1 == data.coordinates[1].1 {
-                    // [0]     [last index]
-                    // <-------------------
-                    if data.coordinates[0].0 < data.coordinates[last_index].0 {
+/// `render_arrow` for a Move/Copy out to the caller (a function's tail
+/// expression): the L on the dot's right side.
+fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalEvent, from: &ResourceTy, id: &usize, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>) {
+        let rap = match from.extract_rap() {
+            Some(r) => r,
+            None => return,
+        };
+        let timeline = fetch_timeline(rap.hash(), visualization_data, resource_owners_layout, *id);
+        let cx = timeline.x_val as f64;
+        let cy = column_event_y(visualization_data, rap.hash(), *id, *line_number) as f64;
 
-                        data.coordinates[0].0 += head_offset;
-                    }
-                    // [last index]     [0]
-                    // ------------------->
-                    else {
-                        data.coordinates[0].0 -= head_offset;
-                    }
-                } else {
+        let leg: f64 = 10.0;
+        let head_offset: f64 = 18.0;
+        let arrow_tip_protrusion: f64 = 12.75;
+        // Bend at the same x as the InitRefParam L's bend
+        // (cx + head_offset + leg), so caller-in and caller-
+        // out arrows have their vertical legs at the same
+        // column. Vertical stroke is half the input L's leg
+        // length to keep the L compact (matches the spirit
+        // of the input L's shortened vertical, which clears
+        // the label above the param dot).
+        let source_x = cx + 5.25;
+        let bend_x = cx + head_offset + leg;
+        let vertical_line: f64 = leg / 2.0;
+        let head_end_y = cy - vertical_line;
 
-                    if data.coordinates[0].0 < data.coordinates[last_index].0 {
-                        let hypotenuse = (((data.coordinates[1].0 - data.coordinates[0].0) as f64).powi(2) + ((data.coordinates[1].1 - data.coordinates[0].1) as f64).powi(2)).sqrt();
-                        let cos_ratio = ((data.coordinates[1].0 - data.coordinates[0].0) as f64) / hypotenuse;
-                        let sin_ratio = ((data.coordinates[1].1 - data.coordinates[0].1) as f64) / hypotenuse;
-                        data.coordinates[0].0 += cos_ratio * head_offset;
-                        data.coordinates[0].1 += sin_ratio * head_offset;
-                    }
-                    else {
-                        let hypotenuse = (((data.coordinates[0].0 - data.coordinates[1].0) as f64).powi(2) + ((data.coordinates[1].1 - data.coordinates[0].1) as f64).powi(2)).sqrt();
-                        let cos_ratio = ((data.coordinates[0].0 - data.coordinates[1].0) as f64) / hypotenuse;
-                        let sin_ratio = ((data.coordinates[1].1 - data.coordinates[0].1) as f64) / hypotenuse;
-                        data.coordinates[0].0 -= cos_ratio * head_offset;
-                        data.coordinates[0].1 += sin_ratio * head_offset;
-                    }
-                }
+        let polyline_pts = format!(
+            "{} {} {} {} {} {}",
+            source_x, cy,        // source = dot's right edge (open end)
+            bend_x, cy,          // bend
+            bend_x, head_end_y,  // head end (top of vertical line)
+        );
 
-                // The last point is the tail. Start it at the edge of
-                // the source dot rather than its centre. Done after the
-                // head pullback so an arrow between the two halves of
-                // one column (`s` to `*s`, where both ends start on the
-                // same dot) leaves the dot in the direction it points.
-                let n = data.coordinates.len();
-                data.coordinates[n - 1] =
-                    tail_off_dot(data.coordinates[n - 1], data.coordinates[n - 2], &dots.positions);
+        // Arrowhead at the top of the vertical, pointing UP.
+        // Direction at endpoint = (0, -1), tip extends 12.75
+        // upward; base half-width 6 to either side.
+        let head_v1 = (bend_x - 6.0, head_end_y);
+        let head_v2 = (bend_x, head_end_y - arrow_tip_protrusion);
+        let head_v3 = (bend_x + 6.0, head_end_y);
 
-                // Compute the inline arrow-head triangle, sized to
-                // match the previous SVG marker (viewBox 0 0 10 10,
-                // markerWidth=3 × strokeWidth=5, path M 0 0 L 8.5 4
-                // L 0 8 z). In user coordinates the marker is 15px
-                // square; the path's tip at viewBox (8.5, 4) maps
-                // to 12.75 user units forward of the reference, and
-                // the base half-height is 6 user units. Reference
-                // point sits at the polyline endpoint coord[0].
-                //
-                // Direction at the endpoint = vector from coord[1]
-                // (the segment immediately preceding the endpoint
-                // in the polyline traversal, both for 2-point lines
-                // and for the kinked trapezoid form) to coord[0].
-                {
-                    let ex = data.coordinates[0].0;
-                    let ey = data.coordinates[0].1;
-                    let dx = ex - data.coordinates[1].0;
-                    let dy = ey - data.coordinates[1].1;
-                    let len = (dx * dx + dy * dy).sqrt();
-                    let (cos, sin) = if len > 0.0 { (dx / len, dy / len) } else { (1.0, 0.0) };
-                    // V1 / V3 are the two base corners (perpendicular
-                    // ±6 from the endpoint), V2 is the tip 12.75 along
-                    // the line direction beyond the endpoint.
-                    let v1 = (ex + 6.0 * sin, ey - 6.0 * cos);
-                    let v2 = (ex + 12.75 * cos, ey + 12.75 * sin);
-                    let v3 = (ex - 6.0 * sin, ey + 6.0 * cos);
-                    data.head_points = format!(
-                        "{},{} {},{} {},{}",
-                        v1.0, v1.1, v2.0, v2.1, v3.0, v3.1
-                    );
-                }
+        // Returning a Copy value (i32, bool, ..) copies it out;
+        // only non-Copy values are moved. Same wording as the
+        // dot tooltip for this event (data.rs).
+        // A returned `&T` is a copy of the reference, not of the data.
+        // A returned `&mut T` moves the reference, not the data.
+        let ptc = rap.points_to_copy();
+        let message: Box<dyn Fn(&String) -> String> = match external_event {
+            ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::StaticRef(_)), .. } =>
+                Box::new(hover_messages::event_dot_copy_ref_to_caller),
+            ExternalEvent::Copy { .. } => Box::new(hover_messages::event_dot_copy_to_caller),
+            ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), .. } =>
+                Box::new(move |name: &String| hover_messages::event_dot_ref_moved(name, true, ptc, true)),
+            _ => { let v = rap.holds_value(); Box::new(move |name: &String| hover_messages::event_dot_move_to_caller(name, v)) }
+        };
+        let title = match external_event {
+            // `&self.s` returned: a reborrow through `self` (#784).
+            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('&') =>
+                hover_messages::event_dot_reborrow_to_caller(r.name(), place),
+            // `*r` returned with r a reference: a copy of the value
+            // r points to (#670).
+            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('*') =>
+                hover_messages::event_dot_copy_deref_to_caller(r.name(), place),
+            // `p.x` returned from behind a reference p: the field
+            // is copied, not p's resource (#266).
+            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } =>
+                hover_messages::event_dot_copy_through_deref_field(
+                    r.name(), place, &"the caller".to_string(), r.points_to_copy()),
+            _ => message(&rap.name().to_string()),
+        };
 
-                while !data.coordinates.is_empty() {
-                    let recent = data.coordinates.pop();
-                    data.coordinates_hbs.push_str(&recent.unwrap().0.to_string());
-                    data.coordinates_hbs.push_str(&String::from(" "));
-                    data.coordinates_hbs.push_str(&recent.unwrap().1.to_string());
-                    data.coordinates_hbs.push_str(&String::from(" "));
-                }
+        let rendered = format!(
+            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+                \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
+                \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+                \x20       </g>\n",
+            head_v1.0, head_v1.1, head_v2.0, head_v2.1, head_v3.0, head_v3.1,
+            title = title,
+            polyline_pts = polyline_pts,
+        );
 
-                // will need to change this later for structs in conditionals
-                if resource_owners_layout.contains_key(from.hash()) && resource_owners_layout[from.hash()].is_struct_group {
-                    let is_member = resource_owners_layout[from.hash()].is_member;
-                    let owner_key = resource_owners_layout[from.hash()].owner as i64;
+        if timeline.is_struct_group {
+            let owner_entry = ensure_owner_entry(output, timeline.owner as i64);
+            if timeline.is_member {
+                owner_entry.1.arrows.push_str(&rendered);
+            } else {
+                owner_entry.0.arrows.push_str(&rendered);
+            }
+        } else {
+            output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
+        }
+}
+
+/// Whether an arrow event is not drawn as an arrow at all (to the caller,
+/// to or from an anonymous value, fn to fn, an element's borrow ...).
+fn arrow_is_undrawn(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy) -> bool {
+    match (from, to) { // don't render arrow for anything to caller or anonymous or fn -> fn
+        (ResourceTy::Anonymous, _) | (_, ResourceTy::Caller) | (_, ResourceTy::Anonymous) | (_, ResourceTy::Temporary { .. })
+        | (ResourceTy::Value(ResourceAccessPoint::Function(_)), ResourceTy::Value(ResourceAccessPoint::Function(_))) => return true,
+        // A borrow stored in an element (`v[0] = &u`) and its
+        // end are drawn on the lender's column only (#282).
+        // (A read through an element, `let n = *slots[0];`, is an
+        // arrow out of the collection's column: #438.)
+        (ResourceTy::Index(..), _)
+            if matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) => return true,
+        (_, ResourceTy::Index(..))
+            if matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => return true,
+        _ => {}
+    }
+    // The end of a borrow of a temporary tuple's element: the
+    // tuple has no column, so there's nothing to draw an arrow
+    // to; only the end dot on the reference's column (#658).
+    if let ExternalEvent::StaticDie { static_lender: Some(StaticLender::TupleTemporary), .. }
+         | ExternalEvent::MutableDie { static_lender: Some(StaticLender::TupleTemporary), .. } = external_event {
+        return true;
+    }
+    false
+}
+
+/// The arrow between two variables' columns, as the polyline points in
+/// `data` (a straight line, or a trapezoid when it dips; see below). Returns
+/// true when the arrow was already drawn whole (hopping over dots).
+#[allow(clippy::too_many_arguments)]
+fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from_variable: &ResourceTy, to_variable: &ResourceTy, data: &mut ArrowData, head_offset: f64, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>, dots: &mut DotLayer) -> bool {
+        let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
+        let to_timeline = fetch_timeline(to_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
+
+        let x1 = to_timeline.x_val;
+        let x2 = from_timeline.x_val;
+        let y1 = column_event_y(visualization_data, to_variable.hash(), external_event.get_id(), *line_number);
+        let y2 = column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number);
+        // A return whose source is where another return on this
+        // row ends (`s` gives back to `r`, `r` to `x`) would be
+        // drawn level with it and read as one long arrow
+        // through `r`'s dot (#577). It dips half a row instead.
+        let dip = arrow_dip_of(visualization_data, *line_number, external_event);
+        // The same goes for a return that retraces a borrow on its
+        // row (#710).
+        let chained = dip == 0 && y1 == y2
+            && (returns_chain_on_row(visualization_data, *line_number, external_event)
+                || return_overlaps_borrow_on_row(visualization_data, *line_number, external_event));
+        let row_drop = if chained { LINE_SPACE / 2 } else { dip };
+        let y_row = if chained { y1 + row_drop } else { get_y_axis_pos(*line_number) + row_drop };
+        if row_drop > 0 && x2 <= x1{ // trapezoid
+            let x3 = from_timeline.x_val + 20;
+            let x4 = to_timeline.x_val - 20;
+            let y3 = y_row;
+            let y4 = y_row;
+    
+            data.coordinates.push((x1 as f64, y1 as f64));
+            data.coordinates.push((x4 as f64, y4 as f64));
+            data.coordinates.push((x3 as f64, y3 as f64));
+            data.coordinates.push((x2 as f64, y2 as f64));
+    
+        } else if row_drop > 0 && x2 > x1 { // deeper trapezoid
+            let x3 = from_timeline.x_val - 20;
+            let x4 = to_timeline.x_val + 20;
+            let y3 = y_row;
+            let y4 = y_row;
+    
+            data.coordinates.push((x1 as f64, y1 as f64));
+            data.coordinates.push((x4 as f64, y4 as f64));
+            data.coordinates.push((x3 as f64, y3 as f64));
+            data.coordinates.push((x2 as f64, y2 as f64));
+    
+        } else { // straight line
+            // Hop over any event dot that sits between the
+            // arrow's source and target columns at this line.
+            // Without the hop the arrow's polyline runs
+            // straight through those middle dots, visually
+            // overlapping them and (more importantly) eating
+            // their hover events because the arrow's <g>
+            // tooltip-trigger sits on top. (Not when one end
+            // is on a split dot and the other isn't, see
+            // `event_dot_y`: that arrow isn't level.)
+            if let Some(rendered) = (y1 == y2).then(|| render_hopping_arrow(
+                x1, y1, x2,
+                &data.title,
+                &dots.positions,
+                if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
+            )).flatten() {
+                // Inline render done; push to the right
+                // output bucket and bypass the post-match
+                // polyline pipeline by leaving coordinates
+                // empty.
+                if resource_owners_layout.contains_key(from_variable.hash()) && resource_owners_layout[from_variable.hash()].is_struct_group {
+                    let is_member = resource_owners_layout[from_variable.hash()].is_member;
+                    let owner_key = resource_owners_layout[from_variable.hash()].owner as i64;
                     let owner_entry = ensure_owner_entry(output, owner_key);
                     if is_member {
-                        owner_entry.1.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+                        owner_entry.1.arrows.push_str(&rendered);
                     } else {
-                        owner_entry.0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+                        owner_entry.0.arrows.push_str(&rendered);
                     }
+                } else {
+                    output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
                 }
-                else {
-                    output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
-                }
+                return true;
             }
+            data.coordinates.push((x1 as f64, y1 as f64));
+            data.coordinates.push((x2 as f64, y2 as f64));
+        }
+    false
+}
+
+/// The end of `render_arrow`'s generic case: pull the head back, add the
+/// arrowhead and file the finished arrow under its column.
+fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>, dots: &mut DotLayer, registry: &Handlebars) {
+    // draw arrow only if data.x1 is not default value
+    if !data.coordinates.is_empty() {
+        let last_index = data.coordinates.len() - 1;
+        if head_offset == 18.0 && data.coordinates[last_index].0 > data.coordinates[0].0
+            && head_lands_on_call_icon(&data.coordinates[0], dots) {
+            head_offset += CALL_ICON_CLEARANCE;
+        }
+
+        if data.coordinates.len() == 2 && data.coordinates[0].1 == data.coordinates[1].1 {
+            // [0]     [last index]
+            // <-------------------
+            if data.coordinates[0].0 < data.coordinates[last_index].0 {
+
+                data.coordinates[0].0 += head_offset;
+            }
+            // [last index]     [0]
+            // ------------------->
+            else {
+                data.coordinates[0].0 -= head_offset;
+            }
+        } else {
+
+            if data.coordinates[0].0 < data.coordinates[last_index].0 {
+                let hypotenuse = (((data.coordinates[1].0 - data.coordinates[0].0) as f64).powi(2) + ((data.coordinates[1].1 - data.coordinates[0].1) as f64).powi(2)).sqrt();
+                let cos_ratio = ((data.coordinates[1].0 - data.coordinates[0].0) as f64) / hypotenuse;
+                let sin_ratio = ((data.coordinates[1].1 - data.coordinates[0].1) as f64) / hypotenuse;
+                data.coordinates[0].0 += cos_ratio * head_offset;
+                data.coordinates[0].1 += sin_ratio * head_offset;
+            }
+            else {
+                let hypotenuse = (((data.coordinates[0].0 - data.coordinates[1].0) as f64).powi(2) + ((data.coordinates[1].1 - data.coordinates[0].1) as f64).powi(2)).sqrt();
+                let cos_ratio = ((data.coordinates[0].0 - data.coordinates[1].0) as f64) / hypotenuse;
+                let sin_ratio = ((data.coordinates[1].1 - data.coordinates[0].1) as f64) / hypotenuse;
+                data.coordinates[0].0 -= cos_ratio * head_offset;
+                data.coordinates[0].1 += sin_ratio * head_offset;
+            }
+        }
+
+        // The last point is the tail. Start it at the edge of
+        // the source dot rather than its centre. Done after the
+        // head pullback so an arrow between the two halves of
+        // one column (`s` to `*s`, where both ends start on the
+        // same dot) leaves the dot in the direction it points.
+        let n = data.coordinates.len();
+        data.coordinates[n - 1] =
+            tail_off_dot(data.coordinates[n - 1], data.coordinates[n - 2], &dots.positions);
+
+        // Compute the inline arrow-head triangle, sized to
+        // match the previous SVG marker (viewBox 0 0 10 10,
+        // markerWidth=3 × strokeWidth=5, path M 0 0 L 8.5 4
+        // L 0 8 z). In user coordinates the marker is 15px
+        // square; the path's tip at viewBox (8.5, 4) maps
+        // to 12.75 user units forward of the reference, and
+        // the base half-height is 6 user units. Reference
+        // point sits at the polyline endpoint coord[0].
+        //
+        // Direction at the endpoint = vector from coord[1]
+        // (the segment immediately preceding the endpoint
+        // in the polyline traversal, both for 2-point lines
+        // and for the kinked trapezoid form) to coord[0].
+        {
+            let ex = data.coordinates[0].0;
+            let ey = data.coordinates[0].1;
+            let dx = ex - data.coordinates[1].0;
+            let dy = ey - data.coordinates[1].1;
+            let len = (dx * dx + dy * dy).sqrt();
+            let (cos, sin) = if len > 0.0 { (dx / len, dy / len) } else { (1.0, 0.0) };
+            // V1 / V3 are the two base corners (perpendicular
+            // ±6 from the endpoint), V2 is the tip 12.75 along
+            // the line direction beyond the endpoint.
+            let v1 = (ex + 6.0 * sin, ey - 6.0 * cos);
+            let v2 = (ex + 12.75 * cos, ey + 12.75 * sin);
+            let v3 = (ex - 6.0 * sin, ey + 6.0 * cos);
+            data.head_points = format!(
+                "{},{} {},{} {},{}",
+                v1.0, v1.1, v2.0, v2.1, v3.0, v3.1
+            );
+        }
+
+        while !data.coordinates.is_empty() {
+            let recent = data.coordinates.pop();
+            data.coordinates_hbs.push_str(&recent.unwrap().0.to_string());
+            data.coordinates_hbs.push_str(&String::from(" "));
+            data.coordinates_hbs.push_str(&recent.unwrap().1.to_string());
+            data.coordinates_hbs.push_str(&String::from(" "));
+        }
+
+        // will need to change this later for structs in conditionals
+        if resource_owners_layout.contains_key(from.hash()) && resource_owners_layout[from.hash()].is_struct_group {
+            let is_member = resource_owners_layout[from.hash()].is_member;
+            let owner_key = resource_owners_layout[from.hash()].owner as i64;
+            let owner_entry = ensure_owner_entry(output, owner_key);
+            if is_member {
+                owner_entry.1.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+            } else {
+                owner_entry.0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
+            }
+        }
+        else {
+            output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
         }
     }
 }
