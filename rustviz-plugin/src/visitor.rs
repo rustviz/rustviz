@@ -5317,7 +5317,6 @@ fn literal_temporary_name(expr: &Expr) -> Option<String> {
       let name = match qpath {
         QPath::Resolved(_, p) => p.segments.iter().map(|s| s.ident.as_str()).collect::<Vec<_>>().join("::"),
         QPath::TypeRelative(_, seg) => seg.ident.as_str().to_owned(),
-        _ => return None,
       };
       Some(format!("{} {{ .. }}", name))
     }

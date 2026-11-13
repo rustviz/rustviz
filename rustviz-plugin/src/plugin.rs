@@ -85,32 +85,37 @@ fn find_compiled_file(tcx: TyCtxt, wanted: &str) -> Option<std::path::PathBuf> {
 // "The main function"
 pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
 
-  // configure the logger
-  let log_file = match OpenOptions::new()
-    .create(true)
-    .write(true)
-    .truncate(true)
-    .open("output.log")
-  {
-    Ok(file) => file,
-    Err(e) => {
-        eprintln!("Error opening log file: {:?}", e);
-        return;
-    }
-  };
-  CombinedLogger::init(
-    vec![
-        WriteLogger::new(
-            LevelFilter::Info,
-            Config::default(),
-            log_file,
-        )
-    ]
-  ).expect("Failed to initialize logger");
+  // The visitor's `info!` trace goes to a file only when asked for:
+  // `RUSTVIZ_DEBUG_LOG=1` writes `output.log` in the current directory,
+  // and any other non-empty value is the path to write. (It used to be
+  // created, and truncated, in the cwd on every run.)
+  if let Some(want) = std::env::var_os("RUSTVIZ_DEBUG_LOG").filter(|v| !v.is_empty()) {
+    let path = if want == "1" { std::ffi::OsString::from("output.log") } else { want };
+    let log_file = match OpenOptions::new()
+      .create(true)
+      .write(true)
+      .truncate(true)
+      .open(&path)
+    {
+      Ok(file) => file,
+      Err(e) => {
+          eprintln!("Error opening log file {:?}: {:?}", path, e);
+          return;
+      }
+    };
+    CombinedLogger::init(
+      vec![
+          WriteLogger::new(
+              LevelFilter::Info,
+              Config::default(),
+              log_file,
+          )
+      ]
+    ).expect("Failed to initialize logger");
+  }
 
   // Data structures to be passed to visitor
   let mut testing_helper: RV1Helper = RV1Helper::new();
-  let mut line_map: BTreeMap<usize, String> = BTreeMap::new();
   let mut line_map2: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
   // The file to visualize: `--file`, or else the crate root rustc is
   // compiling (`src/lib.rs` or `src/main.rs`).
@@ -136,17 +141,14 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
       None => true,
     }
   };
-  match testing_helper.initialize_line_map(root_file) {
-    Ok(l) => {
-      line_map = l;
-    }
+  let a_map: BTreeMap<usize, String> = match testing_helper.initialize_line_map(root_file) {
+    Ok(l) => l,
     Err(e) => {
       error!("{}", e);
       eprintln!("RustViz couldn't read the crate's source file ({e}). RustViz visualizes a single-file crate: src/lib.rs or src/main.rs.");
       std::process::exit(1);
     }
-  }
-  let a_map: BTreeMap<usize, String> = line_map.clone();
+  };
   // Lines carrying a `// rustviz: skip` or `// rustviz: hide`
   // marker. Both kinds bypass body traversal here and visit_local
   // suppression in the per-fn visitor; the `hide` subset is also

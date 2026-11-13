@@ -10,19 +10,6 @@ use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, Stmt
 
 use crate::expr_visitor::{RapData, RefData};
 
-// outdated function don't use this to find a name of a variable/hir_id
-pub fn extract_var_name(input_string: &str ) -> Option<String> {
-  let start_index = input_string.find('`')? + 1;
-  let end_index = input_string.rfind('`')?;
-  let rough_string=input_string[start_index..end_index].to_owned();
-  if rough_string.contains("String::from"){
-    Some(String::from("String::from"))
-  }
-  else{
-    Some(rough_string)
-  }
-}
-
 // Best-effort name extraction from a HIR id. Originally implemented by
 // pretty-printing the node and grepping for backticked tokens; that pretty
 // printer (`Map::node_to_string`) was removed in rustc 1.85, so we now walk
@@ -1041,16 +1028,6 @@ pub fn scoped_in_events(events: &[(usize, ExternalEvent)], exit_drops: &HashSet<
     .filter(|(_, ev)| !exit_drops.contains(&ev.get_id()))
     .filter_map(|(_, ev)| ev.is_gos_ev().cloned())
     .collect()
-}
-
-// Used for filtering events from the main event container
-pub fn filter_ev((line_num, _ev): &(usize, ExternalEvent), split: usize, merge: usize) -> bool {
-  if *line_num <= merge && *line_num >= split {
-    true
-  }
-  else {
-    false
-  }
 }
 
 // REBORROW HELPERS
