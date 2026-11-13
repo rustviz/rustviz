@@ -62,7 +62,7 @@ in ` ```rv ` blocks (the marker is stripped from the displayed code):
   (`#[derive(..)]`); the attributes are hidden with it. Calls into a
   hidden fn still draw their arrows, and a hidden struct's fields still get
   columns where an instance is used. On any other line (a `let`, a `mod`)
-  `hide` hides nothing, and the plugin prints a warning on its stderr.
+  `hide` hides nothing.
 
 Run `mdbook build` (or `mdbook serve`) as usual. For verbose logs, set
 `RUST_LOG=info`.

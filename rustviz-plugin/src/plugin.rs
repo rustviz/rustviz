@@ -159,8 +159,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // preceding blank line if any — keeps the surrounding spacing
   // tidy when fns at the end of the file are removed).
   let mut hidden_source_lines: HashSet<usize> = HashSet::new();
-  // `hide` markers that hid something, to warn about the rest.
-  let mut used_hide_markers: HashSet<usize> = HashSet::new();
   let mut shadow_notes_by_fq: HashMap<String, ShadowNote> = HashMap::new();
   let mut a_line_map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
   let mut owner_to_hash: HashMap<String, usize> = HashMap::new();
@@ -196,7 +194,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
     // attributes, so `#[derive(..)]`, included) from the code panel, as for
     // a hidden fn. A hidden `impl` is not traced either, like a hidden fn.
     // `fn`s handle their own marker below; a marker on a `mod` or anywhere
-    // else is reported after the loop.
+    // else hides nothing.
     if !matches!(item.kind, ItemKind::Fn { .. } | ItemKind::Mod(..)) {
       let sm = tcx.sess.source_map();
       let first = sm.lookup_char_pos(item.span.lo()).line;
@@ -208,7 +206,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         start -= 1;
       }
       if let Some(m) = (start..=first).find(|l| hide_marker_lines.contains(l)) {
-        used_hide_markers.insert(m);
         for l in start..=last {
           hidden_source_lines.insert(l);
         }
@@ -254,7 +251,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             // visited), so moves into / out of it still appear.
             if skip_lines.contains(&fn_start_line) {
               if hide_marker_lines.contains(&fn_start_line) {
-                used_hide_markers.insert(fn_start_line);
                 let body_end_line = tcx.sess.source_map()
                   .lookup_char_pos(hir_body.value.span.hi()).line;
                 for l in fn_start_line..=body_end_line {
@@ -386,7 +382,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         // into / out of it still appear.
         if skip_lines.contains(&fn_start_line) {
           if hide_marker_lines.contains(&fn_start_line) {
-            used_hide_markers.insert(fn_start_line);
             let body_end_line = tcx.sess.source_map()
               .lookup_char_pos(hir_body.value.span.hi()).line;
             for l in fn_start_line..=body_end_line {
@@ -558,14 +553,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
-  // A `hide` marker that hid nothing is reported, not silently dropped.
-  let mut unused: Vec<usize> = (&hide_marker_lines - &used_hide_markers).into_iter().collect();
-  unused.sort();
-  for l in unused {
-    eprintln!(
-      "warning: `// rustviz: hide` on line {l} hides nothing: it applies to a fn, struct, enum, union, impl, trait, use, type, const or static item, on the line the item starts on (or on its `#[..]` attribute line)"
-    );
-  }
   match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, hidden_source_lines, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {

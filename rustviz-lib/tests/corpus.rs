@@ -19495,7 +19495,7 @@ fn hide_marker_hides_struct_enum_impl_use() {
 
 /// #814: a `hide` marker that hides nothing (here on a `let`) is not an
 /// error and changes nothing in the code panel apart from the stripped
-/// marker; the plugin warns about it on stderr.
+/// marker.
 #[test]
 fn misplaced_hide_marker_keeps_the_line() {
     let rv = run_with_local_backend("hide_misplaced_814");
