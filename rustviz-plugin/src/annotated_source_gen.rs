@@ -17,7 +17,53 @@ use rustc_span::{BytePos, Span};
 const ARG_TRACING_MACROS: &[&str] = &[
   "assert!", "assert_eq!", "assert_ne!",
   "debug_assert!", "debug_assert_eq!", "debug_assert_ne!",
+  // Formatting macros (#824).
+  "println!", "print!", "eprintln!", "eprint!", "format!", "write!",
+  "writeln!", "panic!", "unreachable!", "todo!", "unimplemented!",
 ];
+
+/// Byte ranges (start of the opening quote, end of the closing quote) of
+/// the string literals in `src`, including raw strings.
+fn string_literal_ranges(src: &str) -> Vec<(usize, usize)> {
+  let b = src.as_bytes();
+  let mut out = Vec::new();
+  let mut i = 0;
+  while i < b.len() {
+    let start = i;
+    let mut hashes = 0;
+    let mut j = i;
+    if b[j] == b'r' && (j == 0 || !(b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_')) {
+      j += 1;
+      while j < b.len() && b[j] == b'#' { hashes += 1; j += 1; }
+      if j < b.len() && b[j] == b'"' {
+        let mut k = j + 1;
+        while k < b.len() {
+          if b[k] == b'"' && b[k + 1..].iter().take(hashes).filter(|&&c| c == b'#').count() == hashes {
+            break;
+          }
+          k += 1;
+        }
+        let end = (k + 1 + hashes).min(b.len());
+        out.push((start, end));
+        i = end;
+        continue;
+      }
+    }
+    if b[i] == b'"' {
+      let mut k = i + 1;
+      while k < b.len() && b[k] != b'"' {
+        if b[k] == b'\\' { k += 1; }
+        k += 1;
+      }
+      let end = (k + 1).min(b.len());
+      out.push((start, end));
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  out
+}
 
 /// Collects the maximal user-written sub-expressions of a macro
 /// expansion: the arguments the user typed, not the code the macro
@@ -99,7 +145,21 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
     if crate::visitor::user_macro_name(expr.span).is_some_and(|m| ARG_TRACING_MACROS.contains(&m.as_str())) {
       let mut found = UserArgs { args: Vec::new() };
       intravisit::walk_expr(&mut found, expr);
+      let sm = self.tcx.sess.source_map();
+      let call = expr.span.source_callsite();
+      let call_text = sm.span_to_snippet(call).unwrap_or_default();
+      let strings = string_literal_ranges(&call_text);
       for arg in found.args {
+        // An implicit format capture (`println!("{s}")`) is an
+        // expression whose span sits inside the format string; the
+        // code panel can't nest a highlight in the string's own span,
+        // so leave it plain.
+        if arg.span.lo() >= call.lo() && arg.span.hi() <= call.hi() {
+          let (lo, hi) = ((arg.span.lo() - call.lo()).0 as usize, (arg.span.hi() - call.lo()).0 as usize);
+          if strings.iter().any(|&(a, b)| lo > a && hi < b) {
+            continue;
+          }
+        }
         self.annotate_expr(arg);
       }
       return;
