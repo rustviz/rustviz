@@ -286,38 +286,34 @@ function displayTooltip(tooltip, classname) {
 }
 
 
-// Where the pointer is, in viewport coordinates, plus the gaps the tooltip
-// keeps from it. With <object> embedding (mdbook-rustviz), evt.clientX/Y are
-// local to the SVG document, so the panel's bounding rect maps them into the
-// viewport. With inline SVG (`rustviz html`, the playground), they already
-// are viewport coordinates.
+// Where the pointer is, in viewport coordinates. With <object> embedding
+// (mdbook-rustviz), evt.clientX/Y are local to the SVG document, so the
+// panel's bounding rect maps them into the viewport. With inline SVG
+// (`rustviz html`, the playground), they already are viewport coordinates.
 function mousePos(evt, obj) {
     if (obj && obj.contentDocument) {
         let r = obj.getBoundingClientRect();
-        return { x: evt.clientX + r.x, y: evt.clientY + r.y, dx: 15, dy: 45 };
+        return { x: evt.clientX + r.x, y: evt.clientY + r.y };
     }
-    return { x: evt.clientX, y: evt.clientY, dx: 15, dy: 25 };
+    return { x: evt.clientX, y: evt.clientY };
 }
 
-// Top-left of the tooltip, in page coordinates (it is position:absolute), so
-// that its whole box stays inside the visible viewport. By default it sits
-// below and to the right of the pointer; if that would cross the right edge it
-// flips to the left of the pointer, and if it would cross the bottom it flips
-// above. A box still too big for either side (or a very narrow viewport) is
-// clamped to the margin. It never crosses the left or top edge. Works whatever
-// the page scroll or an mdbook sidebar does to the layout, because the
-// decision is made in viewport coordinates and the scroll offset is added last.
+// Gaps between the pointer and the tooltip box, like a native tooltip: by
+// default 12px right of and 16px below the pointer; flipped left its right
+// edge is 12px left of the pointer, flipped up its bottom edge 8px above it.
+const TOOLTIP_DX = 12, TOOLTIP_DY = 16, TOOLTIP_UP_GAP = 8;
+
 function placeTooltip(tooltip, mouse) {
     const margin = 8;
     const vw = document.documentElement.clientWidth || window.innerWidth;
     const vh = window.innerHeight || document.documentElement.clientHeight;
     const w = tooltip.offsetWidth;
     const h = tooltip.offsetHeight;
-    let x = mouse.x + mouse.dx;
-    if (x + w > vw - margin) x = mouse.x - mouse.dx - w;
+    let x = mouse.x + TOOLTIP_DX;
+    if (x + w > vw - margin) x = mouse.x - TOOLTIP_DX - w;
     x = Math.max(margin, Math.min(x, vw - margin - w));
-    let y = mouse.y + mouse.dy;
-    if (y + h > vh - margin) y = mouse.y - 15 - h;
+    let y = mouse.y + TOOLTIP_DY;
+    if (y + h > vh - margin) y = mouse.y - TOOLTIP_UP_GAP - h;
     y = Math.max(margin, Math.min(y, vh - margin - h));
     return {
         x: Math.round(x + window.scrollX),
