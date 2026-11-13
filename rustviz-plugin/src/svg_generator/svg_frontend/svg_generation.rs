@@ -19,6 +19,9 @@ struct SvgData {
     height: i32,
 }
 
+/// Empty space kept below the last code line's text baseline, in px.
+const BOTTOM_MARGIN: i32 = 25;
+
 fn sort_branch_external_events(b_data: & mut ExtBranchData) {
     // sort first,
     for (_, event_vec) in b_data.line_map.iter_mut() {
@@ -1107,7 +1110,12 @@ pub fn render_svg(
         diagram: timeline_panel_string,
         tl_id: "tl_".to_owned() + "vis",
         tl_width: code_panel_width,
-        height: (num_lines * LINE_SPACE as i32 + 80) + 50,
+        // The last code line's text sits at y = LINE_SPACE * (num_lines + 1).
+        // Nothing in either panel is drawn more than ~5px below it (a
+        // drop dot's radius, or a glyph's descender), so a fixed margin
+        // below it leaves an even gap about as tall as the one above
+        // the first line. It used to be a fixed 100px band (#844).
+        height: (num_lines + 1) * LINE_SPACE as i32 + BOTTOM_MARGIN,
     };
 
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();
