@@ -9,7 +9,7 @@ family as Flowistry / Aquascope).
 
 End users typically don't touch this crate directly — they use one of:
 
-- the **`rustviz` CLI** in [`rustviz-cli`](https://crates.io/crates/rustviz-cli) (`rustviz svg foo.rs`, `rustviz html foo.rs`),
+- the **`rustviz` CLI** in [`rustviz`](https://crates.io/crates/rustviz) (`rustviz svg foo.rs`, `rustviz html foo.rs`),
 - the **`mdbook-rustviz` preprocessor** in [`mdbook-rustviz`](https://crates.io/crates/mdbook-rustviz) (` ```rv ` fenced blocks),
 - the **playground** in [`../playground/`](../playground/), or
 - the **`rustviz-lib` Rust library** in [`rustviz-lib`](https://crates.io/crates/rustviz-lib).
@@ -25,7 +25,7 @@ The standard install path is via the `rustviz` CLI's bootstrap, which
 also installs the matching nightly toolchain:
 
 ```sh
-cargo install rustviz-cli
+cargo install rustviz
 rustviz init
 ```
 

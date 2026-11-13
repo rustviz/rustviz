@@ -5,7 +5,7 @@ Renders a single Rust source file to a code-panel + timeline-panel SVG
 pair, or to a single self-contained HTML page.
 
 ```sh
-cargo install rustviz-cli
+cargo install rustviz             # (`cargo install rustviz-cli` installs the same binary)
 rustviz init                       # one-time: nightly toolchain + plugin
 
 rustviz svg foo.rs                 # writes foo.code.svg + foo.timeline.svg
