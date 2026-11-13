@@ -167,7 +167,7 @@ pub enum InteriorMut {
 }
 
 // when something is not a reference
-#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+#[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
 pub struct Owner {
     pub name: String,
     pub hash: u64,
@@ -903,13 +903,6 @@ impl ResourceAccessPoint {
         }
     }
 
-    pub fn is_owner(&self) -> bool {
-        match self {
-            ResourceAccessPoint::Owner(_) => true,
-            _ => false
-        }
-    }
-
     pub fn is_fn(&self) -> bool {
         match self {
             ResourceAccessPoint::Function(_) => true,
@@ -937,11 +930,6 @@ pub enum BranchType {
 pub const IF_LET_ARM: &str = "If let";
 
 impl BranchType {
-    /// An `if let`: its first arm starts by binding the pattern, on the
-    /// split line (see `IF_LET_ARM`).
-    pub fn is_if_let(&self) -> bool {
-        matches!(self, BranchType::If(labels, _) if labels.first().is_some_and(|l| l == IF_LET_ARM))
-    }
     pub fn get_start_end(&self, index: usize) -> (usize, usize) {
         match self {
             BranchType::If(_, v) 
@@ -2634,24 +2622,6 @@ impl Event {
                 *x
             }
             _ => 1000000000
-        }
-    }
-    pub fn extract_is(&self) -> &ResourceTy {
-        match self {
-            Event::Duplicate {is: x , ..} | Event::Move {is: x, ..} | Event::StaticLend {is : x, ..} | 
-            Event::MutableLend {is: x, ..} | Event::MutableDie {is: x, ..} | Event::StaticDie {is: x, ..} | 
-            Event::Acquire { is: x, .. } | Event::Copy { is: x, .. } | Event::MutableBorrow { is: x, .. } |
-            Event::StaticBorrow { is: x, .. } | Event::StaticReacquire { is: x, .. } | Event::MutableReacquire {is: x, ..}
-            | Event::Branch { is: x, .. } | Event::ClosureCall { is: x, .. } => {
-                x
-            }
-            _ => &ResourceTy::Anonymous
-        }
-    }
-    pub fn is_branch(&self) -> bool {
-        match self {
-            Event::Branch { .. } => true, 
-            _ => false
         }
     }
     pub fn deref_name <'a>(&self, name: &'a mut String) -> & 'a String {

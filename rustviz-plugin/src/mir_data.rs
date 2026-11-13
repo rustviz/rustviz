@@ -618,24 +618,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
     }
 
-    // would be nice to use MIR to figure out where drops occur rather than our own internal state logic
-    pub fn gather_drop_data(&self, body_with_facts: &BodyWithBorrowckFacts) -> HashMap<String, usize> {
-        // compute local to name map
-        let loc_to_source_name = self.mir_local_names(body_with_facts);
-
-        let mut res = HashMap::new();
-        for (local, loc_idx) in body_with_facts.input_facts.as_ref().unwrap().var_dropped_at.iter() {
-            let line = self.location_to_line(self.point_to_location(*loc_idx, body_with_facts), body_with_facts);
-            match loc_to_source_name.get(local) {
-                Some(s) => {
-                    res.insert(s.to_owned(), line);
-                }
-                None => {}
-            }
-        }
-        res
-    }
-
 
     /// The loan issued at exactly the `&x` expression `r` was assigned
     /// from (#233). Only the kill line is used, as in `borrow_match`.

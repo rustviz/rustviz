@@ -682,29 +682,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  pub fn is_return_type_ref(&self,fn_expr:&Expr) -> bool{
-    if let Some(return_type)=self.return_type_of(fn_expr){
-      return_type.is_ref()
-    }
-    else{
-      false
-    }
-  }
-
-  pub fn is_return_type_copyable(&self,fn_expr:&Expr)->bool{
-    if let Some(return_type)=self.return_type_of(fn_expr){
-      if return_type.walk().fold(false,|flag,item|{flag||item.expect_ty().is_ref()}) {
-        false
-      }
-      else{
-        self.tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(self.tcx, fn_expr.hir_id.owner), return_type)
-      }
-    }
-    else{
-      false
-    }
-  }
-
   // updates the lifetime of a loan (as well as for each of the aliases associated with this loan)
   pub fn update_lifetime(&mut self, name: &String, line:usize){
     self.borrow_map.get_mut(name).unwrap().lifetime = line;
@@ -843,13 +820,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds an owner RAP
   pub fn add_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, ctor_temp: false, scrutinee: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, ..Default::default()}), scope, is_global);
   }
 
   // Adds an owner RAP for a `union`-typed binding (one opaque column;
   // see the AdtKind::Union arms).
   pub fn add_union_owner(&mut self, name: String, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_closure: false, is_union: true, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, ctor_temp: false, scrutinee: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy, is_plain_value, interior_mut, is_union: true, ..Default::default()}), scope, is_global);
   }
 
   /// `Some(kind)` iff `ty` is `Rc<T>`, `Arc<T>` or one of their
@@ -1093,7 +1070,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
   pub fn add_closure_owner(&mut self, name: String, mutability: bool, is_plain_value: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value, interior_mut: InteriorMut::No, is_closure: true, is_union: false, is_manually_drop: false, unbound_temp: false, let_literal_temp: false, temp_part: None, ctor_temp: false, scrutinee: None, write: Default::default(), holds_borrow: false, rc: None, rc_inside: None, holds: None, box_contents_moved: false}), scope, is_global);
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value, interior_mut: InteriorMut::No, is_closure: true, ..Default::default()}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -3282,14 +3259,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         true => self.add_ev(line_num, Evt::Copy, to_ro, from_ro, false),
         false => self.add_ev(line_num, Evt::Move, to_ro, from_ro, false)
       }
-    }
-  }
-
-  // Update the aliasing data for an alias
-  pub fn update_aliasing_data(& mut self, alias: &String, new_data: &BTreeMap<usize, String>, offset: usize) {
-    let ref_data = self.borrow_map.get_mut(alias).unwrap();
-    for (k, v) in new_data {
-      ref_data.aliasing.insert(*k + offset, v.to_owned());
     }
   }
 
