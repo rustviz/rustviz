@@ -337,7 +337,7 @@ impl ColumnKind {
     };
     if fields {
       ColumnKind::Fields(ty.to_string())
-    } else if tcx.type_is_copy_modulo_regions(rustc_middle::ty::TypingEnv::post_analysis(tcx, owner), ty) {
+    } else if tcx.type_is_copy_modulo_regions(typing_env(tcx, owner), ty) {
       ColumnKind::Copy
     } else if crate::expr_visitor::ty_is_plain(tcx, ty, owner) {
       ColumnKind::Plain
@@ -1904,4 +1904,31 @@ pub fn vec_macro_elems<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>
     }
   }
   find(expr)
+}
+
+/// The typing environment for judging types that occur in the body of
+/// `owner` (an `expr.hir_id.owner` or `pat.hir_id.owner`).
+pub fn typing_env<'tcx>(tcx: TyCtxt<'tcx>, owner: rustc_hir::OwnerId) -> rustc_middle::ty::TypingEnv<'tcx> {
+  rustc_middle::ty::TypingEnv::post_analysis(tcx, owner)
+}
+
+/// Whether `ty` has drop glue, in the environment of `owner`: the one
+/// place the plugin asks rustc `needs_drop`. This is the raw answer, which
+/// is host-dependent for the std lock types (`Mutex`, `RwLock`, ...): on
+/// macOS they have drop glue, on Linux and Windows they don't. Wording
+/// that must not depend on the host (what a column holds, "value" or
+/// "resource") goes through `expr_visitor::ty_is_plain`, which adds the
+/// std-lock rule and treats closures by their captures (#813, #822).
+/// Drops that are stated or drawn follow the compiler's real drop glue,
+/// so they use this one.
+pub fn needs_drop<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
+  needs_drop_in(tcx, ty, typing_env(tcx, owner))
+}
+
+/// `needs_drop` with an environment the caller already has (for example
+/// `TypingEnv::fully_monomorphized()` for a type taken from a library
+/// definition, or an `env` threaded through helpers that also ask
+/// `is_copy`).
+pub fn needs_drop_in<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
+  ty.needs_drop(tcx, env)
 }
