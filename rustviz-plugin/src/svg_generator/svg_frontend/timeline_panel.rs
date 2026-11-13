@@ -2375,9 +2375,8 @@ fn closure_value_title(event: &Event, my_name: &String, visualization_data: &Vis
     let h_rap = h.extract_rap()?;
     let owns = closure_move_capture_count(visualization_data, *g_rap.hash()) > 0;
     Some(match event {
-        Event::Duplicate { .. } => hover_messages::event_dot_copy_to(my_name, &h.name()),
-        Event::Move { .. } if owns => hover_messages::event_dot_move_to(my_name, &h.name()),
-        Event::Move { .. } => hover_messages::event_dot_move_to_value(my_name, &h.name()),
+        Event::Duplicate { .. } => hover_messages::event_dot_copy_to(my_name),
+        Event::Move { .. } => hover_messages::event_dot_move_to(my_name, !owns),
         _ => {
             let borrows = closure_borrow_count(visualization_data, *h_rap.hash());
             // `h = g;` after h had a value (a Copy closure: the old
@@ -3321,14 +3320,13 @@ fn render_arrow (
             // A returned `&T` is a copy of the reference, not of the data.
             // A returned `&mut T` moves the reference, not the data.
             let ptc = rap.points_to_copy();
-            let message: Box<dyn Fn(&String, &String) -> String> = match external_event {
+            let message: Box<dyn Fn(&String) -> String> = match external_event {
                 ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::StaticRef(_)), .. } =>
                     Box::new(hover_messages::event_dot_copy_ref_to_caller),
                 ExternalEvent::Copy { .. } => Box::new(hover_messages::event_dot_copy_to_caller),
                 ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::MutRef(_)), .. } =>
-                    Box::new(move |name: &String, _: &String| hover_messages::event_dot_ref_moved(name, true, ptc, true)),
-                _ if rap.holds_value() => Box::new(hover_messages::event_dot_move_to_caller_value),
-                _ => Box::new(hover_messages::event_dot_move_to_caller),
+                    Box::new(move |name: &String| hover_messages::event_dot_ref_moved(name, true, ptc, true)),
+                _ => { let v = rap.holds_value(); Box::new(move |name: &String| hover_messages::event_dot_move_to_caller(name, v)) }
             };
             let title = match external_event {
                 // `&self.s` returned: a reborrow through `self` (#784).
@@ -3343,10 +3341,7 @@ fn render_arrow (
                 ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } =>
                     hover_messages::event_dot_copy_through_deref_field(
                         r.name(), place, &"the caller".to_string(), r.points_to_copy()),
-                _ => message(
-                    &rap.name().to_string(),
-                    &"the caller".to_string(),
-                ),
+                _ => message(&rap.name().to_string()),
             };
 
             let rendered = format!(
@@ -4539,7 +4534,7 @@ fn push_seg_if_renderable(
         state,
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray }
     ) {
-        hover_messages::state_inactive_arm(rap.name(), arm_label)
+        hover_messages::state_inactive_arm(arm_label)
     } else {
         timeline_segment_title(&state, rap, visualization_data, None)
     };

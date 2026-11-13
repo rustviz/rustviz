@@ -2191,21 +2191,17 @@ fn is_plain(rty: &ResourceTy) -> bool {
     matches!(rty, ResourceTy::Value(r) if r.holds_value())
 }
 
-fn safe_message(
-    message_functor: fn(&String, &String) -> String,
-    my_name: &String,
-    some_target: &ResourceTy
-) -> String {
-
-    let target_name = match some_target {
+// The name a tooltip uses for the other end of an event: a dereferenced
+// target reads `*r`.
+fn target_name(some_target: &ResourceTy) -> String {
+    match some_target {
         ResourceTy::Deref(r) => {
             let mut temp = r.name().clone();
             temp.insert(0, '*');
             temp
         }
         _ => some_target.name()
-    };
-    message_functor(my_name, &target_name)
+    }
 }
 
 
@@ -2218,8 +2214,8 @@ impl State {
             State::ResourceMoved{ dropped_by_hand: true, .. } => {
                 hover_messages::state_dropped_by_hand(my_name)
             }
-            State::ResourceMoved{ move_to , move_at_line: _, .. } => {
-                safe_message(hover_messages::state_resource_moved, my_name, move_to)
+            State::ResourceMoved{ move_at_line: _, .. } => {
+                hover_messages::state_resource_moved(my_name)
             }
             State::FullPrivilege { s: LineState::Uninit } => {
                 hover_messages::state_uninitialized(my_name)
@@ -2230,8 +2226,8 @@ impl State {
             State::PartialPrivilege { .. } => {
                 hover_messages::state_partial_privilege(my_name, false)
             }
-            State::RevokedPrivilege { to: _, borrow_to , prev_state: _} => {
-                safe_message(hover_messages::state_resource_revoked, my_name, borrow_to)
+            State::RevokedPrivilege { to: _, borrow_to: _, prev_state: _} => {
+                hover_messages::state_resource_revoked(my_name)
             }
             State::Invalid => {
                 hover_messages::state_invalid(my_name)
@@ -2714,10 +2710,10 @@ impl Event {
                 hover_messages::event_dot_closure_call_once(my_name, fates)
             }
             Event::OwnerGoOutOfScope => {
-                hover_messages::event_dot_owner_go_out_out_scope(my_name)
+                hover_messages::event_dot_owner_go_out_of_scope(my_name)
             }
             Event::RefGoOutOfScope => {
-                hover_messages::event_dot_ref_go_out_out_scope(my_name)
+                hover_messages::event_dot_ref_go_out_of_scope(my_name)
             }
             Event::OwnerDropAtReassign { parts: Some(p), .. } => {
                 hover_messages::event_dot_struct_drop_at_reassign_partial(my_name, p)
@@ -2757,8 +2753,8 @@ impl Event {
             Event::OrAltBorrow { sources, mutable, end, .. } => {
                 match (*end, *mutable) {
                     (false, _) => hover_messages::event_dot_or_alt_borrow(my_name, sources, *mutable),
-                    (true, false) => hover_messages::event_dot_static_return(my_name, my_name),
-                    (true, true) => hover_messages::event_dot_mut_return(my_name, my_name),
+                    (true, false) => hover_messages::event_dot_static_return(my_name),
+                    (true, true) => hover_messages::event_dot_mut_return(my_name),
                 }
             }
             // The column of the value a `ref` binding borrows (#691).
@@ -2897,11 +2893,11 @@ impl Event {
                     }
                     // Returning a `&T` copies the reference, not the referent.
                     ResourceTy::Caller if matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
-                        safe_message(hover_messages::event_dot_copy_ref_to_caller, &self.deref_name(my_name), to),
-                    ResourceTy::Caller => safe_message(hover_messages::event_dot_copy_to_caller, &self.deref_name(my_name), to),
+                        hover_messages::event_dot_copy_ref_to_caller(&self.deref_name(my_name)),
+                    ResourceTy::Caller => hover_messages::event_dot_copy_to_caller(&self.deref_name(my_name)),
                     _ if !to.is_closure() && matches!(is, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) =>
                         hover_messages::event_dot_ref_copied(my_name, is.extract_rap().map_or(false, |r| r.points_to_copy())),
-                    _ => safe_message(hover_messages::event_dot_copy_to, &self.deref_name(my_name), to)
+                    _ => hover_messages::event_dot_copy_to(&self.deref_name(my_name))
                 }
             }
             // `let n = r?;` / `r?`: the `?` moves r (#652).
@@ -2935,7 +2931,7 @@ impl Event {
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
                 match to {
-                    ResourceTy::Caller => safe_message(if v { hover_messages::event_dot_move_to_caller_value } else { hover_messages::event_dot_move_to_caller }, &self.deref_name(my_name), to),
+                    ResourceTy::Caller => hover_messages::event_dot_move_to_caller(&self.deref_name(my_name), v),
                     ResourceTy::Temporary { tuple: Some(t), .. } => hover_messages::event_dot_move_to_tuple_temporary(&self.deref_name(my_name), t, v),
                     ResourceTy::Temporary { extended, tuple: None } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
                     // `vec![s];`: s is moved into the temporary the macro or
@@ -2948,8 +2944,8 @@ impl Event {
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
                             &is.extract_rap().map_or(String::new(), |r| r.drop_note())),
-                    _ if to.is_closure() => safe_message(if v { hover_messages::event_dot_capture_move_to_closure_value } else { hover_messages::event_dot_capture_move_to_closure }, &self.deref_name(my_name), to),
-                    _ => safe_message(if v { hover_messages::event_dot_move_to_value } else { hover_messages::event_dot_move_to }, &self.deref_name(my_name), to),
+                    _ if to.is_closure() => hover_messages::event_dot_capture_move_to_closure(&self.deref_name(my_name), &target_name(to), v),
+                    _ => hover_messages::event_dot_move_to(&self.deref_name(my_name), v),
                 }
 
             }
@@ -2958,7 +2954,7 @@ impl Event {
                 // lender is handled by event_dot_lend_through_ref.
                 let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 if to.is_closure() {
-                    let target_name = safe_message(|_, t| t.clone(), my_name, to);
+                    let target_name = target_name(to);
                     hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
                 } else {
                     // `is` is the lender. A `&T` lender was read-only
@@ -2967,7 +2963,7 @@ impl Event {
                     // the shared borrow); see event_dot_static_lend.
                     let omit_read_only = is.extract_rap()
                         .map_or(true, |r| (r.is_ref() && !r.is_mutref()) || r.may_have_interior_mut());
-                    let target_name = safe_message(|_, t| t.clone(), my_name, to);
+                    let target_name = target_name(to);
                     if let Some(r) = ref_lender(is) {
                         return hover_messages::event_dot_lend_through_ref(r.name(), &target_name, false, r.is_mutref(), r.points_to_copy());
                     }
@@ -2976,7 +2972,7 @@ impl Event {
             }
             Event::MutableLend{ to, is, ..} => {
                 let is_copy = matches!(is, ResourceTy::Value(r) if r.holds_value());
-                let target_name = safe_message(|_, t| t.clone(), my_name, to);
+                let target_name = target_name(to);
                 if to.is_closure() {
                     hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, is_copy)
                 } else if let Some(r) = ref_lender(is) {
@@ -2985,11 +2981,11 @@ impl Event {
                     hover_messages::event_dot_mut_lend(&self.deref_name(my_name), &target_name, is_copy)
                 }
             }
-            Event::StaticDie{ to,.. } => {
-                safe_message(hover_messages::event_dot_static_return, &self.deref_name(my_name), to)
+            Event::StaticDie{ .. } => {
+                hover_messages::event_dot_static_return(&self.deref_name(my_name))
             }
-            Event::MutableDie{ to ,..} => {
-                safe_message(hover_messages::event_dot_mut_return, &self.deref_name(my_name), to)
+            Event::MutableDie{ .. } => {
+                hover_messages::event_dot_mut_return(&self.deref_name(my_name))
             }
             // arrow going in
             // `n` in `let n = r?;` (#652).
@@ -3017,7 +3013,7 @@ impl Event {
                     // (the closure literal's own Bind) keeps the
                     // generic message because there's no captured
                     // upvar to name on the closure side yet.
-                    safe_message(if from.extract_rap().map_or(false, |r| r.holds_value()) { hover_messages::event_dot_closure_capture_acquire_value } else { hover_messages::event_dot_closure_capture_acquire }, &self.deref_name(my_name), from)
+                    hover_messages::event_dot_closure_capture_acquire(&self.deref_name(my_name), &target_name(from), from.extract_rap().map_or(false, |r| r.holds_value()))
                 } else if let ResourceTy::Index(r, place, write) = is {
                     // `v[i] = s;` / `v[i] = 5;` assigns to the place
                     // `v[i]`: it reads like a plain assignment, and v
@@ -3089,10 +3085,10 @@ impl Event {
                 } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, temp_part: Some(part), .. })) = is {
                     // `make_p().name`, `match make() { Some(s) => .. }`:
                     // part of the value is moved out (#469).
-                    hover_messages::event_dot_unbound_temporary_part_acquire(&self.deref_name(my_name), &from.name(), part)
+                    hover_messages::event_dot_unbound_temporary_part_acquire(&from.name(), part)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
                     // `make();`, `make().len()`: nothing takes the value.
-                    safe_message(hover_messages::event_dot_unbound_temporary_acquire, &self.deref_name(my_name), from)
+                    hover_messages::event_dot_unbound_temporary_acquire(&target_name(from))
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_temporary()) {
                     // `let r = &String::from("a");`: say why this
                     // temporary has a column until the end of the
@@ -3106,15 +3102,15 @@ impl Event {
                     // for the iterand, #504). "Acquires ownership" is the wrong
                     // mental model for Copy types — there's no heap
                     // resource to own.
-                    safe_message(hover_messages::event_dot_acquire_copyable, &self.deref_name(my_name), from)
+                    hover_messages::event_dot_acquire_copyable(&self.deref_name(my_name))
                 } else if is_plain(is) {
                     // A non-Copy value with nothing to drop (an iterator
                     // over borrowed data, a struct of integers), or a
                     // Copy field that came along with its parent: a
                     // value, not a resource (#484).
-                    safe_message(hover_messages::event_dot_acquire_value, &self.deref_name(my_name), from)
+                    hover_messages::event_dot_acquire_value(&self.deref_name(my_name))
                 } else {
-                    safe_message(hover_messages::event_dot_acquire, &self.deref_name(my_name), from)
+                    hover_messages::event_dot_acquire(&self.deref_name(my_name))
                 }
             }
             Event::Copy{ from, is: ResourceTy::Index(r, place, write), ..} => {
@@ -3148,7 +3144,7 @@ impl Event {
             Event::Copy{ from: ResourceTy::Anonymous, is, ..} => {
                 match is.extract_rap().filter(|rap| rap.is_ref()) {
                     Some(rap) => hover_messages::event_dot_ref_acquire(&self.deref_name(my_name), rap.is_mutref()),
-                    None => hover_messages::event_dot_acquire_copyable(&self.deref_name(my_name), &String::new()),
+                    None => hover_messages::event_dot_acquire_copyable(&self.deref_name(my_name)),
                 }
             }
             // The result of a call (`let n = v.len();`, `v.len() as i32`)
@@ -3158,7 +3154,7 @@ impl Event {
                 hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, f.cast_to.as_deref(), f.inside.as_deref())
             }
             Event::Copy{ from ,..} => {
-                safe_message(hover_messages::event_dot_copy_from, &self.deref_name(my_name), from)
+                hover_messages::event_dot_copy_from(&self.deref_name(my_name), &target_name(from))
             }
             Event::MutableBorrow{ from, is, ..} => {
                 if is.is_closure() {
@@ -3166,7 +3162,7 @@ impl Event {
                 } else if is.holds_borrow() {
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref(), holds_copy_value(from))
                 } else {
-                    hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
+                    hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), holds_copy_value(from))
                 }
             }
             Event::StaticBorrow{ from, is, ..} => {
@@ -3175,7 +3171,7 @@ impl Event {
                 } else if is.holds_borrow() {
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref(), holds_copy_value(from))
                 } else {
-                    hover_messages::event_dot_static_borrow(&self.deref_name(my_name), &from.name(), holds_copy_value(from))
+                    hover_messages::event_dot_static_borrow(&self.deref_name(my_name), holds_copy_value(from))
                 }
             }
             // A reference copied out of `it` gave back its part of the
@@ -3184,7 +3180,7 @@ impl Event {
                 if !still_borrowed_by.is_empty() =>
             {
                 let mutable = matches!(self, Event::MutableReacquire { .. });
-                let from_name = safe_message(|_, t| t.clone(), my_name, from);
+                let from_name = target_name(from);
                 hover_messages::event_dot_reacquire_still_borrowed(&self.deref_name(my_name), &from_name, still_borrowed_by, mutable, holds_copy_value(is))
             }
             Event::StaticReacquire{ from, is, ..} | Event::MutableReacquire{ from, is, ..} if ref_lender(is).is_some() => {
@@ -3192,13 +3188,11 @@ impl Event {
                 let mutable = matches!(self, Event::MutableReacquire { .. });
                 hover_messages::event_dot_reacquire_through_ref(r.name(), borrower_name(from).as_ref(), mutable, r.is_mutref(), r.points_to_copy())
             }
-            Event::StaticReacquire{ from, is, ..} => {
-                let from_name = safe_message(|_, t| t.clone(), my_name, from);
-                hover_messages::event_dot_static_reacquire(&self.deref_name(my_name), &from_name, holds_copy_value(is))
+            Event::StaticReacquire{ is, ..} => {
+                hover_messages::event_dot_static_reacquire(&self.deref_name(my_name), holds_copy_value(is))
             }
-            Event::MutableReacquire{ from, is, ..} => {
-                let from_name = safe_message(|_, t| t.clone(), my_name, from);
-                hover_messages::event_dot_mut_reacquire(&self.deref_name(my_name), &from_name, holds_copy_value(is))
+            Event::MutableReacquire{ is, ..} => {
+                hover_messages::event_dot_mut_reacquire(&self.deref_name(my_name), holds_copy_value(is))
             }
             Event::RefDie {..} => {
               panic!("internal state: a RefDie event has no hover text of its own");
