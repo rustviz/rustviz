@@ -2171,8 +2171,14 @@ pub fn state_out_of_scope(my_name: &String) -> String {
 
 // The resource is transferred on this line or before this line due to move,
 // thus it is impossible to access this variable anymore. This is an invisible line in the timeline.
-pub fn state_value_moved(my_name: &String) -> String {
-    format!("{0}'s value was moved, so {0} can't be used until it's assigned again", styled_name_html(my_name))
+// `mutable`: a `let mut` binding can be assigned again; an immutable one
+// never can (E0384).
+pub fn state_value_moved(my_name: &String, mutable: bool) -> String {
+    format!(
+        "{0}'s value was moved, so {0} can't be used{1}",
+        styled_name_html(my_name),
+        if mutable { " until it's assigned again" } else { " anymore" }
+    )
 }
 
 // Mutably borrowed, for a column holding a value with nothing to drop.
@@ -2613,21 +2619,23 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // drops the value only if it wasn't moved (#179). The scope-end dot
 // says that (`event_dot_go_out_of_scope_maybe_moved`). `value`: it holds
 // a value or a reference, which owns nothing to drop.
-pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, note: &str) -> String {
+// `mutable`: only a `let mut` binding can be assigned again (a second
+// assignment to an immutable one is E0384).
+pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mutable: bool, note: &str) -> String {
     let my_name_fmt = styled_name_html(my_name);
+    let again = if mutable { " (until it's assigned again)" } else { "" };
     if value {
         return format!(
-            "{0} was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again).",
-            my_name_fmt
+            "{0} was moved in at least one branch above, so it can't be used after the branches{1}.",
+            my_name_fmt, again
         );
     }
     let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} was moved in at least one branch above, so it can't be used after the branches \
-         (until it's assigned again). If the branch that ran didn't move it, its resource{1} is \
-         dropped{2} when {0} goes out of scope.",
-        my_name_fmt, holds, rest
+        "{0} was moved in at least one branch above, so it can't be used after the branches{3}. \
+         If the branch that ran didn't move it, its resource{1} is dropped{2} when {0} goes out \
+         of scope.",
+        my_name_fmt, holds, rest, again
     )
 }
 

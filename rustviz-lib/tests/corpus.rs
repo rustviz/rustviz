@@ -1073,8 +1073,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (#179; it used to say "dropped at the branch's end").
         must_contain: &[
             "Move from s to consume",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -1100,8 +1099,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // other → mixed. Outer if: the else consumes, and the then-arm
         // ends maybe-moved, so the outer merge is mixed too (#179).
         must_contain: &[
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -1170,8 +1168,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from s to consume",
             // At least one inner merge is the mixed implicit-drop
             // case (consume on one path, borrow on the other).
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -1202,8 +1199,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from opt to x",
             "show reads from x",
             "x goes out of scope. Its resource is dropped.",
-            "opt was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource (including the String it holds, if any) is \
+            "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is \
              dropped when opt goes out of scope.",
         ],
         must_not_contain: &[
@@ -1259,8 +1255,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // even/odd N just affects placement, not classification.
         must_contain: &[
             "Move from s to consume",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -1278,8 +1273,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // empty `else` (#257; it used to be an unconditional move).
         must_contain: &[
             "Move from s to consume",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -1301,8 +1295,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from s to consume",
             "show reads from s",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -1319,8 +1312,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Closure capture (immutable borrow) from s to f",
             "Move from s to consume",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -3283,8 +3275,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // moved only when `c` holds.
         must_contain: &[
             "Move from p.name to n",
-            "p.name was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "p.name was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when p.name goes out of scope.",
             "p.name goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -3303,13 +3294,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from opt to x",
             "Move from s to take",
-            "opt was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource (including the String it holds, if any) is \
+            "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is \
              dropped when opt goes out of scope.",
             "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -3338,8 +3327,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `} else {}`: the empty `else` column is one row tall and
         // used to count as having moved `s`.
         must_contain: &[
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -3355,8 +3343,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // them, no join dot: #694), but the outer `if` has no `else`:
         // maybe-moved after it.
         must_contain: &[
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -3506,15 +3493,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s is live in a conditional expression ",
             "s's resource is moved",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
             "t is live in a conditional expression ",
             "t's resource is moved",
-            "t was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when t goes out of scope.",
             "t goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -3534,8 +3519,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquired ownership of a resource (in all branches above)",
         ],
         must_not_contain: &[
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
         ],
     },
@@ -5067,7 +5051,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p is assigned a new value",
             "p goes out of scope",
             "r's value is moved",
-            "r was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+            "r was moved in at least one branch above, so it can't be used after the branches.",
             "q is bound to a value (in all branches above)",
         ],
         must_not_contain: &[
@@ -5761,8 +5745,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v goes out of scope. Its resource is dropped.",
             "v goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
-            "v was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "v was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when v goes out of scope.",
             "(temporary) goes out of scope at the end of the block: a let borrowed it",
             "dropped at the end of the condition",
@@ -5990,8 +5973,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is initialized with a copy of msg",
             "Move from msg to s",
             "msg's resource is moved",
-            "msg was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource \
+            "msg was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource \
              (including the String it holds, if any) is dropped when msg goes out of scope.",
         ],
         must_not_contain: &["Move from msg to n", "Copy from msg to s", "msg's resource is copied"],
@@ -6146,8 +6128,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s acquires ownership of a new resource; its previous resource is dropped",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
         ],
     },
@@ -6163,8 +6144,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s acquires ownership of a new resource; its previous resource is dropped",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
         ],
     },
@@ -6182,8 +6162,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s acquires ownership of a new resource; its previous resource is dropped",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
             // t is moved in every arm: there's nothing to drop.
             "t acquires ownership of a new resource; its previous resource is dropped",
@@ -6206,8 +6185,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "s acquires ownership of a new resource; its previous resource is dropped",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
         ],
     },
@@ -6330,8 +6308,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s isn't moved in any of the branches above",
             "s isn't moved in any of the branches above that reach this point",
             "s goes out of scope. No resource is dropped.",
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
         ],
     },
@@ -6406,17 +6383,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
-            "s was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
-            "t was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when t goes out of scope.",
-            "u was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "u was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when u goes out of scope.",
-            "w was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "w was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when w goes out of scope.",
             "s isn't moved in any of the branches above",
             "t isn't moved in any of the branches above",
@@ -6462,8 +6435,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m isn't moved in any of the branches above",
             "r isn't moved in any of the branches above",
             "r still owns its resource here: the branch that moved r returned before reaching this point",
-            "m was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "m was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when m goes out of scope.",
         ],
     },
@@ -7423,7 +7395,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "rc_branch",
         must_contain: &[
-            "a was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped) when a goes out of scope.",
+            "a was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped) when a goes out of scope.",
             "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "r goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
         ],
@@ -7549,8 +7521,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "o goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "v goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "o was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (the Rc inside only lowers its reference count) when o goes out of scope.",
-            "v was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed) when v goes out of scope.",
+            "o was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (the Rc inside only lowers its reference count) when o goes out of scope.",
+            "v was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed) when v goes out of scope.",
             "o's resource is moved into drop, which drops it (the Rc inside only lowers its reference count)",
             "v's resource is moved into drop, which drops it (each Rc in it only lowers its reference count; its own buffer is freed)",
         ],
@@ -7999,8 +7971,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "first is live in a conditional expression ",
             "first holds an immutable reference; it can read the borrowed resource",
-            "first was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "first was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when first goes out of scope.",
         ],
     },
@@ -8014,8 +7985,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "t is live in a conditional expression ",
-            "t was moved in at least one branch above, so it can't be used after the branches \
-             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+            "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when t goes out of scope.",
             "t goes out of scope. No resource is dropped.",
         ],
@@ -8574,7 +8544,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "words goes out of scope. Its resource (including every String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "maybe goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "words was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource (including every String it holds) is dropped when words goes out of scope.",
+            "words was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including every String it holds) is dropped when words goes out of scope.",
             "maybe's resource is moved into drop, which drops it (including the String it holds, if any)",
             "_v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
@@ -11012,7 +10982,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a reference from y is returned to the caller; the data it points to is not copied",
             "m's mutable reference is moved to the caller (not the resource it points to)",
             "k's mutable reference is moved to the caller (not the resource it points to)",
-            "m was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+            "m was moved in at least one branch above, so it can't be used after the branches.",
         ],
         must_not_contain: &[
             "its resource is dropped when m goes out of scope",
@@ -11024,7 +10994,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "mutref_moved_in_branch",
         must_contain: &[
-            "z was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+            "z was moved in at least one branch above, so it can't be used after the branches.",
         ],
         must_not_contain: &[
             "its resource is dropped when z goes out of scope",
@@ -11052,8 +11022,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "m's mutable reference is moved to the caller (not the resource it points to)",
             "n's mutable reference is moved to the caller (not the resource it points to)",
-            "m was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
-            "n was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+            "m was moved in at least one branch above, so it can't be used after the branches.",
+            "n was moved in at least one branch above, so it can't be used after the branches.",
         ],
         must_not_contain: &[
             "m's mutable borrow ends",
@@ -13304,6 +13274,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "struct Greeter",
             "use std::fmt::Write",
+        ],
+    },
+    // #841: "(until it's assigned again)" is only true of a `let mut`
+    // binding; a non-mut variable can never be assigned a second time
+    // (E0384).
+    TooltipExpect {
+        name: "assigned_again_nonmut_join_841",
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+        ],
+        must_not_contain: &["assigned again"],
+    },
+    TooltipExpect {
+        name: "assigned_again_mut_join_841",
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+        ],
+        must_not_contain: &[],
+    },
+    // A plain value (nothing to drop): `p` is non-mut, `m` is `let mut`.
+    // `m.a` follows m; `p.a` follows p.
+    TooltipExpect {
+        name: "assigned_again_value_join_841",
+        must_contain: &[
+            "p was moved in at least one branch above, so it can't be used after the branches.",
+            "p.a was moved in at least one branch above, so it can't be used after the branches.",
+            "m was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+            "m.a was moved in at least one branch above, so it can't be used after the branches (until it's assigned again).",
+        ],
+        must_not_contain: &[
+            "p was moved in at least one branch above, so it can't be used after the branches (until",
+            "p.a was moved in at least one branch above, so it can't be used after the branches (until",
         ],
     },
 ];
@@ -17924,7 +17926,7 @@ fn no_split_or_join_dot_floats_off_its_column() {
     // Each text that lost its dot is on the column's next one, before
     // that dot's own events, as many times as there are such dots.
     const MAYBE_MOVED: &str = "s was moved in at least one branch above, so it can't be used after the \
-        branches (until it's assigned again). If the branch that ran didn't move it, its resource is \
+        branches. If the branch that ran didn't move it, its resource is \
         dropped when s goes out of scope.";
     const DROP_FLAG: &str = "s goes out of scope. Its resource is dropped here only if no branch above \
         moved it (Rust tracks this with a runtime drop flag).";
