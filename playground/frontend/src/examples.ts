@@ -20,11 +20,11 @@
 //   plain Rust with no RV1 annotations, so they drop directly into
 //   the RV2 playground editor.
 //
-// A handful of these will fail to visualize today because the RV2
-// plugin doesn't yet support every feature the tutorial covers
-// (lifetimes, struct-member borrows, chained method calls, etc.).
-// That surfaces the current plugin gaps to curious users — see
-// rustviz2-plugin/README.md for the up-to-date support matrix.
+// The set is also curated for interest: examples that only move
+// integers around (no ownership or borrowing events worth drawing) were
+// dropped, and a few examples that are not from the tutorial were added
+// (function returning a reference, struct field moved out, push in a
+// loop, thread::spawn). Each one was checked tooltip by tooltip.
 //
 // To refresh: re-run the one-shot fetch pipeline used to seed this
 // file (gh api repos/rustviz/rustviz-tutorial/contents/src/assets/
@@ -241,6 +241,22 @@ fn world(s: &mut String) {
     s.push_str(", world");
 }`,
       },
+      {
+        // Not from the upstream tutorial. `longest` returns one of its
+        // two reference arguments; the signature ties the result's
+        // lifetime to both, so both lenders stay borrowed while `r` lives.
+        name: "Function returning a reference",
+        code: `fn longest<'a>(a: &'a String, b: &'a String) -> &'a String {
+    if a.len() >= b.len() { a } else { b }
+}
+
+fn main() {
+    let s1 = String::from("hello");
+    let s2 = String::from("hi");
+    let r = longest(&s1, &s2);
+    println!("{}", r);
+}`,
+      },
     ],
   },
   {
@@ -312,6 +328,21 @@ fn main() {
     let f = Foo { x: 5, y: _y };
     println!("{}", f.x);
     println!("{}", f.y);
+}`,
+      },
+      {
+        // Not from the upstream tutorial. A partial move: `p.name` is
+        // moved out, but the Copy field `p.age` can still be used.
+        name: "Struct field moved out",
+        code: `struct Person {
+    name: String,
+    age: u32,
+}
+
+fn main() {
+    let p = Person { name: String::from("Ada"), age: 36 };
+    let n = p.name;
+    println!("{} {}", n, p.age);
 }`,
       },
       {
@@ -436,19 +467,6 @@ fn main() {
 }`,
       },
       {
-        name: "if without else",
-        code: `fn show(_s: &String) {} // rustviz: hide
-
-fn main() {
-    let s = String::from("hi");
-    let cond = true; // rustviz: skip
-    if cond {
-        show(&s);
-    }
-    show(&s);
-}`,
-      },
-      {
         name: "if as let RHS",
         code: `fn main() {
     let n = 3; // rustviz: skip
@@ -512,31 +530,6 @@ fn main() {
 }`,
       },
       {
-        name: "deeply nested if (3 levels)",
-        code: `fn consume(_s: String) {} // rustviz: hide
-fn show(_s: &String) {} // rustviz: hide
-
-fn main() {
-    let s = String::from("hi");
-    let c1 = true; // rustviz: skip
-    let c2 = false; // rustviz: skip
-    let c3 = true; // rustviz: skip
-    if c1 {
-        if c2 {
-            if c3 {
-                consume(s);
-            } else {
-                show(&s);
-            }
-        } else {
-            show(&s);
-        }
-    } else {
-        consume(s);
-    }
-}`,
-      },
-      {
         name: "match: 3 arms (consume vs borrow)",
         code: `fn consume(_s: String) {} // rustviz: hide
 fn show(_s: &String) {} // rustviz: hide
@@ -581,28 +574,6 @@ fn main() {
 }`,
       },
       {
-        name: "for over a Range",
-        code: `fn read(_n: i32) {}
-
-fn main() {
-    for i in 0..3 {
-        read(i);
-    }
-}`,
-      },
-      {
-        name: "while loop",
-        code: `fn read(_n: i32) {}
-
-fn main() {
-    let mut n = 0;
-    while n < 3 {
-        read(n);
-        n += 1;
-    }
-}`,
-      },
-      {
         name: "while let popping a stack",
         code: `fn consume(_s: String) {}
 
@@ -614,44 +585,36 @@ fn main() {
 }`,
       },
       {
-        name: "loop { ... break }",
-        code: `fn read(_n: i32) {}
-
-fn main() {
-    let mut n = 0;
-    loop {
-        read(n);
-        n += 1;
-        if n >= 3 {
-            break;
-        }
+        // Not from the upstream tutorial. Each iteration creates a
+        // String and moves it into the Vec, which owns every one.
+        name: "for loop pushing into a Vec",
+        code: `fn main() {
+    let mut v = Vec::new();
+    for _ in 0..3 {
+        let s = String::from("item");
+        v.push(s);
     }
+    println!("{}", v.len());
 }`,
       },
+    ],
+  },
+  {
+    chapter: 'Threads',
+    // Not from the upstream tutorial. The spawned closure's body isn't
+    // traced (see the closure limitations), but the move of `s` into it
+    // and the move of `handle` into `join` are drawn.
+    examples: [
       {
-        name: "loop { break value }",
-        code: `fn show(_n: i32) {}
+        name: "thread::spawn with a move closure",
+        code: `use std::thread;
 
 fn main() {
-    let mut n = 0;
-    let result = loop {
-        n += 1;
-        if n >= 5 {
-            break n * 2;
-        }
-    };
-    show(result);
-}`,
-      },
-      {
-        name: "if let on Option",
-        code: `fn read(_n: i32) {}
-
-fn main() {
-    let opt: Option<i32> = Some(3);
-    if let Some(x) = opt {
-        read(x);
-    }
+    let s = String::from("hello");
+    let handle = thread::spawn(move || {
+        println!("{}", s);
+    });
+    handle.join().unwrap();
 }`,
       },
     ],
