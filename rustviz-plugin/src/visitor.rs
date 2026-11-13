@@ -915,7 +915,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Blocks and `DropTemps` are just containers; their statements are
     // checked one by one below.
     if !matches!(expr.kind, ExprKind::Block(..) | ExprKind::DropTemps(_)) {
-      self.refuse_user_macro_use(expr.span, |v| v.visit_expr(expr));
+      self.refuse_user_macro_use(expr.span, expr);
     }
     match expr.kind {
       ExprKind::Block(b, _) => {
@@ -924,7 +924,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             StmtKind::Let(l) => {
               if let Some(init) = l.init {
                 if l.span.from_expansion() {
-                  self.refuse_user_macro_use(l.span, |v| v.visit_expr(init));
+                  self.refuse_user_macro_use(l.span, init);
                 }
                 self.descend_through_expansion(init);
               }
@@ -1049,7 +1049,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn refuse_user_macro_use(
     &self,
     span: rustc_span::Span,
-    walk: impl FnOnce(&mut LocalUseFinder<'tcx>),
+    e: &'tcx Expr<'tcx>,
   ) {
     if !span.from_expansion() {
       return;
@@ -1061,9 +1061,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !is_user_bang {
       return;
     }
-    let mut finder = LocalUseFinder { tcx: self.tcx, found: None };
-    walk(&mut finder);
-    if let Some(var) = finder.found {
+    if let Some(var) = first_user_local_use(self.tcx, e) {
       let name = user_macro_name(span).unwrap_or_else(|| String::from("a macro!"));
       panic!("user-defined macros that use a variable (`{}`, line {}) aren't supported yet \
               (the use inside `{}` isn't visualized)",
@@ -1230,34 +1228,15 @@ fn own_param_ref_bindings<'tcx>(
   }
 }
 
-/// Finds the first use of a local variable written by the user (not
-/// synthesized by a macro) inside an expression.
-struct LocalUseFinder<'tcx> {
-  tcx: rustc_middle::ty::TyCtxt<'tcx>,
-  /// (line, name) of the first such use.
-  found: Option<(usize, String)>,
-}
-
-impl<'tcx> LocalUseFinder<'tcx> {
-  fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
-    Visitor::visit_expr(self, expr);
-  }
-}
-
-impl<'tcx> Visitor<'tcx> for LocalUseFinder<'tcx> {
-  fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
-    if self.found.is_some() {
-      return;
-    }
-    if let ExprKind::Path(QPath::Resolved(None, path)) = expr.kind {
-      if matches!(path.res, Res::Local(_)) && !expr.span.from_expansion() {
-        let name = path.segments.last().map(|s| s.ident.as_str().to_owned()).unwrap_or_default();
-        self.found = Some((expr_to_line(expr, &self.tcx), name));
-        return;
-      }
-    }
-    intravisit::walk_expr(self, expr);
-  }
+/// The first use of a local variable written by the user (not
+/// synthesized by a macro) inside an expression: its line and name.
+fn first_user_local_use<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx>) -> Option<(usize, String)> {
+  locals_in(e, ClosureLocals::Skip).into_iter().find_map(|m| {
+    let expr = m.expr.filter(|x| !x.span.from_expansion())?;
+    let ExprKind::Path(QPath::Resolved(None, path)) = expr.kind else { return None };
+    let name = path.segments.last().map(|s| s.ident.as_str().to_owned()).unwrap_or_default();
+    Some((expr_to_line(expr, &tcx), name))
+  })
 }
 
 /// The name, with its `!`, of the outermost bang macro the user wrote
@@ -1456,24 +1435,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 }
 
-/// Whether `loop_expr` (a `loop`) has a `break value` that leaves it.
-fn loop_has_break_value<'tcx>(loop_expr: &'tcx Expr<'tcx>) -> bool {
-  struct Find { id: HirId, found: bool }
-  impl<'tcx> Visitor<'tcx> for Find {
-    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-      if let ExprKind::Break(dest, Some(_)) = e.kind {
-        if dest.target_id == Ok(self.id) {
-          self.found = true;
-        }
-      }
-      intravisit::walk_expr(self, e);
-    }
-  }
-  let mut f = Find { id: loop_expr.hir_id, found: false };
-  intravisit::walk_expr(&mut f, loop_expr);
-  f.found
-}
-
 /// Names of the locals that evaluating `e` for its value may move out
 /// of, wholly or in part (a field), so a `return e` / `break e` may
 /// hand them on rather than drop them. One that `e` only borrows
@@ -1555,26 +1516,10 @@ fn locals_moved_by<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx
           }
         }
         _ => {
-          struct All<'a, 'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, moved: &'a mut BTreeSet<String> }
-          impl<'a, 'tcx> Visitor<'tcx> for All<'a, 'tcx> {
-            fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-              if let ExprKind::Path(QPath::Resolved(_, p)) = e.kind {
-                if let Res::Local(id) = p.res {
-                  self.moved.insert(binding_name(&self.tcx, id));
-                }
-              }
-              // A closure's body isn't walked; what it captures is.
-              if let ExprKind::Closure(c) = e.kind {
-                if let Some(upvars) = self.tcx.upvars_mentioned(c.def_id) {
-                  for id in upvars.keys() {
-                    self.moved.insert(binding_name(&self.tcx, *id));
-                  }
-                }
-              }
-              intravisit::walk_expr(self, e);
-            }
+          // A closure's body isn't walked; what it captures is.
+          for m in locals_in(e, ClosureLocals::Captures(self.tcx)) {
+            self.moved.insert(binding_name(&self.tcx, m.id));
           }
-          All { tcx: self.tcx, moved: &mut self.moved }.visit_expr(e);
         }
       }
     }
@@ -5135,7 +5080,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // where the loop does, not at the last use of `x`
                 // (#722). (A `break` that leaves the loop early ends it
                 // in its own branch.)
-                if head_is_iterator && arms.first().is_some_and(|a| breaks_out_of(a.body) <= 1) {
+                if head_is_iterator && arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1) {
                   if let Some(name) = expr_to_rap_name(head_arg, &self.tcx) {
                     if self.borrow_map.contains_key(&name) {
                       if self.raps.get(&name).is_some_and(|r| r.rap.holds_borrow()) {
@@ -5158,7 +5103,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // `break` / `return` in the body ends it in its own
                 // branch, drawn there.)
                 // (the loop's own desugared `None => break` is the one)
-                let runs_to_the_end = arms.first().is_some_and(|a| breaks_out_of(a.body) <= 1)
+                let runs_to_the_end = arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1)
                   && !body_returns(body_expr);
                 let mut pat_decls = HashSet::new();
                 collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
@@ -5283,7 +5228,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // ... but a `let t = $e;` from the user's own macro moves or
       // copies a variable the caller passed in (#342).
       if let Some(init) = local.init {
-        self.refuse_user_macro_use(local.span, |v| v.visit_expr(init));
+        self.refuse_user_macro_use(local.span, init);
       }
       return;
     }
@@ -6551,7 +6496,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ExprKind::If(..) => true,
         // `let r = loop { … break k; }`: the `break`s hand `r` its
         // value as they're visited (#431), so `r` is bound first.
-        ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => loop_has_break_value(init),
+        ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => breaks_to(init).iter().any(|(_, value)| value.is_some()),
         ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) => false,
         ExprKind::Match(..) => true,
         _ => false,
@@ -8355,20 +8300,13 @@ struct BranchLeaves {
 
 /// The local variables `e` mentions, pushed onto `out`.
 fn mentioned_locals<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
-  struct Locals<'a>(&'a mut Vec<String>);
-  impl<'tcx> Visitor<'tcx> for Locals<'_> {
-    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-      if let ExprKind::Path(rustc_hir::QPath::Resolved(None, path)) = &e.kind {
-        if let Res::Local(_) = path.res {
-          if let Some(seg) = path.segments.last() {
-            self.0.push(seg.ident.to_string());
-          }
-        }
+  for m in locals_in(e, ClosureLocals::Skip) {
+    if let Some(ExprKind::Path(rustc_hir::QPath::Resolved(None, path))) = m.expr.map(|x| &x.kind) {
+      if let Some(seg) = path.segments.last() {
+        out.push(seg.ident.to_string());
       }
-      intravisit::walk_expr(self, e);
     }
   }
-  Locals(out).visit_expr(e);
 }
 
 fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tcx>) -> BranchLeaves {
@@ -8518,24 +8456,6 @@ fn body_returns(e: &Expr<'_>) -> bool {
   f.0
 }
 
-/// How many `break`s inside `loop_expr` target it.
-fn breaks_out_of(loop_expr: &Expr<'_>) -> usize {
-  struct Count(HirId, usize);
-  impl<'tcx> Visitor<'tcx> for Count {
-    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-      match e.kind {
-        ExprKind::Closure(..) => return,
-        ExprKind::Break(dest, _) if dest.target_id == Ok(self.0) => self.1 += 1,
-        _ => {}
-      }
-      intravisit::walk_expr(self, e);
-    }
-  }
-  let mut c = Count(loop_expr.hir_id, 0);
-  intravisit::walk_expr(&mut c, loop_expr);
-  c.1
-}
-
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Whether a branch (`body`, with its `events` and the variables
   /// `decls` it declares) has type `!` and so never reaches the merge
@@ -8603,21 +8523,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// How many `break value`s leave the loop `target`.
   fn loop_break_values(&self, target: HirId) -> usize {
-    struct Count(HirId, usize);
-    impl<'tcx> Visitor<'tcx> for Count {
-      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-        if let ExprKind::Break(dest, Some(_)) = e.kind {
-          if dest.target_id == Ok(self.0) {
-            self.1 += 1;
-          }
-        }
-        intravisit::walk_expr(self, e);
-      }
-    }
     let rustc_hir::Node::Expr(loop_expr) = self.tcx.hir_node(target) else { return 0 };
-    let mut c = Count(target, 0);
-    intravisit::walk_expr(&mut c, loop_expr);
-    c.1
+    breaks_to(loop_expr).iter().filter(|(_, value)| value.is_some()).count()
   }
 
   /// At the end of `loop_expr`: the values its `break`s in branches
@@ -8744,7 +8651,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if mine.is_empty() {
       return;
     }
-    let all_breaks = breaks_out_of(loop_expr);
+    let all_breaks = breaks_to(loop_expr).len();
     let line = span_end_line(&loop_expr.span, &self.tcx);
     let mut done: Vec<&ResourceAccessPoint> = Vec::new();
     for m in &mine {
