@@ -1202,6 +1202,7 @@ fn render_branch_dots(
                 hover_messages::event_dot_branch_merge_moved_with_drop(
                     &is.real_name(),
                     is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
+                    rap.is_mut(),
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
                 )
             })
@@ -2522,7 +2523,7 @@ fn timeline_segment_title(
         match state {
             State::FullPrivilege { .. } => return hover_messages::state_full_privilege_value(rap.name()),
             State::PartialPrivilege { .. } => return hover_messages::state_partial_privilege(rap.name(), true),
-            State::ResourceMoved { dropped_by_hand: false, .. } => return hover_messages::state_value_moved(rap.name()),
+            State::ResourceMoved { dropped_by_hand: false, .. } => return hover_messages::state_value_moved(rap.name(), rap.is_mut()),
             State::RevokedPrivilege { .. } => return hover_messages::state_value_revoked(rap.name()),
             _ => {}
         }
