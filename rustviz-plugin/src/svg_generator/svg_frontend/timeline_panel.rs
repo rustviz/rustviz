@@ -4127,6 +4127,9 @@ struct BranchSeg {
     /// `title` names the underlined code, so it's reworded if hovering
     /// it underlines nothing (see `reword_unlit_inactive`).
     inactive_arm: Option<String>,
+    /// The solid stretch around a one-row arm's own row (#845); hovering
+    /// it underlines that row.
+    own_row: bool,
 }
 
 /// Which part of an arm's strip a segment is.
@@ -4174,7 +4177,7 @@ fn trim_dashes_under_solid(segs: Vec<BranchSeg>) -> Vec<BranchSeg> {
         if !down { pieces.reverse(); }
         for (a, b) in pieces {
             let (p1y, p2y) = if down { (a, b) } else { (b, a) };
-            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone(), inactive_arm: seg.inactive_arm.clone() });
+            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone(), inactive_arm: seg.inactive_arm.clone(), own_row: seg.own_row });
         }
     }
     out
@@ -4398,6 +4401,38 @@ fn render_branches(
                 }
             }
 
+            // An arm of one row with no events for the variable (`None =>
+            // println!(..),`) has no rows of its own in its column to be
+            // solid over. It still gets the half row around its own row,
+            // so it reads as the arm that runs here (#845). The join
+            // diagonal starts below it; the join point doesn't move.
+            let (own_first, own_last) = ty.get_start_end(i);
+            if branch.e_data.is_empty() && !branch.diverges && !is_active
+                && own_first == own_last && own_first > *split_point && own_first < *merge_point
+                && !branch_is_collapsed(*split_point, *merge_point)
+                && !state_is_dashed(&parent_active)
+            {
+                let row_y = get_y_axis_pos(own_first) as f64;
+                let top = (row_y - LINE_SPACE as f64 / 2.0).max(column_top_y);
+                let bot = (row_y + LINE_SPACE as f64 / 2.0).min(merge_y);
+                // After the dashes above it, before any below it and the join.
+                let at = segs.iter().position(|s| s.p1.1 >= row_y - 1e-6)
+                    .unwrap_or(segs.len());
+                let n = segs.len();
+                push_seg_if_renderable(
+                    &mut segs, rap, (branch_x, top), (branch_x, bot),
+                    parent_active.clone(), visualization_data, &arm_label, Leg::Column,
+                );
+                if segs.len() > n {
+                    let mut solid = segs.pop().unwrap();
+                    solid.own_row = true;
+                    segs.insert(at, solid);
+                    if let Some(join) = segs.iter_mut().find(|s| (s.p1.0 - s.p2.0).abs() > 1e-6 && s.p1.0 == branch_x) {
+                        if join.p1.1 < bot { join.p1.1 = bot; }
+                    }
+                }
+            }
+
             if entry_maybe_init {
                 let no_value = hover_messages::state_uninitialized(rap.name());
                 for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
@@ -4411,7 +4446,6 @@ fn render_branches(
             // dashed beside the other arms' code, and the diagonals
             // pass it; neither underlines those lines. An arm with no
             // lines of its own (the implicit `else`) underlines none.
-            let (own_first, own_last) = ty.get_start_end(i);
             let own_y = (own_first <= own_last).then(|| (
                 get_y_axis_pos(own_first) as f64,
                 get_y_axis_pos(own_last) as f64,
@@ -4493,7 +4527,7 @@ fn push_seg_if_renderable(
         (false, _) => timeline_segment_title(&state, rap, visualization_data, None),
     };
     let inactive_arm = (inactive && leg == Leg::Column).then(|| arm_label.to_owned());
-    segs.push(BranchSeg { p1, p2, state, title, inactive_arm });
+    segs.push(BranchSeg { p1, p2, state, title, inactive_arm, own_row: false });
 }
 
 /// The y-range of code to underline while hovering a segment. A solid
@@ -4526,6 +4560,8 @@ fn seg_underline_y(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64) -
         return if top < bot { Some((top, bot)) } else { None };
     }
     let (own_top, own_bot) = own_y?;
+    // A one-row arm's own stretch spans half a row either side of its row.
+    if seg.own_row { return Some((own_top, own_bot + 5.0)); }
     let (top, bot) = (top.max(own_top), bot.min(own_bot));
     // Touching an arm's first or last row only at its end isn't beside it.
     if top >= bot { return None; }
