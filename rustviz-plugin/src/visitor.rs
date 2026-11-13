@@ -5924,7 +5924,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if matches!(part, Some(TempPart::Field(_) | TempPart::UpdateBase(_))) {
       self.temp_cols.insert(expr.hir_id, tmp.clone());
     }
-    // Plain text: `hover_messages::fmt_style` escapes it for the tooltip.
+    // Plain text: `hover_messages::styled_name_html` escapes it for the tooltip.
     let id = *self.unique_id;
     self.add_external_event(end_line, ExternalEvent::TemporaryDrop { ro: tmp.clone(), ty: Some(ty), when: when.to_owned(), literal: false, early: false, part, id });
     *self.unique_id += 1;
