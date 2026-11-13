@@ -1270,6 +1270,64 @@ const EXPECTED_OK: &[&str] = &[
     "assert_macro_args_817",
     // #824: variables inside println!/format!/write!/panic! arguments are coloured.
     "fmt_macro_args_824",
+    // — Fixtures that no test ran until now (all render well-formed SVG).
+    "advanced_deref3",
+    "anonymous_copy2caller",
+    "anonymous_deref",
+    "anonymous_fnparam",
+    "basic_alias",
+    "basic_deref2",
+    "basic_deref4",
+    "basic_deref5",
+    "basic_deref6",
+    "basic_for",
+    "basic_for2",
+    "basic_for3",
+    "basic_if",
+    "basic_if10",
+    "basic_if11",
+    "basic_if2",
+    "basic_if3",
+    "basic_if4",
+    "basic_if5",
+    "basic_if6",
+    "basic_if8",
+    "basic_if9",
+    "basic_match",
+    "basic_match3",
+    "basic_match4",
+    "basic_mutref2",
+    "basic_mutref3",
+    "basic_ref2",
+    "basic_ref3",
+    "basic_ref4",
+    "basic_ref5",
+    "basic_struct",
+    "blocks_basic",
+    "box",
+    "calcLength",
+    "copy_owner_tooltip",
+    "deref_basic",
+    "for_array_borrow",
+    "for_range",
+    "if_borrow_in_body",
+    "if_let_inside_body",
+    "if_let_with_macro",
+    "labeled_loop",
+    "loop_body",
+    "loop_break_value",
+    "macro_rhs_acquire_line",
+    "mutRef",
+    "returningOwnership",
+    "returnValues",
+    "struct_impl",
+    "testBorrow",
+    "testScope",
+    "testShadow",
+    "variablesMutability",
+    "while_body",
+    "while_let_body",
+    "while_let_pattern_annotation",
 ];
 
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
@@ -16320,10 +16378,25 @@ fn corpus_expected_ok_produce_well_formed_svg() {
     );
 }
 
+/// `name` is the fixture's file stem, so several entries may pin one
+/// fixture (one per issue that touched it). Failure messages label such an
+/// entry "name (entry k of n)" so the failing one can be found.
+fn entry_label(idx: usize) -> String {
+    let name = EXPECTED_TOOLTIPS[idx].name;
+    let same: Vec<usize> = (0..EXPECTED_TOOLTIPS.len())
+        .filter(|&i| EXPECTED_TOOLTIPS[i].name == name)
+        .collect();
+    match same.len() {
+        1 => name.to_string(),
+        n => format!("{} (entry {} of {})", name, same.iter().position(|&i| i == idx).unwrap() + 1, n),
+    }
+}
+
 #[test]
 fn corpus_expected_tooltips_present() {
     let mut failures = Vec::new();
-    for expect in EXPECTED_TOOLTIPS {
+    for (idx, expect) in EXPECTED_TOOLTIPS.iter().enumerate() {
+        let label = entry_label(idx);
         let res = std::panic::catch_unwind(|| {
             let rv = run_with_local_backend(expect.name);
             assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
@@ -16370,7 +16443,7 @@ fn corpus_expected_tooltips_present() {
                 .cloned()
                 .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_else(|| "<non-string panic>".to_string());
-            failures.push(format!("{}: {}", expect.name, msg));
+            failures.push(format!("{}: {}", label, msg));
         }
     }
     for (name, frag, why) in KNOWN_STILL_PRINTED {
@@ -19386,6 +19459,35 @@ fn old_lender_ends_once_per_arm_when_repointed_in_several_arms() {
         let empty: Vec<_> = tooltip_lines(&timeline).into_iter().filter(|l| l.iter().all(|t| t.trim().is_empty())).collect();
         assert!(empty.is_empty(), "{}: {} dot(s) with an empty tooltip", name, empty.len());
     }
+}
+
+/// Every fixture in `rustviz-plugin/tests/` (and `edition2024/`) is named
+/// somewhere in this file, so a crash in it can't go unnoticed. Add a new
+/// fixture to `EXPECTED_OK` or `EXPECTED_TOOLTIPS`; a fixture that crashes
+/// the plugin gets a `crash` issue (CLAUDE.md) and a comment naming it here.
+#[test]
+fn every_fixture_is_run_by_some_test() {
+    let src = include_str!("corpus.rs");
+    let mut unrun = Vec::new();
+    for dir in ["", "edition2024"] {
+        let d = corpus_dir().join(dir);
+        for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("read {:?}: {}", d, e)) {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let stem = path.file_stem().unwrap().to_str().unwrap();
+            let name = if dir.is_empty() { stem.to_string() } else { format!("{}/{}", dir, stem) };
+            // The quoted-name pattern is built at run time so this test's own
+            // text doesn't count as a mention.
+            let quoted = format!("{}{}{}", '"', name, '"');
+            if !src.contains(&quoted) {
+                unrun.push(name);
+            }
+        }
+    }
+    unrun.sort();
+    assert!(unrun.is_empty(), "fixtures no test runs (add to EXPECTED_OK): {:?}", unrun);
 }
 
 /// #817: the variables inside the arguments of `assert!` and its
