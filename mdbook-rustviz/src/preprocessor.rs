@@ -160,8 +160,10 @@ fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32) -> Stri
       info!("successfully created visualization for example {}", ex_counter);
       let visualization_div = format!("<div class=\"flex-container vis_block\" 
       style=\"position:relative; margin-left:-75px; margin-right:-75px; display: flex; flex-direction: row; justify-content: flex-start; flex-wrap: nowrap; flex-shrink: 0; height: {}px\">
-      <object type=\"image/svg+xml\" class=\"{} code_panel\" data=\"examples/{}/vis_code.svg\" style=\"flex-grow: 1\"></object>
-      <object type=\"image/svg+xml\" class=\"{} tl_panel\" data=\"examples/{}/vis_timeline.svg\" style=\"width: auto; flex-grow: 0\" onmouseenter=\"helpers('{}')\"></object>
+      <div style=\"flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden\">
+      <object type=\"image/svg+xml\" class=\"{} code_panel\" data=\"examples/{}/vis_code.svg\" style=\"display: block\"></object>
+      </div>
+      <object type=\"image/svg+xml\" class=\"{} tl_panel\" data=\"examples/{}/vis_timeline.svg\" style=\"width: auto; flex-grow: 0; flex-shrink: 0\" onmouseenter=\"helpers('{}')\"></object>
       </div>", rv.height(),example_dir_str, example_dir_str, example_dir_str, example_dir_str, example_dir_str);
     
       visualization_div
