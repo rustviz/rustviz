@@ -120,9 +120,11 @@ syntax (e.g. `if let` guards), which the visitor may not handle yet.
 
 ## Practicalities
 
-- Every plugin PR appends to the tails of `EXPECTED_OK` /
-  `EXPECTED_TOOLTIPS`, so parallel PRs conflict there. Resolve by keeping
-  both sides.
+- Every plugin PR appends to the tail of `EXPECTED_TOOLTIPS`, so parallel
+  PRs conflict there. Resolve by keeping both sides. A new fixture needs no
+  list entry to be run: the well-formedness test renders every file in
+  `rustviz-plugin/tests/` (minus `SKIP_WELL_FORMED`, which gives a reason
+  per entry).
 - The playground's compile API runs on Google Cloud Run (project
   `rustviz-playground`), deployed by the `deploy-cloudrun` CI job on every
   push to `main`; see `playground/cloudrun/` and `playground/SECURITY.md`.

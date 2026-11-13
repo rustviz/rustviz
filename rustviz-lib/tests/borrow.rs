@@ -16,6 +16,9 @@
 //! These tests use the same `RV_RUNNER=local` backend as `corpus.rs`
 //! and require `cargo install --path rustviz-plugin --locked` first.
 
+mod common;
+
+use common::svg::attr;
 use std::env;
 
 use rustviz_lib::Rustviz;
@@ -562,15 +565,6 @@ fn main() {
 }
 ";
     let timeline = run(src).timeline_panel_string();
-
-    // Tiny attribute scrape: find an attr `key="value"` inside a tag
-    // substring. Saves pulling regex into the dev-deps just for these.
-    fn attr<'s>(tag: &'s str, key: &str) -> Option<&'s str> {
-        let needle = format!("{}=\"", key);
-        let start = tag.find(&needle)? + needle.len();
-        let end = tag[start..].find('"')? + start;
-        Some(&tag[start..end])
-    }
 
     // Locate the f-group variable label y. Labels render as
     // `<text x="..." y="Y" data-hash="H" class="label …" …>f<tspan>|</tspan>*f</text>`
