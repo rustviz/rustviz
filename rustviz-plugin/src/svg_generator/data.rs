@@ -64,7 +64,7 @@ pub trait Visualizable {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>);
 
     // Appends Events to 
-    fn event_of_exteranl_event(&self, line_num: usize, ext_ev: &ExternalEvent, to_o: bool) -> Vec<(usize, Event)>;
+    fn event_of_external_event(&self, line_num: usize, ext_ev: &ExternalEvent, to_o: bool) -> Vec<(usize, Event)>;
 
     // returns None if the hash does not exist
     fn get_name_from_hash(&self, hash: &u64) -> Option<String>;
@@ -4037,7 +4037,7 @@ impl Visualizable for VisualizationData {
 
     // Just a function to get the respective Events that should be appended to a given RAP's timeline given
     // an ExternalEvent and whether or not the RAP is the receiver of the action
-    fn event_of_exteranl_event(&self, line_num: usize, ext_ev: &ExternalEvent, to_o: bool) -> Vec<(usize, Event)> {
+    fn event_of_external_event(&self, line_num: usize, ext_ev: &ExternalEvent, to_o: bool) -> Vec<(usize, Event)> {
       match ext_ev {
         ExternalEvent::Bind { from, to, id, break_alt } => {
           if to_o { vec![(line_num,  Event::Acquire{from : from.to_owned(), is: to.clone(), via_try: None, id: *id, break_alt: break_alt.clone()})] }
@@ -4218,7 +4218,7 @@ impl Visualizable for VisualizationData {
             | ExternalEvent::LoopMaybeInit { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. } => {
                 if ro == rap {
-                    b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                    b_history.extend(self.event_of_external_event(line_number, event, true));
                 }
             }
             ExternalEvent::OrAltBorrow { ro, into, .. } => {
@@ -4248,14 +4248,14 @@ impl Visualizable for VisualizationData {
                 // ... and a read through an element (`*slots[0]`) leaves it.
                 let from_elem = matches!(from, ResourceTy::Index(r, _, _) if r == rap);
                 if *from == *is || through_rap(from) || from_elem {
-                    b_history.extend(self.event_of_exteranl_event(line_number, event, false));
+                    b_history.extend(self.event_of_external_event(line_number, event, false));
                 }
                 else if *to == *is || through_rap(to) || to_elem {
-                    b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                    b_history.extend(self.event_of_external_event(line_number, event, true));
                 }
                 else if let Some(r) = event.is_gos_ev() {
                     if *r.name() == is.real_name() {
-                        b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                        b_history.extend(self.event_of_external_event(line_number, event, true));
                     }
                 }
                 // A reference field of a struct bound by a pattern
@@ -4264,7 +4264,7 @@ impl Visualizable for VisualizationData {
                 // doesn't name it.
                 else if let ExternalEvent::InitRefParam { param, .. } = event {
                     if param == rap {
-                        b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                        b_history.extend(self.event_of_external_event(line_number, event, true));
                     }
                 }
                 // `x = …` / `*r = …` inside a branch drops the value the
@@ -4272,14 +4272,14 @@ impl Visualizable for VisualizationData {
                 // that variable in `ro`, not in from/to (#267).
                 else if let ExternalEvent::OwnerDropAtReassign { ro, .. } = event {
                     if ro.hash() == rap.hash() {
-                        b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                        b_history.extend(self.event_of_external_event(line_number, event, true));
                     }
                 }
                 // Likewise the drop a `?` in the branch causes if it
                 // returns early (#430, #636).
                 else if let ExternalEvent::OwnerDropIfTryReturns { ro, .. } | ExternalEvent::OwnerDropUnlessReturned { ro, .. } = event {
                     if ro.hash() == rap.hash() {
-                        b_history.extend(self.event_of_exteranl_event(line_number, event, true));
+                        b_history.extend(self.event_of_external_event(line_number, event, true));
                     }
                 }
             }

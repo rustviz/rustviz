@@ -274,7 +274,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
             );
             visitor.visit_body(hir_body);
-            visitor.print_lifetimes();
+            visitor.emit_borrow_ends();
             visitor.print_out_of_scope();
             rap_hash_num = visitor.rap_hashes;
             binding_columns.append(&mut visitor.binding_columns);
@@ -334,7 +334,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
         );
         visitor.visit_body(hir_body);
-        visitor.print_lifetimes();
+        visitor.emit_borrow_ends();
         visitor.print_out_of_scope();
         rap_hash_num = visitor.rap_hashes;
         binding_columns.append(&mut visitor.binding_columns);
