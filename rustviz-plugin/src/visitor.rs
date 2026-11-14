@@ -7067,7 +7067,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     match pat.kind {
       PatKind::Binding(annotation, hirid, _, sub_pat) => {
         let name = binding_name(&self.tcx, hirid);
+        let first_id = *self.unique_id;
         self.bind_one(name.clone(), annotation, hirid, init, is_skipped);
+        if nested {
+          self.mark_copy_inside(&name, hirid, init, first_id);
+        }
         if nested && !is_skipped && self.own_ref_binding(hirid).is_none() {
           if let Some(rap) = self.raps.get(&name).map(|rd| rd.rap.to_owned()) {
             let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
@@ -7119,6 +7123,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       | PatKind::Err(_)
       | PatKind::Expr(_)
       | PatKind::Range(..) => {}
+    }
+  }
+
+  /// `let Some(w) = oi else { .. }` with a Copy payload: `bind_one`
+  /// drew w's copy from all of `oi`, but w gets a copy of a value
+  /// inside it, the same as `if let Some(w) = oi` (#866). Not through a
+  /// `&` pattern: what that copies is behind the reference.
+  fn mark_copy_inside(&mut self, name: &str, hirid: HirId, init: &'tcx Expr<'tcx>, first_id: usize) {
+    let typeck = self.tcx.typeck(hirid.owner);
+    if !copies_from_inside(&Evt::Copy, typeck.node_type(hirid), typeck.expr_ty(init), &ResourceTy::Anonymous) {
+      return;
+    }
+    let mut cur = hirid;
+    while let rustc_hir::Node::Pat(p) = self.tcx.parent_hir_node(cur) {
+      if matches!(p.kind, PatKind::Ref(..) | PatKind::Deref(_) | PatKind::Box(_)) {
+        return;
+      }
+      cur = p.hir_id;
+    }
+    // (The line's arrows are drawn from `event_line_map`'s copy.)
+    let line_events = self.event_line_map.values_mut().flatten();
+    let events = self.preprocessed_events.iter_mut().chain(self.late_old_ends.iter_mut()).map(|(_, e)| e);
+    for e in events.chain(line_events) {
+      if let ExternalEvent::Copy { to: ResourceTy::Value(t), from: ResourceTy::Value(f), id, is_partial, .. } = e {
+        if *id >= first_id && t.name() == name && !f.is_fn() {
+          *is_partial = true;
+        }
+      }
     }
   }
 

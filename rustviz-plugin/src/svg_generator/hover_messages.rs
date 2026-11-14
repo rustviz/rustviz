@@ -886,6 +886,13 @@ pub fn event_dot_init_param(my_name: &String) -> String {
    ... to <Resource Owner 1>
  */
 
+// A pattern copies a value inside my_name out (`if let Some(x) = opt`,
+// `Fruit::Apple(z) =>` on `match x`): not all of my_name, which need
+// not even be Copy (#866).
+pub fn event_dot_copy_inside_to(my_name: &String) -> String {
+    format!("a value inside {0} is copied", styled_name_html(my_name))
+}
+
 // 1   0
 //     |
 // o<--*   the star event
@@ -1654,6 +1661,26 @@ pub fn event_dot_copy_from(my_name: &String, target_name: &String) -> String {
         "{0} is initialized with a copy of {1}",
         my_name,
         target_name
+    )
+}
+
+// A pattern binds a copy of a value inside `target_name` (`if let
+// Some(x) = opt` with opt: Option<i32>, `Fruit::Apple(z) =>` on `match
+// x`): the binding gets the payload, not all of opt (#866). "a value":
+// a pattern can bind several (`Pair(a, b)`).
+pub fn event_dot_copy_from_inside(my_name: &String, target_name: &String) -> String {
+    format!(
+        "{0} is initialized with a copy of a value inside {1}",
+        my_name,
+        target_name
+    )
+}
+
+pub fn event_dot_copyable_assign_copy_inside(my_name: &String, from_name: &String) -> String {
+    format!(
+        "{0} is assigned a copy of a value inside {1}",
+        styled_name_html(my_name),
+        styled_name_html(from_name)
     )
 }
 
