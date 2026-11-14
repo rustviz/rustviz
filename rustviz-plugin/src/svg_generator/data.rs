@@ -1478,6 +1478,11 @@ pub enum ExternalEvent {
         // else { break rb; } })`, #662): passed only if that `break`
         // ended the loop. See BreakAlt.
         break_alt: Option<BreakAlt>,
+        // The references and holders that already borrow `from` and go
+        // on borrowing it after the call (`let r = &v; v.len(); use(r)`,
+        // #870): `from` stays shared when the call gives its borrow
+        // back.
+        still_borrowed_by: Vec<String>,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -4113,7 +4118,7 @@ impl Visualizable for VisualizationData {
         },
         // A reference the call may store (`StoredIn`) is given back
         // later, by its own StaticDie / MutableDie.
-        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
+        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, still_borrowed_by, ..} => {
           if to_o { 
             vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id}),
             (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
@@ -4123,7 +4128,7 @@ impl Visualizable for VisualizationData {
           }
           else { 
             vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id}),
-            (line_num,  Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: Vec::new()})]
+            (line_num,  Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: still_borrowed_by.clone()})]
           }
         },
         ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
@@ -4482,11 +4487,11 @@ impl Visualizable for VisualizationData {
             // and the end of that borrow gives it back (#171).
             // A reference the call may store (`StoredIn`, #513) is given
             // back to `from` later, by its own StaticDie / MutableDie.
-            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
+            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, still_borrowed_by, ..} => {
                 maybe_append_event(self, &from_ro.to_owned(), Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id}, line_number);
                 maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id}, line_number);
                 if stored_in.0.is_none() && !result_keeps_borrow {
-                    maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by: Vec::new()}, line_number);
+                    maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by}, line_number);
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::StaticDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
