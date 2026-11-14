@@ -1080,8 +1080,8 @@ fn render_branch_dots(
         // `merge_point` (the closing-brace line). Sat at
         // `merge_point + 1` previously — a line below the
         // conditional, which read as a stray dot on
-        // unrelated code below. Empty title for the
-        // Unchanged case keeps it as a structural marker.
+        // unrelated code below. Every join dot says what
+        // happened to the variable across the branches.
         //
         // When some branches moved the variable and at
         // least one didn't, Rust inserts an *implicit
@@ -1117,7 +1117,7 @@ fn render_branch_dots(
         // returns or panics doesn't count. So does it when each
         // branch that assigned s moved it away. Otherwise (s
         // isn't assigned on any path that gets here) the dot
-        // gets no message.
+        // says s still has no value (#919).
         let init = init_join(*maybe_init, reaching_end_states(branch_history));
         let partly_initialized = branch_history.iter().filter(|b| !b.diverges).any(|b| {
             matches!(
@@ -1172,7 +1172,22 @@ fn render_branch_dots(
                 )
             })
         } else if partly_initialized {
-            Some(String::new())
+            // No path that gets here gave s a value (#919): a branch
+            // that did returned or panicked (`if c { s = …; return; }`,
+            // a let-else's `else` block), or none did. Anything else
+            // (a reference whose borrow ended in only some arms) gets
+            // no dot: nothing happened to it here.
+            let unassigned_everywhere = branch_history.iter().filter(|b| !b.diverges).all(|b| {
+                matches!(
+                    b.states.last().map(|s| &s.2),
+                    Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
+                ) && !(rap.is_ref() && ends_borrow(&b.e_data))
+            });
+            unassigned_everywhere.then(|| {
+                let mut leavers = Vec::new();
+                assigned_by_leavers(branch_history, &mut leavers);
+                hover_messages::event_dot_branch_merge_still_unassigned(&is.real_name(), &leavers)
+            })
         } else if mixed_moved {
             // Mixed: at least one branch moved, at least
             // one didn't (counting the implicit untouched
@@ -1189,11 +1204,32 @@ fn render_branch_dots(
             // nested in an outer branch only has that branch's
             // events in `history`.
             let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
-            let reassigned_next = full.iter()
+            let next = full.iter()
                 .filter(|(l, _)| *l > *merge_point)
                 .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
-                .map_or(false, |(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_moved: true, .. }));
-            Some(if reassigned_next {
+                .map(|(_, e)| e);
+            let reassigned_next = matches!(next, Some(Event::OwnerDropAtReassign { maybe_moved: true, .. }));
+            Some(if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
+                // Only a Box's contents were moved (`let w = *e;`,
+                // #921): e keeps its heap allocation on every path.
+                // Its old contents, if still there, are dropped by the
+                // next `*e = …` or `e = …`, or else at its scope end.
+                let next_write = full.iter()
+                    .filter(|(l, _)| *l > *merge_point)
+                    .find(|(_, e)| matches!(e,
+                        Event::OwnerDropAtReassign { .. } | Event::Branch { .. }
+                        | Event::Acquire { is: ResourceTy::Deref(_), .. }
+                        | Event::Copy { is: ResourceTy::Deref(_), .. }))
+                    .map(|(_, e)| e);
+                let at = match next_write {
+                    Some(Event::OwnerDropAtReassign { payload: true, .. } | Event::Acquire { .. } | Event::Copy { .. }) =>
+                        hover_messages::ContentsDropAt::PayloadWrite,
+                    _ if reassigned_next => hover_messages::ContentsDropAt::Reassign,
+                    _ => hover_messages::ContentsDropAt::ScopeEnd,
+                };
+                hover_messages::event_dot_branch_merge_box_contents_moved(
+                    &is.real_name(), rap.is_mut(), rap.holds_phrase(), at)
+            } else if reassigned_next {
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name())
             } else {
                 // A `&mut` reference moved on some paths (`if b {
@@ -1672,7 +1708,19 @@ fn render_dot(
                         // A `let` or-pattern, not a branch, may have moved it (#597).
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, true)
                     } else if let Event::OwnerDropAtReassign { maybe_moved: true, by_cond, .. } = event {
-                        hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
+                        // A Box whose contents only were moved out in
+                        // some branches (#921): its old heap allocation
+                        // is freed here either way.
+                        let rap = &visualization_data.timelines[hash].resource_access_point;
+                        let last_branch = history[..i].iter().rev().find_map(|(_, e)| match e {
+                            Event::Branch { branch_history, .. } => Some(branch_history),
+                            _ => None,
+                        });
+                        if rap.box_contents_moved() && last_branch.is_some_and(|b| moves_only_box_contents(b)) {
+                            hover_messages::event_dot_owner_drop_at_reassign_box_contents_maybe_moved(&name, rap.holds_phrase(), *by_cond)
+                        } else {
+                            hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
+                        }
                     } else if matches!(event, Event::OwnerDropUnlessReturned) {
                         let value = visualization_data.timelines[hash].resource_access_point.holds_value();
                         hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note)
@@ -2219,6 +2267,60 @@ fn moved_by_leavers(branch_history: &[BranchData], out: &mut Vec<Vec<BranchExit>
             for (_, e) in &b.e_data {
                 if let Event::Branch { branch_history, .. } = e {
                     moved_by_leavers(branch_history, out);
+                }
+            }
+        }
+    }
+}
+
+// Whether the branches that reach a conditional's join moved only a
+// Box's contents (`let w = *e;`, `take(*e)`, #921), and not the Box
+// itself, on some path: then e still owns its heap allocation on every
+// path.
+fn moves_only_box_contents(branch_history: &[BranchData]) -> bool {
+    // `None`: the Box itself is moved somewhere in `events`.
+    fn contents_moved(events: &[(usize, Event)]) -> Option<bool> {
+        let mut any = false;
+        for (_, e) in events {
+            match e {
+                Event::Move { is: ResourceTy::Deref(_), .. } => any = true,
+                Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { .. } | Event::ClosureCall { .. } => return None,
+                Event::Branch { branch_history, .. } => {
+                    for b in branch_history.iter().filter(|b| !b.diverges) {
+                        any |= contents_moved(&b.e_data)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(any)
+    }
+    let mut any = false;
+    for b in branch_history.iter().filter(|b| !b.diverges) {
+        match contents_moved(&b.e_data) {
+            Some(moved) => any |= moved,
+            None => return false,
+        }
+    }
+    any
+}
+
+// How each branch of type `!` that gave the variable a value left (`if
+// c { s = …; return; }`), also ones nested in branches that get here.
+fn assigned_by_leavers(branch_history: &[BranchData], out: &mut Vec<Vec<BranchExit>>) {
+    for b in branch_history {
+        if b.diverges {
+            let assigned = b.states.iter().any(|s| !matches!(
+                s.2,
+                State::OutOfScope | State::FullPrivilege { s: LineState::Uninit }
+            )) || b.e_data.iter().any(|(_, e)| holds_value_after(false, e));
+            if assigned {
+                out.push(b.exits.clone());
+            }
+        } else {
+            for (_, e) in &b.e_data {
+                if let Event::Branch { branch_history, .. } = e {
+                    assigned_by_leavers(branch_history, out);
                 }
             }
         }

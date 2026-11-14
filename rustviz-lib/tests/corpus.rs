@@ -16998,6 +16998,57 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource m points to is mutably borrowed by keep_mut",
         ],
     },
+    TooltipExpect {
+        name: "join_unassigned_after_return_919",
+        // #919: a `let x;` local assigned only in branches that return
+        // or panic (an `if`, a let-else's `else`, two `match` arms) has
+        // no value on any path that reaches the join. The join dot's
+        // tooltip was empty; the empty-tooltip check in
+        // `assert_well_formed` forbids that for every fixture. The
+        // assignment after the join is x's first on those paths, so it
+        // drops nothing.
+        must_contain: &[
+            "acc still has no value here: the branch that assigned acc returned before reaching this point",
+            "acc2 still has no value here: the branch that assigned acc2 returned before reaching this point",
+            "acc3 still has no value here: the branches that assigned acc3 left early (return, panic) before reaching this point",
+        ],
+        must_not_contain: &[
+            "=", // an empty tooltip (the join dot's)
+            "acc acquires ownership of a new resource",
+            "acc2 acquires ownership of a new resource",
+            "acc3 acquires ownership of a new resource",
+        ],
+    },
+    TooltipExpect {
+        name: "box_contents_maybe_moved_join_921",
+        // #921: `let w = *e;` in some branches moves e's contents, not e:
+        // e keeps its heap allocation on every path. After the join
+        // rustc rejects any use of e (E0382) but accepts a new value for
+        // `*e` or e (with `let mut`). The String, if the branch that ran
+        // didn't move it, is dropped by that next write, or else at e's
+        // scope end; the allocation is freed at e's scope end or
+        // reassignment either way (checked with a `Drop`-printing type).
+        // The join said "e was moved", and that the whole resource is
+        // dropped only on the paths that didn't move it.
+        must_contain: &[
+            "e's contents were moved out in at least one branch above, so e can't be used after the branches. If the branch that ran didn't move them, the String is dropped when e goes out of scope. The Box's heap allocation is freed then either way.",
+            "f's contents were moved out in at least one branch above, so f can't be used after the branches until *f is assigned again. If the branch that ran didn't move them, the String is dropped when *f is assigned again.",
+            "g's contents were moved out in at least one branch above, so g can't be used after the branches until g is assigned again. If the branch that ran didn't move them, the String is dropped when g is assigned again. The Box's heap allocation is freed then either way.",
+            "g acquires ownership of a new resource. Its previous String is dropped here only if no branch above moved it out (Rust tracks this with a runtime drop flag). Its previous Box's heap allocation is freed here either way.",
+            "b's contents were moved out in at least one branch above, so b can't be used after the branches. The Box's heap allocation is freed when b goes out of scope either way.",
+        ],
+        must_not_contain: &[
+            "e was moved in at least one branch above",
+            "f was moved in at least one branch above",
+            "g was moved in at least one branch above",
+            "b was moved in at least one branch above",
+            // f's String is dropped at `*f = …`, not at f's scope end.
+            "is dropped when f goes out of scope",
+            // b's contents (a struct of integers) have nothing to drop.
+            "If the branch that ran didn't move it, its resource is dropped when b goes out of scope",
+            "=g acquires ownership of a new resource. Its previous resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17088,6 +17139,12 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
     if let Some(t) = timeline_tooltips(&timeline).iter().find(|t| t.contains("Anonymous")) {
         panic!("{}: tooltip leaks the internal placeholder name: {:?}", name, t);
     }
+    // Every tooltip says something: an empty one shows an empty box on
+    // hover (#919: a join dot's).
+    let empty = timeline.split("data-tooltip-text=\"").skip(1)
+        .filter(|c| c.split('"').next().is_some_and(|t| t.trim().is_empty()))
+        .count();
+    assert!(empty == 0, "{}: {} empty tooltip(s) in the timeline", name, empty);
     assert!(
         code.trim_start().starts_with("<svg"),
         "{}: code panel is not SVG (starts with: {:?})",

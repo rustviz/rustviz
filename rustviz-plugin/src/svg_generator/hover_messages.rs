@@ -364,6 +364,33 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
     )
 }
 
+// `event_dot_owner_drop_at_reassign_maybe_moved` for a Box whose
+// contents (`*b`), not the Box itself, were moved out in some branches
+// above (#921): the drop flag decides only whether the old contents are
+// dropped; the old Box's heap allocation is freed either way. `holds`:
+// the Box's `Owner::holds` (`the String it holds`), `None` when the
+// contents need no drop.
+pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &String, holds: Option<&str>, by_cond: bool) -> String {
+    // (Starts ". Its previous ", so it subsumes the line's plain
+    // acquire: `reassign_subsumes_acquire`.)
+    let name = styled_name_html(my_name);
+    let mut out = format!("{} acquires ownership of a new resource.", name);
+    match holds.map(|h| h.strip_suffix(" it holds").and_then(|t| t.strip_prefix("the "))) {
+        Some(Some(ty)) => out.push_str(&format!(
+            " Its previous {} is dropped here only if {} moved it out (Rust tracks this with a runtime \
+             drop flag). Its previous Box's heap allocation is freed here either way.",
+            escape_tooltip_name(ty), moved_above(by_cond)
+        )),
+        Some(None) => out.push_str(&format!(
+            " Its previous contents are dropped here only if {} moved them out (Rust tracks this with \
+             a runtime drop flag). Its previous Box's heap allocation is freed here either way.",
+            moved_above(by_cond)
+        )),
+        None => out.push_str(" Its previous Box's heap allocation is freed here."),
+    }
+    out
+}
+
 /// Who may have moved a maybe-moved variable, for the drop-flag
 /// wording: "no branch above", or, when a let-chain's condition may have
 /// moved it before failing (#281), "nothing above".
@@ -2872,6 +2899,59 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mut
     )
 }
 
+/// Where the contents of a Box that some branches moved out of (`let w
+/// = *e;`) are dropped on the paths that didn't (#921).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContentsDropAt {
+    /// At e's scope end, together with the Box's heap allocation.
+    ScopeEnd,
+    /// At `e = …`, which also frees the old Box's heap allocation.
+    Reassign,
+    /// At `*e = …`, which keeps the Box's heap allocation.
+    PayloadWrite,
+}
+
+// `event_dot_branch_merge_moved_with_drop` for a Box whose contents (`*e`),
+// not the Box itself, were moved out in some branches (#921). e still
+// owns its heap allocation on every path, so the drop flag decides only
+// whether the contents are dropped. rustc rejects any use of e after the
+// join (E0382) except a new value for `*e` or for e (both need `let mut
+// e`). `holds`: the Box's `Owner::holds` (`the String it holds`), `None`
+// when the contents need no drop.
+pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt) -> String {
+    let name = styled_name_html(my_name);
+    let deref = styled_name_html(&format!("*{}", my_name));
+    let until = match at {
+        ContentsDropAt::Reassign => format!(" until {} is assigned again", name),
+        ContentsDropAt::PayloadWrite => format!(" until {} is assigned again", deref),
+        ContentsDropAt::ScopeEnd if mutable => format!(" (until {} or {} is assigned again)", deref, name),
+        ContentsDropAt::ScopeEnd => String::new(),
+    };
+    let mut out = format!(
+        "{0}'s contents were moved out in at least one branch above, so {0} can't be used after \
+         the branches{1}.",
+        name, until
+    );
+    let when = match at {
+        ContentsDropAt::ScopeEnd => format!("when {} goes out of scope", name),
+        ContentsDropAt::Reassign => format!("when {} is assigned again", name),
+        ContentsDropAt::PayloadWrite => format!("when {} is assigned again", deref),
+    };
+    if let Some(h) = holds {
+        let what = h.strip_suffix(" it holds").map_or_else(
+            || format!("{}'s contents", name),
+            escape_tooltip_name,
+        );
+        out.push_str(&format!(" If the branch that ran didn't move them, {} is dropped {}.", what, when));
+        if at != ContentsDropAt::PayloadWrite {
+            out.push_str(" The Box's heap allocation is freed then either way.");
+        }
+    } else if at != ContentsDropAt::PayloadWrite {
+        out.push_str(&format!(" The Box's heap allocation is freed {} either way.", when));
+    }
+    out
+}
+
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned
 // again before it goes out of scope: the old value, if it's still there,
 // is dropped at that assignment instead (#335).
@@ -3163,19 +3243,39 @@ pub fn event_dot_branch_merge_kept(my_name: &String, is_ref: Option<bool>, value
         None if value => format!("{} still owns its value here", name),
         None => format!("{} still owns its resource here", name),
     };
+    format!("{}: {}", holds, leavers_never_got_here("moved", &name, leavers))
+}
+
+// "the branch that moved s returned before reaching this point", "the
+// branches that assigned x never finish, so they don't reach this
+// point": why what the branches in `leavers` (how each left) did to
+// the variable `name` doesn't show at the join. `verb`: what they did.
+fn leavers_never_got_here(verb: &str, name: &str, leavers: &[Vec<BranchExit>]) -> String {
     let plural = leavers.len() > 1;
     let mut all: Vec<BranchExit> = leavers.iter().flatten().copied().collect();
     all.sort();
     all.dedup();
     let exits = if leavers.iter().all(|e| *e == leavers[0]) { leavers[0].clone() } else { all };
-    let subject = if plural { format!("the branches that moved {}", name) } else { format!("the branch that moved {}", name) };
+    let subject = if plural { format!("the branches that {} {}", verb, name) } else { format!("the branch that {} {}", verb, name) };
     match exits.as_slice() {
         [BranchExit::Other] | [] => format!(
-            "{}: {} {}, so {} reach this point",
-            holds, subject, exits_verb(&exits, plural), if plural { "they don't" } else { "it doesn't" }
+            "{} {}, so {} reach this point",
+            subject, exits_verb(&exits, plural), if plural { "they don't" } else { "it doesn't" }
         ),
-        _ => format!("{}: {} {} before reaching this point", holds, subject, exits_verb(&exits, plural)),
+        _ => format!("{} {} before reaching this point", subject, exits_verb(&exits, plural)),
     }
+}
+
+// Join of a conditional for a `let x;` local that has no value on any
+// path that gets here (#919; this used to be an empty tooltip).
+// `leavers`: how each branch that assigned it left (`if c { x = …;
+// return; }`, a let-else's `else` block); none: no branch assigned it.
+pub fn event_dot_branch_merge_still_unassigned(my_name: &String, leavers: &[Vec<BranchExit>]) -> String {
+    let name = styled_name_html(my_name);
+    if leavers.is_empty() {
+        return format!("{} still has no value here: none of the branches above assigned it", name);
+    }
+    format!("{} still has no value here: {}", name, leavers_never_got_here("assigned", &name, leavers))
 }
 
 // At the end of a loop, for a variable declared outside it that a
