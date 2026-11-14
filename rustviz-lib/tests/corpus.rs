@@ -15733,6 +15733,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from w4 to t4",
         ],
     },
+    // #907: Book listing 6-2's `Message` has a struct-like variant (no constructor fn,
+    // so the plugin's `ctor_hir_id().unwrap()` panicked). The struct-variant literal is
+    // not a call: nothing is "moved from" a `Message::Move` function.
+    TooltipExpect {
+        name: "struct_variant_enum_907",
+        must_contain: &[
+            "Move from String::from to m",
+            "m acquires ownership of a resource",
+            "m's resource is immutably borrowed by call; m is read-only while the borrow is live",
+            "mv acquires ownership of a resource",
+            "x is initialized with a copy of a value inside mv",
+            "y is initialized with a copy of a value inside mv",
+            "x holds a copyable value",
+        ],
+        must_not_contain: &[
+            "Move from Message::Move",
+            "Move from Move to",
+            "Copy from Message::Move",
+            "Message::Move is",
+            "mv is bound to a copyable value",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
