@@ -2960,8 +2960,10 @@ pub enum ContentsDropAt {
 // whether the contents are dropped. rustc rejects any use of e after the
 // join (E0382) except a new value for `*e` or for e (both need `let mut
 // e`). `holds`: the Box's `Owner::holds` (`the String it holds`), `None`
-// when the contents need no drop.
-pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt) -> String {
+// when the contents need no drop. `by_cond`: a let-chain's condition,
+// not only a branch, may have moved them (`if let … && { let w = *e;
+// … }`, #940): see `moved_above`.
+pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt, by_cond: bool) -> String {
     let name = styled_name_html(my_name);
     let deref = styled_name_html(&format!("*{}", my_name));
     let until = match at {
@@ -2970,11 +2972,18 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool
         ContentsDropAt::ScopeEnd if mutable => format!(" (until {} or {} is assigned again)", deref, name),
         ContentsDropAt::ScopeEnd => String::new(),
     };
-    let mut out = format!(
-        "{0}'s contents were moved out in at least one branch above, so {0} can't be used after \
-         the branches{1}.",
-        name, until
-    );
+    let mut out = if by_cond {
+        format!(
+            "{0}'s contents may have been moved out above, so {0} can't be used after the {1}{2}.",
+            name, styled_name_html(&"if".to_owned()), until
+        )
+    } else {
+        format!(
+            "{0}'s contents were moved out in at least one branch above, so {0} can't be used after \
+             the branches{1}.",
+            name, until
+        )
+    };
     let when = match at {
         ContentsDropAt::ScopeEnd => format!("when {} goes out of scope", name),
         ContentsDropAt::Reassign => format!("when {} is assigned again", name),
@@ -2985,7 +2994,8 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool
             || format!("{}'s contents", name),
             escape_tooltip_name,
         );
-        out.push_str(&format!(" If the branch that ran didn't move them, {} is dropped {}.", what, when));
+        let unless = if by_cond { "If nothing above moved them" } else { "If the branch that ran didn't move them" };
+        out.push_str(&format!(" {}, {} is dropped {}.", unless, what, when));
         if at != ContentsDropAt::PayloadWrite {
             out.push_str(" The Box's heap allocation is freed then either way.");
         }
