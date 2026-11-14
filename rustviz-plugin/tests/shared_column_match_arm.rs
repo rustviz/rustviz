@@ -53,8 +53,8 @@ fn owners(n: i32) {
     }
 }
 
-// The later `w` is declared deeper in the arm, in a block in it. (Its
-// scope end at the block's `}` is missing, #931.)
+// The later `w` is declared deeper in the arm, in a block in it, and
+// goes out of scope at that block's `}` (#931).
 fn nested(n: i32) {
     let a = String::from("a");
     {
