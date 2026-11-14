@@ -1,0 +1,71 @@
+/* RustViz next to Aquascope: one card, mdBook-style tab bar, both panes
+   stacked in one grid cell so the card keeps the taller pane's height. */
+.rv-viz {
+  margin: 1.2em 0;
+  border: 1px solid var(--table-border-color, var(--quote-border));
+  border-radius: 6px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.rv-viz-bar {
+  display: flex;
+  gap: 4px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--table-border-color, var(--quote-border));
+}
+.rv-viz-tab {
+  font: inherit;
+  font-size: 0.8em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 7px 8px 6px;
+  margin: 0;
+  color: var(--icons);
+  background: none;
+  border: none;
+  box-shadow: inset 0 -2px 0 transparent;
+  cursor: pointer;
+}
+.rv-viz-tab:hover { color: var(--icons-hover); }
+.rv-viz-tab[aria-selected="true"] {
+  color: var(--fg);
+  box-shadow: inset 0 -2px 0 var(--sidebar-active);
+}
+.rv-viz-tab:focus-visible { outline: 2px solid var(--sidebar-active); outline-offset: -2px; }
+.rv-viz-panes { display: grid; }
+.rv-viz-pane { grid-area: 1 / 1; min-width: 0; }
+.rv-viz-pane[aria-hidden="true"] { visibility: hidden; pointer-events: none; }
+
+/* Upstream blocks inside the card lose their own frame. */
+.rv-viz .aquascope { border: none; margin: 0; }
+.rv-viz pre { margin: 0; border-radius: 0; }
+.rv-viz pre > code { border-radius: 0; }
+
+/* RustViz figure: fits the text column (no -75px bleed). */
+.rv-fig {
+  display: flex;
+  align-items: flex-start;
+  overflow: hidden;
+  background: var(--rv-code-bg, var(--quote-bg));
+}
+.rv-fig-code { flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+.rv-fig-code > object { display: block; }
+.rv-fig > object.tl_panel { flex: 0 0 auto; }
+.rv-fig-code { flex: 0 1 auto; }
+.rv-fig-foot { text-align: right; font-size: 0.75em; padding: 3px 10px 5px; }
+.rv-fig-foot a, .rv-fig-foot a:visited { color: var(--icons); text-decoration: none; }
+.rv-fig-foot a:hover { color: var(--icons-hover); }
+
+/* Combined views (prototype). */
+.rv-combo .rv-combo-aq .cm-editor { display: none !important; }
+/* mdBook's ~750px text column is too narrow for timeline + snapshot side by
+   side, so the linked snapshot sits under the timeline. */
+.rv-combo-hover .rv-combo-aq { border-top: 1px solid var(--table-border-color, var(--quote-border)); min-width: 0; }
+.rv-combo-hover .rv-combo-aq .interpreter .step { display: none; }
+.rv-combo-hover .rv-combo-aq .interpreter .step.rv-on { display: block; }
+.rv-combo-hover .rv-combo-aq .interpreter { padding: 0.6rem; }
+.rv-combo-cap { font-size: 0.75em; color: var(--icons); padding: 6px 10px 0; min-height: 1.4em; }
+.rv-combo-rows .rv-combo-aq { border-top: 1px solid var(--table-border-color, var(--quote-border)); }
+.rv-combo-rows .rv-combo-aq .interpreter { flex-direction: row !important; flex-wrap: nowrap; padding: 0.6rem; }
+.rv-combo-rows .rv-combo-aq .interpreter .step { transition: opacity 120ms; }
+.rv-combo-rows.rv-focus .rv-combo-aq .interpreter .step:not(.rv-on) { opacity: 0.25; }

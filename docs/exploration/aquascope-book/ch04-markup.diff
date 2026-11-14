@@ -1,0 +1,145 @@
+--- ../../src-untrusted/rust-book/src/ch04-01-what-is-ownership.md	2026-11-14 20:46:00
++++ ch04-01-what-is-ownership.md	2026-11-14 21:19:35
+@@ -162,7 +162,7 @@
+ 
+ To transfer access to data without copying it, Rust uses **pointers**. A pointer is a value that describes a location in memory. The value that a pointer points-to is called its **pointee.** One common way to make a pointer is to allocate memory in the **heap**.  The heap is a separate region of memory where data can live indefinitely. Heap data is not tied to a specific stack frame. Rust provides a construct called [`Box`](https://doc.rust-lang.org/std/boxed/index.html) for putting data on the heap. For example, we can wrap the million-element array in `Box::new` like this:
+ 
+-```aquascope,interpreter
++```aquascope,interpreter,rustviz
+ #fn main() {
+ let a = Box::new([0; 1_000_000]);`[]`
+ let b = a;`[]`
+@@ -204,7 +204,7 @@
+ 
+ For example, let's trace through a program that allocates and frees a box:
+ 
+-```aquascope,interpreter,horizontal
++```aquascope,interpreter,horizontal,rustviz
+ fn main() {
+     let a_num = 4;`[]`
+     make_and_drop();`[]`
+@@ -239,7 +239,7 @@
+ 
+ Boxes are used by Rust data structures[^boxed-data-structures] like [`Vec`](https://doc.rust-lang.org/std/vec/struct.Vec.html), [`String`](https://doc.rust-lang.org/std/string/struct.String.html), and [`HashMap`](https://doc.rust-lang.org/std/collections/struct.HashMap.html) to hold a variable number of elements. For example, here's a program that creates, moves, and mutates a string:
+ 
+-```aquascope,interpreter,horizontal
++```aquascope,interpreter,horizontal,rustviz
+ fn main() {
+     let first = String::from("Ferris");`[]`
+     let full = add_suffix(first);`[]`
+--- ../../src-untrusted/rust-book/src/ch04-02-references-and-borrowing.md	2026-11-14 20:46:00
++++ ch04-02-references-and-borrowing.md	2026-11-14 21:19:35
+@@ -25,7 +25,7 @@
+ 
+ This move behavior is extremely inconvenient. Programs often need to use a string more than once. An alternative `greet` could return ownership of the strings, like this:
+ 
+-```aquascope,interpreter,horizontal
++```aquascope,interpreter,horizontal,rustviz-only
+ fn main() {
+     let m1 = String::from("Hello");
+     let m2 = String::from("world");`[]`
+@@ -45,7 +45,7 @@
+ 
+ A **reference** is a kind of pointer. Here's an example of a reference that rewrites our `greet` program in a more convenient manner:
+ 
+-```aquascope,interpreter,horizontal
++```aquascope,interpreter,horizontal,rustviz
+ fn main() {
+     let m1 = String::from("Hello");
+     let m2 = String::from("world");`[]`
+@@ -234,7 +234,7 @@
+ 
+ Second, why do places lose permissions when they become unused? Because some permissions are mutually exclusive. If you write `num = &v[2]`, then `v` cannot be mutated or dropped while `num` is in use. But that doesn't mean it's invalid to use `num` again. For example, if we add another `println!` to the above program, then `num` simply loses its permissions one line later:
+ 
+-```aquascope,permissions,stepper
++```aquascope,permissions,stepper,rustviz-default
+ #fn main() {
+ let mut v: Vec<i32> = vec![1, 2, 3];
+ let num: &i32 = &v[2];
+@@ -345,7 +345,7 @@
+ 
+ In the previous examples, a lifetime has been a contiguous region of code. However, once we introduce control flow, this is not necessarily the case. For example, here is a function that capitalizes the first character in a vector of ASCII characters:
+ 
+-```aquascope,permissions,stepper,boundaries
++```aquascope,permissions,stepper,boundaries,rustviz
+ fn ascii_capitalize(v: &mut Vec<char>) {
+     let c = &v[0];`(focus,paths:*v)`
+     if c.is_ascii_lowercase() {
+--- ../../src-untrusted/rust-book/src/ch04-03-fixing-ownership-errors.md	2026-11-14 20:46:00
++++ ch04-03-fixing-ownership-errors.md	2026-11-14 21:19:35
+@@ -166,7 +166,7 @@
+ 
+ To fix the program, the key insight is that we need to shorten the lifetime of `largest` to not overlap with `dst.push(..)`. One possibility is to clone `largest`:
+ 
+-```rust
++```rust,rustviz
+ fn add_big_strings(dst: &mut Vec<String>, src: &[String]) {
+     let largest: String = dst.iter().max_by_key(|s| s.len()).unwrap().clone();
+     for s in src {
+@@ -181,7 +181,7 @@
+ 
+ Another possibility is to perform all the length comparisons first, and then mutate `dst` afterwards:
+ 
+-```rust
++```rust,rustviz
+ fn add_big_strings(dst: &mut Vec<String>, src: &[String]) {
+     let largest: &String = dst.iter().max_by_key(|s| s.len()).unwrap();
+     let to_add: Vec<String> = 
+@@ -195,7 +195,7 @@
+ A final possibility is to copy out the length of `largest`, since we don't actually need the contents of `largest`, just its length. 
+ This solution is arguably the most idiomatic and the most performant:
+ 
+-```rust
++```rust,rustviz
+ fn add_big_strings(dst: &mut Vec<String>, src: &[String]) {
+     let largest_len: usize = dst.iter().max_by_key(|s| s.len()).unwrap().len();
+     for s in src {
+--- ../../src-untrusted/rust-book/src/ch04-04-slices.md	2026-11-14 20:46:00
++++ ch04-04-slices.md	2026-11-14 21:19:35
+@@ -21,7 +21,7 @@
+ 
+ <span class="filename">Filename: src/main.rs</span>
+ 
+-```rust
++```rust,rustviz
+ {{#rustdoc_include ../listings/ch04-understanding-ownership/listing-04-07/src/main.rs:here}}
+ ```
+ 
+@@ -73,7 +73,7 @@
+ 
+ <span class="filename">Filename: src/main.rs</span>
+ 
+-```aquascope,interpreter+permissions,boundaries,stepper,horizontal
++```aquascope,interpreter+permissions,boundaries,stepper,horizontal,rustviz
+ fn first_word(s: &String) -> usize {
+     let bytes = s.as_bytes();
+ 
+@@ -159,7 +159,7 @@
+ Because slices are references, they also change the permissions on referenced data. For example, observe below that when
+ `hello` is created as a slice of `s`, then `s` loses write and own permissions:
+ 
+-```aquascope,permissions,stepper,boundaries
++```aquascope,permissions,stepper,boundaries,rustviz-default
+ fn main() {
+     let mut s = String::from("hello");
+     let hello: &str = &s[0..5];
+@@ -218,7 +218,7 @@
+ 
+ <span class="filename">Filename: src/main.rs</span>
+ 
+-```rust
++```rust,rustviz-default
+ {{#rustdoc_include ../listings/ch04-understanding-ownership/no-listing-18-first-word-slice/src/main.rs:here}}
+ ```
+ 
+--- ../../src-untrusted/rust-book/src/ch04-05-ownership-recap.md	2026-11-14 20:46:00
++++ ch04-05-ownership-recap.md	2026-11-14 21:19:35
+@@ -49,7 +49,7 @@
+ 
+ By contrast, Rust's ownership model puts pointers front-and-center. We can see that by translating the `Document` type into a Rust data structure. Normally we would use a `struct`, but we haven't covered those yet, so we'll just use a type alias:
+ 
+-```rust
++```rust,rustviz-only
+ type Document = Vec<String>;
+ 
+ fn new_document(words: Vec<String>) -> Document {

@@ -113,6 +113,14 @@ impl Preprocessor for RustvizPlugin {
 
 		book.for_each_mut(|item| {
 			    if let BookItem::Chapter(chapter) = item {
+				    if chapter.content.contains("rustviz") || (cfg.aquascope_tabs && chapter.content.contains("```aquascope")) {
+					    let (s, _) = add_rustviz_blocks(&chapter.content, &assets_dir, &mut ex_counter, &cfg.playground_url, cfg.aquascope_tabs);
+					    chapter.content = s;
+				    }
+				    // Only round-trip chapters that actually contain `rv` blocks.
+				    if !chapter.content.contains(&format!("```{}", cfg.code_block)) {
+					    return;
+				    }
 				    let _ = process_code_blocks(chapter, &cfg, &assets_dir, &mut ex_counter).map(|s| {
 					                                              chapter.content = s;
 					                                              trace!("chapter '{}' processed", &chapter.name);
@@ -343,5 +351,333 @@ mod tests {
 		assert_eq!(Cfg::default().playground_url, DEFAULT_PLAYGROUND_URL);
 		let t: toml::value::Table = toml::from_str("playground-url = \"\"").unwrap();
 		assert_eq!(Cfg::try_from(t).unwrap().playground_url, "");
+	}
+}
+
+// ---------------------------------------------------------------------
+// RustViz next to Aquascope, chosen per block by fence flags.
+//
+//   ```aquascope,interpreter,rustviz          tabs, Aquascope shown first
+//   ```aquascope,interpreter,rustviz-default  tabs, RustViz shown first
+//   ```aquascope,interpreter,rustviz-only     RustViz replaces Aquascope
+//   ```rust,rustviz / rustviz-default / rustviz-only   same for listings
+//   (no flag)                                 untouched: identical to upstream
+//
+// Prototype-only: `rustviz-combo-hover`, `rustviz-combo-rows` (combined
+// views, see assets/viz.js).
+//
+// Text-level pass (like mdbook-aquascope's own parser): only the flagged
+// fences are rewritten, the rest of the chapter is left byte-for-byte.
+// The ```aquascope fence (minus our flags) is kept for mdbook-aquascope,
+// which must run *after* this preprocessor.
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum RvMode { Tabs { rv_first: bool }, Only, ComboHover, ComboRows }
+
+pub fn rv_mode(flag: &str) -> Option<RvMode> {
+	match flag {
+		"rustviz" => Some(RvMode::Tabs { rv_first: false }),
+		"rustviz-default" => Some(RvMode::Tabs { rv_first: true }),
+		"rustviz-only" => Some(RvMode::Only),
+		"rustviz-combo-hover" => Some(RvMode::ComboHover),
+		"rustviz-combo-rows" => Some(RvMode::ComboRows),
+		_ => None,
+	}
+}
+
+/// Aquascope source -> plain Rust: `#`-prefixed lines are shown (they
+/// are only hidden in Aquascope's view), `\#` is a literal `#`, and the
+/// `` `[..]` ``, `` `(..)` ``, `` `{..}` `` markers are removed. Line
+/// numbers are preserved (the combined views rely on that). When the
+/// block hides a `fn main() {` ... `}` wrapper, the body is indented.
+pub fn aquascope_to_rust(body: &str) -> String {
+	let mut out: Vec<(bool, String)> = Vec::new();
+	for line in body.trim().lines() {
+		if let Some(rest) = line.strip_prefix('#') {
+			out.push((true, rest.to_string()));
+		} else if let Some(rest) = line.strip_prefix("\\#") {
+			out.push((false, format!("#{}", rest)));
+		} else {
+			out.push((false, strip_markers(line)));
+		}
+	}
+	let open = out.iter().position(|(h, l)| *h && l.trim() == "fn main() {");
+	let close = out.iter().rposition(|(h, l)| *h && l.trim() == "}");
+	if let (Some(o), Some(c)) = (open, close) {
+		if o < c {
+			for (_, l) in out[o + 1..c].iter_mut() {
+				if !l.trim().is_empty() {
+					*l = format!("    {}", l);
+				}
+			}
+		}
+	}
+	let mut s = out.into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("\n");
+	s.push('\n');
+	s
+}
+
+/// rustdoc-style source (```rust blocks, `{{#rustdoc_include}}` output)
+/// -> the full program: `# ` / `#` hidden lines are shown, attributes
+/// (`#[..]`, `#![..]`) are left alone.
+pub fn rustdoc_to_rust(body: &str) -> String {
+	let mut s = body
+		.lines()
+		.map(|l| {
+			let t = l.trim_start();
+			let indent = &l[..l.len() - t.len()];
+			if t == "#" {
+				String::new()
+			} else if let Some(rest) = t.strip_prefix("# ") {
+				format!("{}{}", indent, rest)
+			} else {
+				l.to_string()
+			}
+		})
+		.collect::<Vec<_>>()
+		.join("\n");
+	s.push('\n');
+	s
+}
+
+fn strip_markers(line: &str) -> String {
+	let mut s = line.to_string();
+	'outer: loop {
+		for (open, close) in [("`[", "]`"), ("`(", ")`"), ("`{", "}`")] {
+			if let Some(i) = s.find(open) {
+				let after = &s[i + open.len()..];
+				let closer = close.chars().next().unwrap();
+				if let Some(j) = after.find(close) {
+					if !after[..j].contains(closer) {
+						s.replace_range(i..i + open.len() + j + close.len(), "");
+						continue 'outer;
+					}
+				}
+			}
+		}
+		break;
+	}
+	s
+}
+
+const VIZ_CSS: &str = include_str!("assets/viz.css");
+const VIZ_JS: &str = include_str!("assets/viz.js");
+
+struct Fence<'a> {
+	/// byte range of the whole block (opening line .. end of closing line)
+	start: usize,
+	end: usize,
+	lang: &'a str,
+	flags: Vec<&'a str>,
+	body: &'a str,
+	/// raw text of the opening fence line, without the newline
+	open_line: &'a str,
+	commented: bool,
+}
+
+/// Line-based scan for ```aquascope / ```rust fences.
+fn scan_fences(content: &str) -> Vec<Fence<'_>> {
+	let mut out = Vec::new();
+	let mut pos = 0;
+	let mut open: Option<(usize, usize, &str)> = None; // (start, body_start, open_line)
+	for line in content.split_inclusive('\n') {
+		let t = line.trim_end_matches(['\n', '\r']);
+		let ts = t.trim_start();
+		match open {
+			None => {
+				// `<!-- ```aquascope` (commented-out blocks) are still fences for
+				// mdbook-aquascope's text parser; recognise them so we skip them.
+				let (commented, f) = match ts.strip_prefix("<!--") {
+					Some(r) => (true, r.trim_start()),
+					None => (false, ts),
+				};
+				if let Some(info) = f.strip_prefix("```") {
+					if info.starts_with("aquascope") || info.starts_with("rust") {
+						open = Some((pos, pos + line.len(), t));
+						let _ = commented;
+					}
+				}
+			}
+			Some((start, body_start, open_line)) => {
+				if ts.starts_with("```") {
+					let info = open_line.trim_start();
+					let commented = info.starts_with("<!--");
+					let info = info.trim_start_matches("<!--").trim_start().trim_start_matches("```");
+					let mut parts = info.split(',').map(|p| p.trim());
+					let lang = parts.next().unwrap_or("");
+					out.push(Fence {
+						start,
+						end: pos + line.len(),
+						lang,
+						flags: parts.collect(),
+						body: &content[body_start..pos],
+						open_line,
+						commented,
+					});
+					open = None;
+				}
+			}
+		}
+		pos += line.len();
+	}
+	out
+}
+
+/// Rewrites the flagged fences. Returns the new chapter text and whether
+/// any visualization was added (so the caller can inject the assets once).
+pub fn add_rustviz_blocks(content: &str, assets_dir: &PathBuf, ex_counter: &mut u32, playground_url: &str, all_aquascope: bool) -> (String, bool) {
+	let mut out = String::with_capacity(content.len());
+	let mut last = 0;
+	let mut added = false;
+	for f in scan_fences(content) {
+		if f.commented || !(f.lang == "aquascope" || f.lang == "rust") {
+			continue;
+		}
+		let mut mode = None;
+		let mut kept: Vec<&str> = Vec::new();
+		for fl in &f.flags {
+			match rv_mode(fl) {
+				Some(m) => mode = Some(m),
+				None => kept.push(fl),
+			}
+		}
+		let should_fail = kept.contains(&"shouldFail") || kept.contains(&"does_not_compile");
+		if mode.is_none() && all_aquascope && f.lang == "aquascope" && !should_fail {
+			mode = Some(RvMode::Tabs { rv_first: false });
+		}
+		let Some(mode) = mode else { continue };
+		let is_aq = f.lang == "aquascope";
+		if !is_aq && matches!(mode, RvMode::ComboHover | RvMode::ComboRows) {
+			warn!("rustviz-combo-* needs an ```aquascope,interpreter block; ignored");
+			continue;
+		}
+		// The original block with our flags removed, so mdbook-aquascope /
+		// mdBook see exactly what upstream would have written.
+		let indent = &f.open_line[..f.open_line.len() - f.open_line.trim_start().len()];
+		let header = std::iter::once(f.lang).chain(kept.iter().copied()).collect::<Vec<_>>().join(",");
+		let close_line = content[f.start..f.end].trim_end().rsplit('\n').next().unwrap_or("```");
+		let original = format!("{}```{}\n{}{}\n", indent, header, f.body, close_line.trim_start());
+		let code = if is_aq { aquascope_to_rust(f.body) } else { rustdoc_to_rust(f.body) };
+		let name = format!("example-{}", *ex_counter);
+		*ex_counter += 1;
+		let fig = match rustviz_figure(&code, assets_dir, &name, playground_url) {
+			Ok(fig) => fig,
+			Err(e) => {
+				warn!("{}: block not drawn by RustViz: {}", name, e.lines().next().unwrap_or(""));
+				continue; // leave the block exactly as written
+			}
+		};
+		out.push_str(&content[last..f.start]);
+		let other = if is_aq { "Aquascope" } else { "Code" };
+		let html = match mode {
+			RvMode::Only => format!("<div class=\"rv-viz rv-viz-single\" data-rv=\"{name}\">\n{fig}\n</div>\n"),
+			RvMode::Tabs { rv_first } => {
+				let (a, b) = if rv_first { (("RustViz", None), (other, Some(&original))) } else { ((other, Some(&original)), ("RustViz", None)) };
+				let pane = |i: usize, p: &(&str, Option<&String>)| -> String {
+					let hidden = if i == 0 { "false" } else { "true" };
+					match p.1 {
+						Some(orig) => format!("<div class=\"rv-viz-pane\" role=\"tabpanel\" data-pane=\"{i}\" aria-hidden=\"{hidden}\">\n\n{orig}\n</div>\n"),
+						None => format!("<div class=\"rv-viz-pane\" role=\"tabpanel\" data-pane=\"{i}\" aria-hidden=\"{hidden}\">\n{fig}\n</div>\n"),
+					}
+				};
+				format!(
+					"<div class=\"rv-viz rv-viz-tabs\" data-rv=\"{name}\">\n<div class=\"rv-viz-bar\" role=\"tablist\">\
+					<button type=\"button\" class=\"rv-viz-tab\" role=\"tab\" aria-selected=\"true\" data-pane=\"0\">{}</button>\
+					<button type=\"button\" class=\"rv-viz-tab\" role=\"tab\" aria-selected=\"false\" data-pane=\"1\">{}</button></div>\n\
+					<div class=\"rv-viz-panes\">\n{}{}</div>\n</div>\n",
+					a.0, b.0, pane(0, &a), pane(1, &b)
+				)
+			}
+			RvMode::ComboHover | RvMode::ComboRows => {
+				let kind = if mode == RvMode::ComboHover { "hover" } else { "rows" };
+				format!(
+					"<div class=\"rv-viz rv-combo rv-combo-{kind}\" data-rv=\"{name}\" data-combo=\"{kind}\">\n\
+					<div class=\"rv-combo-rv\">\n{fig}\n</div>\n\
+					<div class=\"rv-combo-aq\">\n\n{original}\n</div>\n</div>\n"
+				)
+			}
+		};
+		out.push_str(&html);
+		added = true;
+		last = f.end;
+	}
+	out.push_str(&content[last..]);
+	if added {
+		// process_code_blocks injects helpers.js itself when the chapter
+		// also has `rv` blocks; a second copy would redeclare `const SVG`.
+		let helpers = if out.contains("```rv") { String::new() } else { helpers_script() };
+		(format!("<style>\n{}\n</style>\n<script>\n{}\n</script>\n{}\n\n{}", VIZ_CSS, VIZ_JS, helpers, out), true)
+	} else {
+		(out, false)
+	}
+}
+
+/// The RustViz figure (code panel + timeline) sized to the text column;
+/// reports failure instead of rendering an error box.
+fn rustviz_figure(code: &str, a_dir: &PathBuf, name: &str, playground_url: &str) -> std::result::Result<String, String> {
+	let dir = a_dir.join(name);
+	let _ = fs::create_dir_all(&dir);
+	let rv = Rustviz::new(code).map_err(|e| e.to_string())?;
+	fs::write(dir.join("vis_code.svg"), rv.code_panel_string()).map_err(|e| e.to_string())?;
+	fs::write(dir.join("vis_timeline.svg"), rv.timeline_panel_string()).map_err(|e| e.to_string())?;
+	let link = if playground_url.is_empty() {
+		String::new()
+	} else {
+		format!(
+			"<a class=\"rv-playground-link\" href=\"{}#code={}\" target=\"_blank\" rel=\"noopener\">Open in Playground &#8599;</a>",
+			html_attr_escape(playground_url),
+			base64url(code.as_bytes())
+		)
+	};
+	Ok(format!(
+		"<div class=\"rv-fig\" style=\"height: {h}px\">\
+<div class=\"rv-fig-code\"><object type=\"image/svg+xml\" class=\"{n} code_panel\" data=\"examples/{n}/vis_code.svg\"></object></div>\
+<object type=\"image/svg+xml\" class=\"{n} tl_panel\" data=\"examples/{n}/vis_timeline.svg\" onmouseenter=\"helpers('{n}')\"></object>\
+</div><div class=\"rv-fig-foot\">{link}</div>",
+		h = rv.height(), n = name, link = link
+	))
+}
+
+#[cfg(test)]
+mod aq_tests {
+	use super::*;
+
+	#[test]
+	fn strips_aquascope_markers() {
+		let src = "#fn main() {\nlet x = 1;`(focus,paths:x)`\n`[]`let y = &x;`{}`\n#}";
+		assert_eq!(aquascope_to_rust(src), "fn main() {\n    let x = 1;\n    let y = &x;\n}\n");
+	}
+
+	#[test]
+	fn rustdoc_hidden_lines_shown_attributes_kept() {
+		let src = "# #[derive(Debug)]\n#[derive(Clone)]\n# fn main() {\n    let x = 1;\n# }";
+		assert_eq!(rustdoc_to_rust(src), "#[derive(Debug)]\n#[derive(Clone)]\nfn main() {\n    let x = 1;\n}\n");
+	}
+
+	#[test]
+	fn modes() {
+		assert_eq!(rv_mode("rustviz"), Some(RvMode::Tabs { rv_first: false }));
+		assert_eq!(rv_mode("rustviz-default"), Some(RvMode::Tabs { rv_first: true }));
+		assert_eq!(rv_mode("rustviz-only"), Some(RvMode::Only));
+		assert_eq!(rv_mode("horizontal"), None);
+	}
+
+	#[test]
+	fn unflagged_blocks_untouched() {
+		let ch = "text\n```aquascope,interpreter\n#fn main() {\nlet x = 1;`[]`\n#}\n```\n\n```rust\nfn main() {}\n```\n";
+		let (out, added) = add_rustviz_blocks(ch, &PathBuf::from("/nonexistent"), &mut 0, "", false);
+		assert!(!added);
+		assert_eq!(out, ch);
+	}
+
+	#[test]
+	fn scan_finds_flags_and_bodies() {
+		let ch = "a\n```aquascope,interpreter,rustviz\nlet x = 1;`[]`\n```\n<!-- ```aquascope,interpreter\nx\n``` -->\n";
+		let fs = scan_fences(ch);
+		assert_eq!(fs.len(), 2);
+		assert_eq!(fs[0].flags, vec!["interpreter", "rustviz"]);
+		assert_eq!(fs[0].body, "let x = 1;`[]`\n");
+		assert!(fs[1].commented);
 	}
 }

@@ -1,0 +1,58 @@
+--- src-untrusted/rust-book/book.toml	2026-11-14 20:45:59
++++ proto/book.toml	2026-11-14 21:19:58
+@@ -13,25 +13,40 @@
+   "theme/2018-edition.css",
+   # Not doing any research right now, so no need to pester users with a form.
+   # "js-extensions/packages/consent-form/dist/index.css",
+-  "js-extensions/packages/feedback/dist/index.css",  
++  # RustViz prototype: feedback (highlighting) extension not built locally.
++  # "js-extensions/packages/feedback/dist/index.css",
+ ]
+ additional-js = [
+   "ferris.js",
+   # "js-extensions/packages/telemetry/dist/index.js",
+   # "js-extensions/packages/consent-form/dist/index.js",
+-  "js-extensions/packages/feedback/dist/index.js",
++  # "js-extensions/packages/feedback/dist/index.js",
+ ]
+ 
+ git-repository-url = "https://github.com/cognitive-engineering-lab/rust-book"
+ 
+ [preprocessor.quiz]
++command = "/path/to/bin/mdbook-quiz"
+ fullscreen = true
+ validate = true
+ cache-answers = true
+ more-words = "words.dic"
+ 
+ [preprocessor.aquascope]
++# Pin upstream's implicit (alphabetical) order: aquascope before quiz and
++# the trpl-* preprocessors (their cmark round-trip re-fences ```aquascope
++# blocks with four backticks, which mdbook-aquascope then mis-parses).
++before = ["quiz", "trpl-listing", "trpl-note"]
++command = "/path/to/aquascope/bin/mdbook-aquascope"
+ 
++# RustViz prototype: blocks opt in with fence flags (rustviz,
++# rustviz-default, rustviz-only); unflagged blocks are untouched. Must run
++# before aquascope (it wraps the raw ```aquascope fences, which aquascope
++# then replaces).
++[preprocessor.rustviz]
++command = "/path/to/rustviz/bin/mdbook-rustviz"
++before = ["aquascope"]
++
+ # [build]
+ # extra-watch-dirs = ["quizzes", "../mdbook-quiz/target/debug", "js-extensions/packages/feedback/dist"]
+ [output.html.search]
+@@ -63,10 +78,10 @@
+ 
+ # Do not sync this preprocessor; it is for the HTML renderer only.
+ [preprocessor.trpl-note]
+-command = "cargo run --manifest-path packages/mdbook-trpl/Cargo.toml --bin mdbook-trpl-note"
++command = "/path/to/trpl/bin/mdbook-trpl-note"
+ 
+ [preprocessor.trpl-listing]
+-command = "cargo run --manifest-path packages/mdbook-trpl/Cargo.toml --bin mdbook-trpl-listing"
++command = "/path/to/trpl/bin/mdbook-trpl-listing"
+ output-mode = "default"
+ 
+ [rust]

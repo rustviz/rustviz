@@ -17,6 +17,13 @@ pub struct Cfg {
 	#[serde(alias = "playground-url")]
 	#[serde(default = "Cfg::default_playground_url")]
 	pub playground_url: String,
+
+	/// Dev switch: treat every unflagged ```aquascope block that is not
+	/// `shouldFail` as if it carried the `rustviz` flag. Off by default;
+	/// authors normally choose per block with fence flags.
+	#[serde(alias = "aquascope-tabs")]
+	#[serde(default)]
+	pub aquascope_tabs: bool,
 }
 
 

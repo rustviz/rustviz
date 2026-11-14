@@ -1,0 +1,68 @@
+== ch04-01-what-is-ownership__aq01 [interpreter]  (no disagreement found)
+== ch04-01-what-is-ownership__aq02 [interpreter]  (no disagreement found)
+== ch04-01-what-is-ownership__aq03 [interpreter]  (no disagreement found)
+== ch04-01-what-is-ownership__aq04 [interpreter]  (no disagreement found)
+== ch04-01-what-is-ownership__aq06 [interpreter]  (no disagreement found)
+== ch04-01-what-is-ownership__aq07 [interpreter]  (no disagreement found)
+== ch04-01-what-is-ownership__aq09 [interpreter]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq02 [interpreter]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq03 [interpreter]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq04 [interpreter]
+   - L1@11: `r1` still drawn as a live pointer (stack:x); RustViz ended its borrow at line 8
+== ch04-02-references-and-borrowing__aq05 [interpreter]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq06 [interpreter]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq08 [permissions]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq09 [permissions]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq10 [permissions]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq12 [permissions]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq13 [permissions]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq14 [permissions]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq15 [permissions]  (no disagreement found)
+== ch04-02-references-and-borrowing__aq17 [permissions]  (no disagreement found)
+== ch04-03-fixing-ownership-errors__aq04 [permissions]  (no disagreement found)
+== ch04-03-fixing-ownership-errors__aq07 [permissions]  (no disagreement found)
+== ch04-03-fixing-ownership-errors__aq09 [permissions]  (no disagreement found)
+== ch04-04-slices__aq01 [interpreter+permissions]  (no disagreement found)
+== ch04-04-slices__aq02 [interpreter]
+   - L1@6: `hello` still drawn as a live pointer (heap); RustViz ended its borrow at line 4
+   - L1@6: `world` still drawn as a live pointer (heap); RustViz ended its borrow at line 5
+== ch04-04-slices__aq03 [interpreter]
+   - L1@7: `hello` still drawn as a live pointer (heap); RustViz ended its borrow at line 4
+   - L1@7: `world` still drawn as a live pointer (heap); RustViz ended its borrow at line 5
+== ch04-04-slices__aq04 [permissions]  (no disagreement found)
+== ch04-05-ownership-recap__aq01 [interpreter]
+   - L1@12: `a_stack_ref` still drawn as a live pointer (stack:another_num); RustViz ended its borrow at line 9
+   - L1@12: `a_box_stack_ref` still drawn as a live pointer (stack:a_box); RustViz ended its borrow at line 11
+== ch04-05-ownership-recap__aq02 [interpreter]  (no disagreement found)
+== ch04-05-ownership-recap__aq05 [permissions]  (no disagreement found)
+== ch04-05-ownership-recap__aq09 [permissions]  (no disagreement found)
+== ch05-01-defining-structs__aq01 [interpreter]  (no disagreement found)
+== ch05-01-defining-structs__aq02 [interpreter]  (no disagreement found)
+== ch05-01-defining-structs__aq03 [interpreter]
+   - L1@21: Aquascope shows `user1` moved, RustViz draws no move of `user1`
+== ch05-01-defining-structs__aq04 [interpreter]  (no disagreement found)
+== ch05-01-defining-structs__aq05 [interpreter]  (no disagreement found)
+== ch05-01-defining-structs__aq06 [permissions]  (no disagreement found)
+== ch05-03-method-syntax__aq01 [permissions]  (no disagreement found)
+== ch05-03-method-syntax__aq07 [permissions]  (no disagreement found)
+== ch06-01-defining-an-enum__aq01 [interpreter]  (no disagreement found)
+== ch06-01-defining-an-enum__aq02 [interpreter]  (no disagreement found)
+== ch06-01-defining-an-enum__aq03 [interpreter]  (no disagreement found)
+== ch06-01-defining-an-enum__aq04 [interpreter]  (no disagreement found)
+== ch06-02-match__aq01 [permissions]  (no disagreement found)
+== ch06-02-match__aq03 [permissions]
+   - perm: `opt` regains W after line 8; RustViz ends the borrow of `opt` at [7, 7, 11]
+== ch08-01-vectors__aq01 [interpreter]
+   - L1@4: `iter` holds a dangling pointer (⦻); RustViz: borrow ended at line 7
+   - L2@5: `iter` holds a dangling pointer (⦻); RustViz: borrow ended at line 7
+   - L3@6: `iter` holds a dangling pointer (⦻); RustViz: borrow ended at line 7
+   - L3@6: `n1` still drawn as a live pointer (heap); RustViz ended its borrow at line 5
+   - L4@7: `iter` holds a dangling pointer (⦻); RustViz: borrow ended at line 7
+   - L4@7: `n1` still drawn as a live pointer (heap); RustViz ended its borrow at line 5
+   - L4@7: `n2` still drawn as a live pointer (heap); RustViz ended its borrow at line 6
+== ch08-01-vectors__aq04 [interpreter]  (no disagreement found)
+== experiment-intro__aq01 [interpreter]
+   - L3@4: `hello` holds a dangling pointer (⦻); RustViz: borrow ended at line 3
+   - L4@5: `hello` holds a dangling pointer (⦻); RustViz: borrow ended at line 3
+
+SUMMARY {'ref outlives borrow (runtime vs NLL)': 10, 'borrow end agrees': 12, 'move: aq-only': 1, 'move line agrees': 2, 'borrow end differs': 1, 'dangling-but-dead pointer shown': 6}
