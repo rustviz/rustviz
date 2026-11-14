@@ -13386,6 +13386,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move of each element of kept to w",
         ],
     },
+    // #245: the if branch's move isn't on the `else`'s path, so a
+    // reassignment there drops the value the variable still holds. Main
+    // read "acquires ownership of a resource" (no drop) for each of these.
+    // A by-value parameter holds the caller's value, so reassigning it
+    // drops that too (`q`, and the `else if` arms of `u`).
+    TooltipExpect {
+        name: "else_reassign_drop_245",
+        must_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "p acquires ownership of a new resource; its previous resource is dropped",
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "w acquires ownership of a new resource; its previous resource is dropped",
+            "q acquires ownership of a new resource; its previous resource is dropped",
+            // A Copy value: nothing is dropped.
+            "n is assigned a new value",
+        ],
+        must_not_contain: &[
+            // (`s`'s own `let` reads "s acquires ownership of a resource",
+            // so only the parameters can forbid it.)
+            "=p acquires ownership of a resource",
+            "=t acquires ownership of a resource",
+            "=u acquires ownership of a resource",
+            "=w acquires ownership of a resource",
+            "=q acquires ownership of a resource",
+            "=n acquires ownership of a new resource; its previous resource is dropped",
+            "n's previous",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
