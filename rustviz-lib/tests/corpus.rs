@@ -16513,9 +16513,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "show_str reads from gy",
             "show_str no longer borrows the resource gy points to",
             // `&mut gv` unsized to `&mut dyn Write` points to gv itself:
-            // not a reborrow (its dots are #947).
+            // not a reborrow. What dv borrows is the reference gv
+            // holds, a value (#947).
             "Mutable borrow from gv to dv",
-            "Return mutably borrowed resource from dv to gv",
+            "Return mutably borrowed value from dv to gv",
+            "gv is mutably borrowed by dv; gv can't be used while the borrow is live",
         ],
         must_not_contain: &[
             "Immutable borrow from gx to s",
@@ -16526,6 +16528,48 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "gy is immutably borrowed by show_str",
             "Mutable reborrow from gv to dv",
             "Return mutably borrowed resource from dv to *gv",
+            "Return mutably borrowed resource from dv to gv",
+            "the resource gv points to is mutably borrowed by dv",
+        ],
+    },
+    // ─── `&r` / `&mut r` unsized to a trait object borrows r (#947) ───
+    TooltipExpect {
+        name: "dyn_unsize_ref_var_947",
+        must_contain: &[
+            // let dd: &dyn Debug = &gd; (gd: &String) borrows gd itself:
+            // the `dyn Debug` is gd's `&String`, a value.
+            "Immutable borrow from gd to dd",
+            "gd is immutably borrowed by dd; gd is read-only while the borrow is live",
+            "gd is no longer immutably borrowed",
+            "dd immutably borrows a value",
+            "Return immutably borrowed value from dd to gd",
+            "the value dd points to is immutably borrowed by println!",
+            "println! no longer borrows the value dd points to",
+            // let dw: &mut dyn Write = &mut gw2; (gw2: &mut Vec<u8>).
+            "Mutable borrow from gw2 to dw",
+            "gw2 is mutably borrowed by dw; gw2 can't be used while the borrow is live",
+            "gw2 is no longer mutably borrowed",
+            "the value dw points to is mutably borrowed by write_all through dw; dw can't be used while the borrow is live",
+            "dw mutably borrows a value",
+            "Return mutably borrowed value from dw to gw2",
+            // An owner unsized to a trait object still lends a resource.
+            "k2's resource is immutably borrowed by d2; k2 is read-only while the borrow is live",
+            "d2 immutably borrows a resource",
+            "Return immutably borrowed resource from d2 to k2",
+        ],
+        must_not_contain: &[
+            "the resource gd points to",
+            "dd no longer borrows the resource gd points to",
+            "=dd immutably borrows a resource",
+            "Return immutably borrowed resource from dd to gd",
+            "the resource dd points to",
+            "the resource gw2 points to",
+            "dw no longer borrows the resource gw2 points to",
+            "=dw mutably borrows a resource",
+            "Return mutably borrowed resource from dw to gw2",
+            "the resource dw points to",
+            "Immutable reborrow from gd to dd",
+            "Mutable reborrow from gw2 to dw",
         ],
     },
     TooltipExpect {

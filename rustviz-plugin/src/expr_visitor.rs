@@ -3859,7 +3859,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if ty.is_ref() {
       let (lender, aliasing, static_lender, co_lenders) = self.get_ref_data_full(&expr);
       let src_loan = self.source_ref_loan(expr);
-      let pointee_copy = self.ref_pointee_is_copy(ty, expr.hir_id.owner);
+      // `let d: &dyn Debug = &gd;`: what d points to is gd's `&String`,
+      // known from the type before the unsizing, not from `dyn Debug`
+      // (#947).
+      let typeck = self.tcx.typeck(expr.hir_id.owner);
+      let unsized_from = typeck.expr_adjustments(expr).iter()
+        .any(|a| matches!(a.kind, adjustment::Adjust::Pointer(adjustment::PointerCoercion::Unsize)))
+        .then(|| typeck.expr_ty(expr));
+      let pointee_copy = self.ref_pointee_is_copy(unsized_from.unwrap_or(ty), expr.hir_id.owner);
       self.add_ref(name.clone(), 
       bool_of_mut(ty.ref_mutability().unwrap()), 
       mutability, 
