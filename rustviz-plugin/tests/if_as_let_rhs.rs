@@ -1,5 +1,5 @@
 // `if`/`else` as the RHS of a `let`. The plugin doesn't track
-// borrows *inside* a conditional body (see Limitations) but using
+// borrows *inside* a conditional body but using
 // the conditional as an expression that produces a value into a
 // `let` is supported.
 

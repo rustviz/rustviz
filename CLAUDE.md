@@ -30,22 +30,28 @@ writes through `&mut` mutate the referent, drops happen at scope end).
   also use a `CARGO_HOME` whose `bin` has no plugin (or `--root` into it),
   and check `cargo rv-plugin --version` / `which`.
 
-## Known gaps are issues, not README text
+## Known gaps are issues; the README and panel are short summaries
 
-The README doesn't list limitations (maintainer decision, 2026-11-07); its
-Limitations section only links to the issue searches. What RustViz can't
-draw correctly yet is tracked as GitHub issues labelled `limitation`
-([search](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Alimitation)):
+What RustViz can't draw correctly yet is tracked as GitHub issues labelled
+`limitation`
+([search](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Alimitation)).
+`README.md` -> **Limitations** and the playground's **Known limitations**
+panel (`playground/frontend/src/App.tsx`) are short summaries of the
+top-level gaps (closures, macros, raw pointers, `async`) that link to that
+search; they are not lists of every gap (maintainer decision: the old list
+was far too long).
 
-- A PR that fixes a gap closes its issue ("Fixes #N"); one that fixes
-  only part of it says "Part of #N" and leaves the issue open.
 - A newly found gap (wrong or missing output that isn't a crash) is filed
   as an issue labelled `limitation`: minimal repro, current output,
-  expected output. Don't add limitation text to `README.md`.
-- `playground/frontend/src/App.tsx` → the **Known limitations** panel
-  students see in the playground (a short, student-facing list) is still
-  kept in sync with what `main` gets wrong, in the same PR, for now; its
-  future is decided at release prep.
+  expected output. Don't add bullets to the README or the panel.
+- A PR that fixes a gap closes its issue ("Fixes #N"); one that fixes
+  only part of it says "Part of #N" and leaves the issue open.
+- Touch the README / panel summaries only when a top-level gap changes
+  (closure bodies traced, user macros supported, raw pointers or `async`
+  modelled); update both in the same PR.
+- `Rc` / `Arc` reference counts are deliberately not modelled (RustViz
+  draws ownership and borrowing, not those types' semantics); that is not
+  a limitation to file.
 
 `rustviz-plugin/README.md` only links to the issue searches.
 
