@@ -1427,11 +1427,25 @@ fn render_scope_end_dot(
             // not others (#179): the drop flag decides here.
             let cx = timeline_data.x_val;
             let cy = event_y;
+            let by_cond = moved_by_chain_condition(history) || maybe_moved_by_let(history);
+            let last_branch = history.iter().rev().find_map(|(_, e)| match e {
+                Event::Branch { branch_history, .. } => Some(branch_history),
+                _ => None,
+            });
+            // A Box whose contents need no drop (no drop note), moved
+            // out in some branches only (#929): nothing but the heap
+            // allocation is freed, on every path.
+            let title = if ro.box_contents_moved() && ro.drop_note().is_empty()
+                && last_branch.is_some_and(|b| moves_only_box_contents(b)) {
+                hover_messages::event_dot_go_out_of_scope_box_plain_contents_maybe_moved(&name, by_cond)
+            } else {
+                hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), by_cond, ro.box_contents_moved())
+            };
             let drop_data = DropDotData {
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), moved_by_chain_condition(history) || maybe_moved_by_let(history), ro.box_contents_moved()),
+                title,
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -3146,8 +3160,14 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         Event::OwnerGoOutOfScope | Event::RefGoOutOfScope => false,
         // May have no value after a loop (#786).
         Event::LoopMaybeInit => false,
+        // (Not one that returns or panics after assigning a `let x;`
+        // local: on the paths that get past the conditional, x still
+        // has no value, #930. A `break` out of a loop takes the value
+        // to the code after the loop.)
         Event::Branch { branch_history, .. } => {
-            held || branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| holds_value_after(false, e)))
+            held || branch_history.iter()
+                .filter(|b| !(b.diverges && b.exits.iter().all(|x| matches!(x, BranchExit::Return | BranchExit::Panic | BranchExit::Other))))
+                .any(|b| b.e_data.iter().any(|(_, e)| holds_value_after(false, e)))
         }
         _ => held,
     }

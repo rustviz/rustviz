@@ -391,6 +391,42 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &Strin
     out
 }
 
+// `*b = v` on a Box whose old contents were moved out before (`let w =
+// *b;`, #928): `maybe` None when they were moved on every path (nothing
+// is dropped), `Some(by_cond)` when on some paths only (a drop flag
+// decides). The Box keeps its heap allocation either way. `holds`: the
+// Box's `Owner::holds` (`the String it holds`).
+pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Option<&str>, maybe: Option<bool>) -> String {
+    // (Starts ". Its previous ", so it subsumes the line's plain
+    // acquire: `reassign_subsumes_acquire`.)
+    let ty = holds.and_then(|h| h.strip_suffix(" it holds")).and_then(|t| t.strip_prefix("the "));
+    let what = ty.map_or_else(|| String::from("contents"), escape_tooltip_name);
+    let plural = ty.is_none();
+    let rest = match maybe {
+        None => format!(
+            "Its previous {} {} moved out earlier, so nothing is dropped.",
+            what, if plural { "were" } else { "was" }
+        ),
+        Some(by_cond) => format!(
+            "Its previous {} {} dropped here only if {} moved {} out (Rust tracks this with a runtime drop flag).",
+            what, if plural { "are" } else { "is" }, moved_above(by_cond), if plural { "them" } else { "it" }
+        ),
+    };
+    format!("{} acquires ownership of a new resource. {}", styled_name_html(deref_name), rest)
+}
+
+// Scope end of a Box whose contents need no drop (`Box<P>`, P with no
+// drop glue) and were moved out in some branches only (#929): nothing of
+// the contents is dropped on any path, so no drop flag matters; the
+// Box's heap allocation is freed on every path.
+pub fn event_dot_go_out_of_scope_box_plain_contents_maybe_moved(my_name: &String, by_cond: bool) -> String {
+    format!(
+        "{} goes out of scope. Its contents {}; the Box's heap allocation is freed here either way.",
+        styled_name_html(my_name),
+        if by_cond { "may have been moved out above" } else { "were moved out in at least one branch above" }
+    )
+}
+
 /// Who may have moved a maybe-moved variable, for the drop-flag
 /// wording: "no branch above", or, when a let-chain's condition may have
 /// moved it before failing (#281), "nothing above".

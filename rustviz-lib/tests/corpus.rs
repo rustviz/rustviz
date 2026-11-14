@@ -17049,6 +17049,57 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=g acquires ownership of a new resource. Its previous resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
     },
+    TooltipExpect {
+        name: "box_contents_write_after_move_928",
+        // #928: `*e = …` right after `let w = *e;` drops nothing: e's old
+        // String was moved to w. `*f = …` after a branch that may have
+        // moved f's String drops it only if that branch didn't run (a
+        // runtime drop flag). Checked with a `Drop`-printing type: no
+        // drop at e's write; f's old value dropped at the write only on
+        // the path that didn't move it. Both said "its previous
+        // resource is dropped".
+        must_contain: &[
+            "*e acquires ownership of a new resource. Its previous String was moved out earlier, so nothing is dropped.",
+            "*f acquires ownership of a new resource. Its previous String is dropped here only if no branch above moved it out (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=*e acquires ownership of a new resource; its previous resource is dropped",
+            "=*f acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "box_plain_contents_scope_end_929",
+        // #929: a Box<P> whose P needs no drop, its contents moved out in
+        // some branches only: at the scope end nothing of the contents is
+        // dropped on any path (no drop flag matters), and the Box's heap
+        // allocation is freed on every path. It said the resource is
+        // dropped only if no branch moved it, with a drop flag.
+        must_contain: &[
+            "b goes out of scope. Its contents were moved out in at least one branch above; the Box's heap allocation is freed here either way.",
+            "c goes out of scope. Its contents were moved out in at least one branch above; the Box's heap allocation is freed here either way.",
+        ],
+        must_not_contain: &[
+            "b goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "c goes out of scope. Its resource is dropped here only if no branch above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "let_copy_assigned_after_return_930",
+        // #930: a Copy `let n;` assigned only in a branch that returns
+        // (or panics): on the only path that reaches the later `n = 2;`,
+        // n has no value yet, so that's its first value. It said "n is
+        // assigned a new value". The join now says why n has no value.
+        must_contain: &[
+            "n still has no value here: the branch that assigned n returned before reaching this point",
+            "m still has no value here: the branch that assigned m panicked before reaching this point",
+            "n is bound to a copyable value",
+            "m is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            "n is assigned a new value",
+            "m is assigned a new value",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

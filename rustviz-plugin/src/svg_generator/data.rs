@@ -134,6 +134,14 @@ pub enum PlaceWrite {
     AssignDropsOld,
     /// `*r = e` with an owned value over an old value with nothing to drop.
     AssignOwned,
+    /// `*b = e` on a Box whose old contents (which need drop) were
+    /// moved out on every path (`let w = *b;`, #928): nothing is
+    /// dropped.
+    AssignOverMoved,
+    /// `*b = e` on a Box whose old contents (which need drop) were
+    /// moved out on some paths only (#928): a runtime drop flag decides
+    /// whether they are dropped. `by_cond`: see `moved_above`.
+    AssignMaybeMoved { by_cond: bool },
 }
 
 impl PlaceWrite {
@@ -1019,7 +1027,8 @@ pub struct ExtBranchData {
     pub diverges: bool,
 
     // How a diverging branch leaves (empty when it reaches the merge).
-    // Only used for the merge dot's wording.
+    // Used for the merge dot's wording, and to tell whether a value it
+    // gave a variable can reach the code after the loop it breaks out of.
     pub exits: Vec<BranchExit>,
 
     // The variables the arm's `break value`s out of a loop mention
@@ -3215,10 +3224,12 @@ impl Event {
                         // drawn on the field's own column `s.n`, the place
                         // written through is `r.n`.
                         PlaceWrite::AssignCopy | PlaceWrite::AssignOwned | PlaceWrite::AssignDropsOld
+                        | PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. }
                             if r.name().contains('.') && !place.starts_with('*') && !place.starts_with(r.name().as_str()) =>
                             hover_messages::event_dot_assign_through(r.name(), place),
                         PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
-                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place, ""),
+                        PlaceWrite::AssignDropsOld | PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. } =>
+                            hover_messages::event_dot_owner_drop_at_reassign(place, ""),
                         // The old element has nothing to drop (that's what makes
                         // it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
@@ -3248,6 +3259,12 @@ impl Event {
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name), ""),
+                        // `*b = v` after b's contents were moved out
+                        // (#928), on every path or some only.
+                        PlaceWrite::AssignOverMoved =>
+                            hover_messages::event_dot_box_contents_write_after_move(&self.deref_name(my_name), r.holds_phrase(), None),
+                        PlaceWrite::AssignMaybeMoved { by_cond } =>
+                            hover_messages::event_dot_box_contents_write_after_move(&self.deref_name(my_name), r.holds_phrase(), Some(by_cond)),
                         // The old value has nothing to drop (that's what
                         // makes it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),

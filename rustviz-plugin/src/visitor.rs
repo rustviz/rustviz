@@ -3509,9 +3509,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       PlaceWrite::AssignOwned
     };
+    // `*b = v` on a Box `b` whose contents a `let w = *b;` moved out
+    // before (#928): on every path, nothing of the old contents is
+    // left to drop; on some paths only, a drop flag decides.
+    let box_contents_write = |rap: &ResourceAccessPoint, write: PlaceWrite| {
+      let box_deref = !rap.is_ref() && matches!(lhs_expr.kind, ExprKind::Unary(UnOp::Deref, inner)
+        if self.tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_box());
+      match write {
+        PlaceWrite::AssignDropsOld if box_deref => match self.rap_ownership_now(rap.name()) {
+          Ownership::None => PlaceWrite::AssignOverMoved,
+          Ownership::Maybe => PlaceWrite::AssignMaybeMoved {
+            by_cond: self.maybe_moved_by_let_now(rap.name()) || self.moved_by_chain_condition(rap.name()),
+          },
+          Ownership::Held => write,
+        },
+        _ => write,
+      }
+    };
     let lhs_rty = match lhs_rty {
-      ResourceTy::Deref(rap) if is_assign && (!lhs_ty.is_ref() || !repoints_ref_var) =>
-        ResourceTy::Deref(rap.with_place_write(assign_kind())),
+      ResourceTy::Deref(rap) if is_assign && (!lhs_ty.is_ref() || !repoints_ref_var) => {
+        let write = box_contents_write(&rap, assign_kind());
+        ResourceTy::Deref(rap.with_place_write(write))
+      }
       // A reference-typed field (`h.r = &x`) is not an owned or Copy
       // value; leave its wording alone.
       ResourceTy::DerefField(rap, place, _) if is_assign && !lhs_ty.is_ref() =>
@@ -4363,8 +4382,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // A body that assigns a `let x;` local is drawn as a branch
         // too when x may have no value on the implicit `else` path
         // (#244): the join says so.
+        // So is a body that always leaves the function after assigning
+        // a `let x;` local (`if c { n = 1; return; }`): x still has no
+        // value after the `if`, and the next assignment is its first
+        // (#930). (Not a `break` out of a loop: x keeps its value
+        // after that loop.)
+        let assigns_then_exits = self.expr_diverges(if_expr)
+          && assigned_in_if.iter().any(|id| self.uninit_locals.contains_key(id))
+          && branch_leaves(self.tcx, BranchBody::Expr(if_expr)).exits.iter()
+            .all(|x| matches!(x, BranchExit::Return | BranchExit::Panic | BranchExit::Other));
         let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch
-          || assigns_maybe_init
+          || assigns_maybe_init || assigns_then_exits
           || (self.expr_diverges(if_expr) && {
             let sm = self.tcx.sess.source_map();
             let (split, if_end) = (sm.lookup_char_pos(if_expr.span.lo()).line, sm.lookup_char_pos(if_expr.span.hi()).line);
