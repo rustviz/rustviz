@@ -80,17 +80,30 @@ jobs:
         # because docker isn't on PATH; everything else runs normally.
         run: cargo xtask setup
 
-      - name: cargo build --workspace
-        run: cargo build --workspace --locked
+      # `rustviz` and `rustviz-cli` both define a bin named `rustviz`, so
+      # building both in one cargo invocation makes two links write
+      # target/<profile>/rustviz.exe (cargo#6313). On Windows they race and
+      # fail with LNK1104. So every step that covers the workspace is split
+      # in two: everything but `rustviz`, then `-p rustviz` on its own.
+      - name: cargo build (workspace minus rustviz)
+        run: cargo build --workspace --exclude rustviz --locked
 
-      - name: cargo test --workspace
+      - name: cargo build -p rustviz
+        run: cargo build -p rustviz --locked
+
+      - name: cargo test (workspace minus rustviz)
         env:
           # Corpus tests use the in-process plugin path (faster than
           # spinning up a fresh runner container per case, and we're
           # not testing sandboxing here). The plugin itself was
           # installed by xtask setup.
           RV_RUNNER: local
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --exclude rustviz --locked
+
+      - name: cargo test -p rustviz
+        env:
+          RV_RUNNER: local
+        run: cargo test -p rustviz --locked
 
       - name: Lint plugin for unordered HashMap/HashSet iteration (clippy)
         # Their iteration order is random per process, and when it reached
