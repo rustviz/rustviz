@@ -15369,6 +15369,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "being shared by one or more variables",
         ],
     },
+    TooltipExpect {
+        name: "deref_destructure_886",
+        // #886: `let (c, d) = *r;` binds c and d to copies of values inside
+        // `*r` (`(*r).0`, `(*r).1`), as `match *r { (a, b) => .. }` already
+        // said. main read "c is initialized with a copy of *r" (c is not a
+        // copy of the whole tuple), likewise for the struct and tuple-struct
+        // patterns and for a Box. `let whole = *r;` does copy `*r` itself.
+        must_contain: &[
+            "c is initialized with a copy of a value inside *r",
+            "d is initialized with a copy of a value inside *r",
+            "a is initialized with a copy of a value inside *r",
+            "x is initialized with a copy of a value inside *rp",
+            "y is initialized with a copy of a value inside *rp",
+            "m is initialized with a copy of a value inside *rw",
+            "n is initialized with a copy of a value inside *rw",
+            "g is initialized with a copy of a value inside *bx",
+            "h is initialized with a copy of a value inside *bx",
+            "a value inside *r is copied",
+            "a value inside *rp is copied",
+            "a value inside *rw is copied",
+            "a value inside *bx is copied",
+            "whole is initialized with a copy of *r",
+        ],
+        must_not_contain: &[
+            "c is initialized with a copy of *r",
+            "d is initialized with a copy of *r",
+            "x is initialized with a copy of *rp",
+            "y is initialized with a copy of *rp",
+            "m is initialized with a copy of *rw",
+            "n is initialized with a copy of *rw",
+            "g is initialized with a copy of *bx",
+            "h is initialized with a copy of *bx",
+            "*bx's value is copied",
+            "*rp's value is copied",
+            "*rw's value is copied",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
