@@ -13311,8 +13311,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // #843: an arm column with no events for the variable. The diagonals
     // into and out of an arm underline nothing, so they say where they
     // lead instead of pointing at "the underlined code". (The `None`
-    // arm is one row, so its column is dashed beside the `Some` arm's
-    // rows and has no solid stretch of its own.)
+    // arm is one row: its column is dashed beside the `Some` arm's
+    // rows and solid over its own row, see #845.)
     TooltipExpect {
         name: "arm_no_events_own_rows_843",
         must_contain: &[
@@ -13330,6 +13330,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // The `else` body's own rows keep the ordinary state text.
             "s is the owner of the resource",
             "This segment is for the else branch. The underlined code is not part of that branch.",
+        ],
+        must_not_contain: &[],
+    },
+    // #845: match arms of one row with no events for `s` are solid over
+    // their own row. These texts exist in the old output too (the `_` arm
+    // owns `s`); where the solid stretch is and what it underlines is
+    // pinned by `one_row_arm_without_events_is_solid_over_its_own_row`.
+    TooltipExpect {
+        name: "match_one_row_arms_845",
+        must_contain: &[
+            "s is the owner of the resource",
+            "This segment is for the 0 branch. The underlined code is not part of that branch.",
+            "This segment leads from the 1 branch to where the branches join.",
         ],
         must_not_contain: &[],
     },
@@ -17748,6 +17761,49 @@ fn arm_hovers_that_underline_nothing_do_not_mention_underlined_code() {
             leads += (text.contains("leads into the") || text.contains("to where the branches join")) as usize;
         }
         assert!(leads > 0, "{name}: no diagonal says where it leads");
+    }
+}
+
+/// #845: a match arm of one row with no events for the variable is solid
+/// over its own row (half a row either side, clipped at the split), and
+/// hovering that stretch underlines exactly that line. The rest of its
+/// column stays dashed beside the other arms' rows, and the join diagonal
+/// starts below the solid stretch.
+#[test]
+fn one_row_arm_without_events_is_solid_over_its_own_row() {
+    // (fixture, first/last row of the arms that must have a solid stretch)
+    for (name, rows) in [
+        ("match_one_row_arms_845", vec![8usize, 9, 10]),
+        ("arm_no_events_own_rows_843", vec![9]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let mut solid_rows: Vec<usize> = Vec::new();
+        for group in timeline.split("<g class=\"branch-group\"").skip(1) {
+            let group = &group[..group.find("</g>").unwrap_or(group.len())];
+            let head = &group[..group.find('>').unwrap_or(group.len())];
+            let arm: Vec<usize> = attr(head, "data-arm-rows")
+                .map(|r| r.split(' ').filter_map(|n| n.parse().ok()).collect())
+                .unwrap_or_default();
+            let [first, last] = arm[..] else { continue };
+            if first != last { continue; }
+            // A solid (not dashed) vertical line with a hover polygon that
+            // underlines the arm's own row.
+            let solid = group.contains("stroke-dasharray: none")
+                && group.split("<polygon ").skip(1).any(|poly| {
+                    let tag = &poly[..poly.find('>').unwrap_or(poly.len())];
+                    let Some(r) = attr(tag, "data-underline-y") else { return false };
+                    let ys: Vec<f64> = r.split(' ').filter_map(|v| v.parse().ok()).collect();
+                    let text = attr(tag, "data-tooltip-text").unwrap_or_default();
+                    rows_in_underline_range(&code, (ys[0], ys[1])) == vec![first]
+                        && text.contains("is the owner of the resource")
+                        && !text.contains("not part of that branch")
+                });
+            if solid { solid_rows.push(first); }
+        }
+        for row in rows {
+            assert!(solid_rows.contains(&row), "{name}: the one-row arm at line {row} has no solid stretch underlining it (solid: {solid_rows:?})");
+        }
     }
 }
 
