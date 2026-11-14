@@ -2509,14 +2509,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // off-map event that's still left out on purpose: its text would
         // be false (the call doesn't initialise add_one).
         must_contain: &[
-            "r immutably borrows a resource",
+            // Point holds only an i32: nothing to drop, so a value (#867).
+            "r immutably borrows a value",
             "r holds an immutable reference",
             "r's immutable borrow ends",
-            "m mutably borrows a resource",
+            "m mutably borrows a value",
             "m holds a mutable reference",
             "m's mutable borrow ends",
         ],
         must_not_contain: &[
+            "r immutably borrows a resource",
+            "m mutably borrows a resource",
             "add_one is initialized with a copy of Anonymous resource",
         ],
     },
@@ -13496,9 +13499,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // borrowed" at the iter() line while `animal` still borrows it),
     // basic_match / basic_match3 / basic_match4 ("y is assigned a copy of z"
     // for `y = Fruit::Apple(z)`), while_let_body ("opt is assigned a copy of
-    // Some"), borrow_empty_block ("_r immutably borrows a resource" for
-    // `&{}`), mutAssignOp ("z2 immutably borrows a resource" for
-    // `&appy { a: 4 }`, a type with nothing to drop), if_let_with_macro
+    // Some"), if_let_with_macro
     // ("x is initialized with a copy of opt" for `Some(x) = opt`).
     TooltipExpect {
         name: "aliasing1",
@@ -14755,6 +14756,54 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(copied from",
             "Copy from pop to s",
             "Copy from s to consume",
+        ],
+    },
+    // ─── #867: a borrow of a value that needs no drop is not a resource ───
+    TooltipExpect {
+        name: "borrow_nodrop_referent",
+        must_contain: &[
+            "r immutably borrows a value",
+            "n immutably borrows a value",
+            "k mutably borrows a value",
+            "z immutably borrows a value",
+            "m mutably borrows a value",
+            // A String needs drop: still a resource.
+            "y immutably borrows a resource",
+        ],
+        must_not_contain: &[
+            "r immutably borrows a resource",
+            "n immutably borrows a resource",
+            "k mutably borrows a resource",
+            "z immutably borrows a resource",
+            "m mutably borrows a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "borrow_empty_block",
+        must_contain: &[
+            "_r immutably borrows a value",
+            "_r's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &["_r immutably borrows a resource"],
+    },
+    TooltipExpect {
+        name: "mutAssignOp",
+        must_contain: &[
+            "x is bound to a copyable value",
+            "x's value is mutably borrowed by z; x can't be used while the borrow is live",
+            "z mutably borrows a value",
+            "Mutable borrow from x to z",
+            "y acquires ownership of a new resource; its previous resource is dropped",
+            "y₂ immutably borrows a resource",
+            "Immutable borrow from (temporary) to y₂",
+            "z₂'s immutable borrow ends",
+            "z2 immutably borrows a value",
+            "z2's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "z2 immutably borrows a resource",
+            "z mutably borrows a resource",
+            "y₂ immutably borrows a value",
         ],
     },
 ];
