@@ -4813,7 +4813,10 @@ pub fn register_iflet_let_bindings(
     let typeck_res = self.tcx.typeck(scrutinee.hir_id.owner);
     let scrutinee_ty = typeck_res.node_type(scrutinee.hir_id);
     // `if let Some(n) = &cur.next` with cur a reference (#266).
-    let parent = self.scrutinee_rap(scrutinee);
+    // `if let (s, n) = *b` on a Box whose payload's parts have
+    // columns destructures `b.0` / `b.1` (#892).
+    let parent = self.box_payload_parent(scrutinee, let_expr.pat)
+        .unwrap_or_else(|| self.scrutinee_rap(scrutinee));
 
     let let_line = crate::expr_visitor_utils::span_to_line(&let_expr.span, &self.tcx);
     // Body-end is only needed if we're going to emit a GoOutOfScope.

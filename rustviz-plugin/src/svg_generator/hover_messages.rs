@@ -639,8 +639,15 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
 
 /// Whether `acquire` is the plain "acquires ownership of a resource" line
 /// that `reassign` (`event_dot_owner_drop_at_reassign`) already says, for
-/// the same variable, with more (#506, #519).
+/// the same variable, with more (#506, #519). `*b = (..)` on a Box drawn
+/// as its payload's part columns says it of `*b` (#893): the Box's own
+/// "b acquires ownership of a resource" on that dot adds nothing either.
 pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
+    if let Some(rest) = reassign.strip_prefix(SPAN_BEGIN).and_then(|r| r.strip_prefix('*')) {
+        if reassign_subsumes_acquire(&format!("{}{}", SPAN_BEGIN, rest), acquire) {
+            return true;
+        }
+    }
     // "…; its previous resource is dropped" (a holds note, #542, sits
     // before "is dropped" and an Rc / Arc / Weak's drop note after it,
     // #373), or ". Its previous t.0 …" / ". Its previous resource is

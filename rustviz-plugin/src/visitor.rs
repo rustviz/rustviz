@@ -3349,6 +3349,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       other => other,
     };
+    // `*b = (..)` on a Box drawn as its payload's part columns (`b.0`,
+    // `b.1`): the new payload's parts go into those columns, and the
+    // old payload is dropped, as for `t = (..)` on a local tuple
+    // (what of it a move left, #628). A part moved out earlier holds
+    // a value again, dropped at b's scope end (#893). The Box keeps
+    // its heap allocation: the drop names `*b` (`payload`).
+    let box_payload = self.box_payload_write(lhs_expr)
+      .filter(|b| is_assign && self.rap_holds_resource_now(b.name()));
+    let lhs_rty = match &box_payload {
+      Some(b) => ResourceTy::Value(b.clone()),
+      None => lhs_rty,
+    };
     // if we are pointing at a new piece of data
     //
     // `resource_of_lhs` returns Anonymous when the LHS is a deref
@@ -3739,7 +3751,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);
     } else {
       let n_events = self.preprocessed_events.len();
+      let first_id = *self.unique_id;
       self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+      if let Some(b) = &box_payload {
+        self.retarget_into_payload(b, first_id);
+      }
       self.draw_struct_field_borrow_ends(struct_field_ends);
       // `v[1] = v[2]`: match_rhs has nothing to say about some
       // RHS shapes (an index read, a field of a call, …), but the
@@ -3778,6 +3794,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let n_before_drops = self.preprocessed_events.len();
     for ((rap, maybe_moved), parts) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts) {
       let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
+      let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash());
       self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
         ro: rap,
         id: *self.unique_id,
@@ -3785,6 +3802,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         by_cond,
         parts,
         maybe_init,
+        payload,
       });
       *self.unique_id += 1;
     }
@@ -4511,11 +4529,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // via `add_external_event` (single-arm inline: events
       // join the global timeline before `visit_expr` so they
       // appear in source order with the body).
-      let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, &parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
+      // `(s, n) =>` on `*b`, a Box whose payload's parts have
+      // columns: the arm destructures `b.0` / `b.1` (#892).
+      let box_parent: Option<Vec<ResourceTy>> = self.box_payload_parent(guard_expr, arm.pat).map(|p| vec![p]);
+      let parents: &[ResourceTy] = box_parent.as_deref().unwrap_or(&parents);
+      let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
       // add/fetch raps that are initialized in arm expr
       // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
       let mut pat_out = MatchArmPat::default();
-      let cx = MatchArmCtx { guard_expr, typeck_res, parents: &parents, parents_ty: &parents_ty, scrutinee_moves: &scrutinee_moves, tuple_name: &tuple_name, or_conflicts: &or_conflicts, arm_pat, pat_line, end, inline };
+      let cx = MatchArmCtx { guard_expr, typeck_res, parents, parents_ty: &parents_ty, scrutinee_moves: &scrutinee_moves, tuple_name: &tuple_name, or_conflicts: &or_conflicts, arm_pat, pat_line, end, inline };
       match arm_pat.kind {
         PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _) => self.match_arm_tuple_pat(cx, pat_list, &mut pat_out),
         _ => self.match_arm_singleton_pat(cx, &mut pat_out),
@@ -7005,6 +7027,60 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     has_members.then_some(name)
   }
 
+  /// `match *b { (s, n) => … }` / `if let (s, n) = *b`, with `b` a Box
+  /// whose payload's parts have columns (`b.0`, `b.1`): `b`'s own RAP,
+  /// to match `pat` against as for a local tuple, so that `s` moves out
+  /// of `b.0` only and `n` copies `b.1` (#892), as `let (s, n) = *b;`
+  /// does (#890). `None` for any other scrutinee, and for a pattern
+  /// that destructures none of those parts (`x => …` takes the whole
+  /// payload, `*b`).
+  pub(crate) fn box_payload_parent(&self, scrutinee: &'tcx Expr<'tcx>, pat: &'tcx Pat<'tcx>) -> Option<ResourceTy> {
+    let ExprKind::Unary(UnOp::Deref, _) = scrutinee.kind else { return None };
+    let place = self.member_place_name(scrutinee)?;
+    let parent = ResourceTy::Value(self.raps.get(&place)?.rap.to_owned());
+    let ty = self.tcx.typeck(scrutinee.hir_id.owner).node_type(scrutinee.hir_id);
+    let alts = match pat.kind {
+      PatKind::Or(alts) => alts,
+      _ => std::slice::from_ref(pat),
+    };
+    alts.iter().any(|p| self.pat_parts(p, &parent, ty).is_some()).then_some(parent)
+  }
+
+  /// `*b = …` with `b` a Box whose payload's parts have columns (`b.0`,
+  /// `b.1`), and whose payload needs drop: `b`'s RAP. The new payload's
+  /// parts go into those columns, as `t = (..)` does for a local tuple,
+  /// so a part moved out earlier holds a value again and is dropped at
+  /// `b`'s scope end (#893).
+  fn box_payload_write(&self, lhs_expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let ExprKind::Unary(UnOp::Deref, _) = lhs_expr.kind else { return None };
+    let ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
+    if !self.needs_drop(ty, lhs_expr.hir_id.owner) {
+      return None;
+    }
+    let place = self.member_place_name(lhs_expr)?;
+    let rap = self.raps.get(&place)?.rap.to_owned();
+    matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, is_member: false, .. })).then_some(rap)
+  }
+
+  /// `*b = o` / `*b = make()` with `b` a [`box_payload_write`]: the
+  /// value goes into `*b`, the Box's payload, not into `b`, which keeps
+  /// its heap allocation (#893). Drawn into `b` so that `o`'s parts go
+  /// into `b.0`, `b.1`, …, the arrow (from event `first_id` on) is then
+  /// retargeted to `*b`: "Move from o to *b".
+  fn retarget_into_payload(&mut self, b: &ResourceAccessPoint, first_id: usize) {
+    let retarget = |e: &mut ExternalEvent| {
+      if let ExternalEvent::Move { to, from, id, .. } = e {
+        if *id >= first_id && !matches!(from, ResourceTy::Anonymous)
+          && matches!(to, ResourceTy::Value(t) if t.hash() == b.hash()) {
+          *to = ResourceTy::Deref(b.clone());
+        }
+      }
+    };
+    // (The line's arrows are drawn from `event_line_map`'s copy.)
+    self.preprocessed_events.iter_mut().for_each(|(_, e)| retarget(e));
+    self.event_line_map.values_mut().flatten().for_each(retarget);
+  }
+
   /// Destructure the part `member` (of type `member_ty`) of a tuple or
   /// struct place whose parts have columns: `let (a, b) = t;` moves
   /// (or copies) `t.0` into `a` and `t.1` into `b`, `let P { a, .. } =
@@ -8124,6 +8200,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       by_cond: false,
       parts: None,
       maybe_init: Some(InitBy::EarlierIteration),
+      payload: false,
     });
     *self.unique_id += 1;
   }
