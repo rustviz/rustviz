@@ -1004,15 +1004,20 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_08_iter_mut",
-        status: Wrong,
-        note: "x's borrow 'returned' to iter_mut (#171)",
+        status: Correct,
+        note: "x's mutable borrow returns to v at the end of the loop (was 'returned' to iter_mut, #171; #789)",
         must_contain: &[
             "iter_mut reads from/writes to v (implicitly mutably borrowed)",
             "the value x points to is modified through *x",
+            "Return mutably borrowed resource from x to v",
+            "x's mutable borrow ends",
+            "v's resource is no longer mutably borrowed",
             "v goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["*x acquires ownership of a resource"],
-        known_wrong: &["Return mutably borrowed resource from x to iter_mut"],
+        must_not_contain: &[
+            "*x acquires ownership of a resource",
+            "Return mutably borrowed resource from x to iter_mut",
+        ],
         ..E
     },
     Snippet {
