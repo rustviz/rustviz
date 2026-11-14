@@ -3207,15 +3207,16 @@ fn is_place_expr(e: &Expr) -> bool {
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// The `ExprKind::Assign` arm of `visit_expr`: `lhs = rhs`.
   /// `r.n = 2` / `r.n += 1` through a reference to a local struct (#854):
-  /// the write also lands on the field's own column (`s.n`), drawn like
-  /// an in-place element update, "s.n's value is modified through r.n".
+  /// the write also lands on the field's own column (`s.n`): an assignment
+  /// reads "s.n is assigned a new value through r.n", an update "s.n's
+  /// value is modified through r.n".
   /// Nothing when the struct has no column here (a parameter's) or the
   /// write isn't to a field behind a reference. (An overwritten old
   /// value that needs drop is drawn as its drop, on the same column.)
   fn write_field_behind_ref(&mut self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize) {
-    let ResourceTy::DerefField(p_rap, place, _) = lhs_rty else { return };
+    let ResourceTy::DerefField(p_rap, place, write) = lhs_rty else { return };
     if let Some(field) = self.field_column_behind_ref(lhs_expr, p_rap) {
-      self.add_ev(line_num, Evt::Bind, ResourceTy::Index(field, place.clone(), PlaceWrite::Update), ResourceTy::Anonymous, false);
+      self.add_ev(line_num, Evt::Bind, ResourceTy::Index(field, place.clone(), *write), ResourceTy::Anonymous, false);
     }
   }
 
