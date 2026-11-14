@@ -124,6 +124,18 @@ fn uses_rap(e: &ExternalEvent, r: u64) -> bool {
 /// (#587).
 fn uses_ref_ended_on_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
     group.iter().filter_map(ended_ref).any(|r| uses_rap(e, r))
+        || writes_part_of_lender_ended_on_line(e, group)
+}
+
+/// Whether `e` is the write `*x += 1;` drawn on the column of x's lender
+/// (`v`, x from `v.get_mut(0)`, #861) on the line where one of the line's
+/// stacked arrows (`group`) ends a borrow of v: like the write on x's own
+/// column, it happens before x's borrow ends, on the line's own row.
+fn writes_part_of_lender_ended_on_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
+    let ExternalEvent::Bind { to: ResourceTy::Index(owner, ..), .. } = e else { return false };
+    group.iter()
+        .filter(|g| ended_ref(g).is_some())
+        .any(|g| ResourceAccessPoint_extract(g).1.extract_rap().is_some_and(|l| l.hash() == owner.hash()))
 }
 
 /// Whether `e`, an event of a line that draws no arrow, binds a variable

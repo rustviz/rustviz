@@ -2810,7 +2810,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 ResourceTy::Index(r, place, w) => ResourceTy::Index(r, place, w.into_update()),
                 other => other,
               };
-              self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
+              self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
+              self.write_part_behind_ref_update(&lhs_rty, lhs_expr, line_num);
             }
             _ => {}
           }
@@ -2843,7 +2844,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         match self.resource_of_lhs(lhs_expr) {
           Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) => {
             self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
-            self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
+            self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
+            self.write_part_behind_ref_update(&lhs_rty, lhs_expr, line_num);
           }
           Some(ResourceTy::Index(r, place, w)) => {
             self.add_ev(line_num, Evt::Bind, ResourceTy::Index(r, place, w.into_update()), ResourceTy::Anonymous, false);
@@ -3301,6 +3303,66 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// `*x` (of type `lhs_ty`) with x a reference to part of a variable's
+  /// resource: an element (`v.get_mut(0).unwrap()`, `if let Some(x) =
+  /// v.get_mut(0)`, `&mut v[0]`, `v.iter_mut()`), a map's value. Returns
+  /// that variable, the owner x borrows from (a field column such as
+  /// `b.items` too). Told apart from a reference to the whole of it
+  /// (`&mut s`) by type: `*x` isn't of its type. None when the owner is
+  /// the caller's (x from `v.get_mut(0)` with `v: &mut Vec<_>` a
+  /// parameter), and for a reference-typed `*x` (a borrow stored in an
+  /// element isn't drawn on the collection, as for `v[0] = &u`).
+  fn part_owner_behind_ref(&self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, lhs_ty: rustc_middle::ty::Ty<'tcx>) -> Option<ResourceAccessPoint> {
+    let ResourceTy::Deref(r) = lhs_rty else { return None };
+    if lhs_ty.is_ref() {
+      return None;
+    }
+    let owner = self.owner_behind_ref(r, "").filter(|o| !o.is_fn())?;
+    let erase = |ty: rustc_middle::ty::Ty<'tcx>| self.tcx.erase_and_anonymize_regions(ty);
+    let tys: Vec<_> = self.column_tys(owner.name(), lhs_expr.hir_id.owner).into_iter().map(erase).collect();
+    (!tys.is_empty() && !tys.contains(&erase(lhs_ty))).then_some(owner)
+  }
+
+  /// The types the column `name` may have: of each binding so named, or
+  /// for a field column (`b.items`, `t.0`), of that field of each.
+  fn column_tys(&self, name: &str, owner: rustc_hir::OwnerId) -> Vec<rustc_middle::ty::Ty<'tcx>> {
+    let typeck = self.tcx.typeck(owner);
+    let mut path = name.split('.');
+    let Some(root) = path.next() else { return Vec::new() };
+    let fields: Vec<&str> = path.collect();
+    let names = binding_names(&self.tcx, owner);
+    #[expect(clippy::disallowed_methods, reason = "collected only to test emptiness and membership")]
+    let tys: Vec<_> = names.by_hir.iter()
+      .filter(|(_, n)| n.as_str() == root)
+      .filter_map(|(h, _)| typeck.node_type_opt(*h))
+      .filter_map(|ty| fields.iter().try_fold(ty, |ty, f| self.field_ty_named(ty, f)))
+      .collect();
+    tys
+  }
+
+  /// `*x += 1` / `*x = 7` with x a reference to part of `owner`'s
+  /// resource (`part_owner_behind_ref`): the write is drawn on owner's
+  /// column too, like an element write `v[0] += 1` (#861): "v's
+  /// resource is modified through x", or for `=` a plain assignment to
+  /// the place `*x` that says the old value is dropped if it needs drop.
+  fn write_part_behind_ref(&mut self, owner: ResourceAccessPoint, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize, write: PlaceWrite) {
+    let written = self.plain_source_text(lhs_expr).unwrap_or_else(|| format!("*{}", lhs_rty.real_name()));
+    let place = match write {
+      PlaceWrite::Update | PlaceWrite::UpdateValue => written.trim_start_matches(|c: char| c == '*' || c.is_whitespace()).to_owned(),
+      _ => written,
+    };
+    self.add_ev(line_num, Evt::Bind, ResourceTy::Index(owner, place, write), ResourceTy::Anonymous, false);
+  }
+
+  /// `*x op= k` with x a reference to part of a variable's resource:
+  /// see `write_part_behind_ref`.
+  fn write_part_behind_ref_update(&mut self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize) {
+    let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
+    if let Some(owner) = self.part_owner_behind_ref(lhs_rty, lhs_expr, lhs_ty) {
+      self.write_part_behind_ref(owner, lhs_rty, lhs_expr, line_num, PlaceWrite::Update);
+    }
+  }
+
   /// Whether `lhs_expr`, `*r` (or `**r`, …) of type `lhs_ty`, a
   /// reference, is a reference variable with a column: the one on r's
   /// aliasing chain at that depth. The chain names the references r
@@ -3745,6 +3807,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       && !self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
     // Nor does overwriting a `ManuallyDrop<T>` drop the old `T` (#283).
     let lhs_is_manually_drop = lhs_ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
+    // `*x = …` with x a reference to part of a variable's resource
+    // (`v.get_mut(0)`, `&mut v[0]`): only that part is overwritten, and
+    // the variable isn't given a new resource (#861).
+    let part_owner = self.part_owner_behind_ref(&lhs_rty, lhs_expr, lhs_ty);
     let drop_target: Option<ResourceAccessPoint> =
       if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
         match &lhs_rty {
@@ -3773,8 +3839,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // the resource being overwritten. Borrow checker
             // guarantees it currently holds (otherwise *p
             // wouldn't be a valid place to write to), so we don't
-            // need rap_holds_resource_now here.
-            self.owner_behind_ref(p_rap, "")
+            // need rap_holds_resource_now here. A reference to
+            // part of the owner's resource overwrites only that part:
+            // its drop is stated with the write (`write_part_behind_ref`).
+            if part_owner.is_some() { None } else { self.owner_behind_ref(p_rap, "") }
           }
           ResourceTy::DerefField(p_rap, _, _) => {
             // `r.a = v` after `let r = &mut s;`: the field being
@@ -3926,6 +3994,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // gets an in-place write.
     if drop_target.is_none() && field_drop_targets.is_empty() {
       self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
+    }
+    if let Some(owner) = part_owner {
+      let write = match &lhs_rty {
+        ResourceTy::Deref(r) if is_assign => r.place_write(),
+        _ => PlaceWrite::Update,
+      };
+      self.write_part_behind_ref(owner, &lhs_rty, lhs_expr, line_num, write);
     }
 
     let n_before_drops = self.preprocessed_events.len();
