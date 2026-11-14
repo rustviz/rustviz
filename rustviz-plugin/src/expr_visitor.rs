@@ -75,6 +75,29 @@ pub struct ArmBorrows {
   last_use: std::collections::BTreeMap<String, usize>,
 }
 
+/// The loan of a variable whose column a later variable of the same name
+/// took over (#903; see `ExprVisitor::retired_loans`).
+pub struct RetiredLoan {
+  /// The column's name, which both variables have.
+  pub name: String,
+  pub data: RefData,
+  /// Its `borrow_floor`, if it had one.
+  pub floor: Option<usize>,
+  /// Whether it is in `pattern_copies`.
+  pub copied: bool,
+  /// The line the later variable is declared on: events from there on
+  /// are the later variable's.
+  pub until: usize,
+}
+
+/// `name` with a mark no identifier has and `display_text` doesn't
+/// remove, as the `borrow_map` key of the `i`th retired loan while
+/// `emit_borrow_ends` ends it (#903). Never shown: the events it makes
+/// name the column's RAP.
+fn retired_key(name: &str, i: usize) -> String {
+  format!("{name}\u{E001}{i}")
+}
+
 /// Whether `a` and `b` are the same loan of the same reference.
 fn same_loan(a: &RefData, b: &RefData) -> bool {
   a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
@@ -422,6 +445,18 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// alternatives, so each loan ends on its own path. `emit_borrow_ends`
   /// ends each one like the loan `borrow_map` holds.
   pub arm_loans: Vec<(String, RefData)>,
+  /// Loans of variables whose column a later variable of the same name
+  /// took over: a sibling block's `let r = &v;`, the first of two `for
+  /// x in v.iter()` loops (#903). Same-named variables that are never
+  /// in scope together share a column (`collect_binding_names`), and
+  /// `borrow_map` is keyed by name, so the later variable's loan used to
+  /// replace the earlier one's, whose borrow then never ended.
+  /// `emit_borrow_ends` ends each one like the loans `borrow_map` holds.
+  pub retired_loans: Vec<RetiredLoan>,
+  /// While `emit_borrow_ends` runs: for each retired loan's key
+  /// (`retired_key`), the line from which events are the later
+  /// variable's.
+  pub retired_until: HashMap<String, usize>,
   /// The arms being visited, innermost last: (the conditional's first
   /// and last lines, the arm's first and last lines).
   pub arm_frames: Vec<(usize, usize, usize, usize)>,
@@ -686,6 +721,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       late_old_ends: Vec::new(),
       or_ref_ends: Vec::new(),
       arm_loans: Vec::new(),
+      retired_loans: Vec::new(),
+      retired_until: HashMap::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
       break_moves: Vec::new(),
@@ -1157,8 +1194,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.holder_shadowed(&name) {
       return;
     }
+    self.retire_loan(&name, line_num);
     self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new() });
   }
+  /// A variable named `name` declared on `line` takes over the column
+  /// of an earlier one of that name, which is out of scope by now
+  /// (sibling blocks, two `for x` loops, #903): set the earlier one's
+  /// loan aside in `retired_loans`, where `emit_borrow_ends` still ends
+  /// it, rather than lose it to the new variable's.
+  fn retire_loan(&mut self, name: &str, line: usize) {
+    if !self.borrow_map.get(name).is_some_and(|old| old.assigned_at < line) {
+      return;
+    }
+    let Some(data) = self.borrow_map.remove(name) else { return };
+    let floor = self.borrow_floor.remove(name);
+    let copied = self.pattern_copies.remove(name);
+    // An `if` / `match` arm starts from the loans held before it, so
+    // the same loan can be set aside once per arm that declares `name`.
+    if !self.retired_loans.iter().any(|r| r.name == name && same_loan(&r.data, &data)) {
+      self.retired_loans.push(RetiredLoan { name: name.to_owned(), data, floor, copied, until: line });
+    }
+  }
+
   /// `name`'s column is a borrow holder (#336) whose borrow is
   /// recorded; a reference binding of the same name shadows it.
   pub fn holder_shadowed(&self, name: &String) -> bool {
@@ -1900,8 +1957,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return false;
     };
     let hash = *rap_data.rap.hash();
+    let real_name = rap_data.rap.name();
     let swapped_here = |line: usize| self.destructure_swapped.iter()
-      .any(|(n, lo, hi)| n == name && (*lo..=*hi).contains(&line) && (*lo..=*hi).contains(&rd.assigned_at));
+      .any(|(n, lo, hi)| n == real_name && (*lo..=*hi).contains(&line) && (*lo..=*hi).contains(&rd.assigned_at));
+    // A retired loan's variable is gone where the later one of its name
+    // is declared (#903): what happens to the column from there on is
+    // the later variable's.
+    let until = self.retired_until.get(name).copied().unwrap_or(usize::MAX);
+    let mine = |line: usize| line >= rd.assigned_at && line < until;
     // `in_branch`: the event is inside a branch of a conditional. There
     // only a hand-off to the caller counts: a `&mut` moved or a shared
     // reference copied to the caller (`if c { x } else { y }` as the
@@ -1909,10 +1972,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // that path, so its borrow doesn't end there. The same holds for a
     // shared reference parameter that is the fn's whole result
     // (`fn id(x: &String) -> &String { x }`, #754).
-    fn handed(this: &ExprVisitor, events: &[(usize, ExternalEvent)], hash: u64, rd_assigned_at: usize, swapped_here: &dyn Fn(usize) -> bool, in_branch: bool, caller_only: bool) -> bool {
+    fn handed(this: &ExprVisitor, events: &[(usize, ExternalEvent)], hash: u64, mine: &dyn Fn(usize) -> bool, swapped_here: &dyn Fn(usize) -> bool, in_branch: bool, caller_only: bool) -> bool {
       events.iter().any(|(line, ev)| match ev {
         ExternalEvent::Move { from: ResourceTy::Value(f), to, .. }
-          if *f.hash() == hash && *line >= rd_assigned_at && !swapped_here(*line) =>
+          if *f.hash() == hash && mine(*line) && !swapped_here(*line) =>
         {
           match to {
             ResourceTy::Caller => true,
@@ -1923,16 +1986,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }
         }
         ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Caller, .. }
-          if *f.hash() == hash && *line >= rd_assigned_at => true,
+          if *f.hash() == hash && mine(*line) => true,
         // `&self.s` returned: a reborrow through `self` goes to the caller (#784).
         ExternalEvent::Copy { from: ResourceTy::DerefField(f, place, _), to: ResourceTy::Caller, .. }
-          if place.starts_with('&') && *f.hash() == hash && *line >= rd_assigned_at => true,
+          if place.starts_with('&') && *f.hash() == hash && mine(*line) => true,
         ExternalEvent::Branch { branches, .. } => branches.iter()
-          .any(|b| handed(this, &b.e_data, hash, rd_assigned_at, swapped_here, true, caller_only)),
+          .any(|b| handed(this, &b.e_data, hash, mine, swapped_here, true, caller_only)),
         _ => false,
       })
     }
-    handed(self, self.preprocessed_events, hash, rd.assigned_at, &swapped_here, false, caller_only)
+    handed(self, self.preprocessed_events, hash, &mine, &swapped_here, false, caller_only)
   }
 
   /// `let r2: &mut String = r;`, `Holder { r: a }`, `q = r;`: a `&mut`
@@ -4162,6 +4225,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `emit_borrow_ends`), and a reference later taken out of it
   /// (`it.next().unwrap()`) finds `v` as its lender (#336).
   fn register_holder(&mut self, name: &String, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
+    self.retire_loan(name, expr_to_line(&init, &self.tcx));
     let (mut lenders, is_mut) = self.holder_lenders(init, ty);
     let lender_muts = self.holder_lender_muts(init);
     if lenders.is_empty() {
@@ -6906,7 +6970,47 @@ pub fn print_out_of_scope(&mut self){
 
   // This is where we annotate all RefDie events that were not handled by the assignment operator
   pub fn emit_borrow_ends(&mut self){
+    let retired = self.install_retired_loans();
+    self.emit_borrow_ends_in_map();
+    self.remove_retired_loans(retired);
+  }
 
+  /// Put each retired loan (#903) in `borrow_map` under a key of its
+  /// own (`retired_key`), with a `raps` entry for that key holding the
+  /// column's RAP, so `emit_borrow_ends` ends it like any other loan,
+  /// and the loans it overlaps (another reference to the same lender)
+  /// see it. Returns the keys, for `remove_retired_loans`.
+  fn install_retired_loans(&mut self) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (i, r) in std::mem::take(&mut self.retired_loans).into_iter().enumerate() {
+      let Some(rap) = self.raps.get(&r.name).cloned() else { continue };
+      let key = retired_key(&r.name, i);
+      self.raps.insert(key.clone(), rap);
+      self.borrow_map.insert(key.clone(), r.data);
+      if let Some(floor) = r.floor {
+        self.borrow_floor.insert(key.clone(), floor);
+      }
+      if r.copied {
+        self.pattern_copies.insert(key.clone());
+      }
+      self.retired_until.insert(key.clone(), r.until);
+      keys.push(key);
+    }
+    keys
+  }
+
+  /// Undo `install_retired_loans`: the keys are no variables.
+  fn remove_retired_loans(&mut self, keys: Vec<String>) {
+    for key in keys {
+      self.raps.remove(&key);
+      self.borrow_map.remove(&key);
+      self.borrow_floor.remove(&key);
+      self.pattern_copies.remove(&key);
+      self.retired_until.remove(&key);
+    }
+  }
+
+  fn emit_borrow_ends_in_map(&mut self) {
     // An or-pattern reference's possible borrows (#734) are drawn by
     // their `OrAltBorrow` events, not by an end here.
     for (_, ev) in &self.or_ref_ends {
@@ -7200,7 +7304,7 @@ pub fn print_out_of_scope(&mut self){
         let end = outlived.get(k).copied().unwrap_or(*lifetime);
         let id = *self.unique_id;
         self.add_external_event(end, ExternalEvent::RefDie { 
-          from: ResourceTy::Value(from_ro.clone()), to: to_ro, num_curr_borrowers: get_borrowers(from_ro.name(), &self.borrow_map).len() - 1, 
+          from: ResourceTy::Value(from_ro.clone()), to: to_ro, num_curr_borrowers: get_borrowers(k, &self.borrow_map).len() - 1, 
           id });
         *self.unique_id += 1;
         // An end at the scope end (#913) goes before the scope end
@@ -7284,8 +7388,10 @@ pub fn print_out_of_scope(&mut self){
   fn note_sharers_across_calls(&mut self) {
     #[expect(clippy::disallowed_methods, reason = "collected, then sorted into declaration order")]
     let mut sharers: Vec<Sharer> = self.borrow_map.iter()
-      .filter_map(|(name, rd)| {
-        let hash = *self.raps.get(name)?.rap.hash();
+      .filter_map(|(key, rd)| {
+        // (A retired loan's key isn't its name, #903.)
+        let rap = &self.raps.get(key)?.rap;
+        let (name, hash) = (rap.name(), *rap.hash());
         let lenders: Vec<String> = rd.all_lenders().iter()
           .filter(|l| matches!(l, ResourceTy::Value(r) if !r.is_ref()) && !rd.mut_of(l))
           .map(|l| l.real_name())
