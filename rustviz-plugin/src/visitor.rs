@@ -3277,6 +3277,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// Whether `lhs_expr`, `*r` (or `**r`, …) of type `lhs_ty`, a
+  /// reference, is a reference variable with a column: the one on r's
+  /// aliasing chain at that depth. The chain names the references r
+  /// borrows through, so it is the place `*r` only when that
+  /// variable's type is `lhs_ty`. Not so when r points to a reference
+  /// with no column: a caller's (`r: &mut &str` a parameter), or one
+  /// stored in an element (`&mut words[1]`, `words.get_mut(1)`), or
+  /// reached through another reference (`&mut v[1]` with
+  /// `v: &mut Vec<&str>`, `&mut *x`), whose chain is empty or names
+  /// the collection or `v` / `x` (#897). (A field column such as
+  /// `p.0` has no binding of its own; the chain is trusted for it.)
+  fn deref_is_ref_var(&self, r: &str, lhs_expr: &'tcx Expr<'tcx>, lhs_ty: rustc_middle::ty::Ty<'tcx>) -> bool {
+    let Some(name) = self.borrow_map.get(r)
+      .and_then(|d| d.aliasing.get(num_derefs(lhs_expr).saturating_sub(1)))
+      .filter(|name| self.borrow_map.contains_key(*name)) else { return false };
+    let owner = lhs_expr.hir_id.owner;
+    let typeck = self.tcx.typeck(owner);
+    let erase = |ty| self.tcx.erase_and_anonymize_regions(ty);
+    let names = binding_names(&self.tcx, owner);
+    #[expect(clippy::disallowed_methods, reason = "`filter_map` + `any` over the map: order never observed")]
+    let mut tys = names.by_hir.iter()
+      .filter(|(_, n)| *n == name)
+      .filter_map(|(h, _)| typeck.node_type_opt(*h))
+      .peekable();
+    tys.peek().is_none() || tys.any(|ty| erase(ty) == erase(lhs_ty))
+  }
+
   fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
     // `a = lhs` inside a destructuring assignment: draw it as
     // `a = <the part of the RHS lhs holds>`. That part was
@@ -3381,6 +3408,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // when its type needs drop. `*r += v` / `p.n += v` are in-place
     // updates and keep their "modified through" wording.
     let is_assign = matches!(expr.kind, ExprKind::Assign(..));
+    // `*r = t` with `r: &mut &T` re-points the reference variable r
+    // borrows (`let r = &mut s; *r = "c";`). Otherwise there is no
+    // variable to re-point, and the write replaces the reference
+    // stored in a place, like `*r = 5` through `r: &mut i32` (#897).
+    let repoints_ref_var = match &lhs_rty {
+      ResourceTy::Deref(_) if lhs_ty.is_ref() => self.deref_is_ref_var(&lhs_rty.real_name(), lhs_expr, lhs_ty),
+      _ => true,
+    };
     let assign_kind = || if is_copyable {
       PlaceWrite::AssignCopy
     } else if self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
@@ -3389,7 +3424,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       PlaceWrite::AssignOwned
     };
     let lhs_rty = match lhs_rty {
-      ResourceTy::Deref(rap) if is_assign && !lhs_ty.is_ref() =>
+      ResourceTy::Deref(rap) if is_assign && (!lhs_ty.is_ref() || !repoints_ref_var) =>
         ResourceTy::Deref(rap.with_place_write(assign_kind())),
       // A reference-typed field (`h.r = &x`) is not an owned or Copy
       // value; leave its wording alone.
@@ -3430,7 +3465,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // records what happens to the RHS (e.g. `= v` moves v); the
     // temporary itself gets no ownership event.
     // (Union field writes are excluded too; see lhs_is_union_field.)
-    if lhs_ty.is_ref() && !lhs_is_union_field && lhs_rty.extract_rap().is_some() {
+    if lhs_ty.is_ref() && !lhs_is_union_field && lhs_rty.extract_rap().is_some() && repoints_ref_var {
       let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
       match lhs_rty {
         // ex:
@@ -3812,6 +3847,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.match_rhs(lhs_rty.clone(), rhs_expr, e);
       if let Some(b) = &box_payload {
         self.retarget_into_payload(b, first_id);
+      }
+      // `*r = &t` with r pointing to a reference that has no column
+      // (`&mut words[0]`): t stays borrowed as long as the place
+      // holds the new reference, as for `words[0] = &t` (#897), and
+      // that end is drawn on t's column only, like #664's.
+      if let (false, ExprKind::AddrOf(..), ResourceTy::Deref(r)) = (repoints_ref_var, rhs_expr.kind, &lhs_rty) {
+        let place = ResourceTy::Index(r.clone(), format!("*{}", r.name()), PlaceWrite::Update);
+        self.end_stored_borrow(lhs_expr, n_events, &lhs_rty, place);
       }
       self.draw_struct_field_borrow_ends(struct_field_ends);
       // `v[1] = v[2]`: match_rhs has nothing to say about some
