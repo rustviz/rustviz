@@ -152,7 +152,8 @@ fn base64url(bytes: &[u8]) -> String {
 	out
 }
 
-/// Small right-aligned "Open in Playground" link placed under a figure;
+/// Right-aligned (to the figure's edge: same -75px side margins as the
+/// figure block, so the link lines up with the box above it) small "Open in Playground" link placed under a figure;
 /// empty when `playground_url` is empty (links disabled). `code` is the
 /// figure's source exactly as written in the block.
 fn playground_link(playground_url: &str, code: &str) -> String {
@@ -160,7 +161,7 @@ fn playground_link(playground_url: &str, code: &str) -> String {
 		return String::new();
 	}
 	format!(
-		"\n<div class=\"rv-playground-row\" style=\"text-align: right; margin-top: 0.3em; font-size: 0.85em\">\
+		"\n<div class=\"rv-playground-row\" style=\"text-align: right; margin: 0.3em -75px 0 -75px; font-size: 0.85em\">\
 		<a class=\"rv-playground-link\" href=\"{}#code={}\" target=\"_blank\" rel=\"noopener\" \
 		style=\"color: inherit; opacity: 0.75\">Open in Playground &#8599;</a></div>",
 		html_attr_escape(playground_url),
@@ -244,7 +245,12 @@ ex_counter: &mut u32) -> Result<String, pulldown_cmark_to_cmark::Error> {
 	}
 
 	let mut state = State::None;
-	let mut buf = format!("{}\n", helpers_script()); // inject the helpers script directly into the page
+	// On narrow screens the -75px side margins would push the link past the
+	// viewport edge, so keep it inside the text column there.
+	let mut buf = format!(
+		"<style>@media (max-width: 640px) {{ .rv-playground-row {{ margin-left: 0 !important; margin-right: 0 !important; }} }}</style>\n{}\n",
+		helpers_script()
+	); // inject the helpers script directly into the page
 	// The curly_quotes setting is left at false so that people can
 	// set it in book.toml (mdBook will apply the setting when it
 	// parses our output). It is important to use new_cmark_parser so
