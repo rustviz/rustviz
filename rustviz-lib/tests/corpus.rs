@@ -6415,9 +6415,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "join_after_early_exit",
-        // In `mixed`, no line reaches the join of `match *x` on v's or x's
-        // column: "v's borrow ended in each branch above" is on v's
-        // scope-end dot (#702, `no_split_or_join_dot_floats_off_its_column`).
+        // In `mixed`, the `_` arm of `match *x` goes round the loop again,
+        // so v and x stay borrowed through the join to the loop's end
+        // (#872); the `break` and `return` arms end the borrow in the arm.
         // The merge after branches that moved a value and then left
         // early says how they left: panicked, continued, returned
         // (two arms), return and break mixed; a `&mut` that was
@@ -14831,6 +14831,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from v to",
         ],
     },
+    TooltipExpect {
+        name: "for_break_borrow_end",
+        // #872: a `for` body that can `break` / `return` still goes round
+        // again on its other paths, and `next()` then uses the loop's
+        // iterator, so the loan ends on the loop's closing row, not the
+        // `if`'s. Main had the same end texts one row early; the rows are
+        // checked in `a_loop_that_can_break_keeps_its_loan_to_the_loop_end`.
+        // Not pinned here: `v.len()` inside the first loop (#870) and the
+        // `v.iter()` head's own give-back on the `for` row (#868).
+        must_contain: &[
+            "Immutable borrow from v to a",
+            "Return immutably borrowed resource from a to v",
+            "a's immutable borrow ends",
+            "Return immutably borrowed resource from b to v",
+            "b's immutable borrow ends",
+            "Immutable borrow from v to d",
+            "Return immutably borrowed resource from d to v",
+            "d's immutable borrow ends",
+            "Mutable borrow from w to c",
+            "Return mutably borrowed resource from c to w",
+            "c's mutable borrow ends",
+            "w's resource is no longer mutably borrowed",
+            "Immutable borrow from u to s",
+            "Return immutably borrowed resource from s to u",
+            "u's resource is no longer immutably borrowed",
+            "u goes out of scope. Its resource is dropped (including every String it holds).",
+        ],
+        must_not_contain: &[
+            "(moved from",
+            "Move from v to",
+            "Move from w to",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -15801,6 +15834,41 @@ fn reference_copied_out_of_a_holder_returns_at_its_last_use() {
         .collect();
     assert_eq!(back.len(), 1, "v is unborrowed at {:?} after the loop starts", back);
     assert!(back[0].1 > row, "v is unborrowed at {:?}, not below n's last use (y={}); it still borrows v", back[0], row);
+}
+
+/// #872: `for a in &v { ..; if c { break; } }` ends the loan on the paths
+/// that break, but the others go round again and `next()` uses the
+/// loop's iterator, so rustc keeps `v` borrowed to the loop's end:
+/// `v.push(..)` after the `if` in the body is E0502. Main ended the
+/// borrow on the `if`'s closing row, one row above the loop's. The
+/// borrow's end on the main path is now on the loop's closing row, and
+/// none is on the `if`'s (an `if`/`else` arm that breaks draws its own
+/// end higher up, in the arm). A `continue` arm goes round again, so
+/// it draws no end: `xs.push(..)` before a `continue` is E0502 too.
+#[test]
+fn a_loop_that_can_break_keeps_its_loan_to_the_loop_end() {
+    let rv = run_with_local_backend("for_break_borrow_end");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (arrow, after) in [
+        ("Return immutably borrowed resource from a to v", "println!(\"{}\", a);"),
+        ("Return immutably borrowed resource from b to v", "println!(\"{}\", b);"),
+        ("Return immutably borrowed resource from d to v", "_ => println!(\"{}\", d),"),
+        ("Return mutably borrowed resource from c to w", "println!(\"short\");"),
+        ("Return immutably borrowed resource from s to u", "return s.len();"),
+    ] {
+        let row = code_row_y(&code, after);
+        let closes: Vec<f64> = code_rows_y(&code, "}").into_iter().filter(|y| *y > row).collect();
+        let (if_close, loop_close) = (closes[0], closes[1]);
+        let rows: Vec<f64> = arrow_points(&timeline, arrow).iter().map(|pts| pts[0].1).collect();
+        assert!(rows.iter().any(|y| (y - loop_close).abs() < 1.0),
+            "{arrow}: not on the loop's closing row (y={loop_close}): {rows:?}");
+        assert!(rows.iter().all(|y| (y - if_close).abs() > 1.0),
+            "{arrow}: on the `if`'s closing row (y={if_close}), above the loop's end: {rows:?}");
+    }
+    let d_ends: Vec<f64> = arrow_points(&timeline, "Return immutably borrowed resource from d to v").iter().map(|pts| pts[0].1).collect();
+    let (brk, cont) = (code_row_y(&code, "0 => break,"), code_row_y(&code, "1 => continue,"));
+    assert!(d_ends.iter().any(|y| (y - brk).abs() < 1.0), "d's borrow doesn't end in the `break` arm (y={brk}): {d_ends:?}");
+    assert!(d_ends.iter().all(|y| (y - cont).abs() > 1.0), "d's borrow ends in the `continue` arm (y={cont}): {d_ends:?}");
 }
 
 /// #870: `v.len()` while `r` (a `for` binding, a holder `it`) already
@@ -19624,7 +19692,10 @@ fn no_split_or_join_dot_floats_off_its_column() {
             "s's resource is no longer mutably borrowed", 2),
         ("reassign_through_ref_in_branch", "t is live in a conditional expression",
             "t's resource is no longer mutably borrowed", 2),
-        ("join_after_early_exit", "v's borrow ended in each branch above", "v goes out of scope", 1),
+        // (join_after_early_exit's `mixed` was here: v's borrow ended in
+        // each arm of `match *x`. Its `_` arm goes round the loop again,
+        // which keeps the loop's loan of v to the loop's end (#872), so
+        // lines now reach that join.)
     ] {
         let timeline = run_with_local_backend(name).timeline_panel_string();
         let at = dots_where(&timeline, |lines| {

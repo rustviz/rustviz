@@ -423,6 +423,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // The loop owns what they held from there, so the end of that borrow
   // is not drawn on their (moved-out) columns (#767).
   pub for_moved_holders: HashSet<String>,
+  // A `for` loop's pattern bindings whose borrow is the loop
+  // iterator's loan: a `continue` doesn't end it, since `next()` uses
+  // the iterator again (#872).
+  pub for_loop_loans: HashSet<String>,
   // `let r = loop { … break k; };` (#431): the loop's id, what its
   // `break` values go to (`r`) and how (move or copy). A `break` with a
   // value, in that loop, pairs the value with `r` the way `let r = k;`
@@ -650,6 +654,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       all_paths_exit: false,
       borrow_floor: HashMap::new(),
       for_moved_holders: HashSet::new(),
+      for_loop_loans: HashSet::new(),
       in_scope: Vec::new(),
       exit_frames: Vec::new(),
       literal_temps: HashMap::new(),
@@ -6987,7 +6992,7 @@ pub fn print_out_of_scope(&mut self){
     let assigned: HashMap<String, usize> = self.borrow_map.iter()
       .map(|(n, d)| (n.clone(), d.assigned_at))
       .collect();
-    let mut cx = ExitCtx { scopes: &self.exit_scopes, assigned: &assigned, unique_id: self.unique_id, dropped: Vec::new(), refdied: Vec::new() };
+    let mut cx = ExitCtx { scopes: &self.exit_scopes, assigned: &assigned, loop_loans: &self.for_loop_loans, unique_id: self.unique_id, dropped: Vec::new(), refdied: Vec::new() };
     end_borrows_at_exits_in(self.preprocessed_events, &[], &mut cx);
     // The ends the arms made redundant (#767) are no arrows either.
     let (dropped, refdied) = (cx.dropped, cx.refdied);
@@ -7422,6 +7427,8 @@ struct ExitCtx<'b> {
   scopes: &'b HashMap<usize, ExitScope>,
   /// Each reference's `RefData::assigned_at`.
   assigned: &'b HashMap<String, usize>,
+  /// See `ExprVisitor::for_loop_loans`.
+  loop_loans: &'b HashSet<String>,
   unique_id: &'b mut usize,
   /// Ids of the borrow ends that were dropped for being redundant.
   dropped: Vec<usize>,
@@ -7522,7 +7529,7 @@ fn end_borrows_at_exits_in(
       // function; a `break` the loop, so only a borrow not used after
       // the loop; a `continue` the iteration, so only a borrow also
       // made in it.
-      let leaves = |line: usize, made: usize, carries_r: bool| arm.exits.iter().all(|x| match x {
+      let leaves = |line: usize, made: usize, carries_r: bool, loop_loan: bool| arm.exits.iter().all(|x| match x {
         BranchExit::Return | BranchExit::Panic | BranchExit::Other => true,
         // A `break` whose value mentions `r` carries the borrow out of
         // the loop, to whatever uses the value: it doesn't end here
@@ -7531,7 +7538,9 @@ fn end_borrows_at_exits_in(
         // but on the path through `break rb` `ra` is dead and its borrow
         // of `a` ended before the arm.
         BranchExit::Break => !carries_r && scope.loop_lines.is_some_and(|(_, hi)| line <= hi),
-        BranchExit::Continue => scope.loop_lines.is_some_and(|(lo, hi)| lo <= made && line <= hi),
+        // (Not a `for` binding's loan, which the loop's iterator
+        // holds into the next iteration, #872.)
+        BranchExit::Continue => !loop_loan && scope.loop_lines.is_some_and(|(lo, hi)| lo <= made && line <= hi),
         BranchExit::BreakBlock => false,
       });
       let mut seen: HashSet<(ResourceAccessPoint, ResourceTy)> = HashSet::new();
@@ -7546,7 +7555,7 @@ fn end_borrows_at_exits_in(
         // An end on the conditional's own lines that wasn't put into
         // its arms (`end_outer_borrows_in_arms`) can't be told apart
         // from the conditional; leave it.
-        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made, arm.break_carries.iter().any(|n| n == r.name()))
+        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made, arm.break_carries.iter().any(|n| n == r.name()), cx.loop_loans.contains(r.name()))
           || to.extract_rap().is_some_and(|l| l.is_fn())
           || ends_on_every_path(&arm.e_data, r, to)
         {
