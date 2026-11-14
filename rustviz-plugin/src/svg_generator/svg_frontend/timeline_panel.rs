@@ -1642,9 +1642,17 @@ fn render_dot(
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
+                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
+                    // `*b = …` drops the Box's old payload, not the Box
+                    // (#893): the dot names `*b`, with no note (the Box's
+                    // "including the (String, i32) it holds" is about
+                    // dropping the Box).
+                    let mut name = match event {
+                        Event::OwnerDropAtReassign { payload: true, .. } => format!("*{}", name),
+                        _ => name.clone(),
+                    };
                     let title = if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch), maybe_moved, .. } = event {
                         // A `let s;` local only some branches above
                         // assigned (#244), and maybe moved after that.

@@ -1550,6 +1550,10 @@ pub enum ExternalEvent {
         // InitBy): the old value is dropped here only if there is one
         // (a runtime drop flag decides).
         maybe_init: Option<InitBy>,
+        // `*b = …` overwrites the payload of `ro`, a Box drawn as its
+        // payload's part columns (#893): the Box itself keeps its heap
+        // allocation, so the dot names `*b`.
+        payload: bool,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -2076,7 +2080,8 @@ pub enum Event {
     // rhs lands on the same line and immediately re-establishes
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
     // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy> },
+    // `payload`: see ExternalEvent::OwnerDropAtReassign.
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -3113,6 +3118,12 @@ impl Event {
                     // `let it2 = it;`: the value moves, and the borrow
                     // it holds moves with it (#336).
                     hover_messages::event_dot_holder_acquire(&self.deref_name(my_name), &from.name())
+                } else if matches!(is, ResourceTy::Deref(ResourceAccessPoint::Struct(Struct { is_box: true, .. })))
+                    && matches!(from, ResourceTy::Value(_)) {
+                    // `*b = o` / `*b = make()` on a Box drawn as its
+                    // payload's part columns (#893): the payload takes
+                    // the value; b keeps its heap allocation.
+                    hover_messages::event_dot_acquire(&self.deref_name(my_name))
                 } else if let Some(r) = is.deref_rap() {
                     // `*r += 1;` / `r.f += 1;` modify the resource r
                     // points to in place. `*r = v;` / `r.f = v;` are
@@ -4265,8 +4276,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, parts, maybe_init, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, parts: parts.clone(), maybe_init: *maybe_init })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, parts, maybe_init, payload, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -4629,8 +4640,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, parts, maybe_init, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, parts, maybe_init }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, parts, maybe_init, payload, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, parts, maybe_init, payload }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);

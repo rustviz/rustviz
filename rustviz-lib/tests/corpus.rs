@@ -15579,6 +15579,136 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s immutably borrows",
         ],
     },
+    TooltipExpect {
+        name: "box_partial_move_match_892",
+        // #892: `if let (s7, n7) = *b7` / `match *b2 { (s, n) => .. }` on a
+        // `Box<(String, i32)>` move only the String, out of b7.0 (n7 copies
+        // b7.1), as `let (s, n) = *b;` does (#890) and `match t` does for
+        // a local tuple. main read "Move from *b7 to s7" / "*b2's resource
+        // is moved" (the whole payload), so it said the moved String in
+        // b7.0 is dropped at scope end, and that b7 drops nothing (the
+        // Box's heap allocation is freed). Also for a two-arm match, a
+        // struct pattern, and `ref` (bq.a stays in the Box, borrowed).
+        must_contain: &[
+            "Move from b7.0 to s7",
+            "Copy from b7.1 to n7",
+            "n7 is initialized with a copy of b7.1",
+            "b7.0's resource is moved",
+            "b7.0 goes out of scope. No resource is dropped.",
+            "b7 goes out of scope. b7.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from b2.0 to s",
+            "Copy from b2.1 to n",
+            "b2.0 goes out of scope. No resource is dropped.",
+            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from b3.0 to s3",
+            "Copy from b3.1 to n3",
+            "b3.0 goes out of scope. No resource is dropped: b3.0 was moved or dropped in every branch above.",
+            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from bp.a to a",
+            "bp.a goes out of scope. No resource is dropped.",
+            "bp.b goes out of scope. Its resource is dropped.",
+            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation is freed.",
+            "Move from bq.b to b",
+            "Return immutably borrowed resource from r to bq.a",
+            "bq.a goes out of scope. Its resource is dropped.",
+            "bq goes out of scope. bq.b was moved out earlier, so only bq.a is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "Move from *b7 to s7",
+            "*b7's resource is moved",
+            "Partial move from *b2 to s",
+            "Partial move from *b3 to s3",
+            "a value inside *b2 is copied",
+            "*b2's resource is moved",
+            "*b3's resource is moved",
+            "*bp's resource is moved",
+            "Move from *bp to a",
+            "Move from *bq to b",
+            "Immutable borrow from *bq to r",
+            "b7.0 goes out of scope. Its resource is dropped.",
+            "b2.0 goes out of scope. Its resource is dropped.",
+            "b3.0 goes out of scope. Its resource is dropped.",
+            "bp.a goes out of scope. Its resource is dropped.",
+            "bq.b goes out of scope. Its resource is dropped.",
+            "b7 goes out of scope. No resource is dropped",
+            "b2 goes out of scope. No resource is dropped",
+            "b3 goes out of scope. No resource is dropped",
+            "bp goes out of scope. No resource is dropped",
+            "bq goes out of scope. No resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/box_partial_move_chain_892",
+        // #892: a let-chain on a Box's payload, `if let (s5, n5) = *b5 &&
+        // n5 > 0`, moves only b5.0's String into s5 (before the condition
+        // can fail), and n5 copies b5.1. main said the chain moved all of
+        // *b5, that b5.0's String is dropped at scope end, and that b5
+        // drops nothing.
+        must_contain: &[
+            "Move from b5.0 to s5",
+            "Copy from b5.1 to n5",
+            "b5.0 was moved: the condition moves b5.0 to s5 before it can turn out false, so the move has happened even when the body is skipped, and b5.0 can't be used after the if. When the condition fails after that move, s5 goes out of scope and its resource is dropped.",
+            "b5.0 goes out of scope. No resource is dropped: b5.0 was moved or dropped in every branch above.",
+            "b5 goes out of scope. b5.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "Move from *b5 to s5",
+            "*b5 was moved",
+            "a value inside *b5",
+            "b5.0 goes out of scope. Its resource is dropped.",
+            "b5 goes out of scope. No resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "box_payload_reassign_893",
+        // #893: `*bm = (..)` after `let s2 = bm.0;` puts a new payload in
+        // the Box. Of the old one only what the move left is dropped (here
+        // nothing: bm.1 is an i32); the new String in bm.0 is dropped at
+        // bm's scope end, as for `t = (..)` on a local tuple. main drew no
+        // write on bm.0 / bm.1, so it said "bm.0 goes out of scope. No
+        // resource is dropped." and "bm.0 was moved out earlier, so no
+        // field is dropped", and read the write as "the resource bm points
+        // to is modified through *bm", as if bm were a reference. Also for
+        // a payload moved in from a variable (`*b2 = o`, after `let (s3, _)
+        // = *b2;`), from a call (`*b3 = make()`) and a struct literal
+        // (`*bp = P { .. }`, whose old bp.b is dropped at the write).
+        must_contain: &[
+            "*bm acquires ownership of a new resource. Its previous bm.0 was moved out earlier, so nothing of it is dropped.",
+            "Move from String::from to bm.0",
+            "bm.1 is assigned a new value",
+            "bm.0 goes out of scope. Its resource is dropped.",
+            "bm goes out of scope. Its resource is dropped.",
+            "*b2 acquires ownership of a new resource. Its previous b2.0 was moved out earlier, so nothing of it is dropped.",
+            "Move from o to *b2",
+            "Move from o.0 to b2.0",
+            "o.0 goes out of scope. No resource is dropped.",
+            "b2.0 goes out of scope. Its resource is dropped.",
+            "b2 goes out of scope. Its resource is dropped.",
+            "*b3 acquires ownership of a new resource. Its previous b3.0 was moved out earlier, so nothing of it is dropped.",
+            "Move from make to *b3",
+            "b3.0 goes out of scope. Its resource is dropped.",
+            "b3 goes out of scope. Its resource is dropped.",
+            "*bp acquires ownership of a new resource. Its previous bp.a was moved out earlier, so only its previous bp.b is dropped.",
+            "bp.b acquires ownership of a new resource; its previous resource is dropped",
+            "Move from String::from to bp.a",
+            "bp.a goes out of scope. Its resource is dropped.",
+            "bp goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "was moved out earlier, so no field is dropped",
+            "was moved out earlier, so only bp.b is dropped",
+            "bm.0 goes out of scope. No resource is dropped.",
+            "b2.0 goes out of scope. No resource is dropped.",
+            "b3.0 goes out of scope. No resource is dropped.",
+            "bp.a goes out of scope. No resource is dropped.",
+            "is modified through *bm",
+            "is modified through *b2",
+            "is modified through *b3",
+            "is modified through *bp",
+            "o.0 goes out of scope. Its resource is dropped.",
+            "=bm acquires ownership of a new resource. Its previous bm.0 was moved out earlier, so nothing of it is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
