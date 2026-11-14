@@ -6828,9 +6828,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `let (a, b) = t;` / `let P { a, b } = p;` with `t` / `p` a
       // tuple or struct variable (or a field of one): its parts `t.0`,
       // `p.a`, … have columns, so pair each sub-pattern with its part
-      // (#189, #326). The other shapes fall through to bind_walk, which
+      // (#189, #326). Also `let (s, n) = *b;` on a Box, whose payload's
+      // parts are drawn as `b.0`, `b.1`: s moves out of `b.0` only, not
+      // all of `*b` (#890). The other shapes fall through to bind_walk, which
       // binds everything from the whole of `t`.
-      (PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..), ExprKind::Path(_) | ExprKind::Field(..))
+      (PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..), ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Unary(UnOp::Deref, _))
         if self.member_place_name(init).is_some() =>
       {
         let place = self.member_place_name(init).unwrap();
@@ -6853,7 +6855,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `x` a new value and each place moved into it only if its
       // alternative matched. An or-pattern whose alternatives bind
       // every name from the same place falls through to bind_walk.
-      (PatKind::Or(_), ExprKind::Path(_) | ExprKind::Field(..))
+      (PatKind::Or(_), ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Unary(UnOp::Deref, _))
         if self.member_place_name(init).is_some() && !is_skipped =>
       {
         let place = self.member_place_name(init).unwrap();
@@ -6954,11 +6956,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !self.has_member_columns(ty) || init.span.from_expansion() {
       return None;
     }
-    // Only a chain of fields on a variable (`t`, `p.pair`, `t.0`):
-    // expr_to_rap_name also looks through `*`, `&` and indexing.
+    // Only a chain of fields on a variable (`t`, `p.pair`, `t.0`), or
+    // on the payload of a Box variable (`*b`, `(*b).pair`), whose parts
+    // are drawn as `b.0`, `b.pair` (#890): expr_to_rap_name also looks
+    // through `*` of a reference, `&` and indexing.
     let mut cur = init;
     while let ExprKind::Field(inner, _) = cur.kind {
       cur = inner;
+    }
+    if let ExprKind::Unary(UnOp::Deref, base) = cur.kind {
+      if self.tcx.typeck(base.hir_id.owner).expr_ty(base).is_box() {
+        cur = base;
+      }
     }
     if !matches!(cur.kind, ExprKind::Path(QPath::Resolved(..))) {
       return None;
