@@ -490,7 +490,16 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_06_if_let_copy",
-        must_contain: &["Copy from config_max to max", "max is initialized with a copy of config_max"],
+        // max copies the u8 inside config_max, not all of it (#866).
+        must_contain: &[
+            "Partial copy from config_max to max",
+            "max is initialized with a copy of a value inside config_max",
+            "a value inside config_max is copied",
+        ],
+        must_not_contain: &[
+            "max is initialized with a copy of config_max",
+            "config_max's value is copied",
+        ],
         ..E
     },
     Snippet {
@@ -579,7 +588,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "get reads from v (implicitly borrowed)",
             "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
-            "L5 third₂ is initialized with a copy of third",
+            "L5 third₂ is initialized with a copy of a value inside third",
+            "L5 a value inside third is copied",
             "L5 Immutable borrow from v to third₂: third₂ is a reference copied out of third",
             "v goes out of scope. Its resource is dropped.",
         ],
@@ -587,6 +597,9 @@ const BOOK: &[Snippet] = &[
             "Return immutably borrowed resource from third to third",
             "L3 v's resource is no longer immutably borrowed",
             "=L5 Partial copy from third to third",
+            // third₂ copies the reference inside third, not third (#866).
+            "L5 third₂ is initialized with a copy of third",
+            "L5 third's value is copied",
             "L5 third goes out of scope. No resource is dropped.",
             "L8 third goes out of scope. No resource is dropped.",
             "L5 third₂'s immutable borrow ends (what it borrows from isn't shown)",

@@ -2091,13 +2091,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Used to produce no event at all for the guard.
         must_contain: &[
             "check reads from s",
-            "n is initialized with a copy of opt",
+            "n is initialized with a copy of a value inside opt",
             "s goes out of scope. Its resource is dropped.",
             "Partial copy from opt to n",
         ],
         must_not_contain: &[
             "s's resource is moved",
             "s goes out of scope. No resource is dropped.",
+            // #866: a copy of the value inside, not of the whole.
+            "n is initialized with a copy of opt",
             // The arms' `n`s are never in scope together (#598).
             "n₂",
         ],
@@ -3144,7 +3146,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `third`. `third` holds a borrow of `v` (#336), so x's lender
         // is `v` (#391).
         must_contain: &[
-            "x is initialized with a copy of third",
+            "x is initialized with a copy of a value inside third",
             "Partial copy from third to x",
             "Return immutably borrowed resource from x to v",
         ],
@@ -3152,6 +3154,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from x to *x",
             "Return immutably borrowed resource from x to third",
             "third's resource is no longer immutably borrowed",
+            // #866: a copy of the value inside, not of the whole.
+            "x is initialized with a copy of third",
         ],
     },
     TooltipExpect {
@@ -3177,7 +3181,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // bound reference borrows an element of `v`, not `head`, and
         // certainly not the function `get`.
         must_contain: &[
-            "x is initialized with a copy of head",
+            "x is initialized with a copy of a value inside head",
             "y is initialized with the value inside the Option get() returns",
             "Return immutably borrowed resource from x to v",
             "Return immutably borrowed resource from y to v",
@@ -3189,6 +3193,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from x to head",
             "head's resource is no longer immutably borrowed",
             "Return immutably borrowed resource from y to get",
+            // #866: a copy of the value inside, not of the whole.
+            "x is initialized with a copy of head",
         ],
     },
     TooltipExpect {
@@ -4813,14 +4819,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `n₃`, "shadowing" it (#598).
         must_contain: &[
             "n is bound to a copyable value",
-            "n₂ is initialized with a copy of opt",
+            "n₂ is initialized with a copy of a value inside opt",
             "Partial copy from opt to n₂",
             "n₂, immutable. n₂ shadows n: it is a new variable named n, declared on lines 9 and 10 (in different branches or blocks, so only one exists at a time)",
         ],
         must_not_contain: &[
-            "n is initialized with a copy of opt",
             "=Partial copy from opt to n",
             "n₃",
+            // #866: a copy of the value inside, not of the whole.
+            "n₂ is initialized with a copy of opt",
+            "n is initialized with a copy of opt",
         ],
     },
     TooltipExpect {
@@ -5300,8 +5308,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y₂ is bound to a copyable value",
             "y goes out of scope. Its resource is dropped.",
             // else_if_let
-            "z is initialized with a copy of a",
-            "z is initialized with a copy of b",
+            "z is initialized with a copy of a value inside a",
+            "z is initialized with a copy of a value inside b",
             // tuple_swap
             "Move from g to f₂",
             "Move from f to g₂",
@@ -5314,13 +5322,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // first, so it doesn't shadow it and shares its column: no `z₂`,
             // no header note.
             // nested_match
-            "w₂ is initialized with a copy of b",
+            "w₂ is initialized with a copy of a value inside b",
         ],
         must_not_contain: &[
             "Move from ys to y₂",
             "x₂ is initialized with the value next() returns",
             "z₂",
             "z is assigned a copy of b",
+            // #866: a copy of the value inside, not of the whole.
+            "=z is initialized with a copy of a",
+            "z is initialized with a copy of b",
+            "w₂ is initialized with a copy of b",
             // Not "a different variable": the earlier one is still in scope.
             "n₂, immutable. n₂ is a different variable from n: the 2nd variable named n in this function",
             "=Move from s to s",
@@ -5953,8 +5965,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "if_let_binding_copy",
         // #382: the i32 in `y: Option<i32>` is copied into `b`; `y`
         // keeps its value.
-        must_contain: &["Copy from y to b", "y's value is copied"],
-        must_not_contain: &["Move from y to b", "y's resource is moved"],
+        must_contain: &["Partial copy from y to b", "a value inside y is copied"],
+        must_not_contain: &[
+            "Move from y to b",
+            "y's resource is moved",
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from y to b",
+            "y's value is copied",
+        ],
     },
     TooltipExpect {
         name: "if_let_binding_move",
@@ -5974,24 +5992,37 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // only when the pattern matches. The copy leaves `msg` as it was;
         // the move is what makes `msg` maybe-moved afterwards.
         must_contain: &[
-            "Copy from msg to n",
-            "n is initialized with a copy of msg",
+            "Partial copy from msg to n",
+            "n is initialized with a copy of a value inside msg",
             "Move from msg to s",
             "msg's resource is moved",
             "msg was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource \
              (including the String it holds, if any) is dropped when msg goes out of scope.",
         ],
-        must_not_contain: &["Move from msg to n", "Copy from msg to s", "msg's resource is copied"],
+        must_not_contain: &[
+            "Move from msg to n",
+            "Copy from msg to s",
+            "msg's resource is copied",
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from msg to n",
+            "n is initialized with a copy of msg",
+        ],
     },
     TooltipExpect {
         name: "while_let_binding_kinds",
         // #382: the same three kinds of binding in `while let`.
         must_contain: &[
             "Partial immutable borrow from x to a",
-            "Copy from y to b",
+            "Partial copy from y to b",
             "Move from o to s",
         ],
-        must_not_contain: &["Move from x to a", "Move from y to b", "Copy from o to s"],
+        must_not_contain: &[
+            "Move from x to a",
+            "Move from y to b",
+            "Copy from o to s",
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from y to b",
+        ],
     },
     // #495: a reference declared before an if/match whose last use is
     // in one arm. Its borrow used to end on the parent columns, in the
@@ -6061,7 +6092,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain",
         must_contain: &[
             "Partial immutable borrow from x to a",
-            "Copy from y to b",
+            "Partial copy from y to b",
             "show reads from a",
             "Copy from b to take",
             "a goes out of scope",
@@ -6074,6 +6105,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=x goes out of scope. Its resource is dropped.",
             "y is live in a conditional expression",
             "y isn't moved in any of the branches above",
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from y to b",
         ],
     },
     TooltipExpect {
@@ -7655,8 +7688,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // split dot of its own, no "no value yet" strips over the `if`
         // branch. It's an i32: no drop text.
         must_contain: &[
-            "Copy from b to y",
-            "y is initialized with a copy of b",
+            "Partial copy from b to y",
+            "y is initialized with a copy of a value inside b",
             "y goes out of scope",
             "x goes out of scope",
         ],
@@ -7664,6 +7697,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y is live in a conditional expression ",
             "y has no value yet",
             "y goes out of scope. No resource is dropped.",
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from b to y",
+            "y is initialized with a copy of b",
         ],
     },
     TooltipExpect {
@@ -7724,9 +7760,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // both share one column (no `z₂`, no "different variable" note)
         // and the second binding is an initialization, not an assignment.
         must_contain: &[
-            "z is initialized with a copy of a",
-            "z is initialized with a copy of b",
-            "Copy from b to z",
+            "z is initialized with a copy of a value inside a",
+            "z is initialized with a copy of a value inside b",
+            "Partial copy from b to z",
             "z goes out of scope",
         ],
         must_not_contain: &[
@@ -7736,6 +7772,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "is a different variable from",
             "z is live in a conditional expression ",
             "z has no value yet",
+            // #866: a copy of the value inside, not of the whole.
+            "=z is initialized with a copy of a",
+            "z is initialized with a copy of b",
+            "Copy from b to z",
         ],
     },
     TooltipExpect {
@@ -7745,8 +7785,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // never an assignment ("z is assigned a new value" was the false
         // text for the last one).
         must_contain: &[
-            "z is initialized with a copy of a",
-            "z is initialized with a copy of b",
+            "z is initialized with a copy of a value inside a",
+            "z is initialized with a copy of a value inside b",
             "z is bound to a copyable value",
         ],
         must_not_contain: &[
@@ -7754,6 +7794,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z is assigned a copy of b",
             "z is assigned a new value",
             "is a different variable from",
+            // #866: a copy of the value inside, not of the whole.
+            "=z is initialized with a copy of a",
+            "z is initialized with a copy of b",
         ],
     },
     // ─── An arm binding on the line its nested branch splits on (#502) ──
@@ -7763,11 +7806,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // splits on; it holds 1 in both inner arms, including the
         // `Some(y)` arm that doesn't use it.
         must_contain: &[
-            "x is initialized with a copy of a",
+            "x is initialized with a copy of a value inside a",
             "x is live in a conditional expression ",
             "x holds a copyable value",
         ],
-        must_not_contain: &["x has no value yet"],
+        must_not_contain: &[
+            "x has no value yet",
+            // #866: a copy of the value inside, not of the whole.
+            "=x is initialized with a copy of a",
+        ],
     },
     TooltipExpect {
         name: "match_arm_binding_if_same_line",
@@ -7804,7 +7851,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from r.x to b",
             "the resource h.r points to is read through h.r.x (copied to c)",
             "Partial copy from self.n to v",
-            "v is initialized with a copy of self.n",
+            "v is initialized with a copy of a value inside self.n",
             "Partial immutable borrow from self.label to s",
             "Return immutably borrowed resource from s to self.label",
         ],
@@ -7816,6 +7863,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "self's resource is copied to the caller",
             "p.x acquires ownership of a resource",
             "p.x is the owner of the resource",
+            // #866: a copy of the value inside, not of the whole.
+            "v is initialized with a copy of self.n",
         ],
     },
     TooltipExpect {
@@ -7897,9 +7946,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t immutably borrows a resource",
             "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
             "Partial copy from n to k",
+            "k is initialized with a copy of a value inside n",
+        ],
+        must_not_contain: &[
+            "o goes out of scope. Its resource is dropped.",
+            "=r goes out of scope. Its resource is dropped.",
+            // #866: a copy of the value inside, not of the whole.
             "k is initialized with a copy of n",
         ],
-        must_not_contain: &["o goes out of scope. Its resource is dropped.", "=r goes out of scope. Its resource is dropped."],
     },
     TooltipExpect {
         name: "or_pattern_if_let",
@@ -8731,7 +8785,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from q to r",
             "p goes out of scope. No resource is dropped: p was moved or dropped in every branch above.",
             "Move from entry to key",
-            "Copy from entry to n",
+            "Partial copy from entry to n",
             "key goes out of scope. Its resource is dropped.",
             // The tuple (p, q) is dropped (edition 2024, checked with a
             // Drop-printing program) at the end of the if branch, with
@@ -8746,6 +8800,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The pattern didn't match, so the temporary tuple (x, y) is dropped here, and with it x's and y's resources",
         ],
         must_not_contain: &[
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from entry to n",
             // #694: no join dot when every branch moved or dropped it.
             "=p was moved or dropped in every branch above",
             "=q was moved or dropped in every branch above",
@@ -9268,47 +9324,66 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #583: the copy out of `y` leaves `y` as it was, so `y` has no
         // arms and no join.
         must_contain: &[
-            "Copy from y to u",
-            "u is initialized with a copy of y",
-            "y's value is copied",
+            "Partial copy from y to u",
+            "u is initialized with a copy of a value inside y",
+            "a value inside y is copied",
             "Copy of the value inside the Option pop() returns to t",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "y is live in a conditional expression",
             "y isn't moved in any of the branches above",
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from y to u",
+            "u is initialized with a copy of y",
+            "y's value is copied",
         ],
     },
     TooltipExpect {
         name: "edition2024/if_let_chain_copy_first",
         must_contain: &[
-            "Copy from y to b",
-            "b is initialized with a copy of y",
+            "Partial copy from y to b",
+            "b is initialized with a copy of a value inside y",
             "Partial immutable borrow from x to a",
             "x goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
-        must_not_contain: &["y is live in a conditional expression"],
+        must_not_contain: &[
+            "y is live in a conditional expression",
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from y to b",
+            "b is initialized with a copy of y",
+        ],
     },
     TooltipExpect {
         name: "edition2024/while_let_chain_two_bindings",
         must_contain: &[
-            "Copy from y to u",
-            "u is initialized with a copy of y",
+            "Partial copy from y to u",
+            "u is initialized with a copy of a value inside y",
             "Copy of the value inside the Option pop() returns to t",
             "t goes out of scope",
             "u goes out of scope",
         ],
-        must_not_contain: &[],
+        must_not_contain: &[
+            // #866: a copy of the value inside, not of the whole.
+            "Copy from y to u",
+            "u is initialized with a copy of y",
+        ],
     },
     TooltipExpect {
         name: "edition2024/while_let_chain_two_sources",
         must_contain: &[
+            "Partial copy from y to b",
+            "b is initialized with a copy of a value inside y",
+            "Partial copy from z to c",
+            "c is initialized with a copy of a value inside z",
+        ],
+        must_not_contain: &[
+            // #866: a copy of the value inside, not of the whole.
             "Copy from y to b",
             "b is initialized with a copy of y",
             "Copy from z to c",
             "c is initialized with a copy of z",
         ],
-        must_not_contain: &[],
     },
     // #602: a field moved out of a Box (`take(b.name)`) is drawn like a field
     // moved out of a plain struct, and the Box is partially moved: its
@@ -13496,11 +13571,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── #140: fixtures that had no entry (read as a Rust teacher would) ──
     // Deliberately NOT pinned (each renders, but a tooltip is wrong; tracked
     // in issues): basic_for3 ("animals's resource is no longer immutably
-    // borrowed" at the iter() line while `animal` still borrows it),
-    // basic_match / basic_match3 / basic_match4 ("y is assigned a copy of z"
-    // for `y = Fruit::Apple(z)`), while_let_body ("opt is assigned a copy of
-    // Some"), if_let_with_macro
-    // ("x is initialized with a copy of opt" for `Some(x) = opt`).
+    // borrowed" at the iter() line while `animal` still borrows it).
     TooltipExpect {
         name: "aliasing1",
         must_contain: &[
@@ -13926,6 +13997,72 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     TooltipExpect {
+        name: "basic_match",
+        // #866: `y = Fruit::Apple(z)` gives y a new Fruit built from z's u32,
+        // not a copy of z; `Fruit::Apple(z) =>` copies the u32 inside x.
+        // Not pinned: `Fruit::Apple(8)` / `Fruit::Banana` still read "Move from
+        // Fruit::Apple to x", a non-Copy constructor drawn as an actor (#873).
+        must_contain: &[
+            "Partial copy from x to z",
+            "z is initialized with a copy of a value inside x",
+            "a value inside x is copied",
+            "Copy from z to y",
+            "y is assigned a new value",
+            "z goes out of scope",
+            "y goes out of scope",
+            "x goes out of scope",
+        ],
+        must_not_contain: &[
+            "y is assigned a copy of z",
+            "z is initialized with a copy of x",
+            "x's value is copied",
+        ],
+    },
+    TooltipExpect {
+        name: "basic_match3",
+        // #866: as basic_match, with six arms.
+        // Not pinned: `Fruit::Apple(8)` / `Fruit::Banana` still read "Move from
+        // Fruit::Apple to x", a non-Copy constructor drawn as an actor (#873).
+        must_contain: &[
+            "Partial copy from x to z",
+            "z is initialized with a copy of a value inside x",
+            "a value inside x is copied",
+            "Copy from z to y",
+            "y is assigned a new value",
+            "z goes out of scope",
+            "y goes out of scope",
+            "x goes out of scope",
+        ],
+        must_not_contain: &[
+            "y is assigned a copy of z",
+            "z is initialized with a copy of x",
+            "x's value is copied",
+        ],
+    },
+    TooltipExpect {
+        name: "basic_match4",
+        // #866: `x = Fruit::Apple(z)` inside `match x`, then a nested match
+        // on the new x.
+        // Not pinned: `Fruit::Apple(8)` / `Fruit::Banana` still read "Move from
+        // Fruit::Apple to x", a non-Copy constructor drawn as an actor (#873).
+        must_contain: &[
+            "Partial copy from x to z",
+            "z is initialized with a copy of a value inside x",
+            "Copy from z to x",
+            "x is assigned a new value",
+            "Partial copy from x to c",
+            "c is initialized with a copy of a value inside x",
+            "a value inside x is copied",
+            "Copy from c to +",
+        ],
+        must_not_contain: &[
+            "x is assigned a copy of z",
+            "z is initialized with a copy of x",
+            "c is initialized with a copy of x",
+            "x's value is copied",
+        ],
+    },
+    TooltipExpect {
         name: "basic_mutref2",
         must_contain: &[
             "x is bound to a copyable value",
@@ -14290,6 +14427,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "(moved from",
             "(copied from",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_with_macro",
+        // #866: x copies the i32 inside opt, not opt.
+        must_contain: &[
+            "opt is initialized with a Some value",
+            "Partial copy from opt to x",
+            "x is initialized with a copy of a value inside opt",
+            "a value inside opt is copied",
+            "x's value is immutably borrowed by println!; x is read-only while the borrow is live",
+            "x goes out of scope",
+        ],
+        must_not_contain: &[
+            "x is initialized with a copy of opt",
+            "opt's value is copied",
+            "=Copy from opt to x",
         ],
     },
     TooltipExpect {
@@ -14736,6 +14890,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     TooltipExpect {
+        name: "while_let_body",
+        // #866: `opt = if x < 2 { Some(x + 1) } else { None };` assigns a
+        // new value; `Some` is not an actor and gets no column. x copies the
+        // i32 inside opt.
+        must_contain: &[
+            "opt is initialized with a Some value",
+            "Partial copy from opt to x",
+            "x is initialized with a copy of a value inside opt",
+            "a value inside opt is copied",
+            "opt is assigned a new value",
+            "Copy from x to read",
+            "Immutable borrow from s to _t",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Copy from Some to opt",
+            "opt is assigned a copy of Some",
+            "x is initialized with a copy of opt",
+            "opt's value is copied",
+            "=Some",
+        ],
+    },
+    TooltipExpect {
         name: "while_let_pattern_annotation",
         must_contain: &[
             "_s acquires ownership from the caller",
@@ -14756,6 +14933,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(copied from",
             "Copy from pop to s",
             "Copy from s to consume",
+        ],
+    },    TooltipExpect {
+        name: "ctor_payload_copy_866",
+        // #866: a constructor's value is a new value, not a copy of its
+        // argument or of the constructor; a pattern binding copies a value inside
+        // the scrutinee, not all of it (`let Some(w) = o else`, `Pair::Two(a, b)`).
+        must_contain: &[
+            "Copy from z to f",
+            "f is initialized with an Apple value",
+            "Copy from z to y",
+            "y is assigned a new value",
+            "o is initialized with a Some value",
+            "opt is assigned a new value",
+            "Partial copy from opt to x",
+            "x is initialized with a copy of a value inside opt",
+            "a value inside opt is copied",
+            "Partial copy from o to w",
+            "w is initialized with a copy of a value inside o",
+            "n is initialized with a copy of a value inside f",
+            "a value inside f is copied",
+            "a is initialized with a copy of a value inside p",
+            "b is initialized with a copy of a value inside p",
+            "k is initialized with a copy of a value inside y",
+            "z's value is copied",
+        ],
+        must_not_contain: &[
+            "f is initialized with a copy of z",
+            "y is assigned a copy of z",
+            "Copy from Some to",
+            "opt is assigned a copy of Some",
+            "x is initialized with a copy of opt",
+            "w is initialized with a copy of o",
+            "n is initialized with a copy of f",
+            "a is initialized with a copy of p",
+            "k is initialized with a copy of y",
+            "f's value is copied",
+            "opt's value is copied",
+            "y's value is copied",
+            "=Some",
         ],
     },
     // ─── #867: a borrow of a value that needs no drop is not a resource ───
@@ -16190,9 +16406,9 @@ fn copying_out_of_an_if_let_scrutinee_doesnt_branch_it() {
         assert!(!timeline.contains(text), "y has a branch: {:?}", text);
     }
     // The copy is still drawn on y, and b still gets the value.
-    assert_eq!(dots_with_tooltip(&timeline, "y's value is copied").len(), 1);
-    assert_eq!(arrow_points(&timeline, "Copy from y to b").len(), 1);
-    assert_eq!(dots_with_tooltip(&timeline, "b is initialized with a copy of y").len(), 1);
+    assert_eq!(dots_with_tooltip(&timeline, "a value inside y is copied").len(), 1);
+    assert_eq!(arrow_points(&timeline, "Partial copy from y to b").len(), 1);
+    assert_eq!(dots_with_tooltip(&timeline, "b is initialized with a copy of a value inside y").len(), 1);
 }
 
 /// #382: an `if let` whose pattern borrows, copies or moves out of a
@@ -16228,7 +16444,7 @@ fn if_let_binding_is_drawn_at_the_start_of_its_arm() {
         ("while let Some(a) = &x {",
          "x's resource is immutably borrowed by a; x is read-only while the borrow is live",
          "Partial immutable borrow from x to a"),
-        ("while let Some(b) = y {", "y's value is copied", "Copy from y to b"),
+        ("while let Some(b) = y {", "a value inside y is copied", "Partial copy from y to b"),
         ("while let Some(s) = o {", "o's resource is moved", "Move from o to s"),
     ] {
         let row = code_row_y(&code, line);
@@ -16335,7 +16551,7 @@ fn an_if_let_arm_that_moves_out_on_the_split_row_starts_there() {
     let row = code_row_y(&code, "if let Msg::Pair(n, s) = msg {");
     let moved = dots_with_tooltip(&timeline, "msg's resource is moved");
     let split = dots_listing_tooltip(&timeline, "msg is live in a conditional expression ");
-    let copied = dots_listing_tooltip(&timeline, "msg's value is copied");
+    let copied = dots_listing_tooltip(&timeline, "a value inside msg is copied");
     assert_eq!((moved.len(), split.len(), copied.len()), (1, 1, 1), "dots: {:?} {:?} {:?}", moved, split, copied);
     let (moved, split) = (moved[0], split[0]);
     // The move is the arm's first event, on the `if let` row; the split
@@ -16379,8 +16595,8 @@ fn two_bindings_on_one_let_chain_line_are_drawn_side_by_side() {
     // on the sources' arms)
     for (name, line, arrows, next, binds) in [
         ("edition2024/if_let_chain", "if let Some(a) = &x && let Some(b) = y {",
-         ["Partial immutable borrow from x to a", "Copy from y to b"], "show(a);",
-         ["x's resource is immutably borrowed by a; x is read-only while the borrow is live", "y's value is copied"]),
+         ["Partial immutable borrow from x to a", "Partial copy from y to b"], "show(a);",
+         ["x's resource is immutably borrowed by a; x is read-only while the borrow is live", "a value inside y is copied"]),
         ("edition2024/else_if_let_chain_two_bindings", "} else if let Some(a) = &x && let Some(b) = &y {",
          ["Partial immutable borrow from x to a", "Partial immutable borrow from y to b"], "show(a);",
          ["x's resource is immutably borrowed by a; x is read-only while the borrow is live",
@@ -16425,16 +16641,16 @@ fn copying_out_of_a_let_chain_scrutinee_doesnt_branch_it() {
     // (fixture, the `if let` line, the copy, columns left to right)
     for (name, line, copy, cols) in [
         ("edition2024/if_let_chain", "if let Some(a) = &x && let Some(b) = y {",
-         "Copy from y to b", ["x", "a", "y", "b"]),
+         "Partial copy from y to b", ["x", "a", "y", "b"]),
         ("edition2024/if_let_chain_pop_and_copy", "if let Some(t) = v.pop() && let Some(u) = y {",
-         "Copy from y to u", ["v", "y", "u", "t"]),
+         "Partial copy from y to u", ["v", "y", "u", "t"]),
     ] {
         let rv = run_with_local_backend(name);
         let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
         for text in ["y is live in a conditional expression", "y isn't moved in any of the branches above"] {
             assert!(!timeline.contains(text), "{}: y has a branch: {:?}", name, text);
         }
-        assert_eq!(dots_with_tooltip(&timeline, "y's value is copied").len(), 1, "{}", name);
+        assert_eq!(dots_with_tooltip(&timeline, "a value inside y is copied").len(), 1, "{}", name);
         let xs: Vec<f64> = cols.iter().map(|l| label_x(&timeline, l)).collect();
         assert!(xs.windows(2).all(|w| w[0] < w[1]), "{}: columns {:?} at {:?}", name, cols, xs);
         let row = code_row_y(&code, line);
@@ -16467,11 +16683,11 @@ fn a_let_chains_bindings_are_drawn_beside_their_sources_inline() {
     // right, the next line)
     for (name, line, arrows, cols, next) in [
         ("edition2024/while_let_chain_two_bindings", "while let Some(t) = v.pop() && let Some(u) = y {",
-         &["Copy from y to u"][..], ["v", "y", "u", "t"], "take(t);"),
+         &["Partial copy from y to u"][..], ["v", "y", "u", "t"], "take(t);"),
         ("edition2024/while_let_chain_two_sources", "while let Some(b) = y && let Some(c) = z {",
-         &["Copy from y to b", "Copy from z to c"][..], ["y", "b", "z", "c"], "take(b);"),
+         &["Partial copy from y to b", "Partial copy from z to c"][..], ["y", "b", "z", "c"], "take(b);"),
         ("edition2024/if_let_chain_copy_first", "if let Some(b) = y && let Some(a) = &x {",
-         &["Copy from y to b", "Partial immutable borrow from x to a"][..], ["x", "a", "y", "b"], "show(a);"),
+         &["Partial copy from y to b", "Partial immutable borrow from x to a"][..], ["x", "a", "y", "b"], "show(a);"),
     ] {
         let rv = run_with_local_backend(name);
         let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());

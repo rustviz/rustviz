@@ -1512,7 +1512,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *self.unique_id += 1;
         let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None }
         } else {
           ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
         };
@@ -1559,7 +1559,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       *self.unique_id += 1;
       let (from, to) = (ResourceTy::Value(child), ResourceTy::Value(dest));
       self.add_external_event(line_num, if is_copy {
-        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false }
+        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None }
       } else {
         ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
       });
@@ -1636,8 +1636,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           if from.extract_rap().is_some_and(|r| r.is_ref())));
     }
     for (l, mut e) in taken {
-      if let ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } = &mut e {
-        *to = new_to.clone();
+      match &mut e {
+        // The receiver holds the built value, not a copy of `from`
+        // (`y = Fruit::Apple(z);`, #866).
+        ExternalEvent::Copy { to, into_ctor, .. } => {
+          *into_ctor = Some(to.name());
+          *to = new_to.clone();
+        }
+        ExternalEvent::Move { to, .. } => *to = new_to.clone(),
+        _ => {}
       }
       self.add_external_event(l, e);
     }
@@ -1880,7 +1887,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id, break_alt: None },
-      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false },
+      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None },
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
@@ -4447,7 +4454,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             None => {
               let mut sub = Vec::new();
               self.collect_pat_binding_events(sp, ty_results, parent, &parent_ty, scope, &mut sub);
-              res.extend(sub.into_iter().map(|(r, e, _)| (r, e, parent.clone(), None)));
+              res.extend(sub.into_iter().map(|(r, e, ty)| {
+                let partial = copies_from_inside(&e, ty, parent_ty, parent).then_some(true);
+                (r, e, parent.clone(), partial)
+              }));
             }
           }
         }
@@ -4455,7 +4465,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       None => {
         let mut sub = Vec::new();
         self.collect_pat_binding_events(pat, ty_results, parent, &parent_ty, scope, &mut sub);
-        res.extend(sub.into_iter().map(|(r, e, _)| (r, e, parent.clone(), None)));
+        res.extend(sub.into_iter().map(|(r, e, ty)| {
+          let partial = copies_from_inside(&e, ty, parent_ty, parent).then_some(true);
+          (r, e, parent.clone(), partial)
+        }));
       }
     }
   }
@@ -4475,7 +4488,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  // Add a RAP for each variable bound in a pattern
+  // Add a RAP for each variable bound in a pattern, with the event that
+  // binds it and its type.
   pub fn collect_pat_binding_events<'t>(
     &mut self,
     pat: &Pat,
@@ -4638,7 +4652,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 else { Evt::Move }
             };
 
-            res.push((self.raps.get(&name).unwrap().rap.to_owned(), evt, parent_ty.clone()));
+            res.push((self.raps.get(&name).unwrap().rap.to_owned(), evt, ty));
         }
         // `Ok(s) | Err(s)`: every alternative binds the same names, with
         // the same types and binding modes, out of the same matched
@@ -6234,6 +6248,13 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   // `let moved = Some(m);`: `m` was moved into `moved`; nothing is
   // moved out of the constructor (#768).
   if retargeted {
+    return;
+  }
+  // `opt = Some(x + 1);`: a Copy value the constructor builds from
+  // values with no column (an operator's result): like a constructor
+  // of literals, nothing is copied from the constructor (#866).
+  if matches!(evt, Evt::Copy) && crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner)) {
+    self.bind_from_ctor(line_num, lhs, rhs);
     return;
   }
   // A call through a local `f` (closure, fn pointer) that leaves
@@ -8016,6 +8037,17 @@ fn ty_has_std_sync_primitive<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
 
 /// `pat` is a plain by-value binding (`r`, `mut r`): not `ref r`, not
 /// `r @ pat`.
+/// A by-value binding of type `ty` copies a value inside the matched
+/// `parent_ty` rather than all of it (`Some(x)` on an `Option<i32>`,
+/// `Fruit::Apple(z)`): its copy is partial, and reads "a copy of a value
+/// inside opt" (#866). Not through a reference: what `&x` copies is
+/// behind `parent`, not inside it. Nor out of a call's result, which
+/// is worded as "the value inside the Option f() returns" (#733).
+pub(crate) fn copies_from_inside<'tcx>(evt: &Evt, ty: Ty<'tcx>, parent_ty: Ty<'tcx>, parent: &ResourceTy) -> bool {
+  matches!(evt, Evt::Copy) && !parent_ty.is_ref() && ty != parent_ty
+    && !parent.extract_rap().is_some_and(|p| p.is_fn())
+}
+
 fn is_by_value_binding(pat: &Pat<'_>) -> bool {
   matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No))
 }

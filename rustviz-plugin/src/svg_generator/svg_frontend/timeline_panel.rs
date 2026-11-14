@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1729,8 +1729,16 @@ fn render_dot(
                         data.title = title;
                     } else if let (true, Event::Acquire { is: ResourceTy::Value(_), .. }) = (copyable_assign, event) {
                         data.title = hover_messages::event_dot_copyable_assign(&name);
-                    } else if let (true, Event::Copy { from, is: ResourceTy::Value(_), .. }) = (copyable_assign, event) {
-                        data.title = hover_messages::event_dot_copyable_assign_copy(&name, &from.name());
+                    } else if let (true, Event::Copy { from, is: ResourceTy::Value(_), of, .. }) = (copyable_assign, event) {
+                        // `y = Fruit::Apple(z);` / `opt = Some(x + 1);`:
+                        // y gets a new value, not a copy of z or of the
+                        // constructor, like `y = make();` (#866).
+                        data.title = match of {
+                            CopyOf::IntoCtor(_) => hover_messages::event_dot_copyable_assign(&name),
+                            _ if from.extract_rap().is_some_and(|f| f.is_fn()) => hover_messages::event_dot_copyable_assign(&name),
+                            CopyOf::Inside => hover_messages::event_dot_copyable_assign_copy_inside(&name, &from.name()),
+                            CopyOf::Whole => hover_messages::event_dot_copyable_assign_copy(&name, &from.name()),
+                        };
                     } else if let Some((func, true)) = match event {
                         Event::Acquire { from: ResourceTy::Value(f), is, .. }
                         | Event::Copy { from: ResourceTy::Value(f), is, .. } if f.is_fn() => Some((f.name().to_owned(), is.is_closure())),
