@@ -13397,12 +13397,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "field_write_through_ref_column",
         must_contain: &[
-            "s.n's value is modified through r.n",
-            "s.n's value is modified through r1.n",
-            "s.n's value is modified through r2.n",
-            "s.n's value is modified through r4.n",
-            "s.n's value is modified through (*r5).n",
-            "s.inner.n's value is modified through r6.inner.n",
+            // Assignments read like plain assignment, through the place.
+            "s.n is assigned a new value through r.n",
+            "s.n is assigned a new value through r1.n",
+            "s.n is assigned a new value through r2.n",
+            "s.n is assigned a new value through r4.n",
+            "s.n is assigned a new value through (*r5).n",
+            "s.inner.n is assigned a new value through r6.inner.n",
+            // `+=` is an in-place update.
             "s.n's value is modified through r7.n",
             // The reference's own dots are still true.
             "r.n is assigned a new value",
@@ -13411,8 +13413,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s.a acquires ownership of a new resource; its previous resource is dropped",
         ],
         must_not_contain: &[
+            // An assignment is not an in-place update.
+            "modified through r.n",
+            "modified through r1.n",
+            "modified through r2.n",
+            "modified through r4.n",
+            "modified through (*r5).n",
+            "modified through r6.inner.n",
             // `bump`'s struct is the caller's: no column of ours.
-            "modified through c.n",
+            "through c.n",
             // `s` is a struct, not a reference.
             "the resource s points to",
             "(moved from",
