@@ -2304,7 +2304,7 @@ fn borrow_break_alt<'v>(id: usize, visualization_data: &'v VisualizationData) ->
 // came from by id.
 fn closure_reborrow_lend_title(event: &Event, visualization_data: &VisualizationData) -> Option<String> {
     let (to, is, id, mutable) = match event {
-        Event::StaticLend { to, is, id } => (to, is, *id, false),
+        Event::StaticLend { to, is, id, .. } => (to, is, *id, false),
         Event::MutableLend { to, is, id, .. } => (to, is, *id, true),
         _ => return None,
     };
@@ -2330,7 +2330,7 @@ fn closure_reborrow_lend_title(event: &Event, visualization_data: &Visualization
 // g".
 fn kept_closure_lend_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
     let (to, is, id, mutable) = match event {
-        Event::StaticLend { to, is, id } => (to, is, *id, false),
+        Event::StaticLend { to, is, id, .. } => (to, is, *id, false),
         Event::MutableLend { to, is, id, .. } => (to, is, *id, true),
         _ => return None,
     };

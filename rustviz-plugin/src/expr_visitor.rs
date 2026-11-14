@@ -305,8 +305,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// column, so their borrow's end is drawn as a plain end dot with no
   /// arrow (#658).
   pub tuple_temp_refs: HashSet<String>,
-  /// Spans of the `&mut r` expressions that borrow a reference variable
-  /// r itself (`ref_var_borrow`, #914). A reference whose loan
+  /// Spans of the `&mut r` / `&r` expressions that borrow a reference
+  /// variable r itself (`ref_var_borrow`, #914, #925). A reference whose loan
   /// (`RefData::borrow_span`) is one of them gives back r, a value,
   /// not what r points to.
   pub ref_var_borrows: HashSet<rustc_span::Span>,
@@ -1942,14 +1942,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee }
       }
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
-      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
+      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new() },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
         result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
       },
-      Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() },
+      Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
     }
   }
@@ -2104,7 +2104,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let ev = if ref_data.mut_of(&to) {
       ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by, of_ref_var }
     } else {
-      ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by }
+      ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by, of_ref_var }
     };
     self.add_external_event(line_num, ev);
   }
@@ -2184,11 +2184,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     *self.unique_id += 1;
   }
 
-  /// `add_borrow_ev` for an `MBorrow`, also tagged with whether it
-  /// borrows a reference variable itself (`&mut r`, #914).
-  pub fn add_borrow_ev_of_ref_var(&mut self, line_num: usize, lhs: ResourceTy, rhs: ResourceTy, is_reborrow: bool, of_ref_var: bool) {
-    let mut ev = self.ext_ev_of_evt(Evt::MBorrow, lhs, rhs, *self.unique_id, false);
-    if let ExternalEvent::MutableBorrow { is_reborrow: r, of_ref_var: o, .. } = &mut ev {
+  /// `add_borrow_ev`, also tagged with whether the borrow is of a
+  /// reference variable itself (`&mut r` / `&r`, #914, #925).
+  pub fn add_borrow_ev_of_ref_var(&mut self, line_num: usize, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, is_reborrow: bool, of_ref_var: bool) {
+    let mut ev = self.ext_ev_of_evt(evt, lhs, rhs, *self.unique_id, false);
+    if let ExternalEvent::StaticBorrow { is_reborrow: r, of_ref_var: o, .. }
+         | ExternalEvent::MutableBorrow { is_reborrow: r, of_ref_var: o, .. } = &mut ev {
       *r = is_reborrow;
       *o = of_ref_var;
     }
@@ -4249,7 +4250,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let ev = if k.is_mut {
         ExternalEvent::MutableBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, break_alt: None, via: Some(via), id, of_ref_var: false }
       } else {
-        ExternalEvent::StaticBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, break_alt: None, via: Some(via), id }
+        ExternalEvent::StaticBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, break_alt: None, via: Some(via), id, of_ref_var: false }
       };
       self.update_rap(&lender, line);
       self.add_external_event(line, ev);
@@ -4349,7 +4350,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let ev = if is_mut {
         ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
       } else {
-        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
       };
       self.add_external_event(line, ev);
     }
@@ -5168,7 +5169,7 @@ fn pattern_ref_borrows(
     out.push(if is_mut {
       ExternalEvent::MutableBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via, id, of_ref_var: false }
     } else {
-      ExternalEvent::StaticBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via, id }
+      ExternalEvent::StaticBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via, id, of_ref_var: false }
     });
   }
   out
@@ -5221,7 +5222,7 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
     let ev = if is_mut {
       ExternalEvent::MutableBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
     } else {
-      ExternalEvent::StaticBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
+      ExternalEvent::StaticBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
     };
     self.add_external_event(line_num, ev);
     *self.unique_id += 1;
@@ -5264,7 +5265,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
       let ev = if frap.is_mutref() {
         ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
       } else {
-        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id }
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
       };
       self.add_external_event(line_num, ev);
       *self.unique_id += 1;
@@ -5933,14 +5934,15 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         innermost_addr_of_operand(rhs),
         self.tcx.typeck(rhs.hir_id.owner),
       );
-      // `&mut r` borrowing the reference variable r itself (#914).
+      // `&mut r` / `&r` borrowing the reference variable r itself
+      // (#914, #925).
       let of_ref_var = ref_var_borrow(rhs, self.tcx.typeck(rhs.hir_id.owner));
       if of_ref_var {
         self.ref_var_borrows.insert(rhs.span);
       }
       match fetch_mutability(&rhs) { // fetch last ref mutability in the chain -> &&&mut x
-        Some(Mutability::Not) => self.add_borrow_ev(line_num, Evt::SBorrow, lhs, res, is_reborrow),
-        Some(Mutability::Mut) => self.add_borrow_ev_of_ref_var(line_num, lhs, res, is_reborrow, of_ref_var),
+        Some(Mutability::Not) => self.add_borrow_ev_of_ref_var(line_num, Evt::SBorrow, lhs, res, is_reborrow, of_ref_var),
+        Some(Mutability::Mut) => self.add_borrow_ev_of_ref_var(line_num, Evt::MBorrow, lhs, res, is_reborrow, of_ref_var),
         None => panic!("internal state: a borrow expression has no `&`/`&mut` to take the mutability from")
       }
     }
@@ -6335,7 +6337,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       for lender in lenders {
         let id = *self.unique_id;
         self.add_external_event(line_num, ExternalEvent::StaticBorrow {
-          from: lender, to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id,
+          from: lender, to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false,
         });
         *self.unique_id += 1;
       }
@@ -8161,7 +8163,7 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
         let ev = if mutable {
           ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
         } else {
-          ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new() }
+          ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
         };
         let start = branch_type.get_start_end(b).0;
         let at = arm.e_data.iter().position(|(l, _)| *l >= start).unwrap_or(arm.e_data.len());

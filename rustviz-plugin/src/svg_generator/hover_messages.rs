@@ -1320,6 +1320,22 @@ pub fn event_dot_mut_reacquire_ref_var(ref_name: &String) -> String {
     format!("{0} is no longer mutably borrowed", styled_name_html(ref_name))
 }
 
+// Lender dot of `&r` with r a reference variable: r itself is borrowed
+// (the borrower is a `&&T` / `&&mut T`), not what it points to (that's
+// `&*r`), so r can't be reassigned, nor a `&mut T` r written through,
+// while the borrow is live (#925). The shared counterpart of
+// event_dot_mut_lend_ref_var, worded like event_dot_static_lend.
+pub fn event_dot_static_lend_ref_var(ref_name: &String, target_name: &String) -> String {
+    format!(
+        "{0} is immutably borrowed by {1}; {0} is read-only while the borrow is live",
+        styled_name_html(ref_name), styled_name_html(target_name))
+}
+
+// Where the borrow of event_dot_static_lend_ref_var ends.
+pub fn event_dot_static_reacquire_ref_var(ref_name: &String) -> String {
+    format!("{0} is no longer immutably borrowed", styled_name_html(ref_name))
+}
+
 // Lender dot where a borrow through the reference r ends (#313); the
 // counterpart of event_dot_lend_through_ref. `borrower` is the
 // reference / function / closure whose borrow ended, when known.
@@ -3606,8 +3622,9 @@ pub fn arrow_title(e: &ExternalEvent) -> String {
             else if *is_reborrow { String::from("Immutable reborrow") }
             else { String::from("Immutable borrow") }
         },
-        ExternalEvent::StaticDie{ to, .. } => {
-            format!("Return immutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
+        // `&r` borrowed the reference r itself, a value (#925).
+        ExternalEvent::StaticDie{ to, of_ref_var, .. } => {
+            format!("Return immutably borrowed {}", if *of_ref_var || holds_copy_value(to) { "value" } else { "resource" })
         },
         ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, via, .. } => {
             if *is_partial { String::from("Partial Mutable borrow") }

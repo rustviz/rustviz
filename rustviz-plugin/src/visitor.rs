@@ -5589,7 +5589,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let ev = if is_mut {
             ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by: Vec::new(), of_ref_var: false }
           } else {
-            ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
+            ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by: Vec::new(), of_ref_var: false }
           };
           self.add_external_event(body_end, ev);
         }
