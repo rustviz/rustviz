@@ -1612,7 +1612,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       None => ResourceTy::Anonymous,
     };
+    // `let w = Wrapper(a + &b);`: w's fields get their parts of the new
+    // value too, as in `bind_from_anonymous`.
+    let struct_name = match &lhs {
+      ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => Some(rap.name().clone()),
+      _ => None,
+    };
     self.add_ev(line_num, Evt::Bind, lhs, from, false);
+    if let Some(name) = struct_name {
+      self.bind_struct_fields(line_num, &name);
+    }
   }
 
   /// The moves and copies of a constructor's arguments, drawn into the
@@ -6218,8 +6227,12 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
     return;
   }
   let line_num = span_to_line(&p.span, &self.tcx);
-  // `let n: Option<i32> = None;` is a literal value too (#768).
-  if self.is_copy_literal_value(rhs) {
+  // `let n: Option<i32> = None;` is a literal value too (#768), and so
+  // is a unit variant or unit struct of any type (`Fruit::Banana`,
+  // `None` as an `Option<String>`, `Marker`): the constructor isn't an
+  // actor (#873).
+  if self.is_copy_literal_value(rhs)
+    || matches!(p.res, Res::Def(rustc_hir::def::DefKind::Ctor(_, rustc_hir::def::CtorKind::Const), _)) {
     self.bind_from_ctor(line_num, lhs, rhs);
     return;
   }
@@ -6307,10 +6320,13 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   if retargeted {
     return;
   }
-  // `opt = Some(x + 1);`: a Copy value the constructor builds from
-  // values with no column (an operator's result): like a constructor
-  // of literals, nothing is copied from the constructor (#866).
-  if matches!(evt, Evt::Copy) && crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner)) {
+  // `opt = Some(x + 1);` (#866), `let o = Some(a + &b);`,
+  // `y = Fruit::Apple(c + 1);` (#873): the value the constructor
+  // builds from values with no column (an operator's result, a macro's
+  // value, literals) is a new value, like a constructor of literals.
+  // Nothing is moved or copied out of the constructor: it is never an
+  // actor (#768).
+  if crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner)) {
     self.bind_from_ctor(line_num, lhs, rhs);
     return;
   }

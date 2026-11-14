@@ -3058,8 +3058,10 @@ impl Event {
             }
             // `let o = Some(5);`: the value a constructor of literals
             // builds; nothing is copied from the constructor (#768).
+            // `let y = Fruit::Banana;` with nothing to drop reads the
+            // same (#873); one that needs drop acquires a resource.
             Event::Acquire{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), is, via_try: None, ..}
-                if is.extract_rap().is_some_and(|r| r.is_copy_owner()) && f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())) => {
+                if is.extract_rap().is_some_and(|r| r.holds_value()) && f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())) => {
                 hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, None, f.inside.as_deref())
             }
             // `for w in words`: each iteration moves one element of the
