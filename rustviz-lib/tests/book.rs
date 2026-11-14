@@ -1111,7 +1111,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c15_07_refcell_borrow_mut",
         status: Missing,
-        note: "the `.push(2)` write through the borrow_mut guard has no event of its own, and RefCell's runtime &mut borrow isn't drawn (README Limitations)",
+        note: "the `.push(2)` write through the borrow_mut guard has no event of its own, and RefCell's runtime &mut borrow isn't drawn (#685)",
         must_contain: &[
             "borrow borrows c immutably (a shared borrow); c has interior mutability, so its contents can change even through a shared borrow",
             "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
@@ -1123,7 +1123,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c15_08_rc_refcell",
         status: Missing,
-        note: "was a crash at c2037dd. The `+= 10` write through the borrow_mut guard has no event of its own (README Limitations)",
+        note: "was a crash at c2037dd. The `+= 10` write through the borrow_mut guard has no event of its own (#685)",
         must_contain: &[
             "Move from Rc::new to value",
             "Rc::clone borrows value immutably (a shared borrow); value has interior mutability, so its contents can change even through a shared borrow",
@@ -1378,7 +1378,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x05_refcell_deref_assign",
         status: Missing,
-        note: "was a crash at c2037dd. The `+= 1` write through the borrow_mut guard has no event of its own (README Limitations)",
+        note: "was a crash at c2037dd. The `+= 1` write through the borrow_mut guard has no event of its own (#685)",
         must_contain: &[
             "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "Move from RefCell::new to c",
@@ -1418,7 +1418,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x09_static_item",
         status: Missing,
-        note: "was a crash at c2037dd. The static has no column (README Limitations); only the borrow-end arrow names it",
+        note: "was a crash at c2037dd. The static has no column (#690); only the borrow-end arrow names it",
         must_contain: &[
             "g is bound to an immutable reference",
             "println! reads from g through an implicit reference, so g isn't moved",
