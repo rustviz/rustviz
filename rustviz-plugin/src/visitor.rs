@@ -93,6 +93,9 @@ struct ChainWalk {
   effects: Vec<ChainEffect>,
   /// The chain's bindings whose type needs drop, by name.
   drop_bindings: HashSet<String>,
+  /// The last line of the body the chain's bindings are in scope in
+  /// (see `register_iflet_let_bindings`).
+  body_end: usize,
 }
 
 /// A variable that the condition of an `if` let-chain moves before a
@@ -341,25 +344,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// refused instead of drawn. The one exception is the bindings of a
   /// guard that is a lone `if let`: those happen only when the whole
   /// guard succeeds, i.e. exactly when the arm is taken.
+  ///
+  /// `arm_end`: the arm's last line, where the guard's bindings go out
+  /// of scope.
   fn visit_match_guard(
     &mut self,
     expr: &'tcx Expr<'tcx>,
     whole_guard: bool,
     outer: &HashSet<ResourceAccessPoint>,
     guard_decls: &mut HashSet<ResourceAccessPoint>,
+    arm_end: usize,
   ) {
     match expr.kind {
-      ExprKind::DropTemps(inner) => self.visit_match_guard(inner, whole_guard, outer, guard_decls),
+      ExprKind::DropTemps(inner) => self.visit_match_guard(inner, whole_guard, outer, guard_decls, arm_end),
       ExprKind::Binary(op, lhs, rhs) if op.node == rustc_hir::BinOpKind::And => {
-        self.visit_match_guard(lhs, false, outer, guard_decls);
-        self.visit_match_guard(rhs, false, outer, guard_decls);
+        self.visit_match_guard(lhs, false, outer, guard_decls, arm_end);
+        self.visit_match_guard(rhs, false, outer, guard_decls, arm_end);
       }
       ExprKind::Let(let_expr) => {
         let mark = self.preprocessed_events.len();
         self.visit_expr(let_expr.init);
         self.refuse_lasting_guard_effects(mark, outer, expr);
         let mark = self.preprocessed_events.len();
-        let (bound, _) = self.register_iflet_let_bindings(let_expr, None);
+        let (bound, _) = self.register_iflet_let_bindings(let_expr, None, arm_end);
         if !whole_guard {
           self.refuse_lasting_guard_effects(mark, outer, expr);
         }
@@ -423,7 +430,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
         });
         let mark = self.preprocessed_events.len();
-        let bound = self.register_iflet_let_bindings(let_expr, None).0;
+        let bound = self.register_iflet_let_bindings(let_expr, None, walk.body_end).0;
         self.record_chain_effects(mark, outer, expr, walk, true);
         decls.extend(bound);
       }
@@ -3013,9 +3020,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // (`x goes out of scope. No resource is dropped.` for an
                 // i32 `x`, #261).
                 let mut bindings = HashSet::new();
+                let body_end = self.tcx.sess.source_map()
+                  .lookup_char_pos(then_body.span.hi()).line;
                 if let ExprKind::Let(let_expr) = cond.kind {
                   self.visit_expr(let_expr.init);
-                  bindings = self.register_iflet_let_bindings(let_expr, None).0;
+                  bindings = self.register_iflet_let_bindings(let_expr, None, body_end).0;
                 } else if is_let_chain(cond) {
                   // `while let A = x && cond` (#198): register each
                   // `let`'s bindings like a lone while-let's. The loop
@@ -3023,7 +3032,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   // are shown unconditionally; nothing to refuse. Their
                   // scope ends are emitted after the body, below.
                   let lo = *self.unique_id;
-                  self.visit_if_let_chain(cond, &HashSet::new(), &mut bindings, &mut ChainWalk::default());
+                  self.visit_if_let_chain(cond, &HashSet::new(), &mut bindings, &mut ChainWalk { body_end, ..ChainWalk::default() });
                   let binds = self.chain_binding_events(&(lo..*self.unique_id), &bindings);
                   let cols = self.chain_binding_columns(&binds, &bindings);
                   self.binding_columns.extend(cols);
@@ -3040,8 +3049,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // The body's `let`s, and the pattern's bindings, go out
                 // of scope at its closing brace (#256); nothing else
                 // emits that for them.
-                let body_end = self.tcx.sess.source_map()
-                  .lookup_char_pos(then_body.span.hi()).line;
                 let mut decls = get_decl_of_expr(then_body, &self.tcx, &self.raps);
                 decls.extend(bindings);
                 // Not where every path breaks or continues first (#631).
@@ -3965,7 +3972,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if_hash_lo = self.rap_hashes;
         scrutinee_moves = self.tuple_scrutinee_moves(let_expr.init);
         iflet_tuple = Some(let_expr);
-        let (bound, first_in_branch) = self.register_iflet_let_bindings(let_expr, None);
+        let body_end = span_end_line(&if_expr.span, &self.tcx);
+        let (bound, first_in_branch) = self.register_iflet_let_bindings(let_expr, None, body_end);
         // Copies out of the scrutinee stay before the split (#496).
         if_lo = first_in_branch;
         bound
@@ -3982,7 +3990,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut decls = HashSet::new();
         let start = *self.unique_id;
         let chain_lo = self.preprocessed_events.len();
-        let mut walk = ChainWalk::default();
+        let mut walk = ChainWalk { body_end: span_end_line(&if_expr.span, &self.tcx), ..ChainWalk::default() };
         self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
         if_lo = walk.first_lo.unwrap_or(start);
         chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
@@ -4921,7 +4929,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for (r, e, from, _) in associated_ro.iter_mut() {
         *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
       }
-      let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+      let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end, false);
       or_events.extend(or_evs.start);
       or_end_events.extend(or_evs.end);
       pat_decls.extend(or_evs.decls);
@@ -4982,7 +4990,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `P { a, b } => …` on a struct variable: `a` / `b`
       // come from `p.a` / `p.b` (#326).
       self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
-      let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end);
+      let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end, false);
       or_events.extend(or_evs.start);
       or_end_events.extend(or_evs.end);
       pat_decls.extend(or_evs.decls);
@@ -5058,7 +5066,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         .collect();
       let first_guard_ev = self.preprocessed_events.len();
       let mut guard_decls: HashSet<ResourceAccessPoint> = HashSet::new();
-      self.visit_match_guard(guard, true, &outer, &mut guard_decls);
+      self.visit_match_guard(guard, true, &outer, &mut guard_decls, span_end_line(&arm.span, &self.tcx));
       if !inline {
         branch_e_data.extend(self.preprocessed_events.drain(first_guard_ev..));
       }
@@ -7268,13 +7276,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 continue;
               };
               // `let ((ref x, _) | (_, ref x)) = t;` borrows one of the
-              // places; only a match arm draws that (#565).
-              if matches!(annotation.0, rustc_hir::ByRef::Yes(..)) {
-                panic!("or-patterns that bind the reference `{}` from different places in the value being matched \
-                        (line {}) aren't supported yet in an `if let` or `let`", name, span_to_line(&pat.span, &self.tcx));
-              }
+              // places, as in such a match arm (#565, #734).
               let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
-              let evt = if self.ty_is_copy(lhs_ty, hirid.owner) { Evt::Copy } else { Evt::Move };
+              let evt = match annotation.0 {
+                rustc_hir::ByRef::Yes(_, rustc_hir::Mutability::Mut) => Evt::MBorrow,
+                rustc_hir::ByRef::Yes(..) => Evt::SBorrow,
+                rustc_hir::ByRef::No if self.ty_is_copy(lhs_ty, hirid.owner) => Evt::Copy,
+                rustc_hir::ByRef::No => Evt::Move,
+              };
               self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
               let to = self.raps.get(&name).unwrap().rap.to_owned();
               self.bind_or_conflict(c, to, evt, span_to_line(&init.span, &self.tcx));
@@ -7289,24 +7298,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// of `c.places`, whichever alternative matches. Drawn as in such a
   /// match arm (`or_conflict_events`): `x` gets a new value, with no
   /// arrow, and when it moves (rather than is copied) each place gets
-  /// an `OrAltMove`, so it's maybe-moved afterwards.
+  /// an `OrAltMove`, so it's maybe-moved afterwards; a struct or tuple
+  /// `x` gets its fields with it, and each place's fields may move into
+  /// them. A reference `x` (`ref x`, #734) borrows whichever place
+  /// matched: every place stays borrowed until `x`'s last use, or the
+  /// end of its scope.
   fn bind_or_conflict(&mut self, c: &OrConflict, to: ResourceAccessPoint, evt: Evt, line: usize) {
-    if matches!(to, ResourceAccessPoint::Struct(_)) {
-      panic!("or-patterns that bind the struct or tuple `{}` from different places in the value being matched \
-              (line {}) aren't supported yet in an `if let` or `let`", c.name, line);
-    }
     if matches!(evt, Evt::Move) {
-      let names: Vec<String> = c.places.iter().map(|r| r.name().to_string()).collect();
       for place in &c.places {
         self.update_rap(place, line);
-        let id = *self.unique_id;
-        *self.unique_id += 1;
-        self.add_external_event(line, ExternalEvent::OrAltMove {
-          ro: place.clone(), into: to.name().clone(), from: names.clone(), tuple: None, part_of: None, in_let: true, id,
-        });
       }
     }
-    self.add_ev(line, Evt::Bind, ResourceTy::Value(to), ResourceTy::Anonymous, false);
+    let scope_end = self.raps.get(to.name()).map_or(line, |rd| rd.scope.max(line));
+    let mut bound = vec![(to.clone(), evt, ResourceTy::Anonymous, None)];
+    let mut decls = HashSet::new();
+    let start = self.if_let_or_conflict_events(std::slice::from_ref(c), &mut bound, line, &[], "", scope_end, true, &mut decls);
+    for ev in start {
+      self.add_external_event(line, ev);
+    }
+    // (A reference is drawn by its `OrAltBorrow`s.)
+    if !bound.is_empty() {
+      self.add_ev(line, Evt::Bind, ResourceTy::Value(to), ResourceTy::Anonymous, false);
+    }
   }
 
   /// Walk every `PatKind::Binding` reachable inside `pat` and register
@@ -7859,11 +7872,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (stand_in, conflicts)
   }
 
-  /// `or_conflict_events` for an `if let` / `while let` pattern
-  /// (#597): only a name moved or copied from different places is drawn
-  /// there. A reference or a struct or tuple name (drawn in a match arm
-  /// since #565) panics, reported as "can't visualize this yet". The
-  /// events all go at the pattern's line.
+  /// `or_conflict_events` for an `if let` / `while let` pattern (#597),
+  /// or a `let`'s (`in_let`), whose bindings live until `body_end`: the
+  /// end of the body (of the match arm, for an `if let` guard; of the
+  /// enclosing block, for a `let`). Returns the events at the pattern's
+  /// line. Where a reference's possible borrows end is queued in
+  /// `or_ref_ends`, for `emit_borrow_ends` (#734), and the references
+  /// taken out of `bound` are added to `decls`.
+  #[expect(clippy::too_many_arguments, reason = "or_conflict_events' arguments, and where its results go")]
   pub(crate) fn if_let_or_conflict_events(
     &mut self,
     conflicts: &[OrConflict],
@@ -7871,21 +7887,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     line: usize,
     tuple_vars: &[ResourceAccessPoint],
     tuple: &str,
+    body_end: usize,
+    in_let: bool,
+    decls: &mut HashSet<ResourceAccessPoint>,
   ) -> Vec<ExternalEvent> {
-    for entry in bound.iter() {
-      let written = split_numbered_name(entry.0.name()).map_or(entry.0.name().as_str(), |(base, _)| base);
-      let Some(c) = conflicts.iter().find(|c| c.name == written) else { continue };
-      if matches!(entry.0, ResourceAccessPoint::Struct(_)) {
-        panic!("or-patterns that bind the struct or tuple `{}` from different places in the value being matched \
-                (line {}) aren't supported yet in an `if let` or `let`", c.name, line);
-      }
-      if !matches!(entry.1, Evt::Move | Evt::Copy) {
-        panic!("or-patterns that bind the reference `{}` from different places in the value being matched \
-                (line {}) aren't supported yet in an `if let` or `let`", c.name, line);
-      }
-    }
-    let out = self.or_conflict_events(conflicts, bound, line, tuple_vars, tuple, line);
-    debug_assert!(out.end.is_empty() && out.decls.is_empty());
+    let out = self.or_conflict_events(conflicts, bound, line, tuple_vars, tuple, body_end, in_let);
+    self.or_ref_ends.extend(out.end);
+    decls.extend(out.decls);
     out.start
   }
 
@@ -7910,6 +7918,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ///   which MIR gives (`arm_end`, the end of the arm, if it doesn't).
   ///   The reference is taken out of `bound` (its `OrAltBorrow`s draw
   ///   it) and returned in `decls`.
+  ///
+  /// `in_let`: the pattern is a `let`'s, which is no branch (see
+  /// `ExternalEvent::OrAltMove`).
+  #[expect(clippy::too_many_arguments, reason = "the pattern's bindings, and where it sits")]
   fn or_conflict_events(
     &mut self,
     conflicts: &[OrConflict],
@@ -7918,6 +7930,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     tuple_vars: &[ResourceAccessPoint],
     tuple: &str,
     arm_end: usize,
+    in_let: bool,
   ) -> OrArmEvents {
     let mut out = OrArmEvents::default();
     let mut taken = Vec::new();
@@ -7960,7 +7973,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               *self.unique_id += 1;
               let in_tuple = Self::in_scrutinee_tuple(tuple_vars, place).then(|| tuple.to_owned());
               out.start.push(ExternalEvent::OrAltMove {
-                ro: place.clone(), into: xname.clone(), from: names.clone(), tuple: in_tuple.clone(), part_of: None, in_let: false, id,
+                ro: place.clone(), into: xname.clone(), from: names.clone(), tuple: in_tuple.clone(), part_of: None, in_let, id,
               });
               // A struct or tuple moves its fields with it.
               let prefix = format!("{}.", place.name());
@@ -7980,7 +7993,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 *self.unique_id += 1;
                 out.start.push(ExternalEvent::OrAltMove {
                   ro: member.clone(), into, from: names.clone(), tuple: in_tuple.clone(),
-                  part_of: Some((xname.clone(), place.name().to_string())), in_let: false, id,
+                  part_of: Some((xname.clone(), place.name().to_string())), in_let, id,
                 });
               }
             }
