@@ -47,6 +47,21 @@ fn main() {
 ```
 ````
 
+### "Open in Playground" links
+
+Under every figure the preprocessor adds a small right-aligned
+"Open in Playground" link. It opens the [RustViz playground](https://rustviz.github.io/)
+with that figure's code (the full text of the ` ```rv ` block, including any
+`// rustviz: hide` / `skip` markers) loaded and visualized. To point at a
+different playground, or to turn the links off with an empty string:
+
+```toml
+[preprocessor.rustviz]
+playground-url = "https://rustviz.github.io/"   # default; "" disables the links
+```
+
+The link has class `rv-playground-link`, so a book's `additional-css` can restyle it.
+
 ### Keeping boilerplate out of the diagram
 
 Two comment markers, written at the end of the line an item starts on, work

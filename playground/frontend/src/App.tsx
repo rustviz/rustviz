@@ -9,6 +9,7 @@ import ErrorCard from './ErrorCard';
 import { exampleGroups } from './examples';
 import { get as cacheGet, put as cachePut } from './svgCache';
 import { normalizeCode } from './normalizeCode';
+import { codeFromHash } from './linkCode';
 import {
   codeForSelection,
   DEFAULT_SELECTION,
@@ -32,6 +33,12 @@ import {
 // SPA itself (local dev); set via .env.pages for the GitHub Pages build so
 // the SPA on rustviz.github.io calls the Cloud Run compile API.
 // rv-serve's CORS allowlist must include the SPA's origin in the latter case.
+// An "Open in Playground" link (`#code=<base64url>`, see linkCode.ts)
+// carries a program to load. Read once at module load so React
+// StrictMode's double effects see the same value after the fragment is
+// cleared; null when absent or undecodable (then the usual default loads).
+const LINK_CODE: string | null = codeFromHash(window.location.hash);
+
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
 declare function helpers(param: string): void;
@@ -604,6 +611,16 @@ const ExamplePicker: React.FC<ExamplePickerProps> = ({ selection, userExamples, 
   );
 };
 
+function selectionMatchingCode(code: string): Selection {
+  const norm = normalizeCode(code);
+  for (let chapter = 0; chapter < exampleGroups.length; chapter++) {
+    const index = exampleGroups[chapter].examples.findIndex(
+      ex => normalizeCode(ex.code) === norm);
+    if (index >= 0) return { kind: 'preloaded', chapter, index };
+  }
+  return DEFAULT_SELECTION;
+}
+
 const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isErr, setErr] = useState(false);
@@ -620,8 +637,14 @@ const App: React.FC = () => {
   // from localStorage on first render (useState initializer runs once)
   // and saved back on every change via the effects below.
   const [userExamples, setUserExamples] = useState<UserExample[]>(() => loadUserExamples());
+  // A linked program is an unsaved example: show the dropdown entry
+  // with identical code if there is one, else the default entry (the
+  // first edit then forks it into "(copy)" like any preloaded example).
+  // Saved user examples are never touched by a link.
   const [selection, setSelection] = useState<Selection>(() =>
-    loadSelection(loadUserExamples()),
+    LINK_CODE === null
+      ? loadSelection(loadUserExamples())
+      : selectionMatchingCode(LINK_CODE),
   );
 
   // Refs mirror the latest state so the editor's change listener — a
@@ -692,7 +715,12 @@ const App: React.FC = () => {
     // selection/userExamples here, but adding them would re-mount the
     // editor on every example switch and lose history. The change
     // listener below uses refs to read the live values instead.
-    const initialCode = codeForSelection(selection, userExamples);
+    const initialCode = LINK_CODE ?? codeForSelection(selection, userExamples);
+    // Consumed: drop the fragment so later edits don't leave a stale URL.
+    if (LINK_CODE !== null && window.location.hash) {
+      window.history.replaceState(
+        null, '', window.location.pathname + window.location.search);
+    }
     const newEditor = new Editor(editorHostRef.current, initialCode, handleEditorChange);
     setEditor(newEditor);
     return () => {
