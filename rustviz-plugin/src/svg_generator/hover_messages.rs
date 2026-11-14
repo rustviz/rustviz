@@ -1294,9 +1294,7 @@ pub fn event_dot_lend_through_ref(ref_name: &String, target_name: &String, mutab
         (true, true) => format!(
             "the {2} {0} points to is mutably borrowed by {1} through {0}; {0} can't be used while the borrow is live",
             r, t, noun),
-        (true, false) => format!(
-            "{0} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
-            r, t),
+        (true, false) => event_dot_mut_lend_ref_var(ref_name, target_name),
         (false, true) => format!(
             "the {2} {0} points to is immutably borrowed by {1} through {0}; {0} is read-only while the borrow is live",
             r, t, noun),
@@ -1304,6 +1302,22 @@ pub fn event_dot_lend_through_ref(ref_name: &String, target_name: &String, mutab
             "the {2} {0} points to is immutably borrowed by {1}",
             r, t, noun),
     }
+}
+
+// Lender dot of `&mut r` with r a reference variable: r itself is
+// borrowed (the borrower is a `&mut &mut T` / `&mut &T`), not what it
+// points to. Always so for a `&T` r, which can't hand out mutable
+// access to its referent; for a `&mut T` r only when written `&mut r`,
+// not `&mut *r` (#914).
+pub fn event_dot_mut_lend_ref_var(ref_name: &String, target_name: &String) -> String {
+    format!(
+        "{0} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
+        styled_name_html(ref_name), styled_name_html(target_name))
+}
+
+// Where the borrow of event_dot_mut_lend_ref_var ends.
+pub fn event_dot_mut_reacquire_ref_var(ref_name: &String) -> String {
+    format!("{0} is no longer mutably borrowed", styled_name_html(ref_name))
 }
 
 // Lender dot where a borrow through the reference r ends (#313); the
@@ -1318,7 +1332,7 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
     let r = styled_name_html(ref_name);
     let noun = held(pointee_copy);
     if mutable && !ref_is_mut {
-        return format!("{0} is no longer mutably borrowed", r);
+        return event_dot_mut_reacquire_ref_var(ref_name);
     }
     match borrower {
         Some(b) => format!("{1} no longer borrows the {2} {0} points to", r, styled_name_html(b), noun),
@@ -3606,8 +3620,9 @@ pub fn arrow_title(e: &ExternalEvent) -> String {
             else if *is_reborrow { String::from("Mutable reborrow") }
             else { String::from("Mutable borrow") }
         },
-        ExternalEvent::MutableDie{ to, .. } => {
-           format!("Return mutably borrowed {}", if holds_copy_value(to) { "value" } else { "resource" })
+        // `&mut r` borrowed the reference r itself, a value (#914).
+        ExternalEvent::MutableDie{ to, of_ref_var, .. } => {
+           format!("Return mutably borrowed {}", if *of_ref_var || holds_copy_value(to) { "value" } else { "resource" })
         },
         // Reached only when the callee isn't a Function RAP — a call
         // through a closure variable (`f(&x)`, `g(r)`); calls to real

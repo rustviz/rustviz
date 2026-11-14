@@ -5587,7 +5587,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let (from, to) = (ResourceTy::Anonymous, lender);
           let static_lender = Some(static_lender);
           let ev = if is_mut {
-            ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
+            ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by: Vec::new(), of_ref_var: false }
           } else {
             ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
           };
