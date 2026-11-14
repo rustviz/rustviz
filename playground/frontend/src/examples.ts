@@ -1,35 +1,17 @@
-// Pre-canned examples for the playground dropdown. Curated set: only
-// includes example snippets that the rustviz-tutorial mdBook actually
-// renders as RustViz visualizations — i.e., chapter prose embeds them
-// via the visualization SVGs (`code_examples/<name>/vis_code.svg` and
-// `vis_timeline.svg`). Snippets that the book embeds only as plain
-// code blocks (the entire Rust basics chapter — copy, function,
-// immutable_variable, mutable_variables, printing) are not part of
-// the visual tutorial experience, so they're left out of the
-// playground's dropdown.
+// Pre-canned examples for the playground dropdown. The groups follow the
+// chapters of the RustViz tutorial (https://rustviz.github.io/tutorial/,
+// source: rustviz/tutorial, src/*.md): Motivation, Ownership, Borrowing,
+// Conditionals, Loops, Closures, Structs, Threads.
 //
-// Snippets in src/assets/code_examples/ that aren't referenced by
-// any chapter markdown at all (drafts, abandoned variants — hatra1,
-// hatra1_test, mutable_borrow, string_from, extra_credit) are also
-// intentionally left out.
+// Most examples mirror the tutorial's figures, i.e. the ```rv code blocks
+// in those chapters, copied verbatim (including their `// rustviz: hide`
+// markers), plus a few extras that are not in the tutorial (marked "Not
+// from the tutorial" below). Every example was checked tooltip by
+// tooltip against real Rust semantics, and each must compile and render:
+// the build pre-renders them all (scripts/prerender.ts) and fails if
+// one does not.
 //
-// Source: rustviz/rustviz-tutorial @ master.
-//   src/assets/code_examples/<name>/source.rs is the literal Rust
-//   snippet; we vendor it verbatim. The tutorial itself is RV1-era
-//   (uses the SVG-template approach), but its source.rs files are
-//   plain Rust with no RV1 annotations, so they drop directly into
-//   the RV2 playground editor.
-//
-// The set is also curated for interest: examples that only move
-// integers around (no ownership or borrowing events worth drawing) were
-// dropped, and a few examples that are not from the tutorial were added
-// (function returning a reference, struct field moved out, push in a
-// loop, thread::spawn). Each one was checked tooltip by tooltip.
-//
-// To refresh: re-run the one-shot fetch pipeline used to seed this
-// file (gh api repos/rustviz/rustviz-tutorial/contents/src/assets/
-// code_examples/<name>/source.rs --jq '.content' | base64 -d) for
-// each name in the list below, then rebuild.
+// To change the set, edit the chapter's group below and rebuild.
 
 export type Example = {
   /** Human-readable label for the dropdown option. */
@@ -49,7 +31,7 @@ export const exampleGroups: ExampleGroup[] = [
     chapter: 'Motivation',
     examples: [
       {
-        name: "Hands-on tutorial",
+        name: "References in action",
         code: `fn main() {
     let mut s = String::from("hello");
     let mut q = String::from("skipped"); // rustviz: skip
@@ -146,7 +128,7 @@ fn main() {
 }`,
       },
       {
-        // Not from the upstream tutorial — added to demo the per-fn
+        // Not from the tutorial — added to demo the per-fn
         // timeline layout: each fn has its own `x` with its own
         // column, even though the names collide. The plugin used to
         // share a single column for both (one would silently
@@ -242,7 +224,7 @@ fn world(s: &mut String) {
 }`,
       },
       {
-        // Not from the upstream tutorial. `longest` returns one of its
+        // Not from the tutorial. `longest` returns one of its
         // two reference arguments; the signature ties the result's
         // lifetime to both, so both lenders stay borrowed while `r` lives.
         name: "Function returning a reference",
@@ -257,151 +239,30 @@ fn main() {
     println!("{}", r);
 }`,
       },
-    ],
-  },
-  {
-    chapter: 'Structs',
-    examples: [
       {
-        name: "Struct: Rectangle",
-        code: `struct Rect {
-    w: u32,
-    h: u32,
-}
-
-fn main() {
-    let r = Rect {
-        w: 30,
-        h: 50,
-    };
-
-    println!(
-        "The area of the rectangle is {} square pixels.",
-        area(&r)
-    );
-
-    println!("The height of that is {}.", r.h);
-}
-
-fn area(rect: &Rect) -> u32 {
-    rect.w * rect.h
-}`,
-      },
-      {
-        name: "Struct: Rectangle (variant)",
-        code: `struct Rectangle {
-    width: u32,
-    height: u32,
-}
-
-impl Rectangle {
-    fn area(&self) -> u32 {
-        self.width * self.height
-    }
-}
-
-fn print_area(rect: &Rectangle) {
-    println!(
-        "The area of the rectangle is {} square pixels.",
-        rect.area() // dot even though it's actually a reference
-    );
-}
-
-fn main() {
-    let r = Rectangle {
-        width: 30,
-        height: 50,
-    };
-
-    print_area(&r);
-}`,
-      },
-      {
-        name: "Struct with String",
-        code: `struct Foo {
-    x: i32,
-    y: String,
-}
-
-fn main() {
-    let _y = String::from("bar");
-    let f = Foo { x: 5, y: _y };
-    println!("{}", f.x);
-    println!("{}", f.y);
-}`,
-      },
-      {
-        // Not from the upstream tutorial. A partial move: `p.name` is
-        // moved out, but the Copy field `p.age` can still be used.
-        name: "Struct field moved out",
-        code: `struct Person {
-    name: String,
-    age: u32,
-}
-
-fn main() {
-    let p = Person { name: String::from("Ada"), age: 36 };
-    let n = p.name;
-    println!("{} {}", n, p.age);
-}`,
-      },
-      {
-        name: "Struct with lifetime",
-        code: `struct Excerpt<'a> {
-    p: &'a str,
-}
-
-fn some_function() {
-    let n = String::from("Ok. I'm fine.");
-    let first = n.split('.').next().expect("Could not find a '.'");
-    let i = Excerpt {
-        p: first,
-    };
-    // 'i' cannot be returned
-    // because the struct outlives 'n'
-}
-
-fn main() {
-    some_function();
-}`,
-      },
-    ],
-  },
-  {
-    chapter: 'Closures',
-    examples: [
-      {
-        name: "Move closure (single capture)",
+        name: "Reborrowing: passing a &mut twice",
         code: `fn main() {
-    let s = String::from("hi");
-    let f = move || println!("{}", s);
-    f();
+    let mut s = String::from("hello");
+    let r = &mut s;
+    add_world(r);
+    add_world(r);
+    println!("{}", s);
+}
+
+fn add_world(t: &mut String) {
+    t.push_str(", world");
 }`,
       },
       {
-        name: "Move closure (multiple captures)",
+        name: "Reborrowing: explicit &mut *r and &*r",
         code: `fn main() {
-    let s = String::from("hi");
-    let t = String::from("bye");
-    let f = move || println!("{} {}", s, t);
-    f();
-}`,
-      },
-      {
-        name: "Borrow closure (immutable)",
-        code: `fn main() {
-    let s = String::from("hi");
-    let f = || println!("{}", s);
-    f();
-    println!("after: {}", s);
-}`,
-      },
-      {
-        name: "Borrow closure (mutable)",
-        code: `fn main() {
-    let mut s = String::from("hi");
-    let mut f = || s.push_str("!");
-    f();
+    let mut s = String::from("hello");
+    let r = &mut s;
+    let r2 = &mut *r;
+    r2.push_str("!");
+    let r3 = &*r;
+    println!("{}", r3);
+    r.push_str("?");
     println!("{}", s);
 }`,
       },
@@ -417,24 +278,26 @@ fn main() {
     // multi-line until the renderer grows synthetic offsets for
     // same-line branches.
     //
-    // Helper bindings (`cond`, `n`, `c1`…) carry `// rustviz: skip`
-    // so they don't add scaffolding columns to the visualization —
-    // the diagrams stay focused on the variable whose ownership /
-    // borrow flow the example illustrates.
+    // Helper bindings (`cond`, `c1`…) in the examples that are not
+    // tutorial figures carry `// rustviz: skip`, and helper fns carry
+    // `// rustviz: hide`, so they don't add scaffolding columns to the
+    // visualization — the diagrams stay focused on the variable whose
+    // ownership / borrow flow the example illustrates.
     examples: [
       {
-        name: "if/else: move on one side, borrow on other",
-        code: `fn consume(_s: String) {} // rustviz: hide
-fn show(_s: &String) {} // rustviz: hide
-
-fn main() {
-    let s = String::from("hi");
-    let cond = true; // rustviz: skip
-    if cond {
-        consume(s);
+        name: "Moving in one branch",
+        code: `fn main() {
+    let s = String::from("hello");
+    let keep = false;
+    if keep {
+        println!("{}", s);
     } else {
-        show(&s);
+        takes_ownership(s);
     }
+}
+
+fn takes_ownership(some_string: String) {
+    println!("{}", some_string);
 }`,
       },
       {
@@ -452,47 +315,7 @@ fn main() {
 }`,
       },
       {
-        name: "if/else with disjoint variables",
-        code: `fn show(_s: &String) {} // rustviz: hide
-
-fn main() {
-    let cond = true; // rustviz: skip
-    let a = String::from("a");
-    let b = String::from("b");
-    if cond {
-        show(&a);
-    } else {
-        show(&b);
-    }
-}`,
-      },
-      {
-        name: "if as let RHS",
-        code: `fn main() {
-    let n = 3; // rustviz: skip
-    let s = if n > 0 {
-        String::from("a")
-    } else {
-        String::from("b")
-    };
-    println!("{}", s);
-}`,
-      },
-      {
-        name: "match as let RHS",
-        code: `fn show(_s: &String) {} // rustviz: hide
-
-fn main() {
-    let n = 3; // rustviz: skip
-    let s = match n {
-        0 => String::from("zero"),
-        _ => String::from("other"),
-    };
-    show(&s);
-}`,
-      },
-      {
-        name: "rebind on both sides (\"bound here\" join)",
+        name: "Move, then reassign, in both branches",
         code: `fn consume(_s: String) {} // rustviz: hide
 fn show(_s: &String) {} // rustviz: hide
 
@@ -544,6 +367,29 @@ fn main() {
     }
 }`,
       },
+      {
+        name: "Matching on a reference",
+        code: `fn main() {
+    let name = Some(String::from("Ferris"));
+    match &name {
+        Some(n) => println!("hello, {}", n),
+        None => println!("no name"),
+    }
+    println!("{:?}", name);
+}`,
+      },
+      {
+        name: "Matching by value",
+        code: `fn main() {
+    let name = Some(String::from("Ferris"));
+    match name {
+        Some(n) => {
+            println!("hello, {}", n);
+        }
+        None => println!("no name"),
+    }
+}`,
+      },
     ],
   },
   {
@@ -551,7 +397,7 @@ fn main() {
     examples: [
       {
         name: "for over a borrowed Vec",
-        code: `fn show(s: &String) {
+        code: `fn show(s: &String) { // rustviz: hide
     println!("{}", s);
 }
 
@@ -564,7 +410,7 @@ fn main() {
       },
       {
         name: "for that moves each element",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
 
 fn main() {
     let words = vec![String::from("hi"), String::from("ok")];
@@ -575,7 +421,7 @@ fn main() {
       },
       {
         name: "while let popping a stack",
-        code: `fn consume(_s: String) {}
+        code: `fn consume(_s: String) {} // rustviz: hide
 
 fn main() {
     let mut stack = vec![String::from("a"), String::from("b")];
@@ -585,7 +431,7 @@ fn main() {
 }`,
       },
       {
-        // Not from the upstream tutorial. Each iteration creates a
+        // Not from the tutorial. Each iteration creates a
         // String and moves it into the Vec, which owns every one.
         name: "for loop pushing into a Vec",
         code: `fn main() {
@@ -597,11 +443,193 @@ fn main() {
     println!("{}", v.len());
 }`,
       },
+      {
+        name: "Dropping in each iteration",
+        code: `fn main() {
+    for i in 0..3 {
+        let s = String::from("hello");
+        println!("{} {}", i, s);
+    }
+}`,
+      },
+      {
+        name: "`loop` and `break`",
+        code: `fn main() {
+    let mut s = String::new();
+    let t = loop {
+        s.push_str("ab");
+        if s.len() >= 6 {
+            break s;
+        }
+    };
+    println!("{}", t);
+}`,
+      },
+    ],
+  },
+  {
+    chapter: 'Closures',
+    examples: [
+      {
+        name: "Move closure (single capture)",
+        code: `fn main() {
+    let s = String::from("hello");
+    let show = move || println!("{}", s);
+    show();
+    show();
+}`,
+      },
+      {
+        name: "Move closure (multiple captures)",
+        code: `fn main() {
+    let s = String::from("hi");
+    let t = String::from("bye");
+    let f = move || println!("{} {}", s, t);
+    f();
+}`,
+      },
+      {
+        name: "Borrow closure (immutable)",
+        code: `fn main() {
+    let s = String::from("hello");
+    let show = || println!("{}", s);
+    show();
+    println!("{}", s);
+    show();
+}`,
+      },
+      {
+        name: "Borrow closure (mutable)",
+        code: `fn main() {
+    let mut s = String::from("hello");
+    let mut exclaim = || s.push_str("!");
+    exclaim();
+    exclaim();
+    println!("{}", s);
+}`,
+      },
+      {
+        name: "Closure that can only be called once",
+        code: `fn main() {
+    let s = String::from("hello");
+    let give_back = || s;
+    let t = give_back();
+    println!("{}", t);
+}`,
+      },
+    ],
+  },
+  {
+    chapter: 'Structs',
+    examples: [
+      {
+        name: "Struct: Rectangle",
+        code: `struct Rect {
+    w: u32,
+    h: u32,
+}
+
+fn main() {
+    let r = Rect {
+        w: 30,
+        h: 50,
+    };
+
+    println!(
+        "The area of the rectangle is {} square pixels.",
+        area(&r)
+    );
+
+    println!("The height of that is {}.", r.h);
+}
+
+fn area(rect: &Rect) -> u32 {
+    rect.w * rect.h
+}`,
+      },
+      {
+        name: "Struct: Rectangle with a method",
+        code: `struct Rectangle {
+    width: u32,
+    height: u32,
+}
+
+impl Rectangle {
+    fn area(&self) -> u32 {
+        self.width * self.height
+    }
+}
+
+fn print_area(rect: &Rectangle) {
+    println!(
+        "The area of the rectangle is {} square pixels.",
+        rect.area() // dot even though it's actually a reference
+    );
+}
+
+fn main() {
+    let r = Rectangle {
+        width: 30,
+        height: 50,
+    };
+
+    print_area(&r);
+}`,
+      },
+      {
+        name: "Struct with String",
+        code: `struct Foo {
+    x: i32,
+    y: String,
+}
+
+fn main() {
+    let _y = String::from("bar");
+    let f = Foo { x: 5, y: _y };
+    println!("{}", f.x);
+    println!("{}", f.y);
+}`,
+      },
+      {
+        // Not from the tutorial. A partial move: `p.name` is
+        // moved out, but the Copy field `p.age` can still be used.
+        name: "Struct field moved out",
+        code: `struct Person {
+    name: String,
+    age: u32,
+}
+
+fn main() {
+    let p = Person { name: String::from("Ada"), age: 36 };
+    let n = p.name;
+    println!("{} {}", n, p.age);
+}`,
+      },
+      {
+        name: "Struct with lifetime",
+        code: `struct Excerpt<'a> {
+    p: &'a str,
+}
+
+fn some_function() {
+    let n = String::from("Ok. I'm fine.");
+    let first = n.split('.').next().expect("Could not find a '.'");
+    let i = Excerpt {
+        p: first,
+    };
+    // 'i' cannot be returned
+    // because the struct outlives 'n'
+}
+
+fn main() {
+    some_function();
+}`,
+      },
     ],
   },
   {
     chapter: 'Threads',
-    // Not from the upstream tutorial. The spawned closure's body isn't
+    // Not from the tutorial. The spawned closure's body isn't
     // traced (see the closure limitations), but the move of `s` into it
     // and the move of `handle` into `join` are drawn.
     examples: [
