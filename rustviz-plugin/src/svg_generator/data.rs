@@ -3002,6 +3002,12 @@ impl Event {
                     // doesn't acquire anything. `v[i] += k` modifies
                     // the element in place.
                     match write {
+                        // `r.n = 2` through a reference to a local struct (#854):
+                        // drawn on the field's own column `s.n`, the place
+                        // written through is `r.n`.
+                        PlaceWrite::AssignCopy | PlaceWrite::AssignOwned | PlaceWrite::AssignDropsOld
+                            if r.name().contains('.') && !place.starts_with('*') && !place.starts_with(r.name().as_str()) =>
+                            hover_messages::event_dot_assign_through(r.name(), place),
                         PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(place, ""),
                         // The old element has nothing to drop (that's what makes
