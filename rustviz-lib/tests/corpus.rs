@@ -269,6 +269,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             ", through the reference or_insert returned",
+            // split_whitespace is a method, not a lender (#868).
+            "Return immutably borrowed resource from word to split_whitespace",
             "*count acquires ownership of a resource",
             "text acquires ownership of a resource",
             "text is the owner of the resource",
@@ -8424,6 +8426,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to total here.",
             "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and pair's \
              resource is dropped. If the `?` succeeds, nothing happens to pair here.",
+            // chunks is a method, not a lender (#868).
+            "Return immutably borrowed resource from pair to chunks",
         ],
     },
     // ─── A whole struct overwritten ends its old borrows (#538) ──────
@@ -13613,9 +13617,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
 
     // ─── #140: fixtures that had no entry (read as a Rust teacher would) ──
-    // Deliberately NOT pinned (each renders, but a tooltip is wrong; tracked
-    // in issues): basic_for3 ("animals's resource is no longer immutably
-    // borrowed" at the iter() line while `animal` still borrows it).
+    TooltipExpect {
+        name: "basic_for3",
+        // `for (index, animal) in animals.iter().enumerate()`: the
+        // iterator borrows animals until the loop ends (#868). The false
+        // text was "animals's resource is no longer immutably borrowed"
+        // on the `for` line, which is also the right text at the loop's
+        // end, so that check is line-scoped, in
+        // `loop_iterator_keeps_its_lender_borrowed_to_the_loop_end`.
+        must_contain: &[
+            "animals acquires ownership of a resource",
+            "animals is the owner of the resource",
+            "animals's resource is immutably borrowed by iter; animals is read-only while the borrow is live",
+            "iter reads from animals (implicitly borrowed)",
+            // `animal` isn't drawn as borrowing animals, so the borrow is
+            // the loop's iterator's (#871).
+            "animals's resource is immutably borrowed by the `for` loop's iterator; animals is read-only until the loop ends",
+            "animals's resource is no longer immutably borrowed",
+            "animals goes out of scope. Its resource is dropped.",
+            "index is bound to a copyable value",
+            "index holds a copyable value",
+            "println! reads from index through an implicit reference, so index isn't moved",
+            "index goes out of scope",
+            "animal is bound to an immutable reference",
+            "animal holds an immutable reference; it can read the borrowed value",
+            "the value animal points to is immutably borrowed by println!",
+            "println! reads from animal through an implicit reference, so animal isn't moved",
+            "animal's immutable borrow ends",
+            "animal goes out of scope",
+        ],
+        must_not_contain: &[
+            "animal acquires ownership",
+            "animal is the owner of the resource",
+            "the resource animal points to",
+            // No variable shown shares animals (#871).
+            "animals's resource is being shared by one or more variables",
+        ],
+    },
     TooltipExpect {
         name: "aliasing1",
         must_contain: &[
@@ -15295,6 +15333,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=rm's value is copied",
         ],
     },
+    TooltipExpect {
+        name: "for_iter_chain_borrow_end",
+        // #868: each loop's iterator, made by a call on the variable,
+        // borrows it until the loop ends. Where the borrow ends is checked
+        // in `loop_iterator_keeps_its_lender_borrowed_to_the_loop_end`.
+        must_contain: &[
+            "names's resource is immutably borrowed by iter; names is read-only while the borrow is live",
+            "names's resource is no longer immutably borrowed",
+            "nums's resource is immutably borrowed by iter; nums is read-only while the borrow is live",
+            "nums's resource is no longer immutably borrowed",
+            "words's resource is no longer immutably borrowed",
+            "tags's resource is mutably borrowed by iter_mut; tags can't be used while the borrow is live",
+            "tags's resource is no longer mutably borrowed",
+            "s's resource is immutably borrowed by chars; s is read-only while the borrow is live",
+            "s's resource is no longer immutably borrowed",
+            // Only the loop's iterator, which has no column, borrows
+            // these (#871). (tags, mutably borrowed, has no line drawn.)
+            "names's resource is immutably borrowed by the `for` loop's iterator; names is read-only until the loop ends",
+            "nums's resource is immutably borrowed by the `for` loop's iterator; nums is read-only until the loop ends",
+            "words's resource is immutably borrowed by the `for` loop's iterator; words is read-only until the loop ends",
+            "s's resource is immutably borrowed by the `for` loop's iterator; s is read-only until the loop ends",
+            // `w` points into words, but which element isn't drawn.
+            "w is bound to an immutable reference",
+            "w's immutable borrow ends",
+            "name is bound to an immutable reference",
+            "t is bound to a mutable reference",
+            "n is bound to a copyable value",
+            "c is bound to a copyable value",
+        ],
+        must_not_contain: &[
+            // `iter` is a method, not a variable `w` borrows from.
+            "Return immutably borrowed resource from w to iter",
+            "n is bound to an immutable reference",
+            "being shared by one or more variables",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -16353,6 +16427,51 @@ fn state_lines_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
         }
     }
     out
+}
+
+/// #868: a `for` over an iterator a call made from a variable
+/// (`animals.iter().enumerate()`, `s.chars()`, `tags.iter_mut()`) borrows
+/// the variable until the loop ends: `next()` runs on the iterator at the
+/// top of every iteration, so rustc rejects `animals.push(..)` anywhere in
+/// the body. The variable's dot on the `for` line used to say it was no
+/// longer borrowed. Its first borrow end below the `for` line is on the
+/// loop's closing `}` row, and none is on the `for` line.
+#[test]
+fn loop_iterator_keeps_its_lender_borrowed_to_the_loop_end() {
+    for (name, var, kind, for_src, last_body_src) in [
+        ("basic_for3", "animals", "immutably", "for (index, animal) in animals.iter().enumerate() {",
+         "println!(\"Index: {}, Animal: {}\", index, animal);"),
+        ("for_iter_chain_borrow_end", "names", "immutably", "for (i, name) in names.iter().enumerate() {",
+         "println!(\"{} {}\", i, name);"),
+        ("for_iter_chain_borrow_end", "nums", "immutably", "for n in nums.iter().map(|x| x + 1) {",
+         "println!(\"{}\", n);"),
+        ("for_iter_chain_borrow_end", "words", "immutably", "for w in words.iter().rev() {",
+         "println!(\"{}\", w);"),
+        ("for_iter_chain_borrow_end", "tags", "mutably", "for (i, t) in tags.iter_mut().enumerate() {",
+         "println!(\"{}\", i);"),
+        ("for_iter_chain_borrow_end", "s", "immutably", "for c in s.chars() {",
+         "println!(\"{}\", c);"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let for_row = code_row_y(&code, for_src);
+        let body_row = code_row_y(&code, last_body_src);
+        let close_row = code_rows_y(&code, "}")
+            .into_iter()
+            .find(|y| *y > body_row)
+            .expect("a closing brace below the loop body");
+        let end = format!("{var}'s resource is no longer {kind} borrowed");
+        let ends = dots_listing_tooltip(&timeline, &end);
+        assert!(
+            ends.iter().all(|d| (d.1 - for_row).abs() > 1.0),
+            "{name}: {var} is unborrowed on its `for` row (y={for_row}): {ends:?}",
+        );
+        let first_below = ends.iter().map(|d| d.1).filter(|y| *y > for_row).fold(f64::INFINITY, f64::min);
+        assert!(
+            (first_below - close_row).abs() < 1.0,
+            "{name}: {var}'s borrow should end on the loop's closing row (y={close_row}), not at y={first_below}; ends: {ends:?}",
+        );
+    }
 }
 
 /// #704: `let h = g;` copies a closure that borrows `s`. The loan lasts

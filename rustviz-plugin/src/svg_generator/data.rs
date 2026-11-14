@@ -1050,6 +1050,12 @@ pub enum StaticLender {
     /// temporary tuple, which has no column: the borrow's end is a
     /// plain end dot with no arrow (#658).
     TupleTemporary,
+    /// Not a reference's lender: the end, where a `for` loop ends, of the
+    /// borrow its iterator holds (`for c in s.chars()`; #868). `call` is
+    /// the method that lent the variable (`chars`). The renderer says
+    /// the variable is borrowed by the loop's iterator from that call to
+    /// here (#871). Never drawn as an arrow.
+    LoopIterator { call: String },
 }
 
 /// Whether the `&` / `&mut` of a pass-by-reference event was written in

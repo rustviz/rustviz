@@ -5105,6 +5105,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           _ => None,
         };
         let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
+        // `for (i, a) in v.iter().enumerate()`: the loop's iterator
+        // borrows `v` until the loop ends (#868).
+        let loop_loans = self.keep_loop_head_loans(head_arg);
         // `for x in it` where `it` is already an iterator
         // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
         // returns its argument unchanged, so the loop *moves*
@@ -5211,6 +5214,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
               }
               _ => head_rty.clone(),
+            };
+            // `for x in v.iter().rev()`: the receiver of the last call
+            // is the previous call's result, not a variable, and `x`
+            // isn't a borrow of a method (it said "Return ... from x
+            // to iter"). What x points into isn't known here; the
+            // loop's own borrow of `v` is drawn on v (#868).
+            let lender = match lender {
+              ResourceTy::Value(r) if r.is_fn() => {
+                self.unlent_refs.insert(pat_name.clone());
+                ResourceTy::Anonymous
+              }
+              l => l,
             };
             self.add_ref(
               pat_name.clone(),
@@ -5387,7 +5402,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             *floor = (*floor).max(body_end);
           }
         }
+        // The lenders whose loan a pattern binding gives back where
+        // the loop ends (`for a in v.iter()`: a returns it to v).
+        #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
+        let carried: Vec<ResourceTy> = pat_decls.iter()
+          .filter_map(|d| self.borrow_map.get(d.name()))
+          .flat_map(|rd| rd.all_lenders())
+          .collect();
         self.emit_scope_end(loop_decls, body_end);
+        // The loop's iterator (`v.iter().enumerate()`) holds its loans
+        // until the loop ends: `v.push(..)` anywhere in the body is
+        // E0502 even after the last use of the loop variable (#868).
+        // The end says what held the borrow, so the lender's column
+        // can say so in between (#871).
+        for (lender, is_mut, call) in loop_loans.into_iter().filter(|(l, _, _)| !carried.contains(l)) {
+          let id = *self.unique_id;
+          *self.unique_id += 1;
+          let (from, to) = (ResourceTy::Anonymous, lender);
+          let static_lender = Some(StaticLender::LoopIterator { call });
+          let ev = if is_mut {
+            ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
+          } else {
+            ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
+          };
+          self.add_external_event(body_end, ev);
+        }
         // `break`s in the body target the desugared `loop`
         // (the outer arm's body), which also ends when the
         // iterator runs out.
