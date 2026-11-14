@@ -1362,6 +1362,34 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
     }
 }
 
+// Lender dot of a method call whose receiver r is a reference to a
+// reference (`r.len()` with `r: &&String`, `r.push('!')` with `r: &mut
+// &mut String`): the call borrows what `*r` points to (`**r`), not the
+// reference `*r` that r points to (#952). `derefs`: how many `*` name
+// the reference that points to the borrowed place (1 for `**r`).
+// Otherwise as event_dot_lend_through_ref.
+pub fn event_dot_lend_deep(ref_name: &String, derefs: usize, target_name: &String, mutable: bool, ref_is_mut: bool, holds_value: bool) -> String {
+    let r = styled_name_html(ref_name);
+    let place = styled_name_html(&format!("{}{}", "*".repeat(derefs), ref_name));
+    let t = styled_name_html(target_name);
+    let noun = held(holds_value);
+    match (mutable, ref_is_mut) {
+        (true, _) => format!(
+            "the {3} {0} points to is mutably borrowed by {1} through {2}; {2} can't be used while the borrow is live",
+            place, t, r, noun),
+        (false, true) => format!(
+            "the {3} {0} points to is immutably borrowed by {1} through {2}; {2} is read-only while the borrow is live",
+            place, t, r, noun),
+        (false, false) => format!("the {2} {0} points to is immutably borrowed by {1}", place, t, noun),
+    }
+}
+
+// Where the borrow of event_dot_lend_deep ends.
+pub fn event_dot_reacquire_deep(ref_name: &String, derefs: usize, borrower: &String, holds_value: bool) -> String {
+    let place = styled_name_html(&format!("{}{}", "*".repeat(derefs), ref_name));
+    format!("{1} no longer borrows the {2} {0} points to", place, styled_name_html(borrower), held(holds_value))
+}
+
 // Lender's dot where a reference copied out of a value that holds the
 // borrow ends (`n` in `while let Some(n) = it.next()`, #575): n's part
 // of the borrow is given back, but `holders` (`it`) still hold it, so

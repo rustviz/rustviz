@@ -1088,6 +1088,16 @@ pub enum ImplicitRef {
 /// ends it where the borrow checker does. Holds the place's name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoredIn(pub Option<String>);
+/// A method call whose receiver r is a reference to a reference
+/// borrows what's `derefs + 1` references away, not what r points to:
+/// `r.len()` with `r: &&String` is `str::len(&***r)` and borrows the
+/// String `**r`, which `*r` points to (#952). `holds_value`: that place
+/// is a "value" (Copy or nothing to drop, #484), not a resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeepPlace {
+    pub derefs: usize,
+    pub holds_value: bool,
+}
 /// Where a value an `FnOnce` closure captured by value ends up when
 /// the closure is called, from the closure body's MIR (#271).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -1520,6 +1530,10 @@ pub enum ExternalEvent {
         // borrows r itself, not what r points to (`show(&x)` with
         // `show(r: &&String)`, #938); see StaticBorrow.
         of_ref_var: bool,
+        // The receiver r is a reference to a reference and the call
+        // borrows what's further away (`r.len()` with `r: &&String`,
+        // #952); see DeepPlace.
+        deep: Option<DeepPlace>,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -1540,6 +1554,9 @@ pub enum ExternalEvent {
         // `&mut r` with r a reference variable (`bump(&mut m)` with
         // `bump(r: &mut &mut String)`, #938); see PassByStaticReference.
         of_ref_var: bool,
+        // `r.push(..)` with `r: &mut &mut String` (#952); see
+        // PassByStaticReference.
+        deep: Option<DeepPlace>,
         id: usize
     },
     GoOutOfScope {

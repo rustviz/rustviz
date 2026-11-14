@@ -1774,6 +1774,8 @@ fn render_dot(
                         data.title = title;
                     } else if let Some(title) = closure_reborrow_lend_title(event, visualization_data) {
                         data.title = title;
+                    } else if let Some(title) = deep_lend_title(event, visualization_data) {
+                        data.title = title;
                     } else {
                         data.title = event.print_message_with_name(& mut name);
                     }
@@ -2326,6 +2328,35 @@ fn closure_reborrow_lend_title(event: &Event, visualization_data: &Visualization
     }
     let r = is.extract_rap()?;
     Some(hover_messages::event_dot_capture_reborrow_through_ref(r.name(), &to.name(), mutable, r.is_mutref()))
+}
+
+// Lender-side dots of a method call whose receiver r is a reference to
+// a reference (`r.len()` with `r: &&String`, #952): the call borrows
+// what `*r` points to. The lend / reacquire events don't carry
+// `deep`, so look up the call event they came from by id.
+fn deep_lend_title(event: &Event, visualization_data: &VisualizationData) -> Option<String> {
+    let (other, is, id, mutable, end) = match event {
+        Event::StaticLend { to, is, id, .. } => (to, is, *id, false, false),
+        Event::MutableLend { to, is, id, .. } => (to, is, *id, true, false),
+        Event::StaticReacquire { from, is, id, .. } => (from, is, *id, false, true),
+        Event::MutableReacquire { from, is, id, .. } => (from, is, *id, true, true),
+        _ => return None,
+    };
+    let deep = visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
+        ExternalEvent::PassByStaticReference { id: i, deep: Some(d), .. }
+        | ExternalEvent::PassByMutableReference { id: i, deep: Some(d), .. } if *i == id => Some(*d),
+        _ => None,
+    })?;
+    let r = match is {
+        ResourceTy::Value(r) if r.is_ref() => r,
+        _ => return None,
+    };
+    let borrower = other.name();
+    Some(if end {
+        hover_messages::event_dot_reacquire_deep(r.name(), deep.derefs, &borrower, deep.holds_value)
+    } else {
+        hover_messages::event_dot_lend_deep(r.name(), deep.derefs, &borrower, mutable, r.is_mutref(), deep.holds_value)
+    })
 }
 
 // Source-side dot of a borrow kept by a closure a call returned (`let

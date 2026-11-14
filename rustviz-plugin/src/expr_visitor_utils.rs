@@ -4,7 +4,7 @@ use log::warn;
 use rustc_hir::Mutability;
 use crate::svg_generator::data::{ShadowNote, ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
 use rustc_middle::ty::{Ty, TyCtxt, TypeckResults};
-use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability};
+use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability, DerefAdjustKind};
 use rustc_span::Span;
 use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, StmtKind, Stmt, Block, UnOp};
 
@@ -1092,6 +1092,39 @@ pub fn is_coerced_ref_var_reborrow(addr_of: &Expr, typeck: &TypeckResults) -> bo
     && typeck.expr_ty(inner).is_ref()
     && !typeck.expr_ty_adjusted(addr_of).builtin_deref(true).is_some_and(|t| t.is_ref())
     && typeck.expr_adjustments(addr_of).iter().filter(|a| matches!(a.kind, Adjust::Deref(_))).count() >= 2
+}
+
+/// How many references a method call's receiver or a call's argument
+/// `e` goes through before rustc borrows it, if it's a local reference
+/// variable r, possibly behind written `*`s: the built-in derefs of r
+/// (written, then rustc's adjustments) that each deref a reference, and
+/// the type of the place they reach. `r.len()` with `r: &&String`
+/// derefs r twice and borrows the String `**r` (`str::len(&***r)`, the
+/// third deref being `String`'s `Deref`): `(2, String)`; so does
+/// `show_str(r)` with `show_str(s: &String)` (`show_str(&**r)`). Only
+/// when the adjustments end in a borrow. None for anything else.
+pub fn borrowed_deref_depth<'tcx>(e: &Expr<'tcx>, typeck: &TypeckResults<'tcx>) -> Option<(usize, Ty<'tcx>)> {
+  let mut base = e;
+  let mut written = 0;
+  while let ExprKind::Unary(UnOp::Deref, inner) = base.kind {
+    base = inner;
+    written += 1;
+  }
+  if !matches!(base.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. }))) {
+    return None;
+  }
+  let adjs = typeck.expr_adjustments(e);
+  if !matches!(adjs.last().map(|a| &a.kind), Some(Adjust::Borrow(AutoBorrow::Ref(..)))) {
+    return None;
+  }
+  let auto = adjs.iter().take_while(|a| matches!(a.kind, Adjust::Deref(DerefAdjustKind::Builtin))).count();
+  let mut ty = typeck.expr_ty(base);
+  let mut n = 0;
+  while n < written + auto && ty.is_ref() {
+    ty = ty.builtin_deref(true)?;
+    n += 1;
+  }
+  Some((n, ty))
 }
 
 /// True iff the method receiver `rcvr` hands the callee a reference to
