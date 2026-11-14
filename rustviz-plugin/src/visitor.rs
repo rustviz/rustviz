@@ -4178,8 +4178,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // construct nested in it (an `else if let`'s bindings, #501):
     // see raps_declared_since. A name an earlier, out-of-scope
     // variable used shares its column, so only the branch's code
-    // shows it's declared there (#927).
-    let if_inner = &self.raps_declared_since(if_hash_lo, &uninit_before) | &bindings_within(if_expr, &self.tcx, &self.raps);
+    // shows it's declared there (#927). The same goes for a let-chain
+    // condition's own variables (`&& { let w = t; … }`, #969): they
+    // count as the if branch's (`if_hash_lo` is taken before the
+    // chain), and with a name of their own they're found that way.
+    let mut if_inner = &self.raps_declared_since(if_hash_lo, &uninit_before) | &bindings_within(if_expr, &self.tcx, &self.raps);
+    if is_let_chain(guard_expr) {
+      if_inner = &if_inner | &bindings_within(guard_expr, &self.tcx, &self.raps);
+    }
     let else_hash_lo = self.rap_hashes;
     let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
     let maybe_init_after_if = std::mem::replace(&mut self.maybe_init_locals, maybe_init_before.clone());
