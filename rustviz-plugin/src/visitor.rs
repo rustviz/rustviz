@@ -3482,6 +3482,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // records what happens to the RHS (e.g. `= v` moves v); the
     // temporary itself gets no ownership event.
     // (Union field writes are excluded too; see lhs_is_union_field.)
+    // The reference variable a `*r = <reference>` write re-points
+    // (x in `let r = &mut x; *r = &t;`, #904).
+    let mut repointed: Option<ResourceAccessPoint> = None;
     if lhs_ty.is_ref() && !lhs_is_union_field && lhs_rty.extract_rap().is_some() && repoints_ref_var {
       let lhs_rap = self.raps.get(&lhs_rty.real_name()).unwrap().rap.clone();
       match lhs_rty {
@@ -3638,6 +3641,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let modified_ref_name = ref_data.aliasing.get(deref_index).unwrap().clone();
           let modified_ref_data = self.borrow_map.get(&modified_ref_name).unwrap().clone();
           let to_ro = modified_ref_data.lender.clone();
+          repointed = self.raps.get(&modified_ref_name).map(|r| r.rap.clone());
+          // The old loan's end, if drawn at the write, is the
+          // variable's, like `o = &q`'s (#904).
+          let old_end_from = repointed.clone().map_or_else(|| lhs_rty.clone(), ResourceTy::Value);
           // References that copied the old value of the modified
           // reference (`let h = o;` before `w = &mut o; *w = &q;`)
           // keep its loan, as for `o = &q` (#664).
@@ -3667,7 +3674,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.add_ev(end_line, die, to_ro, place, false);
           }
           else {
-            self.add_borrow_end_ev(line_num, to_ro, lhs_rty.clone(), &modified_ref_data, Vec::new());
+            self.add_borrow_end_ev(line_num, to_ro, old_end_from, &modified_ref_data, Vec::new());
           }
 
           // update modified (derefed) reference's lender and aliasing data
@@ -3864,6 +3871,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.match_rhs(lhs_rty.clone(), rhs_expr, e);
       if let Some(b) = &box_payload {
         self.retarget_into_payload(b, first_id);
+      }
+      // `*r = &t` with r borrowing the reference variable x: x now
+      // borrows t, so the borrow goes to x's column, where its end
+      // already is, not r's (#904). r keeps borrowing x.
+      if let (Some(x), ResourceTy::Deref(_)) = (&repointed, &lhs_rty) {
+        self.retarget_borrows_into(&lhs_rty, x, first_id);
       }
       // `*r = &t` with r pointing to a reference that has no column
       // (`&mut words[0]`): t stays borrowed as long as the place
@@ -7371,6 +7384,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let place = self.member_place_name(lhs_expr)?;
     let rap = self.raps.get(&place)?.rap.to_owned();
     matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, is_member: false, .. })).then_some(rap)
+  }
+
+  /// Borrows made from event id `first_id` on whose borrower is
+  /// `place` (`*r`) go to `var`'s column instead: the variable a
+  /// write through `*r` re-points (#904).
+  fn retarget_borrows_into(&mut self, place: &ResourceTy, var: &ResourceAccessPoint, first_id: usize) {
+    let retarget = |e: &mut ExternalEvent| {
+      if let ExternalEvent::StaticBorrow { to, id, .. } | ExternalEvent::MutableBorrow { to, id, .. } = e {
+        if *id >= first_id && to == place {
+          *to = ResourceTy::Value(var.clone());
+        }
+      }
+    };
+    // (The line's arrows are drawn from `event_line_map`'s copy.)
+    self.preprocessed_events.iter_mut().for_each(|(_, e)| retarget(e));
+    self.event_line_map.values_mut().flatten().for_each(retarget);
   }
 
   /// `*b = o` / `*b = make()` with `b` a [`box_payload_write`]: the

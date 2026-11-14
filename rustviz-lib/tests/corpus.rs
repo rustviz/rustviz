@@ -16388,6 +16388,89 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "mut_ref_to_ref_write_end_904",
+        // #904: after `*r = &t` through `r: &mut &T`, main drew a second,
+        // hollow line on r's column from the write to its scope end ("r
+        // holds a mutable reference, but the value it points to is
+        // currently shared through it, so r can only read it"): the
+        // borrow drawn into `*r` was taken as r getting a new reference,
+        // and r's own end was put before it. r's borrow ends at its last
+        // use, as for any `&mut`; nothing is shared through it. When r
+        // borrows a reference variable, that variable now borrows t, so
+        // the borrow goes to its column, where it already ended. The old
+        // loans' ends are where rustc ends them (checked with a
+        // conflicting use on each side): a / b / g stay borrowed until
+        // x / y / m's last use (r keeps x live across the write); c is
+        // free right after the write when z isn't used again.
+        must_contain: &[
+            // main
+            "Immutable borrow from t to x",
+            "t's resource is immutably borrowed by x; t is read-only while the borrow is live",
+            "x immutably borrows a resource",
+            "r's mutable borrow ends",
+            "Return immutably borrowed resource from x to t",
+            // live_after: y is re-pointed while w still borrows it.
+            "Immutable borrow from u to y",
+            "y immutably borrows a resource",
+            "y is no longer mutably borrowed",
+            "w's mutable borrow ends",
+            "Return immutably borrowed resource from y to u",
+            // dead_after
+            "Immutable borrow from v to z",
+            "Return immutably borrowed resource from z to c",
+            "Return immutably borrowed resource from z to v",
+            "z's immutable borrow ends",
+            "q's mutable borrow ends",
+            // mutable
+            "Mutable borrow from h to m",
+            "h's resource is mutably borrowed by m; h can't be used while the borrow is live",
+            "m mutably borrows a resource",
+            "k's mutable borrow ends",
+            "Return mutably borrowed resource from m to h",
+            // in_branch
+            "Immutable borrow from e to o",
+            "o immutably borrows a resource",
+            "p's mutable borrow ends",
+            "Return immutably borrowed resource from o to e",
+            // element: no variable to re-point (#897).
+            "Immutable borrow from t1 to *el",
+            "*el immutably borrows a resource",
+            "el's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "so r can only read it",
+            "so w can only read it",
+            "so q can only read it",
+            "so k can only read it",
+            "so p can only read it",
+            "so el can only read it",
+            "r holds an immutable reference",
+            "w holds an immutable reference",
+            "q holds an immutable reference",
+            "p holds an immutable reference",
+            "el holds an immutable reference",
+            "k holds an immutable reference",
+            // The borrow goes to the variable *r is.
+            "Immutable borrow from t to *r",
+            "borrowed by *r",
+            "*r immutably borrows",
+            "Immutable borrow from u to *w",
+            "*w immutably borrows",
+            "Immutable borrow from v to *q",
+            "Return immutably borrowed resource from *q to c",
+            "*q's immutable borrow ends",
+            "Mutable borrow from h to *k",
+            "*k mutably borrows",
+            "Immutable borrow from e to *p",
+            "*p immutably borrows",
+            // The old loans don't end at the write when x / y / m are
+            // used after it.
+            "Return immutably borrowed resource from x to a",
+            "Return immutably borrowed resource from y to b",
+            "Return mutably borrowed resource from m to g",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -20598,23 +20681,32 @@ fn reference_column_reaches_its_last_use() {
     // ends two different loans, and no line reaches it: none is drawn
     // while z borrows y, and none after (#700 listed advanced_deref in
     // the first list when its old borrow ended at `y = &x;`).
-    for (name, uses) in [
+    //
+    // `*z = &c;` re-points y while z still borrows it (#904): that dot,
+    // "y immutably borrows a value", is in the stretch where y draws no
+    // line, like the dot where z's borrow starts, so it is not checked.
+    for (name, uses, unchecked_row) in [
         ("advanced_deref", &[
             "y immutably borrows a value",
             "println! no longer borrows the value y points to",
-        ][..]),
-        ("aliasing2", &["println! no longer borrows the value b points to"][..]),
+        ][..], Some("*z = &c;")),
+        ("aliasing2", &["println! no longer borrows the value b points to"][..], None),
         ("ref_reassign_wording", &[
             "println! no longer borrows the value r points to",
             "r is assigned a copy of s's reference",
             "push no longer borrows the resource m points to",
             "println! no longer borrows the resource m points to",
             "println! no longer borrows the resource t points to",
-        ][..]),
+        ][..], None),
     ] {
-        let timeline = run_with_local_backend(name).timeline_panel_string();
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let skip_y = unchecked_row.map(|src| code_row_y(&rv.code_panel_string(), src));
         for used in uses {
-            let lone = lone_dots(&timeline, |t| t.iter().any(|l| l == used));
+            let lone: Vec<_> = lone_dots(&timeline, |t| t.iter().any(|l| l == used))
+                .into_iter()
+                .filter(|d| Some(d.1) != skip_y)
+                .collect();
             assert_eq!(lone, Vec::new(), "{}: no line reaches the dot of {:?}", name, used);
             assert!(!dots_listing_tooltip(&timeline, used).is_empty(), "{}: no dot lists {:?}", name, used);
         }
@@ -21903,5 +21995,37 @@ fn copied_reference_ends_with_its_scope() {
         let ends = dots_listing_tooltip(&svg, &end);
         let scopes = dots_listing_tooltip(&svg, &scope);
         assert_eq!(ends, scopes, "{w}'s borrow end is only in its scope-end dot");
+    }
+}
+
+/// #904: a `&mut` reference that `*r = &t` writes through has one line
+/// (bracket), from its borrow to its last use. Main drew a second one
+/// from the write to r's scope end ("r ... can only read it", or, for
+/// `*k = &mut h`, "k holds a mutable reference; it can read and write").
+#[test]
+fn write_through_mut_ref_to_ref_ends_its_line_at_the_last_use() {
+    let rv = run_with_local_backend("mut_ref_to_ref_write_end_904");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (name, borrow, last_use) in [
+        ("r", "let r = &mut x;", "*r = &t;"),
+        ("w", "let w = &mut y;", "println!(\"{}\", w);"),
+        ("q", "let q = &mut z;", "*q = &v;"),
+        ("k", "let k = &mut m;", "*k = &mut h;"),
+        ("p", "let p = &mut o;", "*p = &e;"),
+        ("el", "let el = &mut refs[0];", "*el = &t1;"),
+    ] {
+        let label = format!("&gt;{name}&lt;/span&gt; holds a");
+        // `d="M x y l 15 dy v dy l -15 dy"` (numbers: x y 15 dy dy -15
+        // dy): from y to y plus the three dys.
+        let spans: Vec<(f64, f64)> = start_tags(&timeline, "path")
+            .into_iter()
+            .filter(|t| attr(t, "data-tooltip-text").is_some_and(|tt| tt.contains(&label)))
+            .filter_map(|t| {
+                let d: Vec<f64> = attr(t, "d")?.split(' ').filter_map(|n| n.parse().ok()).collect();
+                (d.len() == 7).then(|| (d[1], d[1] + d[3] + d[4] + d[6]))
+            })
+            .collect();
+        let want = (code_row_y(&code, borrow), code_row_y(&code, last_use));
+        assert_eq!(spans, vec![want], "{}: one line from `{}` to `{}`", name, borrow, last_use);
     }
 }
