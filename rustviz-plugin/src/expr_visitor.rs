@@ -3688,8 +3688,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // in this case we are borrowing from b; `&p.name` with p a
       // reference is a reborrow of the field through p (#266).
       let lender = self.rap_or_field_through_ref(&expr);
-      // `&mut m` coerced to `&mut String` borrows `*m`, as `&mut *m`
-      // does: the borrow is given back to `*m` (#926).
+      // `&mut m` / `&x` coerced to `&mut String` / `&String` borrows
+      // `*m` / `*x`, as `&mut *m` / `&*x` does: the borrow is given
+      // back to `*m` / `*x` (#926, #939).
       let lender = match lender {
         ResourceTy::Value(x) if is_coerced_ref_var_reborrow(expr, self.tcx.typeck(expr.hir_id.owner)) =>
           ResourceTy::Deref(x),
@@ -6028,7 +6029,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Both resolve to the same source RAP, so decide here from the
       // syntax rather than from r's kind downstream. `&p.f` through a
       // reference p is a reborrow too.
-      // `&mut m` coerced to `&mut String` reborrows `*m` too (#926).
+      // `&mut m` / `&x` coerced to `&mut String` / `&String` reborrows
+      // `*m` / `*x` too (#926, #939).
       let is_reborrow = matches!(res, ResourceTy::DerefField(..)) || is_explicit_reborrow(
         innermost_addr_of_operand(rhs),
         self.tcx.typeck(rhs.hir_id.owner),
