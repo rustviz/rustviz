@@ -16272,6 +16272,90 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
         ],
     },
+    TooltipExpect {
+        name: "box_payload_whole_move_898",
+        // #898: `x => ..` on `match *b1` (b1 a Box drawn as its payload's
+        // part columns) moves the whole payload out, so b1.0 is moved on
+        // every path (the other arm moves it into s) and at b1's scope
+        // end only the Box's heap allocation is freed. Same for `let x =
+        // *b3;` and `take(*b4)` in one branch of an `if`. In b2's match a
+        // `_` arm moves nothing, so b2.0 is dropped at scope end only on
+        // that path, by a drop flag; the allocation is freed either way.
+        // main drew `x` taking `*b` as a move of the Box itself, leaving
+        // b1.0 unmoved on that path: both b1.0 and b1 were "dropped here
+        // only if no branch above moved it", though every path moved
+        // b1.0 and the allocation is always freed.
+        must_contain: &[
+            "Move from *b1 to x",
+            "Move from b1.0 to s",
+            "b1.0 goes out of scope. No resource is dropped: b1.0 was moved or dropped in every branch above.",
+            "b1 goes out of scope. b1.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b1 isn't moved in any of the branches above",
+            "Move from *b2 to x",
+            "b2.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b2 goes out of scope. b2.0 was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed.",
+            "Move from *b3 to x",
+            "b3.0 goes out of scope. No resource is dropped: b3.0 was moved or dropped in every branch above.",
+            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from *b4 to take",
+            "b4.0 goes out of scope. No resource is dropped: b4.0 was moved or dropped in every branch above.",
+            "b4 goes out of scope. b4.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "b1.0 goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "b3.0 goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "b4.0 goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "b1 goes out of scope. Its resource is dropped",
+            "b2 goes out of scope. Its resource is dropped",
+            "b3 goes out of scope. Its resource is dropped",
+            "b4 goes out of scope. Its resource is dropped",
+            "b1 goes out of scope. No resource is dropped",
+            "b1 was moved in at least one branch above",
+            "b2 was moved in at least one branch above",
+            "b1.1 was moved out",
+            "b2.1 was moved out",
+        ],
+    },
+    TooltipExpect {
+        name: "let_else_nested_part_899",
+        // #899: `let (Some(s), n) = t else { .. };` binds s from the String
+        // inside t.0, as `if let (Some(s), n) = t` does, so t.0 has nothing
+        // left to drop. main bound the nested refutable `Some(s)` from all
+        // of t ("Move from t to s") and said t.0's scope end drops "the
+        // String it holds" (the one s took). Same for a Box's payload
+        // (`*b`: main said b dropped nothing, though its heap allocation is
+        // freed), a struct field (`P { a: Some(a), .. }`: p.b is still
+        // dropped), and a Copy value copied out of a part.
+        must_contain: &[
+            "Move from t.0 to s",
+            "Copy from t.1 to n",
+            "t.0 goes out of scope. No resource is dropped.",
+            "t goes out of scope. t.0 was moved out earlier, so no resource is dropped.",
+            "Move from b.0 to s2",
+            "Copy from b.1 to n2",
+            "b.0 goes out of scope. No resource is dropped.",
+            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from p.a to a",
+            "p.a goes out of scope. No resource is dropped.",
+            "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
+            "Partial copy from u.0 to k",
+            "k is initialized with a copy of a value inside u.0",
+        ],
+        must_not_contain: &[
+            "Move from t to s",
+            "Move from *b to s2",
+            "Move from p to a",
+            "Partial copy from u to k",
+            "t's resource is moved",
+            "*b's resource is moved",
+            "p's resource is moved",
+            "t.0 goes out of scope. Its resource is dropped",
+            "b.0 goes out of scope. Its resource is dropped",
+            "p.a goes out of scope. Its resource is dropped",
+            "b goes out of scope. No resource is dropped",
+            "p goes out of scope. No resource is dropped",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

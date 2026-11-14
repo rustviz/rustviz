@@ -2700,6 +2700,14 @@ impl Display for Event {
 }
 
 impl Event {
+    /// The move of `*b` out of a Box drawn as its payload's part columns
+    /// (`x => …` on `match *b`, `let x = *b;`, #898): the parts' own
+    /// moves say what left; b keeps its heap allocation, so on b's
+    /// column this isn't a move of b.
+    pub fn is_box_payload_move(&self) -> bool {
+        matches!(self, Event::Move { is: ResourceTy::Deref(ResourceAccessPoint::Struct(Struct { is_box: true, .. })), .. })
+    }
+
     /// For an or-pattern's possible borrow (#565), the plain borrow
     /// event that changes the column's state the same way.
     pub fn or_alt_plain_equivalent(&self) -> Option<Event> {
@@ -3630,6 +3638,12 @@ impl Visualizable for VisualizationData {
             // A field or a pattern's binding moved out of an unbound
             // temporary: it still holds the rest, until its drop (#469).
             (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Value(r), ..}) if r.temp_part().is_some() =>
+                (*previous_state).clone(),
+            // `x => …` on `match *b` / `let x = *b;`, with b a Box
+            // drawn as its payload's part columns: the payload moves
+            // out, which those columns show; b keeps its heap
+            // allocation, freed at its scope end (#898).
+            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Deref(ResourceAccessPoint::Struct(Struct { is_box: true, .. })), ..}) =>
                 (*previous_state).clone(),
             // The current RAP's resource is moved
             (State::FullPrivilege{..}, Event::Move{to: to_ro,..}) =>

@@ -1510,6 +1510,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)) => Some(rap.name().clone()),
       _ => None,
     };
+    // `let x = *b;`, with b a Box drawn as its payload's part columns:
+    // the parts go with the payload (#898); x's own parts get it.
+    if let (false, Some(b)) = (is_copy, box_payload_of(from)) {
+      if *self.unique_id <= id {
+        *self.unique_id = id + 1;
+      }
+      self.move_struct_fields_away(line_num, b.name());
+      if let Some(to_name) = struct_name(to) {
+        self.bind_struct_fields(line_num, &to_name);
+      }
+      return;
+    }
     let from_struct = struct_name(from);
     let to_struct = struct_name(to);
     let from_children = from_struct.as_ref().map_or(Vec::new(), |n| self.struct_children(n));
@@ -1716,8 +1728,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Every field of `parent`, recursively, moves along with it to a
   /// place that has no per-field columns (a function or closure that
   /// took the whole struct). No extra arrows: the struct's own arrow
-  /// shows where the value went.
-  fn move_struct_fields_away(&mut self, line_num: usize, parent: &str) {
+  /// shows where the value went. Also the parts of a Box's payload
+  /// moved out whole (`*b`, [`box_payload_of`]).
+  pub(crate) fn move_struct_fields_away(&mut self, line_num: usize, parent: &str) {
     for child in self.struct_children(parent) {
       let name = child.name().clone();
       let ev_id = *self.unique_id;
@@ -8421,6 +8434,17 @@ pub(crate) fn ref_pattern_above_at(tcx: &TyCtxt<'_>, binding: rustc_hir::HirId) 
 /// inside opt" (#866). Not through a reference: what `&x` copies is
 /// behind `parent`, not inside it. Nor out of a call's result, which
 /// is worded as "the value inside the Option f() returns" (#733).
+/// `*b`, with `b` a Box drawn as its payload's part columns (`b.0`,
+/// `b.1`; #602, #890): `b`. Moving it out (`let x = *b;`, `x => …` on
+/// `match *b`) moves every part, while b keeps its heap allocation
+/// (#898).
+pub(crate) fn box_payload_of(r: &ResourceTy) -> Option<&ResourceAccessPoint> {
+  match r {
+    ResourceTy::Deref(b @ ResourceAccessPoint::Struct(Struct { is_box: true, is_member: false, .. })) => Some(b),
+    _ => None,
+  }
+}
+
 pub(crate) fn copies_from_inside<'tcx>(evt: &Evt, ty: Ty<'tcx>, parent_ty: Ty<'tcx>, parent: &ResourceTy) -> bool {
   matches!(evt, Evt::Copy) && !parent_ty.is_ref() && ty != parent_ty
     && !parent.extract_rap().is_some_and(|p| p.is_fn())
