@@ -1459,6 +1459,17 @@ pub fn event_dot_acquire_value(my_name: &String) -> String {
     format!("{0} is bound to a value", styled_name_html(my_name))
 }
 
+// The variable of a `for` loop over a collection moved into the loop
+// (`for w in words`, `words: Vec<String>`): `words` goes into the loop's
+// iterator, and each iteration moves one element out of it (#850).
+pub fn event_dot_acquire_loop_element(my_name: &String, collection: &String) -> String {
+    format!(
+        "{0} takes ownership of an element of {1}",
+        styled_name_html(my_name),
+        styled_name_html(collection)
+    )
+}
+
 pub fn event_dot_acquire(my_name: &String) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);
@@ -3396,7 +3407,7 @@ pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: 
  * geometry; the words live here, so every message can be checked
  * against Rust's semantics in one file. */
 
-use crate::svg_generator::data::{ExternalEvent, Function, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
+use crate::svg_generator::data::{ExternalEvent, Function, LoopHead, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
 
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
@@ -3511,6 +3522,11 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     } else {
         format!("{} to {}", title, styled_to_string)
     };
+    // `for w in words`: the arrow into the loop variable moves one
+    // element out of the collection, not the collection (#850).
+    if let ExternalEvent::Move { loop_head: LoopHead::Collection, .. } = external_event {
+        title = format!("Move of each element of {} to {}", styled_from_string, styled_to_string);
+    }
     // A Copy-typed value a call returns (`let n = v.len();`): the
     // source is the call's result, not a variable (or anything)
     // named like the callee (#737). Constructors (`Some(5)`) and
