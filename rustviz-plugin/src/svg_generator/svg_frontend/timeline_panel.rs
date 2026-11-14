@@ -1734,7 +1734,9 @@ fn render_dot(
                         // y gets a new value, not a copy of z or of the
                         // constructor, like `y = make();` (#866).
                         data.title = match of {
-                            CopyOf::IntoCtor(_) => hover_messages::event_dot_copyable_assign(&name),
+                            // (A `&` pattern can't be assigned to; a new
+                            // value, if it ever is, #874.)
+                            CopyOf::IntoCtor(_) | CopyOf::Pointee { .. } => hover_messages::event_dot_copyable_assign(&name),
                             _ if from.extract_rap().is_some_and(|f| f.is_fn()) => hover_messages::event_dot_copyable_assign(&name),
                             CopyOf::Inside => hover_messages::event_dot_copyable_assign_copy_inside(&name, &from.name()),
                             CopyOf::Whole => hover_messages::event_dot_copyable_assign_copy(&name, &from.name()),

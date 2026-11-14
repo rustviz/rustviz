@@ -15100,6 +15100,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "ref_subpattern_copy_874",
+        // #874: under a `&` sub-pattern the binding copies the value a reference
+        // stored in the matched value points to (n's value for `Some(&y)` on
+        // `orr: Option<&i32>`), not a copy of orr nor of a value inside it. main
+        // read "y is initialized with a copy of orr" / "orr's value is copied",
+        // "k is initialized with a copy of s", "w is initialized with the value
+        // inside the Option last() returns", and drew no u, c, a, b or x at all.
+        must_contain: &[
+            "y is initialized with a copy of the value a reference inside orr points to",
+            "the value a reference inside orr points to is copied",
+            "Copy from orr to y",
+            "u is initialized with a copy of the value a reference inside orr points to",
+            "Copy from orr to u",
+            "Copy from orr to c",
+            "a is initialized with a copy of a value inside the value a reference inside op points to",
+            "b is initialized with a copy of a value inside the value a reference inside op points to",
+            "k is initialized with a copy of the value a reference inside s points to",
+            "the value a reference inside s points to is copied",
+            "x is initialized with a copy of the value pointed to by the reference inside the Option get() returns",
+            "Copy of the value pointed to by the reference inside the Option get() returns to x",
+            "w is initialized with a copy of the value pointed to by the reference inside the Option last() returns",
+            "Copy of the value pointed to by the reference inside the Option last() returns to w",
+        ],
+        must_not_contain: &[
+            "is initialized with a copy of orr",
+            "orr's value is copied",
+            "a value inside orr",
+            "Partial copy from orr",
+            "is initialized with a copy of op",
+            "op's value is copied",
+            "k is initialized with a copy of s",
+            "s's value is copied",
+            "w is initialized with the value inside the Option last() returns",
+            "Copy of the value inside the Option last() returns to w",
+            "x is initialized with the value inside the Option get() returns",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
