@@ -13386,7 +13386,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move of each element of kept to w",
         ],
     },
-||||||| parent of eb7d9921 (plugin: a field write through a reference to a local struct is also drawn on the field's column (#854))
     // #854: a write through a reference to a local struct (`r.n = 2`)
     // changes the struct's field too, so it is also drawn on that
     // field's column (`s.n`), as well as on `r`'s; in an `if` / `match`
