@@ -1230,17 +1230,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Copy or plain (`&[i32]`, `&str`; #549), but `[String]` stays a
   /// resource. `dyn Trait` stays a resource (we can't know).
   pub fn ref_pointee_is_copy(&self, ref_ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
-    match ref_ty.kind() {
-      TyKind::Ref(_, inner, _) => match inner.kind() {
-        TyKind::Str => true,
-        // A reference to a reference (`&mut &mut String`): what it
-        // points to is a reference, which needs no drop (#914).
-        TyKind::Ref(..) => true,
-        TyKind::Slice(elem) => self.ty_is_copy(*elem, owner) || self.ty_is_plain(*elem, owner),
-        _ => self.ty_is_copy(*inner, owner) || (inner.is_adt() && self.ty_is_plain(*inner, owner)),
-      },
-      _ => false,
-    }
+    ref_pointee_is_copy(self.tcx, ref_ty, owner)
   }
 
   /// `add_static_ref` with optional struct-membership. Pass
@@ -8238,6 +8228,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
 /// pairs from `events` down through nested Branch events. Otherwise
 /// the lender is drawn on one column throughout the conditional, and
 /// its borrow's end stays where it is.
+///
+/// Variables of the same name in different arms share a column, so
+/// several arms can declare `r` (`if let Some(x) = &a {..} else if let
+/// Some(x) = &b {..}`): the arms whose lines hold `line` are tried
+/// first, so the end lands in the arm where it happens (#916).
 fn arm_declaring(
   events: &[(usize, ExternalEvent)],
   r: &ResourceAccessPoint,
@@ -8245,9 +8240,14 @@ fn arm_declaring(
   line: usize,
 ) -> Option<Vec<(usize, usize)>> {
   for (k, (_, ev)) in events.iter().enumerate() {
-    let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, .. } = ev else { continue };
+    let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, branch_type, .. } = ev else { continue };
     if line < *split_point || line > *merge_point { continue; }
-    for (a, b) in branches.iter().enumerate() {
+    let (BranchType::If(_, spans) | BranchType::Loop(_, spans) | BranchType::Match(_, spans)) = branch_type;
+    let holds_line = |a: usize| spans.get(a).is_some_and(|&(start, end)| start <= line && line <= end);
+    let mut order: Vec<usize> = (0..branches.len()).collect();
+    order.sort_by_key(|&a| !holds_line(a));
+    for a in order {
+      let b = &branches[a];
       if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line) {
         path.insert(0, (k, a));
         return Some(path);
@@ -8472,6 +8472,22 @@ fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, 
       }
       _ => {}
     }
+  }
+}
+
+/// See `ExprVisitor::ref_pointee_is_copy`.
+pub fn ref_pointee_is_copy<'tcx>(tcx: TyCtxt<'tcx>, ref_ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> bool {
+  let is_copy = |ty: Ty<'tcx>| tcx.type_is_copy_modulo_regions(typing_env(tcx, owner), ty);
+  match ref_ty.kind() {
+    TyKind::Ref(_, inner, _) => match inner.kind() {
+      TyKind::Str => true,
+      // A reference to a reference (`&mut &mut String`): what it
+      // points to is a reference, which needs no drop (#914).
+      TyKind::Ref(..) => true,
+      TyKind::Slice(elem) => is_copy(*elem) || ty_is_plain(tcx, *elem, owner),
+      _ => is_copy(*inner) || (inner.is_adt() && ty_is_plain(tcx, *inner, owner)),
+    },
+    _ => false,
   }
 }
 

@@ -310,8 +310,11 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
 /// share a column only if this is the same.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ColumnKind {
-  /// A reference (`&` or `&mut`).
-  Ref(Mutability),
+  /// A reference (`&` or `&mut`), and whether it points to a value
+  /// rather than a resource (`ref_pointee_is_copy`): its tooltips say
+  /// "the borrowed value" or "the borrowed resource" (#484), so a
+  /// `&i32` can't share a column with a `&Vec<i32>` (#917).
+  Ref(Mutability, bool),
   /// A struct or tuple, which has a column per field: one per type.
   Fields(String),
   /// A `Copy` value.
@@ -328,7 +331,7 @@ impl ColumnKind {
   fn of<'tcx>(tcx: TyCtxt<'tcx>, owner: rustc_hir::OwnerId, ty: Ty<'tcx>) -> ColumnKind {
     use rustc_middle::ty::TyKind;
     if let Some(m) = ty.ref_mutability() {
-      return ColumnKind::Ref(m);
+      return ColumnKind::Ref(m, crate::expr_visitor::ref_pointee_is_copy(tcx, ty, owner));
     }
     let fields = match ty.kind() {
       TyKind::Adt(adt, _) => adt.is_struct() && !ty_is_special_owner(&ty) && adt.all_fields().next().is_some(),
