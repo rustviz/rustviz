@@ -6673,7 +6673,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if !is_skipped {
         self.visit_expr(init);
       }
+      let first_id = *self.unique_id;
       self.bind_pat(pat, init, is_skipped);
+      // `let (c, d) = *r;`: c and d copy values inside `*r`, as in
+      // `match *r` (#886).
+      if !is_skipped && !matches!(pat.kind, PatKind::Binding(..) | PatKind::Wild) {
+        if let Some((r, pointee_ty)) = self.deref_place_target(init) {
+          self.mark_copy_deref(pat, &r, pointee_ty, first_id);
+        }
+      }
     }
     self.keep_literal_temp_with_refs(pat);
   }
@@ -7235,6 +7243,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// The variable `*r` names and the type it points to, when `init`
+  /// is a dereference of a reference or Box variable.
+  fn deref_place_target(&self, init: &'tcx Expr<'tcx>) -> Option<(ResourceAccessPoint, rustc_middle::ty::Ty<'tcx>)> {
+    let ExprKind::Unary(UnOp::Deref, base) = init.kind else { return None };
+    if !matches!(base.kind, ExprKind::Path(_)) {
+      return None;
+    }
+    let ty = self.tcx.typeck(init.hir_id.owner).expr_ty(init);
+    match get_rap(base, &self.tcx, &self.raps) {
+      ResourceTy::Value(r) if !r.is_fn() => Some((r, ty)),
+      _ => None,
+    }
+  }
+
   /// `let &b = r;`: `bind_pat` drew b's copy from r, but b gets a copy
   /// of the value r points to, `*r`, as for `let b = *r;` (#880): a
   /// value inside it for a binding nested in the `&` pattern (`let &(a,
@@ -7254,7 +7276,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for e in events.chain(line_events) {
       if let ExternalEvent::Copy { to: ResourceTy::Value(t), from, id, is_partial, pointee, into_ctor: None, .. } = e {
         let Some(inside) = names.get(t.name()) else { continue };
-        if *id >= first_id && *from == ResourceTy::Value(r.clone()) {
+        if *id >= first_id && (*from == ResourceTy::Value(r.clone()) || *from == ResourceTy::Deref(r.clone())) {
           *from = ResourceTy::Deref(r.clone());
           *is_partial = *inside && pointee.is_none();
         }
