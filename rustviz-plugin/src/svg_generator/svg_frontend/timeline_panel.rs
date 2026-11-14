@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, LineState, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, BranchType, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1786,7 +1786,7 @@ fn render_dot(
                             data.title = if copyable_assign {
                                 hover_messages::event_dot_copyable_assign(&name)
                             } else {
-                                let generic = Event::Acquire { from: ResourceTy::Anonymous, is: is.clone(), via_try: None, id: 0, break_alt: None };
+                                let generic = Event::Acquire { from: ResourceTy::Anonymous, is: is.clone(), via_try: None, id: 0, break_alt: None, loop_head: LoopHead::No };
                                 generic.print_message_with_name(&mut name.clone())
                             };
                             data.title.push_str(&hover_messages::break_alt_receiver_suffix());

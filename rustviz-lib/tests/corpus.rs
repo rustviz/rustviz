@@ -4545,7 +4545,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "it's value is moved",
             "x is bound to a mutable reference",
             "s is bound to an immutable reference",
-            "Move from w to s",
+            // (#850: was "Move from w to s".)
+            "Move of each element of w to s",
             "s's resource is immutably borrowed by println!; s is read-only while the borrow is live",
             "s goes out of scope. Its resource is dropped.",
             "s, immutable. A different variable from the s declared on line 13 (separate scopes, so only one exists at a time)",
@@ -4555,6 +4556,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "it's resource is moved",
             "Move from it to x",
             "Return mutably borrowed resource from x to it",
+            "Move from w to s",
             "Move from it2 to s",
             "Return immutably borrowed resource from s to it2",
             "s₂",
@@ -12675,9 +12677,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "pts's resource is moved into the `for` loop's iterator",
             "n is bound to a copyable value",
             "p is bound to a copyable value",
-            "Move from names to s",
+            // (#850: reworded from "Move from names to s", which read as
+            // `s` taking the whole Vec.)
+            "Move of each element of names to s",
+            "s takes ownership of an element of names",
         ],
         must_not_contain: &[
+            "Move from names to s",
             "Move from a to n",
             "Move from pts to p",
         ],
@@ -13345,6 +13351,40 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This segment leads from the 1 branch to where the branches join.",
         ],
         must_not_contain: &[],
+    },
+    // #850: `for w in words` moves `words` into the loop's iterator and one
+    // element into `w` per iteration; it never moves the whole Vec into `w`.
+    TooltipExpect {
+        name: "for_element_move",
+        must_contain: &[
+            "Move of each element of words to w",
+            "w takes ownership of an element of words",
+            "words's resource is moved into the `for` loop's iterator",
+        ],
+        must_not_contain: &[
+            "Move from words to w",
+            "w acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "for_element_move_forms",
+        // An array moves into its iterator like a Vec. A call head
+        // (`into_iter()`, `drain(..)`) has no collection-to-`w` arrow, and
+        // `for w in &kept` is still a borrow.
+        must_contain: &[
+            "Move of each element of arr to w",
+            "w takes ownership of an element of arr",
+            "arr's resource is moved into the `for` loop's iterator",
+            "Immutable borrow from kept to w",
+        ],
+        must_not_contain: &[
+            "Move from arr to w",
+            "Move from more to w",
+            "Move from pairs to w",
+            "Move from drained to w",
+            "w takes ownership of an element of kept",
+            "Move of each element of kept to w",
+        ],
     },
 ];
 
