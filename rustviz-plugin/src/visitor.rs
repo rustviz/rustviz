@@ -2724,6 +2724,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), false, false, ImplicitRef::Autoref);
             }
             Some(lhs_rty @ (ResourceTy::Deref(_) | ResourceTy::Index(..) | ResourceTy::DerefField(..))) => {
+              self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
               let lhs_rty = match lhs_rty {
                 ResourceTy::Index(r, place, w) => ResourceTy::Index(r, place, w.into_update()),
                 other => other,
@@ -2760,6 +2761,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // goes on the receiver's, as an in-place update.
         match self.resource_of_lhs(lhs_expr) {
           Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) => {
+            self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
             self.add_ev(line_num, Evt::Bind, lhs_rty, ResourceTy::Anonymous, false);
           }
           Some(ResourceTy::Index(r, place, w)) => {
@@ -3204,6 +3206,19 @@ fn is_place_expr(e: &Expr) -> bool {
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// The `ExprKind::Assign` arm of `visit_expr`: `lhs = rhs`.
+  /// `r.n = 2` / `r.n += 1` through a reference to a local struct (#854):
+  /// the write also lands on the field's own column (`s.n`), drawn like
+  /// an in-place element update, "s.n's value is modified through r.n".
+  /// Nothing when the struct has no column here (a parameter's) or the
+  /// write isn't to a field behind a reference. (An overwritten old
+  /// value that needs drop is drawn as its drop, on the same column.)
+  fn write_field_behind_ref(&mut self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize) {
+    let ResourceTy::DerefField(p_rap, place, _) = lhs_rty else { return };
+    if let Some(field) = self.field_column_behind_ref(lhs_expr, p_rap) {
+      self.add_ev(line_num, Evt::Bind, ResourceTy::Index(field, place.clone(), PlaceWrite::Update), ResourceTy::Anonymous, false);
+    }
+  }
+
   fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
     // `a = lhs` inside a destructuring assignment: draw it as
     // `a = <the part of the RHS lhs holds>`. That part was
@@ -3631,10 +3646,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // the old value is dropped (#152). Only when the lender
             // is a local with per-field columns; a parameter's
             // lender is the caller, which has no column here.
-            expr_to_rap_name(lhs_expr, &self.tcx)
-              .and_then(|full| full.strip_prefix(p_rap.name().as_str()).map(str::to_owned))
-              .filter(|sfx| sfx.starts_with('.'))
-              .and_then(|sfx| self.owner_behind_ref(p_rap, &sfx))
+            self.field_column_behind_ref(lhs_expr, p_rap)
           }
           _ => None,
         }
@@ -3752,6 +3764,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           None => drop_line = span_end_line(&rhs_expr.span, &self.tcx),
         }
       }
+    }
+
+    // A write through a reference to a local struct's field (`r.n =
+    // 2`) also changes the field's own column (#854). When the old
+    // value is dropped, that drop is its event; otherwise the field
+    // gets an in-place write.
+    if drop_target.is_none() && field_drop_targets.is_empty() {
+      self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
     }
 
     let n_before_drops = self.preprocessed_events.len();
