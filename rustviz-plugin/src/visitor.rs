@@ -5413,14 +5413,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // The loop's iterator (`v.iter().enumerate()`) holds its loans
         // until the loop ends: `v.push(..)` anywhere in the body is
         // E0502 even after the last use of the loop variable (#868).
-        for (lender, is_mut) in loop_loans.into_iter().filter(|(l, _)| !carried.contains(l)) {
+        // The end says what held the borrow, so the lender's column
+        // can say so in between (#871).
+        for (lender, is_mut, call) in loop_loans.into_iter().filter(|(l, _, _)| !carried.contains(l)) {
           let id = *self.unique_id;
           *self.unique_id += 1;
           let (from, to) = (ResourceTy::Anonymous, lender);
+          let static_lender = Some(StaticLender::LoopIterator { call });
           let ev = if is_mut {
-            ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new() }
+            ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
           } else {
-            ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new() }
+            ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
           };
           self.add_external_event(body_end, ev);
         }

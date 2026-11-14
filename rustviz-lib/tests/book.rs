@@ -688,13 +688,18 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_11_string_chars",
-        note: "the Chars iterator borrows s until the loop ends (was: s unborrowed again on the for line, #868)",
+        note: "the Chars iterator borrows s until the loop ends (was: s unborrowed again on the for line, #868; its segment names the loop's iterator, #871)",
         must_contain: &[
             "chars reads from s (implicitly borrowed)",
             "L5 s's resource is no longer immutably borrowed",
+            "s's resource is immutably borrowed by the `for` loop's iterator; s is read-only until the loop ends",
             "s goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["L3 s's resource is no longer immutably borrowed"],
+        must_not_contain: &[
+            "L3 s's resource is no longer immutably borrowed",
+            // c is a char: no variable shares s, the iterator does (#871).
+            "s's resource is being shared by one or more variables",
+        ],
         ..E
     },
     Snippet {

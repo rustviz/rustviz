@@ -5249,10 +5249,10 @@ fn mark_kept_on_lines(&mut self, lo: usize, hi: usize, hashes: &[u64], fns: &[St
 /// Mark the argument-passing events of those lenders as kept by the
 /// result, so the `for` line doesn't say the lender got its resource
 /// back (#868), and return each lender (a variable that owns what it
-/// lends) with whether its loan is mutable. Only the calls in `head`
+/// lends) with whether its loan is mutable and the call that lent it. Only the calls in `head`
 /// whose result can hold a borrow keep one: `v.len()` in
 /// `v.iter().take(v.len())` borrows `v` just for the call.
-pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
+pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool, String)> {
   if !matches!(head.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
     return Vec::new();
   }
@@ -5261,16 +5261,16 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
   self.borrow_holding_call_names(head, typeck, &mut fns);
   let lo = span_to_line(&head.span, &self.tcx);
   let hi = span_end_line(&head.span, &self.tcx);
-  let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+  let mut out: Vec<(ResourceTy, bool, String)> = Vec::new();
   for l in self.value_lenders(head) {
     let owner = matches!(&l, ResourceTy::Value(r) if !r.is_ref() && !r.is_fn());
-    if !owner || out.iter().any(|(o, _)| *o == l) {
+    if !owner || out.iter().any(|(o, _, _)| *o == l) {
       continue;
     }
     let Some(hash) = l.extract_rap().map(|r| *r.hash()) else { continue };
     let ids = self.mark_kept_on_lines(lo, hi, &[hash], &fns);
-    if let Some(is_mut) = ids.iter().find_map(|id| pass_ref_is_mut(&self.preprocessed_events, *id)) {
-      out.push((l, is_mut));
+    if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
+      out.push((l, is_mut, call));
     }
   }
   out
@@ -8094,12 +8094,13 @@ pub fn branch_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> 
 }
 
 /// Whether the pass-by-reference event `id` (looked up in `events`,
-/// branches included) passes a mutable reference.
-fn pass_ref_is_mut(events: &[(usize, ExternalEvent)], id: usize) -> Option<bool> {
+/// branches included) passes a mutable reference, and the function it
+/// passes it to.
+fn pass_ref_kind(events: &[(usize, ExternalEvent)], id: usize) -> Option<(bool, String)> {
   events.iter().find_map(|(_, ev)| match ev {
-    ExternalEvent::PassByStaticReference { id: i, .. } if *i == id => Some(false),
-    ExternalEvent::PassByMutableReference { id: i, .. } if *i == id => Some(true),
-    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| pass_ref_is_mut(&b.e_data, id)),
+    ExternalEvent::PassByStaticReference { id: i, to, .. } if *i == id => Some((false, to.name())),
+    ExternalEvent::PassByMutableReference { id: i, to, .. } if *i == id => Some((true, to.name())),
+    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| pass_ref_kind(&b.e_data, id)),
     _ => None,
   })
 }

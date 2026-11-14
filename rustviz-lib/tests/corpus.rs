@@ -13630,6 +13630,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "animals is the owner of the resource",
             "animals's resource is immutably borrowed by iter; animals is read-only while the borrow is live",
             "iter reads from animals (implicitly borrowed)",
+            // `animal` isn't drawn as borrowing animals, so the borrow is
+            // the loop's iterator's (#871).
+            "animals's resource is immutably borrowed by the `for` loop's iterator; animals is read-only until the loop ends",
             "animals's resource is no longer immutably borrowed",
             "animals goes out of scope. Its resource is dropped.",
             "index is bound to a copyable value",
@@ -13647,6 +13650,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "animal acquires ownership",
             "animal is the owner of the resource",
             "the resource animal points to",
+            // No variable shown shares animals (#871).
+            "animals's resource is being shared by one or more variables",
         ],
     },
     TooltipExpect {
@@ -15343,6 +15348,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "tags's resource is no longer mutably borrowed",
             "s's resource is immutably borrowed by chars; s is read-only while the borrow is live",
             "s's resource is no longer immutably borrowed",
+            // Only the loop's iterator, which has no column, borrows
+            // these (#871). (tags, mutably borrowed, has no line drawn.)
+            "names's resource is immutably borrowed by the `for` loop's iterator; names is read-only until the loop ends",
+            "nums's resource is immutably borrowed by the `for` loop's iterator; nums is read-only until the loop ends",
+            "words's resource is immutably borrowed by the `for` loop's iterator; words is read-only until the loop ends",
+            "s's resource is immutably borrowed by the `for` loop's iterator; s is read-only until the loop ends",
             // `w` points into words, but which element isn't drawn.
             "w is bound to an immutable reference",
             "w's immutable borrow ends",
@@ -15355,6 +15366,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `iter` is a method, not a variable `w` borrows from.
             "Return immutably borrowed resource from w to iter",
             "n is bound to an immutable reference",
+            "being shared by one or more variables",
         ],
     },
 ];

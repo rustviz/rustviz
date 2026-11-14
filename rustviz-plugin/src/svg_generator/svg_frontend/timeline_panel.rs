@@ -2490,6 +2490,9 @@ fn timeline_segment_title(
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
     }
+    if let Some(title) = line.and_then(|l| loop_iterator_title(state, rap, visualization_data, l)) {
+        return title;
+    }
     if rap.is_closure() {
         if let State::FullPrivilege { .. } = state {
             let name = rap.name().to_owned();
@@ -2573,6 +2576,72 @@ fn timeline_segment_title(
 // after `line` (#565): the last borrow of `rap` that starts at or
 // before `line` is an `OrAltLend`. Without a line, `rap` must be lent
 // only that way.
+/// A segment of `rap` from row `line` that only a `for` loop's iterator
+/// borrows (#871): the iterator has no column, so "being shared by one
+/// or more variables" sent the reader looking for a variable that isn't
+/// there.
+fn loop_iterator_title(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
+    let State::PartialPrivilege { s } = state else { return None };
+    if matches!(s, LineState::Gray) || !loop_iterator_holds(visualization_data, rap, line) {
+        return None;
+    }
+    Some(hover_messages::state_borrowed_by_loop_iterator(rap.name(), rap.is_copy_owner() || rap.is_plain_value()))
+}
+
+/// Whether `rap`'s segment from `line` lies where a `for` loop's
+/// iterator borrows it (#871): from the call that lent it (`chars` in
+/// `for c in s.chars()`) to the end the loop draws for that borrow
+/// (`StaticLender::LoopIterator`). The plugin draws that end only when
+/// no loop variable gives the borrow back itself.
+fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAccessPoint, line: usize) -> bool {
+    fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, String)>) {
+        for (_, ev) in events {
+            match ev {
+                ExternalEvent::StaticDie { to: ResourceTy::Value(r), static_lender: Some(StaticLender::LoopIterator { call }), id, .. }
+                | ExternalEvent::MutableDie { to: ResourceTy::Value(r), static_lender: Some(StaticLender::LoopIterator { call }), id, .. }
+                    if *r.hash() == hash => out.push((*id, call.clone())),
+                ExternalEvent::Branch { branches, .. } => {
+                    for b in branches {
+                        loop_ends(&b.e_data, hash, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn flat<'a>(history: &'a [(usize, Event)], out: &mut Vec<(usize, &'a Event)>) {
+        for (l, e) in history {
+            out.push((*l, e));
+            if let Event::Branch { branch_history, .. } = e {
+                for b in branch_history {
+                    flat(&b.e_data, out);
+                }
+            }
+        }
+    }
+    let mut ends = Vec::new();
+    loop_ends(&visualization_data.external_events, *rap.hash(), &mut ends);
+    if ends.is_empty() {
+        return false;
+    }
+    let Some(timeline) = visualization_data.timelines.get(rap.hash()) else { return false };
+    let mut history = Vec::new();
+    flat(&timeline.history, &mut history);
+    ends.iter().any(|(id, call)| {
+        let Some(end) = history.iter().find_map(|(l, e)| match e {
+            Event::StaticReacquire { id: i, .. } | Event::MutableReacquire { id: i, .. } if i == id => Some(*l),
+            _ => None,
+        }) else { return false };
+        let lent = history.iter().filter_map(|(l, e)| match e {
+            Event::StaticLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
+            | Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
+                if f.name == *call && *l <= end => Some(*l),
+            _ => None,
+        }).max();
+        lent.is_some_and(|from| from <= line && line < end)
+    })
+}
+
 fn or_alt_lend_at<'a>(
     visualization_data: &'a VisualizationData,
     rap: &ResourceAccessPoint,
@@ -4307,7 +4376,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, column_top_y),
-                leading_state.clone(), visualization_data, &arm_label, Leg::Split,
+                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with.
@@ -4317,7 +4386,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
-                        leading_state, visualization_data, &arm_label, Leg::Column,
+                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point,
                     );
                 }
             }
@@ -4361,7 +4430,7 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state.clone(), visualization_data, &arm_label, Leg::Column,
+                    state.clone(), visualization_data, &arm_label, Leg::Column, *top,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
@@ -4375,7 +4444,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_bot_y), (parent_x, merge_y),
-                        end_state, visualization_data, &arm_label, Leg::Join,
+                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -4431,7 +4500,7 @@ fn render_branches(
                 let n = segs.len();
                 push_seg_if_renderable(
                     &mut segs, rap, (branch_x, top), (branch_x, bot),
-                    parent_active.clone(), visualization_data, &arm_label, Leg::Column,
+                    parent_active.clone(), visualization_data, &arm_label, Leg::Column, own_first,
                 );
                 if segs.len() > n {
                     let mut solid = segs.pop().unwrap();
@@ -4517,6 +4586,7 @@ fn push_seg_if_renderable(
     visualization_data: &VisualizationData,
     arm_label: &str,
     leg: Leg,
+    row: usize,
 ) {
     if !line_drawn(rap, &state) {
         return;
@@ -4534,7 +4604,10 @@ fn push_seg_if_renderable(
         (true, Leg::Split) => hover_messages::state_arm_split(arm_label),
         (true, Leg::Join) => hover_messages::state_arm_join(arm_label),
         (true, Leg::Column) => hover_messages::state_inactive_arm(arm_label),
-        (false, _) => timeline_segment_title(&state, rap, visualization_data, None),
+        // `row`: the first source row the segment covers, for a `for`
+        // loop around the conditional (#871).
+        (false, _) => loop_iterator_title(&state, rap, visualization_data, row)
+            .unwrap_or_else(|| timeline_segment_title(&state, rap, visualization_data, None)),
     };
     let inactive_arm = (inactive && leg == Leg::Column).then(|| arm_label.to_owned());
     segs.push(BranchSeg { p1, p2, state, title, inactive_arm, own_row: false });
