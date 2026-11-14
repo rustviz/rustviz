@@ -15138,6 +15138,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is initialized with the value inside the Option get() returns",
         ],
     },
+    TooltipExpect {
+        name: "ref_pattern_whole_880",
+        // #880: a `&` pattern matched against a reference variable itself
+        // matches the reference; its binding gets a copy of the value the
+        // reference points to, exactly as `let b = *r;` (same wording). main
+        // read "b is initialized with a copy of r" / "r's reference is copied
+        // (not the value it points to)" (b is not a copy of r, and r's
+        // reference is not what is copied), the same for rt and rm, and drew
+        // no c, w, v or q at all.
+        must_contain: &[
+            "b is initialized with a copy of *r",
+            "Copy from *r to b",
+            "*r's value is copied",
+            "c is initialized with a copy of *r",
+            "Copy from *r to c",
+            "w is initialized with a copy of *r",
+            "Copy from *r to w",
+            "v is initialized with a copy of *r",
+            "Copy from *r to v",
+            "x is initialized with a copy of a value inside *rt",
+            "y is initialized with a copy of a value inside *rt",
+            "a value inside *rt is copied",
+            "q is initialized with a copy of a value inside *ro",
+            "a value inside *ro is copied",
+            "e is initialized with a copy of *rm",
+            "*rm's value is copied",
+        ],
+        must_not_contain: &[
+            "=b is initialized with a copy of r",
+            "Copy from r to b",
+            "reference is copied (not the value it points to)",
+            "is initialized with a copy of rt",
+            "Copy from rt to",
+            "is initialized with a copy of rm",
+            "Copy from rm to e",
+            "=rm's value is copied",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
