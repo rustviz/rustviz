@@ -2158,11 +2158,11 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
 }
 
 // True when a let-chain's condition may have moved this column's value
-// before failing (#281), so a drop-flag message says "nothing above"
-// moved it rather than "no branch above".
+// before failing (#281), or a `while` loop's (#968), so a drop-flag
+// message says "nothing above" moved it rather than "no branch above".
 fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
     history.iter().any(|(_, e)| match e {
-        Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. }, .. } => true,
+        Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
         _ => false,
     })
@@ -2316,7 +2316,8 @@ fn moves_only_box_contents(branch_history: &[BranchData]) -> bool {
                 // A let-chain's condition that moved `*e` before it
                 // failed (`&& { let w = *e; … }`, #940): the path into
                 // the else branch.
-                Event::LoopExitMove { at: MaybeMovedAt::ChainFail { how: ChainFailHow::Out(_), .. }, .. } => any = true,
+                Event::LoopExitMove { at: MaybeMovedAt::ChainFail { how: ChainFailHow::Out(_), .. }
+                    | MaybeMovedAt::WhileCondFail { how: ChainFailHow::Out(_), .. }, .. } => any = true,
                 Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { .. } | Event::ClosureCall { .. } => return None,
                 Event::Branch { branch_history, .. } => {
                     for b in branch_history.iter().filter(|b| !b.diverges) {

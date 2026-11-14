@@ -52,11 +52,15 @@ fn pat_is_irrefutable(pat: &Pat, typeck: &rustc_middle::ty::TypeckResults) -> bo
 /// can fail come before it (for a `let`'s bindings, including that
 /// `let`'s own pattern). Whether the effect is on the path into the
 /// `else` depends on what comes after it, so it's judged once the
-/// whole chain has been walked.
+/// whole chain has been walked. `straight`: the part runs every
+/// effect in it whenever it runs (no `&&`, `||`, `if`, `match` or `?`
+/// inside it), so one after no part that can fail happens on every path
+/// out of the condition (#968).
 struct ChainEffect {
   kind: ChainEffectKind,
   checks_before: usize,
   line: usize,
+  straight: bool,
 }
 
 enum ChainEffectKind {
@@ -396,9 +400,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// "borrow of partially moved value" after `if let Some(a) = x &&
   /// a.len() > 5`). So the effects on variables in `outer` are recorded
   /// in `walk.effects`, and `chain_fail_moves` turns them into what the
-  /// else branch starts with (#281). The `while let` caller passes an
-  /// empty `outer`: the loop is drawn inline, with no branch to get
-  /// wrong.
+  /// else branch starts with (#281). The `while let` caller keeps only
+  /// the moves, which it draws where the loop ends (#968); it sets
+  /// `walk.first_lo` first, so the first part's are recorded too.
   fn visit_if_let_chain(
     &mut self,
     expr: &'tcx Expr<'tcx>,
@@ -460,7 +464,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let line = expr_to_line(part, &self.tcx);
     let is_outer = |r: &ResourceTy| r.extract_rap().is_some_and(|rap| outer.contains(rap));
     let checks_before = walk.checks;
-    let mut push = |kind| walk.effects.push(ChainEffect { kind, checks_before, line });
+    let straight = runs_straight(part);
+    let mut push = |kind| walk.effects.push(ChainEffect { kind, checks_before, line, straight });
     let held = |rap: &ResourceAccessPoint| self.rap_ownership_before(mark, rap.name()) == Ownership::Held;
     // Also the events of a conditional inside the part (`{ if c { z =
     // a; } z > 0 }`): they last the same way.
@@ -594,8 +599,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // A `let`'s bindings with only irrefutable parts up to them:
           // every way into the else branch passes the move. A move by
           // an expression may sit inside a conditional of its own
-          // (`a || take(s)`), so it's only "may have been".
-          let definite = *binding && eff.checks_before == 0;
+          // (`a || take(s)`), so it's only "may have been", unless its
+          // part has none (#968).
+          let definite = (*binding || eff.straight) && eff.checks_before == 0;
           let i = match out.iter().position(|m| m.rap == *rap) {
             Some(i) => i,
             None => {
@@ -3041,23 +3047,49 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let mut bindings = HashSet::new();
                 let body_end = self.tcx.sess.source_map()
                   .lookup_char_pos(then_body.span.hi()).line;
+                // The loop ends when the condition turns out false, which
+                // may be after it moved a variable declared before the
+                // loop (#968): `while let Some(x) = it.next() && { let w
+                // = s; … }`, `while let Some(c) = first(s)`. Its moves are
+                // recorded like an `if` let-chain's (`ChainWalk`), from
+                // its first part on: the loop runs it again after the
+                // body, so the body may have given the variable a new
+                // value, but not after the loop ends.
+                let outer: HashSet<ResourceAccessPoint> = self.in_scope.iter()
+                  .filter_map(|name| self.raps.get(name))
+                  .map(|rd| rd.rap.clone()).filter(|r| !r.is_fn()).collect();
+                let cond_lo = self.preprocessed_events.len();
+                let mut walk = ChainWalk { first_lo: Some(*self.unique_id), body_end, ..ChainWalk::default() };
                 if let ExprKind::Let(let_expr) = cond.kind {
+                  let mark = self.preprocessed_events.len();
                   self.visit_expr(let_expr.init);
+                  self.record_chain_effects(mark, &outer, cond, &mut walk, false);
+                  if !pat_is_irrefutable(let_expr.pat, self.tcx.typeck(let_expr.pat.hir_id.owner)) {
+                    walk.checks += 1;
+                  }
                   bindings = self.register_iflet_let_bindings(let_expr, None, body_end).0;
                 } else if is_let_chain(cond) {
                   // `while let A = x && cond` (#198): register each
                   // `let`'s bindings like a lone while-let's. The loop
                   // is drawn inline (no Branch), so the chain's events
-                  // are shown unconditionally; nothing to refuse. Their
-                  // scope ends are emitted after the body, below.
+                  // are shown unconditionally. Their scope ends are
+                  // emitted after the body, below.
                   let lo = *self.unique_id;
-                  self.visit_if_let_chain(cond, &HashSet::new(), &mut bindings, &mut ChainWalk { body_end, ..ChainWalk::default() });
+                  self.visit_if_let_chain(cond, &outer, &mut bindings, &mut walk);
                   let binds = self.chain_binding_events(&(lo..*self.unique_id), &bindings);
                   let cols = self.chain_binding_columns(&binds, &bindings);
                   self.binding_columns.extend(cols);
                 } else {
+                  let mark = self.preprocessed_events.len();
                   self.visit_expr(cond);
+                  self.record_chain_effects(mark, &outer, cond, &mut walk, false);
+                  walk.checks += 1;
                 }
+                // Only its moves: what else it does to an outer variable
+                // is drawn where it happens and lasts the same way
+                // whether or not the loop goes on.
+                walk.effects.retain(|e| matches!(e.kind, ChainEffectKind::Move { .. }));
+                let cond_moves = self.chain_fail_moves(&walk, cond_lo, false).moves;
                 let before = self.rap_names();
                 self.inside_branch = true;
                 // The body may run no times or many (#786).
@@ -3074,7 +3106,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let decls = &decls - &Self::left_at_exits(self.ends_at_exits(then_body, false), &decls);
                 self.emit_scope_end(decls, body_end);
                 // A `while` also ends when its condition is false.
-                self.emit_loop_exit_moves(expr, None, &before, true);
+                let broke_moved = self.emit_loop_exit_moves(expr, None, &before, true);
+                // After the condition moved something (#968). A variable
+                // a `break` also moved says so already.
+                let line = span_end_line(&expr.span, &self.tcx);
+                for m in cond_moves.into_iter().filter(|m| !broke_moved.contains(&m.rap)) {
+                  self.add_external_event(line, ExternalEvent::LoopExitMove {
+                    ro: m.rap,
+                    definite: m.definite,
+                    at: MaybeMovedAt::WhileCondFail { to: m.to, dropped: m.dropped, how: m.how },
+                    id: *self.unique_id,
+                  });
+                  *self.unique_id += 1;
+                }
               } else {
                 self.inside_branch = true;
                 self.visit_block(block);
@@ -9552,6 +9596,37 @@ fn moved_out_of_outer(
   out
 }
 
+/// Whether evaluating `e` runs all of it: no `&&` / `||`, `if`,
+/// `match` (or `?`), loop, closure, `let … else` or jump inside it
+/// (#968). See `ChainEffect::straight`.
+fn runs_straight(e: &Expr<'_>) -> bool {
+  struct Find(bool);
+  impl<'tcx> Visitor<'tcx> for Find {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      match e.kind {
+        ExprKind::Binary(op, ..) if matches!(op.node, rustc_hir::BinOpKind::And | rustc_hir::BinOpKind::Or) => self.0 = false,
+        ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Loop(..) | ExprKind::Closure(..)
+        | ExprKind::Break(..) | ExprKind::Continue(_) | ExprKind::Ret(_) | ExprKind::Become(_) => self.0 = false,
+        _ => {}
+      }
+      intravisit::walk_expr(self, e);
+    }
+    fn visit_local(&mut self, l: &'tcx LetStmt<'tcx>) {
+      if l.els.is_some() {
+        self.0 = false;
+      }
+      intravisit::walk_local(self, l);
+    }
+  }
+  let mut f = Find(true);
+  match e.kind {
+    // A `let` part: its scrutinee (the pattern is what can fail).
+    ExprKind::Let(let_expr) => f.visit_expr(let_expr.init),
+    _ => f.visit_expr(e),
+  }
+  f.0
+}
+
 /// Whether `e` (outside any closure) contains a `return`, or a `?`,
 /// which returns on its error path.
 fn body_returns(e: &Expr<'_>) -> bool {
@@ -9759,13 +9834,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a `while` / `for` also ends when its condition / iterator does).
   /// Also used for a labeled block (`block`: its HirId, which a `break`
   /// may target instead of the block expression's).
-  fn emit_loop_exit_moves(&mut self, loop_expr: &'tcx Expr<'tcx>, block: Option<HirId>, before: &HashSet<String>, ends_otherwise: bool) {
+  fn emit_loop_exit_moves(&mut self, loop_expr: &'tcx Expr<'tcx>, block: Option<HirId>, before: &HashSet<String>, ends_otherwise: bool) -> Vec<ResourceAccessPoint> {
     let (mine, rest): (Vec<BreakMove>, Vec<BreakMove>) =
       std::mem::take(&mut self.break_moves).into_iter()
         .partition(|m| m.target == loop_expr.hir_id || Some(m.target) == block);
     self.break_moves = rest;
+    let mut emitted = Vec::new();
     if mine.is_empty() {
-      return;
+      return emitted;
     }
     let all_breaks = breaks_to(loop_expr).len();
     let line = span_end_line(&loop_expr.span, &self.tcx);
@@ -9793,7 +9869,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         id: *self.unique_id,
       });
       *self.unique_id += 1;
+      emitted.push(m.rap.clone());
     }
+    emitted
   }
 }
 
