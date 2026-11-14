@@ -16801,6 +16801,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the value e points to",
         ],
     },
+    TooltipExpect {
+        name: "shared_column_match_arm",
+        // #927: an `r` declared in a `match` arm shares the column of an
+        // earlier `r` that's out of scope by then (a block's, an `if`
+        // arm's). The column was drawn into the `match` as if an `r`
+        // existed there. Now the arm's `r` exists only in its arm, as it
+        // does when it has a name of its own. (In `nested`, the inner
+        // `w`'s scope end at its block's `}` is still missing, before
+        // and after this fix: #931.)
+        must_contain: &[
+            "r immutably borrows a resource",
+            "r goes out of scope",
+            "a's resource is immutably borrowed by r; a is read-only while the borrow is live",
+            "p immutably borrows a resource",
+            "p goes out of scope",
+            "s acquires ownership of a resource",
+            "s goes out of scope. Its resource is dropped.",
+            "w immutably borrows a resource",
+        ],
+        must_not_contain: &[
+            "r is live in a conditional expression",
+            "r has no value yet",
+            "r's borrow has ended on this path",
+            "p is live in a conditional expression",
+            "p has no value yet",
+            "p's borrow has ended on this path",
+            "s is live in a conditional expression",
+            "s has no value yet",
+            "w is live in a conditional expression",
+            "w has no value yet",
+            "w's borrow has ended on this path",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

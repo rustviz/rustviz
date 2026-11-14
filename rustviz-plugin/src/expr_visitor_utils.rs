@@ -677,21 +677,31 @@ pub fn needs_scope_end(r: &ResourceAccessPoint) -> bool {
   !r.is_unbound_temporary()
 }
 
-/// The bindings of the `if let` patterns down an `else if let` chain
-/// (`else if let Some(y) = b { … } else if let … `), by name. A binding
-/// that reuses an existing variable's name gets no RAP of its own, so
-/// `raps_declared_since` can't see it as declared in the `else`.
-pub fn else_if_let_bindings(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
-  let mut res = HashSet::new();
-  let mut cur = Some(expr);
-  while let Some(e) = cur {
-    let ExprKind::If(cond, _, els) = e.kind else { break };
-    if let ExprKind::Let(let_expr) = cond.kind {
-      collect_pat_bindings(let_expr.pat, tcx, raps, &mut res);
+/// Every variable bound inside `expr`, at any depth: its `let`s and
+/// patterns, also those of nested blocks, loops, `if let`s and `match`
+/// arms (a closure's body, a different function, isn't walked). A
+/// binding that reuses the name of an earlier variable that's out of
+/// scope by then shares that variable's column (sibling blocks, #308),
+/// so its RAP was registered before `expr` and `raps_declared_since`
+/// can't see it as declared in it (`else if let` bindings, #501; a
+/// branch's `let`s, #927).
+pub fn bindings_within<'v>(expr: &'v Expr<'v>, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find<'a, 't> { tcx: &'a TyCtxt<'t>, raps: &'a HashMap<String, RapData>, out: HashSet<ResourceAccessPoint> }
+  impl<'v> Visitor<'v> for Find<'_, '_> {
+    fn visit_pat(&mut self, p: &'v Pat<'v>) {
+      // A desugaring's own bindings (`for`'s `iter`, `?`'s
+      // `residual`) aren't variables of the program.
+      if p.span.from_expansion() {
+        intravisit::walk_pat(self, p);
+      } else {
+        collect_pat_bindings(p, self.tcx, self.raps, &mut self.out);
+      }
     }
-    cur = els;
   }
-  res
+  let mut f = Find { tcx, raps, out: HashSet::new() };
+  f.visit_expr(expr);
+  f.out
 }
 
 pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint>{
