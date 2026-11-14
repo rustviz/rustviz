@@ -15709,6 +15709,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=bm acquires ownership of a new resource. Its previous bm.0 was moved out earlier, so nothing of it is dropped.",
         ],
     },
+    // ─── A reference copied into a variable that outlives it (#913) ───
+    // The loan lasts until the copy's last use, and the copy gives the
+    // lender back there. The source reference is gone by then: it
+    // doesn't give the lender back after its scope end. Its own end is
+    // stated once, with its scope end
+    // (`copied_reference_ends_with_its_scope`).
+    TooltipExpect {
+        name: "ref_copy_outlives_scope_913",
+        must_contain: &[
+            "Return immutably borrowed resource from x to t",
+            "Return immutably borrowed resource from x2 to t2",
+            "Return immutably borrowed resource from x3 to words",
+            "Return immutably borrowed resource from v4 to t4",
+            "t's resource is no longer immutably borrowed",
+            "w's immutable borrow ends",
+            "w goes out of scope",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from w to t",
+            "Return immutably borrowed resource from w2 to t2",
+            "Return immutably borrowed resource from w3 to words",
+            "Return immutably borrowed resource from w4 to t4",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -21103,4 +21127,24 @@ fn format_macro_arguments_are_coloured_in_the_code_panel() {
     // The macro name is plain text, not a highlighted function.
     assert!(!row_of("    print!(").contains(">print!</tspan>"));
     assert!(!row_of("= format!(").contains(">format!</tspan>"));
+}
+
+/// #913: a reference copied into a variable that outlives it (`x = w;`,
+/// `*r = w;`, `v.push(w);`) ends with its own scope. Its end is in the
+/// same dot as its scope end, before it, and nowhere below it: the old
+/// plugin drew "w's immutable borrow ends" (with a return arrow) a row
+/// after "w goes out of scope", on the copy's last-use row.
+#[test]
+fn copied_reference_ends_with_its_scope() {
+    let rv = run_with_local_backend("ref_copy_outlives_scope_913");
+    let svg = rv.timeline_panel_string();
+    let groups = tooltip_lines(&svg);
+    for w in ["w", "w2", "w3", "w4"] {
+        let (end, scope) = (format!("{w}'s immutable borrow ends"), format!("{w} goes out of scope"));
+        let dot: Vec<&Vec<String>> = groups.iter().filter(|g| g.contains(&scope)).collect();
+        assert_eq!(dot, vec![&vec![end.clone(), scope.clone()]], "{w}'s scope-end dot");
+        let ends = dots_listing_tooltip(&svg, &end);
+        let scopes = dots_listing_tooltip(&svg, &scope);
+        assert_eq!(ends, scopes, "{w}'s borrow end is only in its scope-end dot");
+    }
 }
