@@ -15500,6 +15500,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the reference is stored in a place that isn't drawn",
         ],
     },
+    TooltipExpect {
+        name: "for_ref_copy_str",
+        // #888: `for &w in &words` (words: Vec<&str>) copies the `&str`
+        // stored in each element into w. w points at the string
+        // literal, not into words (w can outlive the loop across a
+        // `words.push(..)`); the loop's iterator is what borrows words
+        // until the loop ends (`words.push(..)` in the body is E0502).
+        // w used to be drawn borrowing words. w's column matches
+        // `let w = words[0];`. Where the iterator's borrow starts and
+        // ends is checked in `for_ref_copy_of_stored_ref_borrows_only_via_the_iterator`.
+        must_contain: &[
+            "words's resource is immutably borrowed by the `for` loop's iterator; words is read-only until the loop ends",
+            "words's resource is no longer immutably borrowed",
+            "w is bound to an immutable reference",
+            "w's immutable borrow ends (what it borrows from isn't shown)",
+            "pairs's resource is immutably borrowed by the `for` loop's iterator; pairs is read-only until the loop ends",
+            "k is bound to an immutable reference",
+            "k's immutable borrow ends (what it borrows from isn't shown)",
+            "n is bound to a copyable value",
+            "tags's resource is mutably borrowed by the `for` loop's iterator; tags can't be used until the loop ends",
+            "tags's resource is no longer mutably borrowed",
+            "tags goes out of scope. Its resource is dropped.",
+            // `&mut t` copies a shared `&str` out of `&mut &str`.
+            "t is bound to an immutable reference",
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            // `&ref s` borrows the String inside names: still drawn.
+            "names's resource is immutably borrowed by s; names is read-only while the borrow is live",
+            "Immutable borrow from names to s",
+            "Return immutably borrowed resource from s to names",
+        ],
+        must_not_contain: &[
+            "words's resource is immutably borrowed by w;",
+            "Immutable borrow from words to w",
+            "Return immutably borrowed resource from w to words",
+            "words's resource is being shared by one or more variables",
+            "w immutably borrows a resource",
+            "pairs's resource is immutably borrowed by k;",
+            "Immutable borrow from pairs to k",
+            "Return immutably borrowed resource from k to pairs",
+            "pairs's resource is being shared by one or more variables",
+            "tags's resource is mutably borrowed by t;",
+            "Mutable borrow from tags to t",
+            "Return immutably borrowed resource from t to tags",
+            "t mutably borrows a resource",
+            "tags goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -16645,6 +16692,46 @@ fn loop_head_borrow_only_the_iterator_holds_spans_the_loop() {
         assert!(
             (first_below - close_row).abs() < 1.0,
             "{name}: {var}'s borrow should end on the loop's closing row (y={close_row}), not at y={first_below}; ends: {ends:?}",
+        );
+    }
+}
+
+/// #888: `for &w in &words` (words: Vec<&str>) copies a reference out of
+/// each element, so w borrows nothing from words; the loop's iterator
+/// borrows words from the `for` row to the loop's closing `}` row.
+#[test]
+fn for_ref_copy_of_stored_ref_borrows_only_via_the_iterator() {
+    let name = "for_ref_copy_str";
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (var, kind, start, for_src, body_src) in [
+        ("words", "immutably", "words's resource is immutably borrowed by the `for` loop's iterator; words is read-only until the loop ends",
+         "for &w in &words {", "println!(\"{}\", w);"),
+        ("pairs", "immutably", "pairs's resource is immutably borrowed by the `for` loop's iterator; pairs is read-only until the loop ends",
+         "for &(k, n) in &pairs {", "println!(\"{} {}\", k, n);"),
+        ("tags", "mutably", "tags's resource is mutably borrowed by the `for` loop's iterator; tags can't be used until the loop ends",
+         "for &mut t in &mut tags {", "println!(\"{}\", t);"),
+    ] {
+        let for_row = code_row_y(&code, for_src);
+        let body_row = code_row_y(&code, body_src);
+        let close_row = code_rows_y(&code, "}")
+            .into_iter()
+            .find(|y| *y > body_row)
+            .expect("a closing brace below the loop body");
+        let starts = dots_listing_tooltip(&timeline, start);
+        assert!(
+            starts.len() == 1 && (starts[0].1 - for_row).abs() < 1.0,
+            "{name}: {var}'s borrow by the loop's iterator should start on its `for` row (y={for_row}): {starts:?}",
+        );
+        let end = format!("{var}'s resource is no longer {kind} borrowed");
+        let first_below = dots_listing_tooltip(&timeline, &end)
+            .iter()
+            .map(|d| d.1)
+            .filter(|y| *y > for_row)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (first_below - close_row).abs() < 1.0,
+            "{name}: {var}'s borrow should end on the loop's closing row (y={close_row}), not at y={first_below}",
         );
     }
 }

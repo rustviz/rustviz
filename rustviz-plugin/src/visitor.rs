@@ -7372,11 +7372,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// "real" source (the iter expression's tail call) doesn't render
   /// cleanly — see the for-loop arm of `visit_expr` for context.
   pub fn register_pattern_bindings_anon(&mut self, pat: &'tcx Pat<'tcx>, line: usize) {
+    self.register_pattern_bindings_below(pat, line, 0);
+  }
+
+  /// `derefs` counts the references the pattern has gone through above
+  /// `pat`, written (`&w`) or implicit (default binding modes): the
+  /// first is the loop item's own `&` into the head (`pattern_lender`).
+  fn register_pattern_bindings_below(&mut self, pat: &'tcx Pat<'tcx>, line: usize, derefs: usize) {
+    let typeck = self.tcx.typeck(pat.hir_id.owner);
+    let derefs = derefs + typeck.pat_adjustments().get(pat.hir_id).map_or(0, |a| a.len());
     match pat.kind {
       PatKind::Binding(_, hirid, ident, sub_pat) => {
         let name = binding_name(&self.tcx, hirid);
-        let pat_ty = self.tcx.typeck(hirid.owner).pat_ty(pat);
-        let lender = if pat_ty.is_ref() { self.pattern_lender.clone() } else { None };
+        let pat_ty = typeck.pat_ty(pat);
+        // A reference binding borrows the head when it is the item's
+        // reference itself (`(i, x)` of `v.iter().enumerate()`), or
+        // borrows a place reached through only that one reference
+        // (`(a, b)` of `&pairs`, `&ref n` of `&names`). A by-value
+        // binding below a deref copies a reference stored in the
+        // element (`for &w in &words`, words: Vec<&str>): it points
+        // wherever that reference does, not into the head (#888).
+        let by_ref = matches!(typeck.pat_binding_modes().get(hirid).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
+        let borrows_head = if by_ref { derefs <= 1 } else { derefs == 0 };
+        let lender = if pat_ty.is_ref() && borrows_head { self.pattern_lender.clone() } else { None };
         if pat_ty.is_ref() {
           let pointee_copy = self.ref_pointee_is_copy(pat_ty, hirid.owner);
           self.add_ref(
@@ -7408,29 +7426,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           None => self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false),
         }
         if let Some(sub) = sub_pat {
-          self.register_pattern_bindings_anon(sub, line);
+          self.register_pattern_bindings_below(sub, line, derefs);
         }
       }
       PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) => {
-        for p in ps { self.register_pattern_bindings_anon(p, line); }
+        for p in ps { self.register_pattern_bindings_below(p, line, derefs); }
       }
       PatKind::Struct(_, fs, _) => {
-        for f in fs { self.register_pattern_bindings_anon(f.pat, line); }
+        for f in fs { self.register_pattern_bindings_below(f.pat, line, derefs); }
       }
       PatKind::Or(ps) => {
         // alternatives bind the same names — first is enough.
-        if let Some(p) = ps.first() { self.register_pattern_bindings_anon(p, line); }
+        if let Some(p) = ps.first() { self.register_pattern_bindings_below(p, line, derefs); }
       }
-      PatKind::Ref(inner, _, _)
-      | PatKind::Box(inner)
+      PatKind::Ref(inner, _, _) => {
+        self.register_pattern_bindings_below(inner, line, derefs + 1);
+      }
+      PatKind::Box(inner)
       | PatKind::Deref(inner)
       | PatKind::Guard(inner, _) => {
-        self.register_pattern_bindings_anon(inner, line);
+        self.register_pattern_bindings_below(inner, line, derefs);
       }
       PatKind::Slice(before, mid, after) => {
-        for p in before { self.register_pattern_bindings_anon(p, line); }
-        if let Some(p) = mid { self.register_pattern_bindings_anon(p, line); }
-        for p in after { self.register_pattern_bindings_anon(p, line); }
+        for p in before { self.register_pattern_bindings_below(p, line, derefs); }
+        if let Some(p) = mid { self.register_pattern_bindings_below(p, line, derefs); }
+        for p in after { self.register_pattern_bindings_below(p, line, derefs); }
       }
       // No bindings inside.
       PatKind::Wild | PatKind::Never | PatKind::Missing | PatKind::Err(_)
