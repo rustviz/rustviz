@@ -383,6 +383,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // initializer and extended with it (`let w = W { r: &String::new() };`,
   // #856), by the `&` expression that borrows it.
   pub nested_ext_temps: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
+  // The `(temporary N)` column of a tuple / struct / array literal that
+  // is a `let`-`else`'s initializer (`let (Some(a), _) = (x, make())
+  // else { .. }`), by the literal and by each variable moved into it
+  // (x): the pattern's bindings are moved out of it (#954).
+  pub let_else_literal_temps: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
   // The `(temporary N)` column of an unbound temporary that is a
   // constructor call (`Some(make());`), with the id of the move into it
   // from the constructor, which the constructor's arguments replace
@@ -710,6 +715,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loop_iterators: Vec::new(),
       temp_cols: HashMap::new(),
       nested_ext_temps: HashMap::new(),
+      let_else_literal_temps: HashMap::new(),
       ctor_temps: HashMap::new(),
       destructure_srcs: HashMap::new(),
       destructure_moved: HashSet::new(),
@@ -5938,6 +5944,15 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
   // `_ => unreachable!()` in `let s = match … { … }` doesn't bind `s`
   // (#296). (`return v` hands `v` to the caller, not to `lhs`.)
   if self.tcx.typeck(rhs.hir_id.owner).expr_ty_opt(rhs).is_some_and(|ty| ty.is_never()) {
+    return;
+  }
+  // `let (Some(a), _) = (x, make()) else { .. }`: the literal is the
+  // `let`-`else`'s temporary, which x was moved into; `a` is moved out
+  // of it, not out of x (#954). Keyed by the literal and by each
+  // variable in it (`note_let_else_literal_temp`).
+  if let Some(tmp) = self.let_else_literal_temps.get(&rhs.hir_id).cloned() {
+    let line_num = span_to_line(&rhs.span, &self.tcx);
+    self.add_ev(line_num, evt, lhs, ResourceTy::Value(tmp), true);
     return;
   }
   // Macro-expanded RHS — `let v = vec![1, 2, 3]`, `let s = format!(...)`,

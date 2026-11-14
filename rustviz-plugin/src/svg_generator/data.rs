@@ -3211,8 +3211,11 @@ impl Event {
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary())
                     && matches!(from, ResourceTy::Value(f) if !f.is_fn()) {
                     // `vec![s];`: s is moved into the temporary (#570).
+                    // `if let P { a: Some(s), .. } = (P { a: x, .. })`:
+                    // the pattern can move it on (#955).
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
-                    hover_messages::event_dot_unbound_temporary_takes(&from_name)
+                    let moved_on = matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(_), .. })));
+                    hover_messages::event_dot_unbound_temporary_takes(&from_name, moved_on)
                 } else if matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, .. })))
                     && matches!(from, ResourceTy::Value(ResourceAccessPoint::Function(f))
                         if !f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase()))) {

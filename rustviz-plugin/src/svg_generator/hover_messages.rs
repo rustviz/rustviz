@@ -537,8 +537,14 @@ pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part:
 
 // A variable moved into an unbound temporary (`vec![s];`, `let _ = P {
 // name: t, n: 1 };`): the variable's value is now the temporary's, and
-// is dropped with it (#570).
-pub fn event_dot_unbound_temporary_takes(from_name: &String) -> String {
+// is dropped with it (#570). When a pattern moves parts of the
+// temporary out (`moved_on`: `if let P { a: Some(s), .. } = (P { a: x,
+// .. })`), the column's other dots say what is left and when it is
+// dropped (#955).
+pub fn event_dot_unbound_temporary_takes(from_name: &String, moved_on: bool) -> String {
+    if moved_on {
+        return format!("This temporary takes the value of {0}, which is moved into it", styled_name_html(from_name));
+    }
     format!(
         "This temporary takes the value of {0}, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
         styled_name_html(from_name)
