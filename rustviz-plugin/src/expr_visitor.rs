@@ -3020,6 +3020,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// let r = &mut q.a;`. `None` when the chain ends anywhere else (a
   /// parameter's caller, an anonymous temporary) or the field has no
   /// column. A reference is never returned: it doesn't own (#323).
+  /// `lhs_expr` is `r.f` / `r.inner.f` / `(*r).f` written through the
+  /// reference `r`: the field's own column when `r` points into a local
+  /// struct that has one (`s.f`, #854). None for a parameter's struct,
+  /// which belongs to the caller and has no column here.
+  pub fn field_column_behind_ref(&self, lhs_expr: &'tcx Expr<'tcx>, r: &ResourceAccessPoint) -> Option<ResourceAccessPoint> {
+    expr_to_rap_name(lhs_expr, &self.tcx)
+      .and_then(|full| full.strip_prefix(r.name().as_str()).map(str::to_owned))
+      .filter(|sfx| sfx.starts_with('.'))
+      .and_then(|sfx| self.owner_behind_ref(r, &sfx))
+  }
+
   pub fn owner_behind_ref(&self, r: &ResourceAccessPoint, suffix: &str) -> Option<ResourceAccessPoint> {
     self.owner_behind_ref_at(r, suffix, 0)
   }
