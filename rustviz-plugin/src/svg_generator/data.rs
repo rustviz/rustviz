@@ -3323,6 +3323,11 @@ impl Event {
                     let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
                     hover_messages::event_dot_literal_temporary_acquire(&from_name, ends_with_statement)
+                } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, temp_part: Some(part), .. })) = is {
+                    // `match Some(make()) { Some(s) if .. => .., _ => .. }`:
+                    // a constructor a pattern takes apart (#807).
+                    let from_name = from.extract_rap().map(|r| r.name().clone());
+                    hover_messages::event_dot_ctor_temporary_part_acquire(from_name.as_ref(), part)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) && matches!(from, ResourceTy::Anonymous) {
                     // `let (x, _) = (m(), n());`: the literal's own value
                     // (#483).
@@ -3335,7 +3340,7 @@ impl Event {
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
                     let moved_on = matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(_), .. })));
                     hover_messages::event_dot_unbound_temporary_takes(&from_name, moved_on)
-                } else if matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, .. })))
+                } else if matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, temp_part: None, .. })))
                     && matches!(from, ResourceTy::Value(ResourceAccessPoint::Function(f))
                         if !f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase()))) {
                     // `Some(make());`: what `make` returned is moved into

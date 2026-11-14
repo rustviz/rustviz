@@ -5208,8 +5208,8 @@ pub fn register_iflet_let_bindings(
     // #597), `x` as a new value and each place as moved into it only if
     // its alternative matched. The parents are the tuple literal's
     // elements, as for `match (a, b)`.
-    let (or_parents, or_parents_ty): (Vec<ResourceTy>, Vec<Ty<'tcx>>) = match scrutinee.kind {
-        ExprKind::Tup(elems) if !scrutinee.span.from_expansion() => (
+    let (or_parents, or_parents_ty): (Vec<ResourceTy>, Vec<Ty<'tcx>>) = match self.literal_elems(scrutinee) {
+        Some(elems) => (
             elems.iter().map(|e| self.rap_or_field_through_ref(e)).collect(),
             elems.iter().map(|e| typeck_res.node_type(e.hir_id)).collect(),
         ),
@@ -5222,8 +5222,9 @@ pub fn register_iflet_let_bindings(
     // sub-pattern destructures its own element of the tuple literal
     // (#327), also of a tuple literal nested in it (#627). Otherwise
     // the whole pattern matches the scrutinee.
-    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (pat.kind, scrutinee.kind) {
-        (PatKind::Tuple(..), ExprKind::Tup(_)) if !scrutinee.span.from_expansion() => {
+    // `if let Some(x) = Some(h)`: `x` takes `h`'s value (#807).
+    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (pat.kind, self.literal_elems(scrutinee)) {
+        (PatKind::Tuple(..) | PatKind::TupleStruct(..), Some(_)) => {
             self.literal_pat_parents(pat, scrutinee).into_iter().map(|(sp, parent, ty, _)| (sp, parent, ty)).collect()
         }
         _ => vec![(pat, parent.clone(), scrutinee_ty)],
@@ -5752,7 +5753,7 @@ pub fn tuple_scrutinee_moves(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<Resource
 /// (`["1", "0"]` for `b` in `(a, (b, c))`) and its type.
 fn tuple_scrutinee_vars(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<(ResourceAccessPoint, Vec<String>, Ty<'tcx>)> {
     let mut out = Vec::new();
-    if matches!(scrutinee.kind, ExprKind::Tup(_)) && !scrutinee.span.from_expansion() {
+    if self.literal_elems(scrutinee).is_some() {
         let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
         self.tuple_literal_vars(scrutinee, &mut Vec::new(), typeck, false, &mut out);
         // A variable's field is moved into the tuple too (`y.name` in
@@ -5786,16 +5787,61 @@ pub fn tuple_scrutinee_position(&self, expr: &'tcx Expr<'tcx>) -> bool {
     }
 }
 
+/// The variant or struct that a constructor call (`Some(f)`) or a tuple
+/// struct / struct pattern (`Some(x)`, `P { .. }`) names, as a path
+/// (#807). `None` for anything else.
+fn variant_key(&self, res: Res) -> Option<String> {
+    let id = match res {
+        Res::Def(DefKind::Ctor(..), id) => self.tcx.parent(id),
+        Res::Def(DefKind::Variant | DefKind::Struct, id) => id,
+        _ => return None,
+    };
+    Some(self.tcx.def_path_str(id))
+}
+
+/// `variant_key` of the constructor call `e`.
+fn ctor_variant_key(&self, e: &'tcx Expr<'tcx>) -> Option<String> {
+    let ExprKind::Call(callee, _) = e.kind else { return None };
+    let ExprKind::Path(ref q) = callee.kind else { return None };
+    self.variant_key(self.tcx.typeck(e.hir_id.owner).qpath_res(q, callee.hir_id))
+}
+
+/// `variant_key` of the tuple struct or struct pattern `pat`.
+fn pat_variant_key(&self, pat: &'tcx Pat<'tcx>) -> Option<String> {
+    let typeck = self.tcx.typeck(pat.hir_id.owner);
+    match pat.kind {
+        PatKind::TupleStruct(ref q, ..) | PatKind::Struct(ref q, ..) => self.variant_key(typeck.qpath_res(q, pat.hir_id)),
+        _ => None,
+    }
+}
+
+/// Whether the tuple struct pattern `pat` names another variant than
+/// the constructor call `e` builds (`Err(x)` on `Ok(f)`): it can't
+/// match, and binds nothing from `e`'s elements.
+pub fn ctor_pat_mismatch(&self, pat: &'tcx Pat<'tcx>, e: &'tcx Expr<'tcx>) -> bool {
+    match (self.pat_variant_key(pat), self.ctor_variant_key(e)) {
+        (Some(p), Some(c)) => p != c,
+        _ => false,
+    }
+}
+
 fn tuple_literal_vars(&self, e: &'tcx Expr<'tcx>, path: &mut Vec<String>,
   typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, fields: bool, out: &mut Vec<(ResourceAccessPoint, Vec<String>, Ty<'tcx>)>) {
-    match e.kind {
-        ExprKind::Tup(elems) if !e.span.from_expansion() => {
-            for (i, el) in elems.iter().enumerate() {
-                path.push(i.to_string());
-                self.tuple_literal_vars(el, path, typeck, fields, out);
-                path.pop();
-            }
+    if let Some(elems) = self.literal_elems(e) {
+        // A constructor's element `i` is `i#<variant>`: a pattern
+        // naming another variant doesn't match it (`sub_pat_at`).
+        let variant = self.ctor_variant_key(e);
+        for (i, el) in elems.iter().enumerate() {
+            path.push(match &variant {
+                Some(v) => format!("{}#{}", i, v),
+                None => i.to_string(),
+            });
+            self.tuple_literal_vars(el, path, typeck, fields, out);
+            path.pop();
         }
+        return;
+    }
+    match e.kind {
         ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, Res::Local(_)) => {
             let ty = typeck.node_type(e.hir_id);
             if ty.is_ref() || self.ty_is_copy(ty, e.hir_id.owner) {
@@ -5899,8 +5945,16 @@ pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &R
 pub fn tuple_scrutinee_target(&self, scrutinee: &'tcx Expr<'tcx>) -> ResourceTy {
   let text = self.tcx.sess.source_map().span_to_snippet(scrutinee.span).ok()
     .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
-    .filter(|t| t.chars().count() <= 32)
-    .unwrap_or_default();
+    .filter(|t| t.chars().count() <= 32);
+  // A constructor (`Some(f)`, #807) is named by its path when it's too
+  // long to quote: `Some(..)`. Its text tells it from a tuple's.
+  let text = match (text, scrutinee.kind) {
+    (Some(t), _) => t,
+    (None, ExprKind::Call(callee, _)) => {
+      self.tcx.sess.source_map().span_to_snippet(callee.span).map(|c| format!("{}(..)", c)).unwrap_or_default()
+    }
+    (None, _) => String::new(),
+  };
   ResourceTy::Temporary { extended: false, tuple: Some(text) }
 }
 
@@ -5966,6 +6020,17 @@ pub fn tuple_scrutinee_left(&self, scrutinee: &'tcx Expr<'tcx>, pat: Option<&'tc
 fn sub_pat_at(&self, pat: &'tcx Pat<'tcx>, step: &str,
   typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> Result<Option<&'tcx Pat<'tcx>>, ()> {
   use rustc_middle::ty::TyKind;
+  // `0#Option::Some`: field 0 of a constructor scrutinee's `Some` (#807).
+  let (step, variant) = match step.split_once('#') {
+    Some((s, v)) => (s, Some(v)),
+    None => (step, None),
+  };
+  if let Some(v) = variant {
+    if self.pat_variant_key(pat).is_some_and(|p| p != v) {
+      // Another variant: the pattern doesn't match it, all of it stays.
+      return Ok(None);
+    }
+  }
   match pat.kind {
     PatKind::Tuple(subs, dd) | PatKind::TupleStruct(_, subs, dd) => {
       let Ok(i) = step.parse::<usize>() else { return Err(()) };
@@ -6084,20 +6149,22 @@ fn pat_at_path(&self, pat: &'tcx Pat<'tcx>, path: &[String],
 /// literal's, so it isn't drawn as a partial move.
 pub fn literal_pat_parents(&self, pat: &'tcx Pat<'tcx>, scrutinee: &'tcx Expr<'tcx>)
   -> Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>, &'tcx Expr<'tcx>)> {
-  fn leaves<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
-    match e.kind {
-      ExprKind::Tup(elems) if !e.span.from_expansion() => for el in elems { leaves(el, out) },
-      _ => out.push(e),
-    }
-  }
   let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
   let mut pairs = Vec::new();
   self.literal_pat_pairs(pat, scrutinee, &mut pairs);
   let mut out = Vec::new();
   for (p, el) in pairs {
-    if matches!(el.kind, ExprKind::Tup(_)) && !el.span.from_expansion() && !std::ptr::eq(el, scrutinee) {
+    let mut stand_in = p;
+    while let PatKind::Or(alts) = stand_in.kind {
+      stand_in = &alts[0];
+    }
+    if self.literal_elems(el).is_some() && self.ctor_pat_mismatch(stand_in, el) {
+      // `Err(e)` on `Ok(f)`: this arm can't match, and `e` gets
+      // nothing from `f` (#807).
+      out.push((p, ResourceTy::Anonymous, typeck.node_type(el.hir_id), el));
+    } else if self.literal_elems(el).is_some() && !std::ptr::eq(el, scrutinee) {
       let mut ls = Vec::new();
-      leaves(el, &mut ls);
+      self.literal_leaves(el, &mut ls);
       for l in ls {
         out.push((p, self.rap_or_field_through_ref(l), typeck.node_type(el.hir_id), l));
       }
@@ -6110,7 +6177,9 @@ pub fn literal_pat_parents(&self, pat: &'tcx Pat<'tcx>, scrutinee: &'tcx Expr<'t
 
 /// Each sub-pattern of `pat` with the element of the tuple literal `e`
 /// it matches, through nested tuple literals (`(p, (x, _))` on `(a, (b,
-/// c))`: `p` with `a`, `x` with `b`, `_` with `c`; #627). An
+/// c))`: `p` with `a`, `x` with `b`, `_` with `c`; #627) and
+/// constructors taken apart the same way (`Some(x)` on `Some(f)`: `x`
+/// with `f`; #807, see `literal_elems`). An
 /// or-pattern's first alternative stands for it, as in
 /// `or_arm_stand_in`. A sub-pattern that isn't a tuple pattern, or an
 /// element that isn't a tuple literal, is one pair.
@@ -6119,8 +6188,14 @@ pub fn literal_pat_pairs(&self, pat: &'tcx Pat<'tcx>, e: &'tcx Expr<'tcx>, out: 
   while let PatKind::Or(alts) = p.kind {
     p = &alts[0];
   }
-  match (p.kind, e.kind) {
-    (PatKind::Tuple(subs, dd), ExprKind::Tup(elems)) if !e.span.from_expansion() => {
+  let elems = match (p.kind, self.literal_elems(e)) {
+    (PatKind::Tuple(subs, dd), Some(elems)) if matches!(e.kind, ExprKind::Tup(_)) => Some((subs, dd, elems)),
+    // `Some(x)` on `Some(f)`: `x` with `f` (#807).
+    (PatKind::TupleStruct(_, subs, dd), Some(elems)) if !self.ctor_pat_mismatch(p, e) => Some((subs, dd, elems)),
+    _ => None,
+  };
+  match elems {
+    Some((subs, dd, elems)) => {
       let gap = elems.len().saturating_sub(subs.len());
       for (k, sp) in subs.iter().enumerate() {
         let i = match dd.as_opt_usize() {
@@ -6132,7 +6207,17 @@ pub fn literal_pat_pairs(&self, pat: &'tcx Pat<'tcx>, e: &'tcx Expr<'tcx>, out: 
         }
       }
     }
-    _ => out.push((pat, e)),
+    None => out.push((pat, e)),
+  }
+}
+
+/// The elements of the literal `e` (`literal_elems`), through nested
+/// literals: `b` and `c` for `(b, c)` or `Some((b, c))`. A name bound
+/// from the whole of it is bound from each of them.
+fn literal_leaves(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+  match self.literal_elems(e) {
+    Some(elems) => for el in elems { self.literal_leaves(el, out) },
+    None => out.push(e),
   }
 }
 /// What matching `pat` against an owned value leaves of it: all of it
