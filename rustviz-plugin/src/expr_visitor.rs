@@ -2861,12 +2861,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// may be stored in (an `Index` naming it, with no column of its own
   /// in this event) and the line the loan ends on. None (the borrow
   /// ends at the call, as before) unless x is a variable with a column
-  /// that owns its data, the place is a variable or field with a
-  /// column, and the loan outlives the call's line.
+  /// that owns its data, or a reference variable the call borrows
+  /// itself (`keep(&mut v, &x)` with `x: &String` and
+  /// `fn keep<'a>(h: &mut Vec<&'a &'a String>, r: &'a &'a String)`,
+  /// see `ref_var_borrow`, #960), the place is a variable or field with
+  /// a column, and the loan outlives the call's line.
   fn stored_borrow(&self, arg: &'tcx Expr<'tcx>, from_ro: &ResourceTy, line: usize) -> Option<(ResourceTy, usize)> {
     let ExprKind::AddrOf(..) = arg.kind else { return None };
     let ResourceTy::Value(lender) = from_ro else { return None };
-    if lender.is_ref() || lender.is_fn() {
+    if lender.is_fn() || (lender.is_ref() && !ref_var_borrow(arg, self.tcx.typeck(arg.hir_id.owner))) {
       return None;
     }
     let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return None };

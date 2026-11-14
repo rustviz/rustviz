@@ -16973,6 +16973,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    // ─── `keep(&mut v, &x)` may store `&x` (x a reference) (#960) ───
+    TooltipExpect {
+        name: "stored_ref_var_arg_960",
+        // keep's signature lets it store `&x` in v: x itself stays
+        // borrowed while v is in use, as an owner does (#513). The end
+        // row is checked by `stored_borrow_of_a_reference_variable_ends_at_the_holders_last_use`.
+        must_contain: &[
+            "x is immutably borrowed by keep; x is read-only while the borrow is live",
+            "keep reads from x; keep's signature lets it store this reference in v, so x stays borrowed while v is in use",
+            "x is no longer immutably borrowed",
+            "m is mutably borrowed by keep_mut; m can't be used while the borrow is live",
+            "keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in w, so m stays borrowed while w is in use",
+            "m is no longer mutably borrowed",
+            // look can't store its argument: x's borrow ends there.
+            "look reads from x",
+        ],
+        must_not_contain: &[
+            // The call dots used to end the borrow at the call.
+            "=keep reads from x",
+            "=keep_mut reads from/writes to m",
+            "the resource x points to is immutably borrowed by keep",
+            "keep no longer borrows the resource x points to",
+            "the resource m points to is mutably borrowed by keep_mut",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -22590,6 +22615,28 @@ fn format_macro_arguments_are_coloured_in_the_code_panel() {
     // The macro name is plain text, not a highlighted function.
     assert!(!row_of("    print!(").contains(">print!</tspan>"));
     assert!(!row_of("= format!(").contains(">format!</tspan>"));
+}
+
+/// #960: `keep(&mut v, &x)` with x a reference variable and a signature
+/// that lets keep store `&x` in v: x stays borrowed until v's last use
+/// (`v.len()`), as the borrow checker keeps it, not until keep returns.
+/// Likewise m with `keep_mut(&mut w, &mut m)`.
+#[test]
+fn stored_borrow_of_a_reference_variable_ends_at_the_holders_last_use() {
+    let svg = run_with_local_backend("stored_ref_var_arg_960").timeline_panel_string();
+    for (var, holder, kind) in [("x", "v", "immutably"), ("m", "w", "mutably")] {
+        let end = dots_listing_tooltip(&svg, &format!("{var} is no longer {kind} borrowed"));
+        let last_use = dots_listing_tooltip(&svg, &format!("{holder}'s resource is immutably borrowed by len; {holder} is read-only while the borrow is live"));
+        assert_eq!(last_use.len(), 1, "{holder}.len(): {:?}", last_use);
+        assert!(end.iter().any(|(_, y)| *y == last_use[0].1),
+            "{var}'s borrow should end on {holder}.len()'s row ({:?}), got {:?}", last_use, end);
+    }
+    // The storing call's dot doesn't end the borrow.
+    for lines in tooltip_lines(&svg) {
+        if lines.iter().any(|l| l.contains("'s signature lets it store this reference")) {
+            assert!(!lines.iter().any(|l| l.contains("no longer")), "a stored borrow ends at the call: {:?}", lines);
+        }
+    }
 }
 
 /// #861: a write through the `&mut` a `get_mut` call (or `&mut v[1]`,
