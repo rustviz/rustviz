@@ -314,6 +314,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// of the value a reference stored in it points to (#874); `true`
   /// when the binding is only a part of that value (`Some(&(a, b))`).
   pub pointee_copies: HashMap<u64, (ResourceTy, bool)>,
+  /// `&` patterns matched against a reference column (`&v` on `r:
+  /// &i32`): their bindings are matched against `*r`, like `match *r`
+  /// (#880), so they aren't `&` sub-patterns in #874's sense.
+  pub deref_ref_pats: HashSet<rustc_hir::HirId>,
   // While the pattern of `for (a, b) in &v` is registered: the borrow
   // of the head that each reference binding is (#576).
   pub pattern_lender: Option<(Evt, ResourceTy)>,
@@ -636,6 +640,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       tuple_temp_refs: HashSet::new(),
       pattern_copies: HashSet::new(),
       pointee_copies: HashMap::new(),
+      deref_ref_pats: HashSet::new(),
       pattern_lender: None,
       temp_count: 0,
       param_value_count: 0,
@@ -4448,6 +4453,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       return;
     }
+    // `&v => …` on `match r` with `r: &i32`: the `&` pattern matches
+    // r's reference, and `v` is matched against the value it points
+    // to, `*r`, exactly as in `v => …` on `match *r` (#880).
+    if let (PatKind::Ref(inner, _, _), ResourceTy::Value(r), rustc_middle::ty::Ref(_, pointee, _)) = (pat.kind, parent, parent_ty.kind()) {
+      if !r.is_fn() {
+        self.deref_ref_pats.insert(pat.hir_id);
+        self.get_dec_of_pat_parts(inner, ty_results, &ResourceTy::Deref(r.clone()), *pointee, scope, res);
+        return;
+      }
+    }
     match self.pat_parts(pat, parent, parent_ty) {
       Some(subs) => {
         for (sp, part) in subs {
@@ -4665,7 +4680,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             // Under a `&` sub-pattern (`Some(&y)` on an `Option<&i32>`),
             // a by-value binding copies the value the stored reference
             // points to (#874).
-            let behind_ref = ref_pattern_above(&self.tcx, id);
+            // Not under one matched against a reference column, which
+            // is matched against `*r` instead (#880).
+            let behind_ref = ref_pattern_above_at(&self.tcx, id)
+              .filter(|(ref_pat, _)| !self.deref_ref_pats.contains(ref_pat))
+              .map(|(_, part)| part);
             let evt = if let Some(mutbl) = binding_ref {
                 if bool_of_mut(mutbl) { Evt::MBorrow } else { Evt::SBorrow }
             } else if behind_ref.is_some() {
@@ -4686,8 +4705,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
         // `Some(&y)` on an `Option<&i32>`: y copies the value the
         // reference inside the matched value points to (#874). A `&`
-        // pattern matched against a reference scrutinee itself (`&v`
-        // on `r: &i32`) isn't drawn.
+        // pattern matched against a reference column itself (`&v` on
+        // `r: &i32`) is matched against `*r` in `get_dec_of_pat_parts`
+        // (#880).
         PatKind::Ref(inner, _, _) if !parent_ty.is_ref() => {
             self.collect_pat_binding_events(inner, ty_results, parent, parent_ty, scope, res);
         }
@@ -8079,6 +8099,11 @@ fn ty_has_std_sync_primitive<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
 /// = r;`), which matches the scrutinee itself rather than a reference
 /// stored in it (#874).
 pub(crate) fn ref_pattern_above(tcx: &TyCtxt<'_>, binding: rustc_hir::HirId) -> Option<bool> {
+  ref_pattern_above_at(tcx, binding).map(|(_, part)| part)
+}
+
+/// [`ref_pattern_above`], with the `&` pattern's HirId.
+pub(crate) fn ref_pattern_above_at(tcx: &TyCtxt<'_>, binding: rustc_hir::HirId) -> Option<(rustc_hir::HirId, bool)> {
   let in_pattern = |n: rustc_hir::Node<'_>| matches!(n, rustc_hir::Node::Pat(_) | rustc_hir::Node::PatField(_));
   let mut cur = binding;
   loop {
@@ -8086,7 +8111,7 @@ pub(crate) fn ref_pattern_above(tcx: &TyCtxt<'_>, binding: rustc_hir::HirId) -> 
       rustc_hir::Node::Pat(p) => {
         if let PatKind::Ref(inner, _, _) = p.kind {
           let is_root = !in_pattern(tcx.parent_hir_node(p.hir_id));
-          return (!is_root).then_some(inner.hir_id != binding);
+          return (!is_root).then_some((p.hir_id, inner.hir_id != binding));
         }
         cur = p.hir_id;
       }

@@ -6825,6 +6825,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       (PatKind::Ref(inner_pat, _, _), ExprKind::AddrOf(_, _, inner_init)) => {
         self.bind_pat(inner_pat, inner_init, is_skipped);
       }
+      // `let &b = r;` with `r: &i32`: the `&` pattern matches r's
+      // reference, and `b` gets a copy of the value it points to, as
+      // in `let b = *r;` (#880).
+      (PatKind::Ref(inner_pat, _, _), _) if self.deref_target(init).is_some() => {
+        let (r, pointee_ty) = self.deref_target(init).unwrap();
+        let first_id = *self.unique_id;
+        self.bind_pat(inner_pat, init, is_skipped);
+        self.mark_copy_deref(inner_pat, &r, pointee_ty, first_id);
+      }
       // `let [a, b] = [e1, e2];` — fixed-length slice destructure
       // against an array literal of matching length. Pair element-wise.
       // The mid-`Some` case (`let [a, .., b] = …`) only pairs cleanly
@@ -7168,6 +7177,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if *id >= first_id && t.name() == name {
           *pointee = Some(part);
           *is_partial = false;
+        }
+      }
+    }
+  }
+
+  /// The variable `init` names and the type its reference points to,
+  /// when `init` is a reference variable (`r` with `r: &i32`).
+  fn deref_target(&self, init: &'tcx Expr<'tcx>) -> Option<(ResourceAccessPoint, rustc_middle::ty::Ty<'tcx>)> {
+    let ty = self.tcx.typeck(init.hir_id.owner).expr_ty(init);
+    let rustc_middle::ty::Ref(_, pointee, _) = ty.kind() else { return None };
+    if !matches!(init.kind, ExprKind::Path(_)) {
+      return None;
+    }
+    match get_rap(init, &self.tcx, &self.raps) {
+      ResourceTy::Value(r) if !r.is_fn() => Some((r, *pointee)),
+      _ => None,
+    }
+  }
+
+  /// `let &b = r;`: `bind_pat` drew b's copy from r, but b gets a copy
+  /// of the value r points to, `*r`, as for `let b = *r;` (#880): a
+  /// value inside it for a binding nested in the `&` pattern (`let &(a,
+  /// b) = r;`). A copy through a `&` sub-pattern inside it (#874)
+  /// keeps its wording, from `*r`.
+  fn mark_copy_deref(&mut self, inner: &'tcx Pat<'tcx>, r: &ResourceAccessPoint, pointee_ty: rustc_middle::ty::Ty<'tcx>, first_id: usize) {
+    let typeck = self.tcx.typeck(inner.hir_id.owner);
+    let mut names: HashMap<String, bool> = HashMap::new();
+    inner.each_binding(|_, hirid, _, _| {
+      if matches!(typeck.pat_binding_modes().get(hirid).map(|m| m.0), Some(rustc_hir::ByRef::No)) {
+        names.insert(binding_name(&self.tcx, hirid), typeck.node_type(hirid) != pointee_ty);
+      }
+    });
+    // (The line's arrows are drawn from `event_line_map`'s copy.)
+    let line_events = self.event_line_map.values_mut().flatten();
+    let events = self.preprocessed_events.iter_mut().chain(self.late_old_ends.iter_mut()).map(|(_, e)| e);
+    for e in events.chain(line_events) {
+      if let ExternalEvent::Copy { to: ResourceTy::Value(t), from, id, is_partial, pointee, into_ctor: None, .. } = e {
+        let Some(inside) = names.get(t.name()) else { continue };
+        if *id >= first_id && *from == ResourceTy::Value(r.clone()) {
+          *from = ResourceTy::Deref(r.clone());
+          *is_partial = *inside && pointee.is_none();
         }
       }
     }
