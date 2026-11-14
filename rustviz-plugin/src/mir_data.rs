@@ -10,8 +10,8 @@
 use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_end_line, span_to_line, written_name}};
 use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ScopeEndHolds};
 use log::info;
-use rustc_middle::mir::{BorrowKind, Location, Local, Operand, ProjectionElem, StatementKind, TerminatorKind, VarDebugInfoContents};
-use rustc_middle::mir::visit::Visitor;
+use rustc_middle::mir::{BorrowKind, Location, Local, Operand, Place, PlaceElem, ProjectionElem, Rvalue, StatementKind, TerminatorKind, VarDebugInfoContents};
+use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::ty::{GenericArgKind, RegionVid, Ty, TyKind};
 use rustc_hir::intravisit;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -24,6 +24,35 @@ use polonius_engine::{Algorithm, Output, FactTypes};
 type Loan = <RustcFacts as FactTypes>::Loan;
 type Point = <RustcFacts as FactTypes>::Point;
 type Origin = <RustcFacts as FactTypes>::Origin;
+
+/// Why a write to a lender is allowed at a line where a loan of it is
+/// drawn live (#796): on the write's path the loan is already dead.
+#[derive(Clone, Debug)]
+pub struct DeadLoanWrite {
+    /// RAP name of the reference that held the loan.
+    pub borrower: String,
+    /// Where `borrower` is given a new reference on the write's path,
+    /// and whether that is before the write; None when it isn't used
+    /// again on that path.
+    pub repoint: Option<(usize, bool)>,
+}
+
+/// Finds a use of `local` (not a `StorageLive` / `StorageDead`).
+struct LocalUse { local: Local, found: bool }
+
+impl<'tcx> Visitor<'tcx> for LocalUse {
+    fn visit_local(&mut self, local: Local, ctx: PlaceContext, _loc: Location) {
+        if local == self.local && !matches!(ctx, PlaceContext::NonUse(_)) {
+            self.found = true;
+        }
+    }
+}
+
+/// Whether places with projections `a` and `b` of the same local can
+/// overlap: not when they name different fields at the same depth.
+fn projections_overlap(a: &[PlaceElem<'_>], b: &[PlaceElem<'_>]) -> bool {
+    !a.iter().zip(b).any(|(x, y)| matches!((x, y), (ProjectionElem::Field(f, _), ProjectionElem::Field(g, _)) if f != g))
+}
 
 /// A loan a call left in a variable (see `loans_kept_after_call`).
 #[derive(Clone, Debug)]
@@ -335,6 +364,188 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
         }
         (last, past)
+    }
+
+    /// A write to the variable `lender` at `line` (an assignment to it or
+    /// a part of it, or a `&mut` borrow of it, as `v.push(..)` takes)
+    /// where a loan of it is dead though the borrow checker keeps it in
+    /// scope on another path, past the write (#796): `let mut c = &x; if
+    /// cond { x = 2; c = &y; } println!("{}", c);` compiles because on
+    /// the path through the `if`, `c` is given a new reference before it
+    /// is used again. The diagram gives each loan one end (#778), so x is
+    /// drawn borrowed across the write; this says why rustc accepts it.
+    /// None when no such loan, or no reference variable holding it, is
+    /// found.
+    pub fn dead_loan_at_write(&self, lender: &str, line: usize) -> Option<DeadLoanWrite> {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let names = self.mir_local_names(bwf);
+        let x = body.local_decls.indices().find(|l| names.get(l).is_some_and(|n| n == lender))?;
+        let no_deref = |p: &Place<'tcx>| !p.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
+        // The writes at `line`.
+        let mut writes: Vec<(Location, Place<'tcx>)> = Vec::new();
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for (statement_index, st) in data.statements.iter().enumerate() {
+                let loc = Location { block, statement_index };
+                let StatementKind::Assign(assign) = &st.kind else { continue };
+                let (lhs, rv) = &**assign;
+                let place = match rv {
+                    Rvalue::Ref(_, BorrowKind::Mut { .. }, p) if p.local == x => *p,
+                    _ if lhs.local == x => *lhs,
+                    _ => continue,
+                };
+                if no_deref(&place) && self.location_to_line(loc, bwf) == line {
+                    writes.push((loc, place));
+                }
+            }
+            let loc = Location { block, statement_index: data.statements.len() };
+            if let TerminatorKind::Call { destination, .. } = &data.terminator().kind {
+                if destination.local == x && no_deref(destination) && self.location_to_line(loc, bwf) == line {
+                    writes.push((loc, *destination));
+                }
+            }
+        }
+        if writes.is_empty() {
+            return None;
+        }
+        // The loans of x the writes conflict with, issued before the line.
+        let loans: Vec<(BorrowIndex, Location, Local)> = bwf.borrow_set.location_map().iter().enumerate()
+            .filter(|(_, (issued, b))| {
+                let bp = b.borrowed_place();
+                bp.local == x && no_deref(&bp)
+                    && writes.iter().any(|(_, w)| projections_overlap(bp.projection, w.projection))
+                    && self.location_to_line(**issued, bwf) < line
+            })
+            .map(|(i, (issued, b))| (BorrowIndex::from_usize(i), *issued, b.assigned_place().local))
+            .collect();
+        if loans.is_empty() {
+            return None;
+        }
+        // Each loan must be out of scope at the writes (rustc accepted
+        // them) and in scope at or after the line on some other path.
+        let borrows = Borrows::new(self.tcx, body, &bwf.region_inference_context, &bwf.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        let mut live_later: Vec<BorrowIndex> = Vec::new();
+        let mut at_write: Vec<BorrowIndex> = Vec::new();
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for statement_index in 0..=data.statements.len() {
+                let location = Location { block, statement_index };
+                cursor.seek_before_primary_effect(location);
+                let is_write = writes.iter().any(|(l, _)| *l == location);
+                let l_line = self.location_to_line(location, bwf);
+                for (b, _, _) in loans.iter() {
+                    if !cursor.get().contains(*b) { continue; }
+                    if is_write { at_write.push(*b); }
+                    if l_line >= line { live_later.push(*b); }
+                }
+            }
+        }
+        // `local = ...` at `loc`, the whole variable.
+        let stmt_assigns = |loc: Location, local: Local| -> bool {
+            body.basic_blocks[loc.block].statements.get(loc.statement_index).is_some_and(|st|
+                matches!(&st.kind, StatementKind::Assign(a) if a.0.local == local && a.0.projection.is_empty()))
+        };
+        for (b, issued, assigned) in loans {
+            if at_write.contains(&b) || !live_later.contains(&b) {
+                continue;
+            }
+            // The reference variable the loan is stored in: the place it
+            // is assigned to, or the variable a temporary holding it is
+            // moved or reborrowed into.
+            let (mut holder, mut holder_at) = (assigned, issued);
+            for _ in 0..4 {
+                if names.contains_key(&holder) { break; }
+                let next = body.basic_blocks.iter_enumerated().find_map(|(block, data)| {
+                    data.statements.iter().enumerate().find_map(|(statement_index, st)| {
+                        let StatementKind::Assign(a) = &st.kind else { return None };
+                        let reads = match &a.1 {
+                            Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) => p.local == holder && p.projection.is_empty(),
+                            Rvalue::Ref(_, _, p) => p.local == holder && matches!(p.projection.as_slice(), [ProjectionElem::Deref]),
+                            _ => false,
+                        };
+                        (reads && a.0.projection.is_empty()).then(|| (a.0.local, Location { block, statement_index }))
+                    })
+                });
+                let Some((h, at)) = next else { break };
+                (holder, holder_at) = (h, at);
+            }
+            let Some(borrower) = names.get(&holder) else { continue };
+            if !body.local_decls[holder].ty.is_ref() {
+                continue;
+            }
+            let succ = |l: Location| -> Vec<Location> {
+                let data = &body.basic_blocks[l.block];
+                if l.statement_index < data.statements.len() {
+                    vec![Location { block: l.block, statement_index: l.statement_index + 1 }]
+                } else {
+                    data.terminator().successors().map(|block| Location { block, statement_index: 0 }).collect()
+                }
+            };
+            let uses = |l: Location| -> bool {
+                let data = &body.basic_blocks[l.block];
+                let mut v = LocalUse { local: holder, found: false };
+                match data.statements.get(l.statement_index) {
+                    Some(st) => v.visit_statement(st, l),
+                    None => v.visit_terminator(data.terminator(), l),
+                }
+                v.found
+            };
+            // Back from the writes: was the reference given a new value on
+            // every path that reaches them, after it took the loan? Then
+            // that is where the loan's use on this path ended.
+            let preds = body.basic_blocks.predecessors();
+            let pred = |l: Location| -> Vec<Location> {
+                if l.statement_index > 0 {
+                    vec![Location { block: l.block, statement_index: l.statement_index - 1 }]
+                } else {
+                    preds[l.block].iter().map(|&p| Location { block: p, statement_index: body.basic_blocks[p].statements.len() }).collect()
+                }
+            };
+            let mut seen: std::collections::HashSet<Location> = std::collections::HashSet::new();
+            let mut work: Vec<Location> = writes.iter().flat_map(|(l, _)| pred(*l)).collect();
+            let (mut earlier, mut old_value) = (BTreeSet::new(), false);
+            while let Some(l) = work.pop() {
+                if !seen.insert(l) { continue; }
+                if stmt_assigns(l, holder) {
+                    if l == holder_at { old_value = true; } else { earlier.insert(self.location_to_line(l, bwf)); }
+                    continue;
+                }
+                let before = pred(l);
+                if before.is_empty() { old_value = true; }
+                work.extend(before);
+            }
+            // Else forward from the writes: is the reference given a new
+            // value before its next use, or not used again?
+            let mut seen: std::collections::HashSet<Location> = std::collections::HashSet::new();
+            let mut work: Vec<Location> = writes.iter().flat_map(|(l, _)| succ(*l)).collect();
+            let (mut later, mut used) = (BTreeSet::new(), false);
+            while let Some(l) = work.pop() {
+                if !seen.insert(l) { continue; }
+                let data = &body.basic_blocks[l.block];
+                if let Some(st) = data.statements.get(l.statement_index) {
+                    if matches!(st.kind, StatementKind::StorageDead(d) if d == holder) { continue; }
+                }
+                if stmt_assigns(l, holder) {
+                    later.insert(self.location_to_line(l, bwf));
+                    continue;
+                }
+                if uses(l) {
+                    used = true;
+                    continue;
+                }
+                work.extend(succ(l));
+            }
+            // Only a single line is named: with several (`if a { c = &y; }
+            // else { c = &z; }`) no one line is the reason.
+            let repoint = match (old_value, earlier.len(), used, later.len()) {
+                (false, 1, _, _) => Some((*earlier.first()?, true)),
+                (true, _, false, 0) => None,
+                (true, _, false, 1) => Some((*later.first()?, false)),
+                _ => continue,
+            };
+            return Some(DeadLoanWrite { borrower: borrower.clone(), repoint });
+        }
+        None
     }
 
     // To get this to really work we would need to do a dataflow analysis to establish which temporaries 

@@ -609,6 +609,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// borrows `emit_holder_literal_borrows` draws: drawn after the old
   /// value's borrow ends and drop, which come first on the dot (#1097).
   pub deferred_holder_borrows: Option<Vec<(String, &'tcx Expr<'tcx>)>>,
+  /// (column, line) pairs `note_dead_loan_write` has looked at (#796).
+  pub dead_loan_checked: HashSet<(String, usize)>,
 
 
   // Variables moved in a branch that then `break`s out of a loop
@@ -981,6 +983,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       arm_frames: Vec::new(),
       defer_old_ends: false,
       deferred_holder_borrows: None,
+      dead_loan_checked: HashSet::new(),
       break_moves: Vec::new(),
       loop_given: Vec::new(),
       loop_maybe_entry: Vec::new(),
@@ -1637,6 +1640,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ChainFailUse { ro, .. }
       | ExternalEvent::TiedParamNote { ro, .. }
       | ExternalEvent::DeadElseNote { ro, .. }
+      | ExternalEvent::DeadLoanNote { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::OwnerDropUnlessReturned { ro, .. }
@@ -1739,6 +1743,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => ()
     }
     self.propagate_struct_transfer(line_num, &event);
+    self.note_dead_loan_write(line_num, &event);
+  }
+
+  /// `event` writes to a variable's column (an assignment, or a `&mut`
+  /// borrow): if a loan of the variable is drawn live across the write
+  /// though it is dead on the write's path (#796), add the note that
+  /// says why rustc accepts the write.
+  fn note_dead_loan_write(&mut self, line: usize, event: &ExternalEvent) {
+    let written = match event {
+      ExternalEvent::Bind { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Move { to, .. } => to,
+      ExternalEvent::MutableBorrow { from, .. } | ExternalEvent::PassByMutableReference { from, .. } => from,
+      _ => return,
+    };
+    let (ResourceTy::Value(r) | ResourceTy::Index(r, ..)) = written else { return };
+    if r.is_fn() || r.is_ref() || self.bwf.borrow_set.location_map().is_empty() {
+      return;
+    }
+    if !self.dead_loan_checked.insert((r.name().to_owned(), line)) {
+      return;
+    }
+    let lender = r.name().split('.').next().unwrap_or(r.name()).to_owned();
+    let Some(dead) = self.dead_loan_at_write(&lender, line) else { return };
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line, ExternalEvent::DeadLoanNote {
+      ro: r.clone(), lender, borrower: dead.borrower, repoint: dead.repoint, id,
+    });
   }
 
   /// Registered member-field RAPs directly under `parent` (`parent.f`,

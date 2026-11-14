@@ -13013,13 +13013,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // keeps x borrowed until the `println!`: the borrow checker's end
         // is the latest over the paths, and that is where x's borrow is
         // drawn to (#778; #770 drew it ending at the `if`). The write sits
-        // inside the drawn span, so the scope end reads "No resource is
-        // dropped" like any written lender's. The reassignment's own dot
-        // only starts the new borrow (#770).
+        // inside the drawn span, and its dot says why rustc accepts it
+        // there (#796). The reassignment's own dot only starts the new
+        // borrow (#770).
         must_contain: &[
             "x's value is no longer immutably borrowed",
             "c's immutable borrow ends",
             "c immutably borrows a value",
+            // A bullet of the `x += 1;` dot (after "x's value is copied" and
+            // "x is assigned a new value").
+            "On this path c is given a new reference on line 11 before it is used again, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 11",
         ],
         must_not_contain: &[
             "c's immutable borrow ends• c immutably borrows a value",
@@ -20395,6 +20398,65 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "reborrowed through rows,",
             // `copied` returns the stored `&str`, not a reference into names.
             "reborrowed through names",
+        ],
+    },
+    // #796: each write is drawn inside its lender's borrowed span (the
+    // borrow checker's end is the latest over the paths, #778), and rustc
+    // accepts it only because the loan is dead on the write's path: the
+    // reference is given a new one before its next use, or (`returns`)
+    // isn't used again. The write's dot says so; main showed only the
+    // write ("x is assigned a new value"), which reads as a write to a
+    // borrowed variable.
+    TooltipExpect {
+        name: "dead_loan_write_796",
+        must_contain: &[
+            "x is assigned a new value. On this path c is given a new reference on line 19 before it is used again, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 19",
+            // Bullets of their dots, after "a is assigned a new value" /
+            // "m is assigned a new value".
+            "On this path r was given a new reference on line 30, so r's borrow of a is already over here; a stays borrowed only on paths that skip line 30",
+            "d is assigned a new value. On this path q is given a new reference on line 45 before it is used again, so q's borrow of d is already over here; d stays borrowed only on paths that skip line 45",
+            "On this path p is given a new reference on line 59 before it is used again, so p's borrow of m is already over here; m stays borrowed only on paths that skip line 59",
+            "s.n is assigned a new value. On this path f is given a new reference on line 75 before it is used again, so f's borrow of s is already over here; s stays borrowed only on paths that skip line 75",
+            "v[0] is assigned a new value. On this path g is given a new reference on line 77 before it is used again, so g's borrow of v is already over here; v stays borrowed only on paths that skip line 77",
+            "h is assigned a new value. On this path u isn't used again, so u's borrow of h is already over here; h stays borrowed only on the other paths",
+            // The single span is kept (borrow-checker view, #778).
+            "x's value is no longer immutably borrowed",
+            "s's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "=x is assigned a new value",
+            "=d is assigned a new value",
+            "=s.n is assigned a new value",
+            "=v[0] is assigned a new value",
+            "=h is assigned a new value",
+        ],
+    },
+    // #796: `x += 8;` follows `c = &y;` on its path, so c's loan of x
+    // ended there (line 8), not at the later `c = &z;` / `c = &s;`: the
+    // note names the earlier line, and x is borrowed only on the path that
+    // skips the outer `if`.
+    TooltipExpect {
+        name: "basic_if12",
+        must_contain: &[
+            "On this path c was given a new reference on line 8, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 8",
+        ],
+        must_not_contain: &[
+            "skip line 11",
+            "skip line 15",
+        ],
+    },
+    // #796 near misses: the lender isn't drawn borrowed at the write (its
+    // arm's column shows the borrow ended, or the write follows the last
+    // use), so the write gets no note.
+    TooltipExpect {
+        name: "dead_loan_write_near_796",
+        must_contain: &[
+            "x is assigned a new value",
+            "a is assigned a new value",
+        ],
+        must_not_contain: &[
+            "On this path",
+            "is already over here",
         ],
     },
 ];

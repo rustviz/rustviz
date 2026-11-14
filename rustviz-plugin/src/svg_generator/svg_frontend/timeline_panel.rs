@@ -174,6 +174,16 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         texts[i] = merged;
         texts.remove(j);
     }
+    // The note on a write drawn inside a borrow that is over on its
+    // path (#796) goes last: after the write's own text as a second
+    // sentence, or as the last bullet.
+    if let Some(i) = texts.iter().position(|t| t.starts_with(hover_messages::DEAD_LOAN_NOTE_START)) {
+        let note = texts.remove(i);
+        match texts.as_mut_slice() {
+            [only] => *only = format!("{}. {}", only, note),
+            _ => texts.push(note),
+        }
+    }
     if texts.len() <= 1 {
         return texts.first().cloned().unwrap_or_default();
     }
