@@ -1056,6 +1056,12 @@ pub enum StaticLender {
     /// the variable is borrowed by the loop's iterator from that call to
     /// here (#871). Never drawn as an arrow.
     LoopIterator { call: String },
+    /// Like `LoopIterator`, for a head written `&v` / `&mut v` whose
+    /// loop variables borrow none of it (`for &y in &v`, `for _ in
+    /// &v`; #885): only the loop's iterator holds the borrow. `lend` is
+    /// the id of the borrow drawn on the `for` line, which the renderer
+    /// also titles as the iterator's. Never drawn as an arrow.
+    LoopHeadBorrow { lend: usize },
 }
 
 /// Whether the `&` / `&mut` of a pass-by-reference event was written in

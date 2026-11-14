@@ -1759,6 +1759,8 @@ fn render_dot(
                         }
                     } else if let Some(title) = ends_several_loans_title(event, history, *line_number, &mut name) {
                         data.title = title;
+                    } else if let Some(title) = loop_head_lend_title(event, &name, rap, visualization_data) {
+                        data.title = title;
                     } else if let Some(title) = kept_closure_lend_title(event, &name, visualization_data) {
                         data.title = title;
                     } else if let Some(title) = closure_reborrow_lend_title(event, visualization_data) {
@@ -2571,6 +2573,28 @@ fn timeline_segment_title(
     state.print_message_with_name(rap.name())
 }
 
+/// The dot of the borrow a `for` loop's head `&v` / `&mut v` makes when
+/// only the loop's iterator holds it (`for &y in &v`; #885): the
+/// iterator has no column, so say it is the borrower.
+fn loop_head_lend_title(event: &Event, name: &String, rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Option<String> {
+    fn is_loop_head_lend(events: &[(usize, ExternalEvent)], lend: usize) -> bool {
+        events.iter().any(|(_, ev)| match ev {
+            ExternalEvent::StaticDie { static_lender: Some(StaticLender::LoopHeadBorrow { lend: l }), .. }
+            | ExternalEvent::MutableDie { static_lender: Some(StaticLender::LoopHeadBorrow { lend: l }), .. } => *l == lend,
+            ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| is_loop_head_lend(&b.e_data, lend)),
+            _ => false,
+        })
+    }
+    let (id, is_mut) = match event {
+        Event::StaticLend { to: ResourceTy::Anonymous, id, .. } => (*id, false),
+        Event::MutableLend { to: ResourceTy::Anonymous, id, .. } => (*id, true),
+        _ => return None,
+    };
+    is_loop_head_lend(&visualization_data.external_events, id).then(|| {
+        hover_messages::event_dot_lend_to_loop_iterator(name, is_mut, rap.is_copy_owner() || rap.is_plain_value())
+    })
+}
+
 // The or-pattern reference (and whether its borrow is mutable) whose
 // possible borrow puts `rap` in a lent state on the segment starting
 // after `line` (#565): the last borrow of `rap` that starts at or
@@ -2594,12 +2618,12 @@ fn loop_iterator_title(state: &State, rap: &ResourceAccessPoint, visualization_d
 /// (`StaticLender::LoopIterator`). The plugin draws that end only when
 /// no loop variable gives the borrow back itself.
 fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAccessPoint, line: usize) -> bool {
-    fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, String)>) {
+    fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, StaticLender)>) {
         for (_, ev) in events {
             match ev {
-                ExternalEvent::StaticDie { to: ResourceTy::Value(r), static_lender: Some(StaticLender::LoopIterator { call }), id, .. }
-                | ExternalEvent::MutableDie { to: ResourceTy::Value(r), static_lender: Some(StaticLender::LoopIterator { call }), id, .. }
-                    if *r.hash() == hash => out.push((*id, call.clone())),
+                ExternalEvent::StaticDie { to: ResourceTy::Value(r), static_lender: Some(l @ (StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. })), id, .. }
+                | ExternalEvent::MutableDie { to: ResourceTy::Value(r), static_lender: Some(l @ (StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. })), id, .. }
+                    if *r.hash() == hash => out.push((*id, l.clone())),
                 ExternalEvent::Branch { branches, .. } => {
                     for b in branches {
                         loop_ends(&b.e_data, hash, out);
@@ -2627,15 +2651,19 @@ fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAcc
     let Some(timeline) = visualization_data.timelines.get(rap.hash()) else { return false };
     let mut history = Vec::new();
     flat(&timeline.history, &mut history);
-    ends.iter().any(|(id, call)| {
+    ends.iter().any(|(id, lender)| {
         let Some(end) = history.iter().find_map(|(l, e)| match e {
             Event::StaticReacquire { id: i, .. } | Event::MutableReacquire { id: i, .. } if i == id => Some(*l),
             _ => None,
         }) else { return false };
-        let lent = history.iter().filter_map(|(l, e)| match e {
-            Event::StaticLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
-            | Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
+        let lent = history.iter().filter_map(|(l, e)| match (e, lender) {
+            (Event::StaticLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
+            | Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. },
+             StaticLender::LoopIterator { call })
                 if f.name == *call && *l <= end => Some(*l),
+            // `for &y in &v`: the borrow the `for` line drew (#885).
+            (Event::StaticLend { id: i, .. } | Event::MutableLend { id: i, .. }, StaticLender::LoopHeadBorrow { lend })
+                if i == lend => Some(*l),
             _ => None,
         }).max();
         lent.is_some_and(|from| from <= line && line < end)

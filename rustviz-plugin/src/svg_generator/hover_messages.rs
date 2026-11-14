@@ -2229,6 +2229,8 @@ pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &St
         // Never drawn as an arrow (the end has no reference to start from).
         StaticLender::LoopIterator { call } =>
             format!("the iterator {} returned ends", styled_name_html(call)),
+        StaticLender::LoopHeadBorrow { .. } =>
+            "the `for` loop's iterator ends".to_string(),
     };
     format!(
         "{0}'s {1}borrow of {2}",
@@ -2552,6 +2554,19 @@ pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
         "{0}'s {1} is being shared by one or more variables",
         my_name_fmt, held(holds_value)
     )
+}
+
+// The dot where a `for` loop's iterator borrows a variable whose loop
+// variables don't (`for &y in &v`, `for _ in &mut v`; #885).
+pub fn event_dot_lend_to_loop_iterator(my_name: &String, is_mut: bool, holds_value: bool) -> String {
+    if is_mut {
+        format!(
+            "{0}'s {1} is mutably borrowed by the `for` loop's iterator; {0} can't be used until the loop ends",
+            styled_name_html(my_name), held(holds_value)
+        )
+    } else {
+        state_borrowed_by_loop_iterator(my_name, holds_value)
+    }
 }
 
 // PartialPrivilege of a variable that only a `for` loop's iterator
