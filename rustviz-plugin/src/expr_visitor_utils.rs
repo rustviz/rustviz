@@ -958,15 +958,17 @@ pub fn collect_event_live_vars(
                                 out.insert(rap.clone());
                             }
                         }
-                        // A write through a reference to a struct's
-                        // field (`r.n = 2`) is drawn on the field's own
-                        // column too (`s.n`, #854), so it is live there.
-                        // (An element's holder, `v[i] += 1`, isn't
-                        // drawn in a branch.)
-                        ResourceTy::Index(rap, ..) if rap.name().contains('.') => {
-                            out.insert(rap.clone());
+                        // A write through an element place (`v[i] += 1`,
+                        // `v[i] = x`) is drawn on the holder's column
+                        // (`v`, #860), and one through a reference to a
+                        // struct's field (`r.n = 2`) on the field's own
+                        // column (`s.n`, #854), so the holder is live.
+                        ResourceTy::Index(rap, ..) => {
+                            if !rap.is_fn() && !rap.is_unbound_temporary() {
+                                out.insert(rap.clone());
+                            }
                         }
-                        ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Index(..)
+                        ResourceTy::Anonymous | ResourceTy::Caller
                         | ResourceTy::Temporary { .. } => {}
                     }
                 }

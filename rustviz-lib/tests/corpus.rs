@@ -13427,6 +13427,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(copied from",
         ],
     },
+    // An element written in place or assigned inside an if / match arm
+    // is drawn on the collection's column, as outside a branch (#860).
+    // (`*v.get_mut(0).unwrap() += 1` and HashMap `get_mut` writes aren't
+    // drawn even unbranched; tracked separately.)
+    TooltipExpect {
+        name: "element_write_in_arm",
+        must_contain: &[
+            // `+=` is an in-place update of the element.
+            "v's resource is modified through v[0]",
+            "a's value is modified through a[1]",
+            // `=` assigns to the place `v[1]`.
+            "v[1] is assigned a new value",
+            "a[2] is assigned a new value",
+            // A String element: the old one is dropped, and it says so.
+            "w[0] acquires ownership of a new resource; its previous resource is dropped",
+            "Move from String::from to w[0]",
+            "u[0] acquires ownership of a new resource; its previous resource is dropped",
+            "u[1] acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            // An assignment is not an in-place update, and `+=` isn't an assignment.
+            "modified through v[1]",
+            "modified through a[2]",
+            "modified through w[0]",
+            "v[0] is assigned",
+            "a[1] is assigned",
+            // A Copy element isn't an owned resource.
+            "v[1] acquires ownership",
+            "its previous value is dropped",
+            "(moved from",
+            "(copied from",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
