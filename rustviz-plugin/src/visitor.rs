@@ -5338,13 +5338,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // emit this for them.
         let body_end = self.tcx.sess.source_map()
           .lookup_char_pos(body_expr.span.hi()).line;
+        // A body that can run to its end goes round again there:
+        // `next()` runs on the loop's iterator, so the loan the loop
+        // holds is live to the loop's closing brace, even if a
+        // `break` or `return` leaves early on another path (where
+        // the loan ends; drawn in that path's arm when it has one)
+        // (#872). (the loop's own desugared `None => break` is the
+        // one `break` of a body without any.)
+        let no_break = arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1);
+        let reaches_end = !self.expr_diverges(body_expr);
         // `for x in it`: the loop owns the iterator `it` holds a
         // borrow in, until the loop ends, so the lender is
         // borrowed through the whole body and its borrow ends
         // where the loop does, not at the last use of `x`
-        // (#722). (A `break` that leaves the loop early ends it
-        // in its own branch.)
-        if head_is_iterator && arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1) {
+        // (#722).
+        if head_is_iterator && (no_break || reaches_end) {
           if let Some(name) = expr_to_rap_name(head_arg, &self.tcx) {
             if self.borrow_map.contains_key(&name) {
               if self.raps.get(&name).is_some_and(|r| r.rap.holds_borrow()) {
@@ -5363,12 +5371,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // (`&mut m`, `&pairs`) until the loop ends, so the
         // lender is borrowed through the whole body, not just
         // to the last use of the binding: `m.len()` after
-        // `s`'s last use is still E0499/E0502 (#739). (A
-        // `break` / `return` in the body ends it in its own
-        // branch, drawn there.)
-        // (the loop's own desugared `None => break` is the one)
-        let runs_to_the_end = arms.first().is_some_and(|a| breaks_to(a.body).len() <= 1)
-          && !body_returns(body_expr);
+        // `s`'s last use is still E0499/E0502 (#739), also in a
+        // body with a `break` / `return` that doesn't always run
+        // (#872).
+        let runs_to_the_end = (no_break && !body_returns(body_expr)) || reaches_end;
         let mut pat_decls = HashSet::new();
         collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
         #[expect(clippy::disallowed_methods, reason = "each binding's floor is raised on its own")]
@@ -5376,6 +5382,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let lent = self.borrow_map.get(decl.name())
             .is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous));
           if lent {
+            self.for_loop_loans.insert(decl.name().to_owned());
             let floor = self.borrow_floor.entry(decl.name().to_owned()).or_insert(body_end);
             *floor = (*floor).max(body_end);
           }
