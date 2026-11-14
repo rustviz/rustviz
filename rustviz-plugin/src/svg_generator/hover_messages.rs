@@ -1510,6 +1510,16 @@ pub fn event_dot_acquire_copyable(my_name: &String) -> String {
 // A Copy-typed place that already holds a value is assigned again
 // (`n += 1;`, `p.x = 5;`, `n = m;`). Nothing is acquired or
 // initialized: the old value is overwritten in place (#178).
+// `r.n = 2;` through a reference to a local struct: the field column
+// `s.n` is assigned a new value, reached through the place `r.n` (#854).
+pub fn event_dot_assign_through(field: &str, place: &str) -> String {
+    format!(
+        "{0} is assigned a new value through {1}",
+        styled_name_html(&field.to_owned()),
+        styled_name_html(&place.to_owned())
+    )
+}
+
 pub fn event_dot_copyable_assign(my_name: &String) -> String {
     format!("{0} is assigned a new value", styled_name_html(my_name))
 }
