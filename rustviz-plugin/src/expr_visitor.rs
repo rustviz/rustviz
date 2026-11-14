@@ -555,10 +555,12 @@ pub struct BreakMove {
 pub enum ExitFrame {
   // `hide`: ranges of event ids (see `take_branch_events`) that can
   // be among `preprocessed_events` while a branch of the conditional
-  // is visited but aren't on the path through it: the if-body's while
-  // the `else` is visited, and, for `let x = if … / match …`, the
-  // events binding each branch's value to `x` (`rhs_arm_ids`), which
-  // only happen once the conditional has finished.
+  // is visited but aren't on the path through it: for `let x = if … /
+  // match …`, the events binding each branch's value to `x`
+  // (`rhs_arm_ids`), which only happen once the conditional has
+  // finished. (The if-body's, and an earlier arm's, are out of
+  // `preprocessed_events` while the `else` or the next arm is
+  // visited, #245.)
   //
   // `binds`: events on the path into the branch that aren't in
   // `preprocessed_events` while it's visited (a match arm's pattern
@@ -7574,6 +7576,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
         if is_rap(to) {
           return Some(Ownership::Held);
         }
+      }
+      // A by-value parameter holds the caller's value from the start
+      // (#245: `fn f(mut s: String) { s = … }` drops it).
+      ExternalEvent::InitRefParam { param, .. } if param.name() == rap_name => {
+        return Some(Ownership::Held);
       }
       ExternalEvent::Branch { branches, .. } if !branches.is_empty() => {
         let before = ownership_after(&events[..i], rap_name, start);

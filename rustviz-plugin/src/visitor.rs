@@ -3974,6 +3974,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       *self.unique_id += 1;
     }
     let uses_ids = uses_lo..*self.unique_id;
+    // The if-body's events, when there's an `else` (see below).
+    let mut if_ev_early: Option<Vec<(usize, ExternalEvent)>> = None;
     let else_decl = match else_expr {
       Some(e) => {
         // The scrutinee's temporaries are gone by now (see
@@ -3984,12 +3986,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             *len = entry_len;
           }
         }
-        // The if-body's events stay in `preprocessed_events` until
-        // both branches are visited; they aren't on the `else`'s
-        // path.
-        if let Some(ExitFrame::Branch { hide, .. }) = self.exit_frames.last_mut() {
-          hide.push(if_ids.clone());
-        }
+        // The if-body's events aren't on the `else`'s path: take
+        // them out before it's visited, as a `match` does arm by arm,
+        // so what the `else` asks of the events so far (does `s`
+        // still own a value its reassignment drops?) doesn't see the
+        // if-body's moves (#245).
+        if_ev_early = Some(self.take_branch_events(if_ids.clone(), Some(if_expr), &pre_split));
         // Nor are the if-body's `if let` bindings: an exit in the
         // `else` doesn't drop them.
         self.in_scope.truncate(entry_len);
@@ -4134,7 +4136,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (#117). The guard's events were handed out before `if_ids`,
     // so they stay on the global timeline.
     let _ = line_num; // no longer used for guard-live extension
-    let mut if_ev = self.take_branch_events(if_ids, Some(if_expr), &pre_split);
+    let mut if_ev = match if_ev_early {
+      Some(ev) => ev,
+      None => self.take_branch_events(if_ids, Some(if_expr), &pre_split),
+    };
     let mut else_ev = self.take_branch_events(else_ids, else_expr, &HashSet::new());
     // The arrows now inside the branches are drawn from each
     // branch's own line map. Take them out of the global one, or an
