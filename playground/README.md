@@ -33,6 +33,11 @@ cd playground/frontend && npm run dev   # serves at http://127.0.0.1:3000/
 #  `cargo run` running in another terminal)
 ```
 
+The playground also loads a program from its URL: `https://<host>/#code=<base64url>`,
+where the payload is the UTF-8 source in unpadded base64url (`-`/`_` alphabet). It is put
+in the editor, rendered once, and the fragment is then removed. `mdbook-rustviz` emits
+these links under each figure; the helpers are in `frontend/src/linkCode.ts`.
+
 If you don't have Docker installed and just want to poke at the server,
 set `RV_RUNNER=local`. **Never** do this on a public deployment — see
 [`SECURITY.md`](SECURITY.md).
