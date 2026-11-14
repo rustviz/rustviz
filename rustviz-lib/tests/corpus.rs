@@ -17175,6 +17175,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f acquires ownership of a new resource. Its previous resource (including the String it holds) is dropped",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/whole_value_moved_by_chain_953",
+        // #953: a let-chain's condition that moves a whole value (`&& {
+        // let ws = s; … }`). When it moves s and the body runs (s), or a
+        // later part then fails and the skipped body (t) or the else
+        // branch (u) runs, s is gone although the branch that ran didn't
+        // move it. The joins said "s was moved in at least one branch
+        // above … If the branch that ran didn't move it, its resource is
+        // dropped …", false on those paths. Only the body moves q: its
+        // join keeps the branch wording. Checked with a `Drop`-printing
+        // type.
+        must_contain: &[
+            "s may have been moved above, so it can't be used after the if. If nothing above moved it, its resource is dropped when s goes out of scope.",
+            "t may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when t is assigned again.",
+            "u may have been moved above, so it can't be used after the if. If nothing above moved it, its resource is dropped when u goes out of scope.",
+            "r may have been moved above, so it can't be used after the if.",
+            "q was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when q goes out of scope.",
+        ],
+        must_not_contain: &[
+            "s was moved in at least one branch above",
+            "t was moved in at least one branch above",
+            "u was moved in at least one branch above",
+            "r was moved in at least one branch above",
+            "If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "If the branch that ran didn't move it, its resource is dropped when t is assigned again.",
+            "If the branch that ran didn't move it, its resource is dropped when u goes out of scope.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
