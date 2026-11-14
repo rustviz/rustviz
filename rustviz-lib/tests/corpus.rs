@@ -13902,6 +13902,38 @@ fn arrow_tails_on_dots(svg: &str) -> Vec<String> {
 /// #269: arrows used to start at their source dot's centre. Each tail
 /// must sit on the edge of a drawn dot instead, for straight arrows and
 /// for trapezoids that leave the dot diagonally.
+/// A figure ends a small, even margin below its last code line, not a
+/// fixed 100px band (#844): the code and timeline SVGs share the height,
+/// and the last line's text sits 20-40px above the bottom edge.
+#[test]
+fn figure_ends_just_below_the_last_code_line() {
+    for name in ["arrow_tail_off_source_dot", "advanced_deref3"] {
+        let rv = run_with_local_backend(name);
+        let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+        for svg in [&code, &timeline] {
+            let root = &svg[..svg.find('>').unwrap()];
+            assert!(
+                root.contains(&format!("height=\"{}px\"", rv.height())),
+                "{}: panel height differs from rv.height() {}: {}", name, rv.height(), root
+            );
+        }
+        let last_y = start_tags(&code, "text")
+            .iter()
+            .filter_map(|t| {
+                let i = t.find(" y=\"")? + 4;
+                t[i..t[i..].find('"')? + i].parse::<f64>().ok()
+            })
+            .fold(0.0, f64::max);
+        let below = rv.height() as f64 - last_y;
+        assert!(
+            (20.0..=40.0).contains(&below),
+            "{}: {}px below the last code line's text (want 20-40): the figure has a dead band",
+            name, below
+        );
+        assert_eq!(off_canvas_ys(&timeline), Vec::<String>::new(), "{}", name);
+    }
+}
+
 #[test]
 fn arrow_tails_start_at_the_dot_edge() {
     let rv = run_with_local_backend("arrow_tail_off_source_dot");
