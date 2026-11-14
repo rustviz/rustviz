@@ -1073,6 +1073,19 @@ pub fn ref_var_borrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
     && typeck.expr_ty_adjusted(addr_of).builtin_deref(true).is_some_and(|t| t.is_ref())
 }
 
+/// True iff `addr_of` is `&mut r` with `r` a local reference variable
+/// that rustc coerces through r (`let s: &mut String = &mut m;`,
+/// `f(&mut m)` with `f(s: &mut String)`): the adjustments deref twice
+/// and borrow `*m`, so this is the reborrow `&mut *m` (#926). The
+/// complement of `ref_var_borrow` for `&mut <local ref>`.
+pub fn is_coerced_ref_var_reborrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
+  let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, Mutability::Mut, inner) = addr_of.kind else { return false };
+  matches!(inner.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
+    && typeck.expr_ty(inner).is_ref()
+    && !typeck.expr_ty_adjusted(addr_of).builtin_deref(true).is_some_and(|t| t.is_ref())
+    && !typeck.expr_adjustments(addr_of).is_empty()
+}
+
 /// True iff `operand` (the expression under a `&` / `&mut`, or a
 /// method receiver) is a place reached through a reference, so that
 /// borrowing it is a reborrow:

@@ -835,7 +835,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   // a `&mut`: the autoref'd place is reached through
                   // the reference, so this reborrows it too (#407).
                   let is_reborrow = match rcvr.kind {
-                    ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, typeck),
+                    ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, typeck)
+                      || is_coerced_ref_var_reborrow(rcvr, typeck),
                     _ => is_implicit_mut_reborrow(rcvr, typeck) || is_explicit_reborrow(rcvr, typeck),
                   };
                   let result_has_lifetime = call_result_has_lifetime(expr, typeck);
@@ -9048,7 +9049,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut ev = self.ext_ev_of_evt(evt, ResourceTy::Value(rap), lender, *self.unique_id, is_partial);
     if let ExternalEvent::StaticBorrow { is_reborrow, .. }
          | ExternalEvent::MutableBorrow { is_reborrow, .. } = &mut ev {
-      *is_reborrow = is_explicit_reborrow(init, typeck);
+      *is_reborrow = is_explicit_reborrow(init, typeck) || is_coerced_ref_var_reborrow(init, typeck);
     }
     self.add_external_event(line_num, ev);
     *self.unique_id += 1;
