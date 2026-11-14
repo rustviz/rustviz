@@ -339,12 +339,14 @@ const BOOK: &[Snippet] = &[
         id: "c5_05_tuple_struct",
         note: "was a crash at c2037dd (`black.0`)",
         must_contain: &[
-            "Move from Color to black",
+            "black is initialized with a Color value",
             "Copy from black.0 to r",
             "println! reads from black.2 through an implicit reference, so black.2 isn't moved",
             "black goes out of scope",
         ],
-        must_not_contain: &["black goes out of scope. Its resource is dropped."],
+        // #873: `Color(0, 0, 0)` builds a new value; the constructor is
+        // not an actor.
+        must_not_contain: &["black goes out of scope. Its resource is dropped.", "Move from Color to black", "=Color"],
         ..E
     },
     Snippet {
@@ -448,7 +450,11 @@ const BOOK: &[Snippet] = &[
             "Move from loopback to _b",
             "loopback goes out of scope. No resource is dropped.",
             "_b goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "home acquires ownership of a resource",
         ],
+        // #873: `IpAddr::V4(127, 0, 0, 1)` builds a new value; the
+        // constructor is not an actor.
+        must_not_contain: &["Move from IpAddr::V4 to home", "=IpAddr::V4"],
         ..E
     },
     Snippet {
@@ -458,8 +464,12 @@ const BOOK: &[Snippet] = &[
             "coin goes out of scope",
             "Copy of the value value_in_cents() returns to v",
             "c goes out of scope",
+            "c is initialized with a Dime value",
         ],
         must_not_contain: &[
+            // #873: the constructor is not an actor.
+            "Move from Coin::Dime to c",
+            "=Coin::Dime",
             "c goes out of scope. No resource is dropped.",
             "coin goes out of scope. Its resource is dropped.",
         ],
@@ -559,6 +569,9 @@ const BOOK: &[Snippet] = &[
             "L10 self's resource is no longer immutably borrowed",
             "L10 s's immutable borrow ends",
             "L10 s no longer borrows the resource self points to",
+            // #873: `Message::Quit` builds a new value; not an actor.
+            "Move from Message::Quit to q",
+            "=Message::Quit",
         ],
         known_wrong: &["L9 self's immutable borrow ends"],
         ..E
@@ -748,6 +761,9 @@ const BOOK: &[Snippet] = &[
         ],
         must_not_contain: &[
             "r was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
+            // #873: `Ok(3)` builds a new value; `Ok` is not an actor.
+            "Move from Ok to r",
+            "=Ok",
         ],
         ..E
     },

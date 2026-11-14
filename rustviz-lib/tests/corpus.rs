@@ -1613,6 +1613,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from c to area",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from Shape::Circle to c",
             "s acquires ownership from the caller",
             // Pre-#131 the param was registered like a struct and
             // got a phantom column for the first variant's field.
@@ -1625,13 +1627,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `struct Color(u8, u8, u8)`: one column per field, so a read
         // of `black.0` is a copy out of that field's column, and
         // `black.1 = 10` lands on `black.1`. Pre-fix: panic.
+        // #873: `Color(0, 0, 0)` builds a new value; the constructor is not
+        // an actor.
         must_contain: &[
-            "Move from Color to black",
-            "black is bound to a value",
+            "black is initialized with a Color value",
             "Copy from black.0 to r",
             "r is initialized with a copy of black.0",
         ],
         must_not_contain: &[
+            "Move from Color to black",
+            "=Color",
             "black acquires ownership of a resource",
             // The read must not lose its source.
             "r is bound to a copyable value",
@@ -1781,7 +1786,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n goes out of scope",
             "e goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &[],
+        // #873: a constructor is not an actor.
+        must_not_contain: &[
+            "Move from Ok to res",
+        ],
     },
 
     // ─── Receivers consumed by `self` methods; `String +` (#172) ────
@@ -4108,14 +4116,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `fn make() -> Marker { Marker }` returns a unit struct built
         // by its constructor; it used to panic in the renderer
         // (#136). The constructor value goes to the caller undrawn.
+        // #873: `let m = Marker;` builds a new value; `Marker` is not an
+        // actor.
         must_contain: &[
-            "Move from Marker to m",
+            "m is initialized with a Marker value",
             "Move from Marker::make to n",
             "name reads from m (implicitly borrowed)",
             "name reads from n (implicitly borrowed)",
         ],
         must_not_contain: &[
             "m's resource is moved",
+            "Move from Marker to m",
+            "=Marker",
         ],
     },
     TooltipExpect {
@@ -4418,6 +4430,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e.part's immutable borrow ends",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from Some to k",
+            "Move from Some to o",
             "a goes out of scope. No resource is dropped.",
             "b goes out of scope. No resource is dropped.",
             "e.part acquires ownership of a resource",
@@ -4502,6 +4517,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w.n goes out of scope",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from Some to m",
+            "Move from Some to o",
             "z.part holds an immutable reference (it came with the value matched into z)",
             "y.n has no value yet",
             "z.part has no value yet",
@@ -6017,6 +6035,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from o to s",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from None to o",
             "Move from x to a",
             "Move from y to b",
             "Copy from o to s",
@@ -7254,6 +7274,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.y holds a copyable value",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from Some to o",
             "p.x has no value yet",
             "p.y has no value yet",
         ],
@@ -7457,6 +7479,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is moved into drop, which drops it (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped)",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from Maker to m",
             "r is another Rc to the same value",
             "t is another Rc to the same value",
             "makes another Rc to the same value (nothing is copied), now owned by r",
@@ -8284,7 +8308,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x acquires ownership of a resource",
             "x goes out of scope. Its resource is dropped.",
             "x holds a value",
-            "x is bound to a value",
+            "x is initialized with a Red value",
             "x's value is moved",
             "x, immutable. A different variable from the x declared on line 9 (separate scopes, so only one exists at a time)",
             "x, immutable. A different variable from the x declared on line 5 (separate scopes, so only one exists at a time)",
@@ -8294,19 +8318,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // said this of its `x`, which shared the `String`'s column.
             "x's resource is moved",
             "x₂",
+            // #873: the constructor is not an actor.
+            "Move from Light::Red to x",
         ],
     },
     // Two non-Copy owners without drop glue still share one column.
     TooltipExpect {
         name: "same_name_plain_owners_share",
         must_contain: &[
-            "x is bound to a value",
+            "x is initialized with a Red value",
+            "x is initialized with an On value",
             "x's value is moved",
         ],
         must_not_contain: &[
             "A different variable from",
             "x₂",
             "resource",
+            // #873: the constructors are not actors.
+            "Move from Light::Red to x",
+            "Move from Mode::On to x",
         ],
     },
     // A bare macro call as an arm's body (`Some(x) => println!(..)`) has
@@ -9229,6 +9259,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from None to a",
             "=a was moved or dropped in every branch above",
             "=b was moved or dropped in every branch above",
             "Move from a to x",
@@ -9304,6 +9336,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c goes out of scope. No resource is dropped: c was moved or dropped in every branch above.",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from None to a",
             "=a was moved or dropped in every branch above",
             "=b was moved or dropped in every branch above",
             "=c was moved or dropped in every branch above",
@@ -9582,6 +9616,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from None to a",
             "Immutable borrow from a to x",
             "n.0's resource",
             "moved into",
@@ -9666,6 +9702,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from None to a",
             "x borrows a or b",
             "a's resource is immutably borrowed by x",
             "Immutable borrow from a to x",
@@ -10159,6 +10197,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x acquires ownership of a resource",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from None to a",
             "Move from a to x",
             "Move from b to x",
             "a still owns it",
@@ -10635,6 +10675,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "i goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
         must_not_contain: &[
+            // #873: a constructor is not an actor.
+            "Move from Plain::A to h",
             "=a goes out of scope. Its resource is dropped.",
             "=b goes out of scope. Its resource is dropped.",
             "=c goes out of scope. Its resource is dropped.",
@@ -13353,9 +13395,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "hide_items_814",
         must_contain: &[
             "Move from String::from to g.s",
-            "Move from Mood::Happy to _m",
+            "_m is initialized with a Happy value",
         ],
         must_not_contain: &[
+            // #873: the constructor is not an actor.
+            "Move from Mood::Happy to _m",
             "struct Greeter",
             "use std::fmt::Write",
         ],
@@ -14000,8 +14044,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "basic_match",
         // #866: `y = Fruit::Apple(z)` gives y a new Fruit built from z's u32,
         // not a copy of z; `Fruit::Apple(z) =>` copies the u32 inside x.
-        // Not pinned: `Fruit::Apple(8)` / `Fruit::Banana` still read "Move from
-        // Fruit::Apple to x", a non-Copy constructor drawn as an actor (#873).
+        // #873: `Fruit::Apple(8)` / `Fruit::Banana` build new values; the
+        // constructor is not an actor.
         must_contain: &[
             "Partial copy from x to z",
             "z is initialized with a copy of a value inside x",
@@ -14011,18 +14055,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z goes out of scope",
             "y goes out of scope",
             "x goes out of scope",
+            "x is initialized with an Apple value",
+            "y is initialized with a Banana value",
         ],
         must_not_contain: &[
             "y is assigned a copy of z",
             "z is initialized with a copy of x",
             "x's value is copied",
+            "Move from Fruit::Apple to x",
+            "Move from Fruit::Banana to y",
+            "=Fruit::Apple",
+            "=Fruit::Banana",
         ],
     },
     TooltipExpect {
         name: "basic_match3",
         // #866: as basic_match, with six arms.
-        // Not pinned: `Fruit::Apple(8)` / `Fruit::Banana` still read "Move from
-        // Fruit::Apple to x", a non-Copy constructor drawn as an actor (#873).
+        // #873: `Fruit::Apple(8)` / `Fruit::Banana` build new values; the
+        // constructor is not an actor.
         must_contain: &[
             "Partial copy from x to z",
             "z is initialized with a copy of a value inside x",
@@ -14032,19 +14082,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z goes out of scope",
             "y goes out of scope",
             "x goes out of scope",
+            "x is initialized with an Apple value",
+            "y is initialized with a Banana value",
         ],
         must_not_contain: &[
             "y is assigned a copy of z",
             "z is initialized with a copy of x",
             "x's value is copied",
+            "Move from Fruit::Apple to x",
+            "Move from Fruit::Banana to y",
+            "=Fruit::Apple",
+            "=Fruit::Banana",
         ],
     },
     TooltipExpect {
         name: "basic_match4",
         // #866: `x = Fruit::Apple(z)` inside `match x`, then a nested match
         // on the new x.
-        // Not pinned: `Fruit::Apple(8)` / `Fruit::Banana` still read "Move from
-        // Fruit::Apple to x", a non-Copy constructor drawn as an actor (#873).
+        // #873: `Fruit::Apple(8)` / `Fruit::Banana` build new values; the
+        // constructor is not an actor.
         must_contain: &[
             "Partial copy from x to z",
             "z is initialized with a copy of a value inside x",
@@ -14054,12 +14110,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c is initialized with a copy of a value inside x",
             "a value inside x is copied",
             "Copy from c to +",
+            "x is initialized with an Apple value",
         ],
         must_not_contain: &[
             "x is assigned a copy of z",
             "z is initialized with a copy of x",
             "c is initialized with a copy of x",
             "x's value is copied",
+            "Move from Fruit::Apple to x",
+            "Move from Fruit::Banana to x",
+            "Move from Fruit::Bean to x",
+            "=Fruit::Apple",
+            "=Fruit::Banana",
+            "=Fruit::Bean",
         ],
     },
     TooltipExpect {
@@ -14827,11 +14890,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "unit_struct_box",
         must_contain: &[
-            "Move from Marker to m",
-            "m is bound to a value",
+            "m is initialized with a Marker value",
             "e is bound to a value",
         ],
         must_not_contain: &[
+            // #873: `Marker` is a constructor, not an actor.
+            "Move from Marker to m",
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
@@ -14972,6 +15036,61 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "opt's value is copied",
             "y's value is copied",
             "=Some",
+            // #873: a non-Copy constructor isn't an actor either.
+            "Move from Fruit::Banana to y",
+            "Move from Pair::Two to p",
+        ],
+    },
+    TooltipExpect {
+        name: "ctor_not_actor_873",
+        // #873: a constructor is never an actor, whatever its type. A
+        // non-Copy constructor's value is a new value: no constructor column
+        // and no arrow out of it. A payload call keeps its arrow
+        // (`Some(String::from("w"))`), and a variable moved in keeps its move
+        // (`Some(s)`).
+        must_contain: &[
+            "y is initialized with a Banana value",
+            "y is assigned a new value",
+            "p is initialized with a Two value",
+            "o acquires ownership of a resource",
+            "o acquires ownership of a new resource; its previous resource (including the String it holds, if any) is dropped",
+            "o2 acquires ownership of a resource",
+            "Move from String::from to w",
+            "w acquires ownership of a resource",
+            "Move from s to m",
+            "s's resource is moved",
+            "m acquires ownership of a resource",
+            "n acquires ownership of a resource",
+            "k is initialized with a Marker value",
+            "t acquires ownership of a resource",
+            "t.0 acquires ownership of a resource",
+            "t.0 goes out of scope. Its resource is dropped.",
+            // A Copy tuple struct's fields get their values too.
+            "pt is initialized with a Pt value",
+            "pt.0 is bound to a copyable value",
+            "Copy from pt.0 to px",
+            "pt goes out of scope",
+        ],
+        must_not_contain: &[
+            // #877's plugin: `Pt(1, 2)` left pt.0 / pt.1 without a value.
+            "pt.0 and pt.1 were moved out earlier",
+            "Move from Fruit::Banana",
+            "Move from Fruit::Apple",
+            "Move from Pair::Two",
+            "Move from Some to o",
+            "Move from Some to o2",
+            "Move from None to n",
+            "Move from Marker to k",
+            "Move from Wrapper to t",
+            "Move from Some",
+            "to Some",
+            "=Fruit::Banana",
+            "=Fruit::Apple",
+            "=Pair::Two",
+            "=Some",
+            "=None",
+            "=Marker",
+            "=Wrapper",
         ],
     },
     // ─── #867: a borrow of a value that needs no drop is not a resource ───
