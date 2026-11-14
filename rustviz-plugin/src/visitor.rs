@@ -5176,6 +5176,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // The variable moved into the loop as its iterator, whose
         // drop is stated on its column (#482).
         let mut iterator_head: Option<ResourceAccessPoint> = None;
+        // The head's `&v` / `&mut v` when only the loop's iterator holds
+        // it (#885): the lender, whether the loan is mutable, and the id
+        // of the borrow on the `for` line.
+        let mut head_loan: Option<(ResourceTy, bool, usize)> = None;
         if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
           let pat_name = binding_name(&self.tcx, pat_hirid);
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -5326,6 +5330,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           self.register_pattern_bindings_anon(user_pat, for_line);
           self.pattern_lender = None;
+          // `for &y in &v`, `for &(a, b) in &pairs`, `for _ in &v`: no
+          // loop variable borrows the head (each is a copy, or there is
+          // none), but the loop's iterator still borrows `v` until the
+          // loop ends (#885). Draw that borrow on `v`; it ends with the
+          // loop, below.
+          if let (Some(e @ (Evt::SBorrow | Evt::MBorrow)), ResourceTy::Value(r)) = (&iterand_evt, &head_rty) {
+            let mut decls = HashSet::new();
+            collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut decls);
+            #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
+            let borrowed = decls.iter()
+              .filter_map(|d| self.borrow_map.get(d.name()))
+              .any(|rd| rd.all_lenders().contains(&head_rty));
+            if !borrowed && !r.is_ref() && !r.is_fn() {
+              let id = *self.unique_id;
+              let is_mut = matches!(e, Evt::MBorrow);
+              self.add_ev(for_line, e.clone(), ResourceTy::Anonymous, head_rty.clone(), false);
+              head_loan = Some((head_rty.clone(), is_mut, id));
+            }
+          }
         }
 
         // Visit body — events flow into the global timeline.
@@ -5415,11 +5438,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // E0502 even after the last use of the loop variable (#868).
         // The end says what held the borrow, so the lender's column
         // can say so in between (#871).
-        for (lender, is_mut, call) in loop_loans.into_iter().filter(|(l, _, _)| !carried.contains(l)) {
+        let loop_loans = loop_loans.into_iter()
+          .filter(|(l, _, _)| !carried.contains(l))
+          .map(|(l, m, call)| (l, m, StaticLender::LoopIterator { call }))
+          .chain(head_loan.map(|(l, m, lend)| (l, m, StaticLender::LoopHeadBorrow { lend })));
+        for (lender, is_mut, static_lender) in loop_loans {
           let id = *self.unique_id;
           *self.unique_id += 1;
           let (from, to) = (ResourceTy::Anonymous, lender);
-          let static_lender = Some(StaticLender::LoopIterator { call });
+          let static_lender = Some(static_lender);
           let ev = if is_mut {
             ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by: Vec::new() }
           } else {
