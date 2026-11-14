@@ -1093,7 +1093,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new() });
       *self.unique_id += 1;
     }
   }

@@ -14806,6 +14806,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y₂ immutably borrows a value",
         ],
     },
+    TooltipExpect {
+        name: "call_while_shared",
+        // #870: a call that borrows v while r (or a, or the holder `it`)
+        // already shares it gives back only its own borrow; v stays
+        // shared until the last of those ends. Main said "v's resource is
+        // no longer immutably borrowed" at the call and drew v as its
+        // unborrowed owner from there; that text is right where the
+        // borrow really ends, so its rows are checked in
+        // `a_call_on_a_shared_variable_leaves_it_shared`.
+        must_contain: &[
+            "v's resource is immutably borrowed by r; v is read-only while the borrow is live",
+            "v's resource is immutably borrowed by len; v is read-only while the borrow is live",
+            "v's resource is no longer borrowed by len, but is still immutably borrowed by r",
+            "v's resource is no longer borrowed by len, but is still immutably borrowed by a",
+            "v's resource is no longer borrowed by len, but is still immutably borrowed by it",
+            "Return immutably borrowed resource from r to v",
+            "Return immutably borrowed resource from a to v",
+            "v's resource is no longer immutably borrowed",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+        ],
+        must_not_contain: &[
+            "(moved from",
+            "Move from v to",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -15776,6 +15801,59 @@ fn reference_copied_out_of_a_holder_returns_at_its_last_use() {
         .collect();
     assert_eq!(back.len(), 1, "v is unborrowed at {:?} after the loop starts", back);
     assert!(back[0].1 > row, "v is unborrowed at {:?}, not below n's last use (y={}); it still borrows v", back[0], row);
+}
+
+/// #870: `v.len()` while `r` (a `for` binding, a holder `it`) already
+/// borrows `v` lends `v` to `len` and gets that borrow back, but `r`'s
+/// borrow goes on: `v.push(..)` between the call and `r`'s last use is
+/// E0502. Main reset v to unborrowed at the call ("v's resource is no
+/// longer immutably borrowed", then the owner line). Now the call's dot
+/// says who still borrows v, v's line stays "being shared" down to the
+/// real end, and v is unborrowed again only there.
+#[test]
+fn a_call_on_a_shared_variable_leaves_it_shared() {
+    let rv = run_with_local_backend("call_while_shared");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let loop_end = |body: &str| {
+        let body_row = code_row_y(&code, body);
+        code_rows_y(&code, "}").into_iter().find(|y| *y > body_row).expect("the loop's closing brace")
+    };
+    let cases = [
+        ("r", code_row_y(&code, "println!(\"{}\", v.len());"), code_row_y(&code, "println!(\"{:?}\", r);")),
+        ("a", code_row_y(&code, "let n = v.len();"), loop_end("println!(\"{} {}\", a, n);")),
+        ("it", code_row_y(&code, "let k = v.len();"), loop_end("println!(\"{} {}\", x, k);")),
+    ];
+    let back = dots_listing_tooltip(&timeline, "v's resource is no longer immutably borrowed");
+    let owner = state_lines_with_tooltip(&timeline, "v is the owner of the resource");
+    for (by, call_row, end_row) in cases {
+        let still = dots_listing_tooltip(&timeline, &format!("v's resource is no longer borrowed by len, but is still immutably borrowed by {by}"));
+        assert_eq!(still.len(), 1, "{by}: v's dots where len's borrow ends: {still:?}");
+        assert!((still[0].1 - call_row).abs() < 1.0, "{by}: v's dot {:?} isn't on the call row (y={call_row})", still[0]);
+        let early: Vec<_> = back.iter().filter(|d| d.1 > call_row - 1.0 && d.1 < end_row - 1.0).collect();
+        assert!(early.is_empty(), "{by}: v is unborrowed at {early:?}, above the borrow's end (y={end_row})");
+        assert!(back.iter().any(|d| (d.1 - end_row).abs() < 1.0), "{by}: v isn't unborrowed on the end row (y={end_row}): {back:?}");
+        let free: Vec<_> = owner.iter().filter(|(a, b)| b.min(end_row) - a.max(call_row) > 0.5).collect();
+        assert!(free.is_empty(), "{by}: v drawn as its unborrowed owner at {free:?}, between the call (y={call_row}) and the borrow's end (y={end_row})");
+    }
+}
+
+/// The y ranges of the column lines whose tooltip is exactly `text`.
+fn state_lines_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for (i, _) in svg.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
+        let group = &svg[i..i + svg[i..].find("</g>").unwrap_or(svg.len() - i)];
+        let open = &group[..group.find('>').unwrap_or(group.len()) + 1];
+        if timeline_tooltips(open) != [text] {
+            continue;
+        }
+        for l in start_tags(group, "line") {
+            let ys = attr(l, "y1").zip(attr(l, "y2")).and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)));
+            if let (Some((a, b)), true) = (ys, attr(l, "x1") == attr(l, "x2")) {
+                out.push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    out
 }
 
 /// #704: `let h = g;` copies a closure that borrows `s`. The loan lasts
