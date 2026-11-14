@@ -464,7 +464,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         walk.first_lo.get_or_insert(*self.unique_id);
         let typeck = self.tcx.typeck(let_expr.pat.hir_id.owner);
-        if !pat_is_irrefutable(let_expr.pat, typeck) {
+        // A literal scrutinee (`Some(o)`, `(a, 1)`) moves its
+        // variables into its temporary before the pattern is checked
+        // (#949): the check counts after the bindings' effects.
+        let check = !self.let_always_matches(let_expr.pat, let_expr.init);
+        let check_after = check && !self.tuple_scrutinee_moves(let_expr.init).is_empty();
+        if check && !check_after {
           walk.checks += 1;
         }
         // By column name: a binding that shadows a variable is `a₂`.
@@ -476,6 +481,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mark = self.preprocessed_events.len();
         let bound = self.register_iflet_let_bindings(let_expr, None, walk.body_end).0;
         self.record_chain_effects(mark, outer, expr, walk, true);
+        if check_after {
+          walk.checks += 1;
+        }
         decls.extend(bound);
       }
       _ => {
@@ -507,6 +515,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let straight = runs_straight(part);
     let mut push = |kind| walk.effects.push(ChainEffect { kind, checks_before, line, straight });
     let held = |rap: &ResourceAccessPoint| self.rap_ownership_before(mark, rap.name()) == Ownership::Held;
+    // The variables a literal scrutinee moves into its temporary, which a
+    // pattern that can fail takes apart (#949), and the temporary's text.
+    let (literal_vars, literal_text) = match part.kind {
+      ExprKind::Let(l) if binding && !self.let_always_matches(l.pat, l.init) => (
+        self.tuple_scrutinee_moves(l.init),
+        match self.tuple_scrutinee_target(l.init) {
+          ResourceTy::Temporary { tuple: Some(t), .. } => t,
+          _ => String::new(),
+        },
+      ),
+      _ => (Vec::new(), String::new()),
+    };
+    let how_moved = |rap: &ResourceAccessPoint| if literal_vars.contains(rap) {
+      ChainFailHow::Literal(literal_text.clone())
+    } else {
+      ChainFailHow::Move
+    };
     // Also the events of a conditional inside the part (`{ if c { z =
     // a; } z > 0 }`): they last the same way.
     fn flatten<'e>(events: &'e [(usize, ExternalEvent)], out: &mut Vec<&'e ExternalEvent>) {
@@ -532,7 +557,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // What the event does to the place it takes from.
       match ev {
         ExternalEvent::Move { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) =>
-          push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: ChainFailHow::Move }),
+          push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: how_moved(rap) }),
         // An outer closure that can only be called once: the call
         // moves it (#579).
         ExternalEvent::ClosureCall { closure: c @ ResourceTy::Value(rap), .. } if is_outer(c) =>
@@ -2700,6 +2725,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           if self.manually_drop_by_hand(fn_expr, args, which) {
             return;
           }
+        }
+        // `let W(y) = W(g);`: a constructor that a `let` pattern takes
+        // apart is no actor either (as below, #950). `bind_pat` draws
+        // `g` to `y`, and moves what the pattern leaves into the
+        // literal's temporary. (Registered for the code panel only.)
+        if self.let_ctor_literals.remove(&expr.hir_id) {
+          if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+            self.add_fn(name);
+          }
+          for arg in args.iter() {
+            self.visit_expr(arg);
+          }
+          return;
         }
         // `match Some(f) { Some(x) => .. }`: the constructor is taken
         // apart like a tuple literal (#807). What goes into it is drawn
@@ -6205,12 +6243,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ExprKind::Tup(elems) if elems.iter().any(|x| x.hir_id == cur.hir_id) => cur = p,
         ExprKind::Call(callee, args) if is_ctor_path(callee, typeck) && args.iter().any(|x| x.hir_id == cur.hir_id) => cur = p,
         ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) => return s.hir_id == cur.hir_id && top(cur),
-        ExprKind::Let(l) => {
-          return l.init.hir_id == cur.hir_id
-            && matches!(self.tcx.parent_hir_node(p.hir_id),
-              Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == p.hir_id))
-            && top(cur);
-        }
+        // Also a part of a let chain (`if let Some(x) = Some(f) &&
+        // c`, #949).
+        ExprKind::Let(l) => return l.init.hir_id == cur.hir_id && self.is_if_condition_let(p) && top(cur),
+        _ => return false,
+      }
+    }
+  }
+
+  /// Whether `pat` matches every value `init` can have: an irrefutable
+  /// pattern, or one that takes apart a literal the way it was built
+  /// (`Some(x)` on `Some(f)`, #949): a let-chain part that can't fail.
+  fn let_always_matches(&self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) -> bool {
+    let typeck = self.tcx.typeck(pat.hir_id.owner);
+    if pat_is_irrefutable(pat, typeck) {
+      return true;
+    }
+    if self.literal_elems(init).is_none() {
+      return false;
+    }
+    let mut pairs = Vec::new();
+    self.literal_pat_pairs(pat, init, &mut pairs);
+    // Each leaf: an irrefutable sub-pattern, with its element. A
+    // pattern naming another variant than the constructor builds is a
+    // leaf of its own, and refutable.
+    pairs.iter().all(|(p, _)| pat_is_irrefutable(p, typeck))
+  }
+
+  /// Whether the `let` expression `l` is an `if`'s condition, or a part
+  /// of a let chain that is (`if a && let P = e && c`, #949).
+  fn is_if_condition_let(&self, l: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    let mut cur = l;
+    loop {
+      let Node::Expr(p) = self.tcx.parent_hir_node(cur.hir_id) else { return false };
+      match p.kind {
+        ExprKind::If(c, ..) => return c.hir_id == cur.hir_id,
+        ExprKind::DropTemps(_) => cur = p,
+        ExprKind::Binary(op, ..) if op.node == rustc_hir::BinOpKind::And && is_let_chain(p) => cur = p,
         _ => return false,
       }
     }
@@ -7194,7 +7264,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return false;
     }
 
-    // Calls, borrows and reads inside the RHS.
+    // Calls, borrows and reads inside the RHS. A constructor the
+    // pattern takes apart (`W(y) = W(g);`) is no actor (#950).
+    self.note_let_ctor_literals(local.pat, init);
     self.visit_expr(init);
 
     let mut pairs: Vec<(HirId, &'tcx Expr<'tcx>)> = Vec::new();
@@ -7372,8 +7444,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         pair_seq(self, pats, dd.as_opt_usize(), exprs, pairs, discarded)
       }
       (PatKind::TupleStruct(_, pats, dd), ExprKind::Call(callee, args))
-        if matches!(callee.kind, ExprKind::Path(QPath::Resolved(_, p))
-          if matches!(p.res, Res::Def(DefKind::Ctor(..), _))) =>
+        if is_ctor_path(callee, self.tcx.typeck(src.hir_id.owner)) =>
       {
         pair_seq(self, pats, dd.as_opt_usize(), args, pairs, discarded)
       }
@@ -7504,6 +7575,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let mut nested_temps = Vec::new();
       let init_len = self.in_scope.len();
       if !is_skipped {
+        self.note_let_ctor_literals(pat, init);
         self.visit_expr(init);
         nested_temps = self.bind_nested_extended_temps(pat, init);
       }
@@ -7809,30 +7881,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // elements, and the elements it covers are paired with nothing.
       // Those, like an element matched by `_`, are still moved into the
       // tuple temporary (#439).
-      (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(sub_exprs))
-        if sub_pats.len() <= sub_exprs.len()
-          && (ddpos.as_opt_usize().is_some() || sub_pats.len() == sub_exprs.len()) =>
+      //
+      // `let W(a, b) = W(e1, e2);` (also `let Some(a) = Some(e) else ..`)
+      // takes the constructor apart the same way: it's no actor, and
+      // `a` takes e1's value (#950). A call that isn't a constructor
+      // (`let W(a) = wrap(s);`) is bound from as a whole.
+      (PatKind::Tuple(..) | PatKind::TupleStruct(..), ExprKind::Tup(_) | ExprKind::Call(..))
+        if self.let_literal_pairs(pat, init).is_some() =>
       {
-        let d = ddpos.as_opt_usize().unwrap_or(sub_pats.len());
-        let tail = sub_pats.len() - d;
-        let tail_start = sub_exprs.len() - tail;
-        let pairs: Vec<_> = sub_pats[..d].iter().zip(sub_exprs.iter())
-          .chain(sub_pats[d..].iter().zip(sub_exprs[tail_start..].iter()))
-          .collect();
-        self.premove_into_literal(&pairs, sub_exprs[d..tail_start].iter().collect(), is_skipped);
+        let (pairs, ignored) = self.let_literal_pairs(pat, init).unwrap();
+        self.premove_into_literal(&pairs, ignored, is_skipped);
         for (sp, se) in pairs {
-          self.refuse_or_in_literal(sp, se, is_skipped);
-          self.bind_pat(sp, se, is_skipped);
-        }
-      }
-      // `let Foo(a, b) = Foo(e1, e2);` — single-variant tuple struct
-      // (the only case `let` admits irrefutably). Same arity guard
-      // as above.
-      (PatKind::TupleStruct(_, sub_pats, ddpos), ExprKind::Call(_, sub_exprs))
-        if ddpos.as_opt_usize().is_none()
-          && sub_pats.len() == sub_exprs.len() =>
-      {
-        for (sp, se) in sub_pats.iter().zip(sub_exprs.iter()) {
           self.refuse_or_in_literal(sp, se, is_skipped);
           self.bind_pat(sp, se, is_skipped);
         }
@@ -7972,6 +8031,49 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut by_value = true;
     pat.each_binding(|_, hid, _, _| by_value &= self.own_ref_binding(hid).is_none());
     by_value
+  }
+
+  /// `let (a, b) = (e1, e2);`, `let W(a, b) = W(e1, e2);`: each
+  /// sub-pattern with the element of the literal it takes apart, by
+  /// position. With a `..` (`let (a, ..) = (e1, e2, e3);`) the patterns
+  /// after it pair with the last elements; the elements it covers are
+  /// returned on their own. A constructor call pairs with a pattern
+  /// naming its own variant or struct (#950). `None` when the pattern
+  /// doesn't take the init apart this way.
+  fn let_literal_pairs(&self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>)
+    -> Option<(Vec<(&'tcx Pat<'tcx>, &'tcx Expr<'tcx>)>, Vec<&'tcx Expr<'tcx>>)> {
+    let (sub_pats, ddpos, sub_exprs) = match (pat.kind, init.kind) {
+      (PatKind::Tuple(sub_pats, ddpos), ExprKind::Tup(sub_exprs)) => (sub_pats, ddpos, sub_exprs),
+      (PatKind::TupleStruct(_, sub_pats, ddpos), ExprKind::Call(callee, sub_exprs))
+        if !init.span.from_expansion()
+          && is_ctor_path(callee, self.tcx.typeck(init.hir_id.owner))
+          && !self.ctor_pat_mismatch(pat, init) => (sub_pats, ddpos, sub_exprs),
+      _ => return None,
+    };
+    if sub_pats.len() > sub_exprs.len() || (ddpos.as_opt_usize().is_none() && sub_pats.len() != sub_exprs.len()) {
+      return None;
+    }
+    let d = ddpos.as_opt_usize().unwrap_or(sub_pats.len());
+    let tail_start = sub_exprs.len() - (sub_pats.len() - d);
+    let pairs = sub_pats[..d].iter().zip(sub_exprs.iter())
+      .chain(sub_pats[d..].iter().zip(sub_exprs[tail_start..].iter()))
+      .collect();
+    Some((pairs, sub_exprs[d..tail_start].iter().collect()))
+  }
+
+  /// The constructor calls in `let pat = init;` that `bind_pat` takes
+  /// apart like tuple literals (`W(g)` in `let W(y) = W(g);` or `let
+  /// (W(y), n) = (W(g), 1);`, #950). A constructor is never an actor
+  /// (#873): visiting them draws no move into the constructor, and
+  /// `bind_pat` draws each element going where the pattern puts it.
+  fn note_let_ctor_literals(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) {
+    let Some((pairs, _)) = self.let_literal_pairs(pat, init) else { return };
+    if matches!(init.kind, ExprKind::Call(..)) {
+      self.let_ctor_literals.insert(init.hir_id);
+    }
+    for (sp, se) in pairs {
+      self.note_let_ctor_literals(sp, se);
+    }
   }
 
   /// `let (p, (x, _) | (_, x)) = (s, u);`: the literal moves `u` into

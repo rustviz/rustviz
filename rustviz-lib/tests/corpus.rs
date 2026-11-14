@@ -17845,6 +17845,95 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "from the caller",
         ],
     },
+    // #949: a constructor scrutinee in a let chain is no actor either
+    // (#873). `Some(x)` on `Some(f)` can't fail: f's String is in x
+    // before a later part can turn out false, and x drops it then.
+    // `Some(Some(w))` on `Some(o)` can fail: o is moved into the
+    // temporary either way. `c && let Some(z) = Some(k)` moves k only
+    // when c holds, into z for the body. Main (with #807) drew "Move
+    // from f to Some" / "Move from Some to x", and "k may have been
+    // moved: when the condition moves k to Some and then turns out
+    // false" (nothing after that part can fail).
+    TooltipExpect {
+        name: "edition2024/ctor_let_chain_949",
+        must_contain: &[
+            "Move from f to x",
+            "f was moved: the condition moves f to x before it can turn out false, so the move has happened even when the body is skipped, and f can't be used after the if. When the condition fails after that move, x goes out of scope and its resource is dropped.",
+            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above.",
+            "Move from h to y",
+            "h was moved: the condition moves h to y before it can turn out false, so the else branch runs after that move, and h can't be used here. When the condition fails after that move, y goes out of scope and its resource is dropped.",
+            "Move from k to z",
+            "Move from o to w",
+            "o was moved: the condition moves o into the temporary value Some(o) before it can turn out false, so the move has happened even when the body is skipped, and o can't be used after the if. If the pattern doesn't match, the temporary value Some(o) is dropped, and with it o's resource; if it matches and the condition fails after that, w goes out of scope and its resource is dropped.",
+            "o goes out of scope. No resource is dropped: o was moved or dropped in every branch above.",
+        ],
+        must_not_contain: &[
+            "Move from f to Some",
+            "Move from h to Some",
+            "Move from k to Some",
+            "Move from o to Some",
+            "Move from Some",
+            "to Some",
+            "A temporary holds the value that Some returns",
+            "=Some",
+            "f may have been moved",
+            "h may have been moved",
+            "k may have been moved: when the condition moves k",
+            // k is moved only when c holds, by the last part: nothing
+            // after it can fail.
+            "k was moved:",
+            "o may have been moved",
+            // o is moved into the temporary however the condition goes:
+            // no drop flag
+            "o goes out of scope. Its resource",
+            "f goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #950: `let W(y) = W(g);` takes the constructor apart like `let (y,
+    // n) = (g, 1);` takes a tuple apart: no actor (#873), g's String
+    // goes to y once. What `_` / `..` leave is moved into the temporary
+    // W2 builds and dropped with it at the end of the statement. Also
+    // in a tuple (`(W(r), n) = (W(e), 1)`), a let-else and a
+    // destructuring assignment. `let W(v) = wrap(m);`: v takes what
+    // wrap returns. Main drew "Move from g to W" and "Move from g to
+    // y" (g moved twice), "Move from d to q" for `W2(q, ..) = W2(c,
+    // d)`, and "Move from m to v" past wrap.
+    TooltipExpect {
+        name: "ctor_let_950",
+        must_contain: &[
+            "Move from g to y",
+            "Move from a to p",
+            "Move from b to (temporary)",
+            "The temporary that the literal on the right of this let builds takes the value of b. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+            "Move from c to q",
+            "Move from d to (temporary)",
+            "The temporary that the literal on the right of this let builds takes the value of d. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+            "Move from e to r",
+            "Move from h to t",
+            "Move from k to u",
+            "Move from m to wrap",
+            "Move from wrap to v",
+        ],
+        must_not_contain: &[
+            "Move from g to W",
+            "Move from a to W2",
+            "Move from b to W2",
+            "Move from c to W2",
+            "Move from d to W2",
+            "Move from e to W",
+            "Move from h to Some",
+            "Move from k to W",
+            "Move from W",
+            "Move from Some",
+            "Move from d to q",
+            "Move from m to v",
+            "A temporary holds the value that W2 returns",
+            "=W",
+            "=W2",
+            "=Some",
+            "(temporary 2)",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

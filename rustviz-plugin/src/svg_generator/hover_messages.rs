@@ -3566,6 +3566,34 @@ pub fn event_dot_chain_fail_move(
              the body is skipped, and {0} can't be used after the {3}",
             name, moves, act, if_kw),
     };
+    // That temporary is dropped when the condition fails, with what the
+    // pattern didn't take out of it: all of it if the pattern didn't
+    // match (#949).
+    if let ChainFailHow::Literal(tuple) = how {
+        let tmp = temporary_tuple(tuple);
+        if to.is_empty() {
+            return format!("{out}. When the condition fails, {tmp} is dropped, and with it {name}'s resource.");
+        }
+        out.push_str(&format!(". If the pattern doesn't match, {tmp} is dropped, and with it {name}'s resource"));
+        if dropped.is_empty() {
+            out.push('.');
+            return out;
+        }
+        let plural = dropped.len() > 1;
+        let fmt: Vec<String> = dropped.iter().map(|n| styled_name_html(n)).collect();
+        let names = match fmt.len() {
+            1 => fmt.concat(),
+            n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+        };
+        out.push_str(&format!(
+            "; if it matches and the condition fails after that, {} {} out of scope and {} {} dropped.",
+            names,
+            if plural { "go" } else { "goes" },
+            if plural { "their resources" } else { "its resource" },
+            if plural { "are" } else { "is" },
+        ));
+        return out;
+    }
     out.push_str(&cond_fail_dropped(dropped));
     out
 }
@@ -3618,6 +3646,9 @@ fn cond_move_parts(my_name: &String, to: &[String], how: &ChainFailHow) -> (Stri
     let (moves, act) = match how {
         ChainFailHow::Call => (format!(
             "the condition calls {} (it can only be called once, so the call moves it)", name), "call"),
+        // Into the temporary of a literal scrutinee that the pattern
+        // may not match (#949).
+        ChainFailHow::Literal(tuple) => (format!("the condition moves {} into {}", name, temporary_tuple(tuple)), "move"),
         _ if to.is_empty() => (format!("the condition moves {}", name), "move"),
         _ => (format!("the condition moves {} to {}", name, join(to)), "move"),
     };
