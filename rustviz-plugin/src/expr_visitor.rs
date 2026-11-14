@@ -5221,8 +5221,15 @@ fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[Reso
   // (`t.len()` in `if t.len() > 1 { first_word(&t) } ..`; #337).
   let mut fns: Vec<String> = Vec::new();
   self.call_names(call, &mut fns);
+  self.mark_kept_on_lines(lo, hi, &hashes, &fns);
+}
+
+/// Set `result_keeps_borrow` on the pass-by-reference events from one
+/// of `hashes` into one of the functions `fns` on lines `lo..=hi`, and
+/// return their ids.
+fn mark_kept_on_lines(&mut self, lo: usize, hi: usize, hashes: &[u64], fns: &[String]) -> Vec<usize> {
   let mut ids: Vec<usize> = Vec::new();
-  mark_kept_in(&mut self.preprocessed_events, lo, hi, &hashes, &fns, &mut ids);
+  mark_kept_in(&mut self.preprocessed_events, lo, hi, hashes, fns, &mut ids);
   for line in lo..=hi {
     if let Some(evs) = self.event_line_map.get_mut(&line) {
       for ev in evs.iter_mut() {
@@ -5231,6 +5238,67 @@ fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[Reso
         }
       }
     }
+  }
+  ids
+}
+
+/// `for x in <head>` with `head` a call (`v.iter()`,
+/// `v.iter().enumerate()`, `s.chars()`): the loop's iterator is
+/// `head`'s value, and it keeps the loans that value holds until the
+/// loop ends, since `next()` runs again at the top of every iteration.
+/// Mark the argument-passing events of those lenders as kept by the
+/// result, so the `for` line doesn't say the lender got its resource
+/// back (#868), and return each lender (a variable that owns what it
+/// lends) with whether its loan is mutable. Only the calls in `head`
+/// whose result can hold a borrow keep one: `v.len()` in
+/// `v.iter().take(v.len())` borrows `v` just for the call.
+pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
+  if !matches!(head.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+    return Vec::new();
+  }
+  let typeck = self.tcx.typeck(head.hir_id.owner);
+  let mut fns: Vec<String> = Vec::new();
+  self.borrow_holding_call_names(head, typeck, &mut fns);
+  let lo = span_to_line(&head.span, &self.tcx);
+  let hi = span_end_line(&head.span, &self.tcx);
+  let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+  for l in self.value_lenders(head) {
+    let owner = matches!(&l, ResourceTy::Value(r) if !r.is_ref() && !r.is_fn());
+    if !owner || out.iter().any(|(o, _)| *o == l) {
+      continue;
+    }
+    let Some(hash) = l.extract_rap().map(|r| *r.hash()) else { continue };
+    let ids = self.mark_kept_on_lines(lo, hi, &[hash], &fns);
+    if let Some(is_mut) = ids.iter().find_map(|id| pass_ref_is_mut(&self.preprocessed_events, *id)) {
+      out.push((l, is_mut));
+    }
+  }
+  out
+}
+
+/// `call_names`, keeping only the calls whose result type can hold a
+/// borrow (`iter`, `enumerate`, not `len`).
+fn borrow_holding_call_names(&self, e: &'tcx Expr<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, out: &mut Vec<String>) {
+  let holds = |e: &'tcx Expr<'tcx>| typeck.expr_ty(e).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
+  match e.kind {
+    ExprKind::Call(f, args) => {
+      if holds(e) {
+        if let Some(n) = hirid_to_var_name(f.hir_id, &self.tcx) {
+          out.push(n);
+        }
+      }
+      for a in args.iter() { self.borrow_holding_call_names(a, typeck, out); }
+    }
+    ExprKind::MethodCall(seg, rcvr, args, _) => {
+      if holds(e) {
+        out.push(seg.ident.as_str().to_owned());
+      }
+      self.borrow_holding_call_names(rcvr, typeck, out);
+      for a in args.iter() { self.borrow_holding_call_names(a, typeck, out); }
+    }
+    ExprKind::AddrOf(_, _, inner) | ExprKind::Unary(_, inner) | ExprKind::Field(inner, _)
+    | ExprKind::DropTemps(inner) | ExprKind::Cast(inner, _) | ExprKind::Index(inner, _, _) => self.borrow_holding_call_names(inner, typeck, out),
+    _ => {}
   }
 }
 
@@ -8023,6 +8091,17 @@ pub fn branch_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> 
     _ => return None,
   }
   Some(out)
+}
+
+/// Whether the pass-by-reference event `id` (looked up in `events`,
+/// branches included) passes a mutable reference.
+fn pass_ref_is_mut(events: &[(usize, ExternalEvent)], id: usize) -> Option<bool> {
+  events.iter().find_map(|(_, ev)| match ev {
+    ExternalEvent::PassByStaticReference { id: i, .. } if *i == id => Some(false),
+    ExternalEvent::PassByMutableReference { id: i, .. } if *i == id => Some(true),
+    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| pass_ref_is_mut(&b.e_data, id)),
+    _ => None,
+  })
 }
 
 fn set_kept(ev: &mut ExternalEvent) {

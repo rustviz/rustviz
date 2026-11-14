@@ -688,7 +688,13 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_11_string_chars",
-        must_contain: &["chars reads from s (implicitly borrowed)", "s goes out of scope. Its resource is dropped."],
+        note: "the Chars iterator borrows s until the loop ends (was: s unborrowed again on the for line, #868)",
+        must_contain: &[
+            "chars reads from s (implicitly borrowed)",
+            "L5 s's resource is no longer immutably borrowed",
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &["L3 s's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
@@ -729,6 +735,8 @@ const BOOK: &[Snippet] = &[
             "map goes out of scope. No resource is dropped.",
             "Return immutably borrowed resource from text to *text",
             "text's immutable borrow ends (what it borrows from isn't shown)",
+            // split_whitespace is a method, not a lender (#868).
+            "Return immutably borrowed resource from word to split_whitespace",
         ],
         ..E
     },
@@ -1034,18 +1042,19 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c13_08_iter_mut",
         status: Correct,
-        note: "x's mutable borrow returns to v at the end of the loop (was 'returned' to iter_mut, #171; #789)",
+        note: "x's mutable borrow returns to v at the end of the loop (was 'returned' to iter_mut, #171; #789), and v isn't unborrowed on the for line (#868)",
         must_contain: &[
             "iter_mut reads from/writes to v (implicitly mutably borrowed)",
             "the value x points to is modified through *x",
             "Return mutably borrowed resource from x to v",
             "x's mutable borrow ends",
-            "v's resource is no longer mutably borrowed",
+            "L5 v's resource is no longer mutably borrowed",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "*x acquires ownership of a resource",
             "Return mutably borrowed resource from x to iter_mut",
+            "L3 v's resource is no longer mutably borrowed",
         ],
         ..E
     },
