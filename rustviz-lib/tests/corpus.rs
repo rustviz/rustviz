@@ -15547,6 +15547,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "tags goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "borrow_elem_vec_of_refs_894",
+        // #894: `&words[1]` with `words: Vec<&str>` (r: `&&str`) was refused
+        // ("internal error at expr_visitor.rs:705"): words was put on r's
+        // alias chain as if it were a reference. It is drawn exactly like
+        // `&v[1]` with `v: Vec<i32>`: words is borrowed by r until r's last
+        // use. The same for a variable index and an array. `let s: &str =
+        // tags[1];` copies the stored reference (it points at the literal,
+        // not into tags); main drew no start for s at all.
+        must_contain: &[
+            "Immutable borrow from words to r",
+            "words's resource is immutably borrowed by r; words is read-only while the borrow is live",
+            "r immutably borrows a resource",
+            "Return immutably borrowed resource from r to words",
+            "words's resource is no longer immutably borrowed",
+            "words goes out of scope. Its resource is dropped.",
+            "Immutable borrow from names to e",
+            "names's resource is immutably borrowed by e; names is read-only while the borrow is live",
+            "Return immutably borrowed resource from e to names",
+            "Immutable borrow from arr to a",
+            "arr's value is immutably borrowed by a; arr is read-only while the borrow is live",
+            "Return immutably borrowed value from a to arr",
+            "s is bound to an immutable reference",
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "tags goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from tags to s",
+            "tags's resource is immutably borrowed by s",
+            "s immutably borrows",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

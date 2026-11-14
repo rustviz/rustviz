@@ -3559,8 +3559,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // (`get_rap` never yields DerefField, but `&&p.f` through a
           // reference does: there is no aliasing chain to extend.)
           ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::DerefField(..) | ResourceTy::Temporary { .. } => { (lender, aliasing) }
+          // `&words[1]` with `words: Vec<&str>` also has type `&&str`,
+          // but what is borrowed is an element stored in the owner
+          // `words` (the lender resolves to `words` itself): words is no
+          // reference, so there is nothing to alias, and it has no
+          // borrow_map entry for `update_lifetime` to extend (#894).
+          // Only a reference borrowed or reborrowed through (`&b`, `&*b`,
+          // `&v[1]` with `v: &Vec<&str>`) joins the chain.
+          ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _)
+            if !self.borrow_map.contains_key(x.name()) => (lender, aliasing),
           ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) => {
-            aliasing.push_front(x.name().to_owned()); // here the lender is added to the list of aliases 
+            aliasing.push_front(x.name().to_owned()); // here the lender is added to the list of aliases
             (lender, aliasing)
           }
         }
@@ -6243,6 +6252,13 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           .collect(),
         None => return,
       };
+      // No tracked borrow in the collection (`let s: &str = words[1];`
+      // with `words = vec!["a", "b"]`): s still starts here, bound to
+      // the reference it copied (#894).
+      if lenders.is_empty() {
+        self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+        return;
+      }
       let Some(coll) = expr_to_rap_name(base, &self.tcx) else { return };
       let via = BorrowVia {
         func: coll,
