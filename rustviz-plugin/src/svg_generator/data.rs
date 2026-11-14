@@ -1368,6 +1368,10 @@ pub enum ExternalEvent {
     // named here builds, and `to` holds that value (`y =
     // Fruit::Apple(z)`, #866): `to` is not a copy of `from`. Only
     // `retarget_ctor_arg_events` sets it.
+    // `pointee`: a `&` sub-pattern copied the value a reference stored
+    // inside `from` points to (`let Some(&y) = orr`, #874), not a part
+    // of `from`; `Some(true)` when the binding is only a part of that
+    // value (`Some(&(a, b))`).
     Copy {
         from: ResourceTy,
         to: ResourceTy,
@@ -1375,6 +1379,7 @@ pub enum ExternalEvent {
         into_closure: bool,
         closure_value: bool,
         into_ctor: Option<String>,
+        pointee: Option<bool>,
         id: usize,
         break_alt: Option<BreakAlt>,
     },
@@ -1872,14 +1877,29 @@ pub enum CopyOf {
     /// the receiver holds (`y = Fruit::Apple(z)`): ExternalEvent's
     /// `into_ctor`.
     IntoCtor(String),
+    /// A `&` sub-pattern copied the value a reference stored inside
+    /// `from` points to (`let Some(&y) = orr`, #874); `part` when the
+    /// receiver got only a value inside it (`Some(&(a, b))`):
+    /// ExternalEvent's `pointee`.
+    Pointee { part: bool },
+}
+
+/// What the source of a copy says was copied out of it: a constructor's
+/// argument (`IntoCtor`) is copied whole, as before #866.
+fn source_copy_of(of: CopyOf) -> CopyOf {
+    match of {
+        CopyOf::IntoCtor(_) => CopyOf::Whole,
+        of => of,
+    }
 }
 
 impl CopyOf {
-    fn of(is_partial: bool, into_ctor: &Option<String>) -> CopyOf {
-        match into_ctor {
-            Some(c) => CopyOf::IntoCtor(c.clone()),
-            None if is_partial => CopyOf::Inside,
-            None => CopyOf::Whole,
+    fn of(is_partial: bool, into_ctor: &Option<String>, pointee: Option<bool>) -> CopyOf {
+        match (into_ctor, pointee) {
+            (Some(c), _) => CopyOf::IntoCtor(c.clone()),
+            (None, Some(part)) => CopyOf::Pointee { part },
+            (None, None) if is_partial => CopyOf::Inside,
+            (None, None) => CopyOf::Whole,
         }
     }
 }
@@ -1925,13 +1945,14 @@ pub enum Event {
     // 1. x: i32 = y + 15;              here y duplicate to + op, and x acquire from +
     //                                  at this point, we treat it as y duplicates to None
     // 2. x: MyStruct = y.clone();      here y duplicates to x.
-    // `inside`: a pattern copied a value inside `is` out (`if let
-    // Some(x) = opt`), not all of it (#866).
+    // `of`: what was copied out of `is` when it isn't all of it: a
+    // value inside it (`if let Some(x) = opt`, #866), or the value a
+    // reference inside it points to (`if let Some(&x) = orr`, #874).
     Duplicate {
         to: ResourceTy,
         is: ResourceTy,
         into_closure: bool,
-        inside: bool,
+        of: CopyOf,
         id: usize,
         break_alt: Option<BreakAlt>,
     },
@@ -2913,7 +2934,7 @@ impl Event {
             Event::Move{ loop_head: LoopHead::Iterator, ..} => {
                 hover_messages::event_dot_move_iterator_into_loop(&self.deref_name(my_name))
             }
-            Event::Duplicate{ to, is, inside, ..} => {
+            Event::Duplicate{ to, is, of, ..} => {
                 match to {
                     // A `move` closure capturing a Copy value copies it (#311).
                     _ if to.is_closure() => {
@@ -2928,7 +2949,11 @@ impl Event {
                         hover_messages::event_dot_ref_copied(my_name, is.extract_rap().map_or(false, |r| r.points_to_copy())),
                     // `if let Some(x) = opt`: only the value inside opt is
                     // copied (#866).
-                    _ if *inside => hover_messages::event_dot_copy_inside_to(&self.deref_name(my_name)),
+                    _ if *of == CopyOf::Inside => hover_messages::event_dot_copy_inside_to(&self.deref_name(my_name)),
+                    // `if let Some(&x) = orr`: the value a reference
+                    // inside orr points to is copied (#874).
+                    _ if matches!(of, CopyOf::Pointee { .. }) =>
+                        hover_messages::event_dot_copy_pointee_to(&self.deref_name(my_name), *of == CopyOf::Pointee { part: true }),
                     _ => hover_messages::event_dot_copy_to(&self.deref_name(my_name))
                 }
             }
@@ -3196,6 +3221,11 @@ impl Event {
             // The result of a call (`let n = v.len();`, `v.len() as i32`)
             // isn't a copy of anything named in the code: the variable
             // gets the value the call returns (#733).
+            // `if let Some(&x) = v.get(0)`: x gets a copy of the value
+            // the reference the call returned points to (#874).
+            Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), of: CopyOf::Pointee { part }, ..} => {
+                hover_messages::event_dot_copy_pointee_of_call(&self.deref_name(my_name), &f.name, f.inside.as_deref(), *part)
+            }
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), ..} => {
                 hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, f.cast_to.as_deref(), f.inside.as_deref())
             }
@@ -3208,6 +3238,11 @@ impl Event {
             // opt, not of opt (#866).
             Event::Copy{ from, of: CopyOf::Inside, ..} => {
                 hover_messages::event_dot_copy_from_inside(&self.deref_name(my_name), &target_name(from))
+            }
+            // `let Some(&y) = orr`: y gets a copy of n, which the
+            // reference inside orr points to, not a copy of orr (#874).
+            Event::Copy{ from, of: CopyOf::Pointee { part }, ..} => {
+                hover_messages::event_dot_copy_from_pointee(&self.deref_name(my_name), &target_name(from), *part)
             }
             Event::Copy{ from ,..} => {
                 hover_messages::event_dot_copy_from(&self.deref_name(my_name), &target_name(from))
@@ -4124,11 +4159,12 @@ impl Visualizable for VisualizationData {
       match ext_ev {
         ExternalEvent::Bind { from, to, id, break_alt } => {
           if to_o { vec![(line_num,  Event::Acquire{from : from.to_owned(), is: to.clone(), via_try: None, id: *id, break_alt: break_alt.clone(), loop_head: LoopHead::No})] }
-          else { vec![(line_num, Event::Duplicate{to : to.to_owned(), is: from.clone(), into_closure: false, inside: false, id: *id, break_alt: break_alt.clone()})] }
+          else { vec![(line_num, Event::Duplicate{to : to.to_owned(), is: from.clone(), into_closure: false, of: CopyOf::Whole, id: *id, break_alt: break_alt.clone()})] }
         },
-        ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, ..} => {
-          if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of: CopyOf::of(*is_partial, into_ctor), id: *id, break_alt: break_alt.clone()})] }
-          else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, inside: CopyOf::of(*is_partial, into_ctor) == CopyOf::Inside, id: *id, break_alt: break_alt.clone()})] }
+        ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, ..} => {
+          let of = CopyOf::of(*is_partial, into_ctor, *pointee);
+          if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: *id, break_alt: break_alt.clone()})] }
+          else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, of: source_copy_of(of), id: *id, break_alt: break_alt.clone()})] }
         },
         ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
           if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), loop_head: *loop_head})] }
@@ -4427,14 +4463,14 @@ impl Visualizable for VisualizationData {
             // eg: let ro_to = 5;
             ExternalEvent::Bind{from: from_ro, to: to_ro, id, break_alt} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: None, id: id, break_alt: break_alt.clone(), loop_head: LoopHead::No}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, inside: false, id: id, break_alt}, line_number);
+                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Whole, id: id, break_alt}, line_number);
             },
             // eg: let x : i64 = y as i64;
-            ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, ..} => {
-                let of = CopyOf::of(is_partial, &into_ctor);
-                let inside = of == CopyOf::Inside;
+            ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, ..} => {
+                let of = CopyOf::of(is_partial, &into_ctor, pointee);
+                let source_of = source_copy_of(of.clone());
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
-                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, inside, id: id, break_alt}, line_number);
+                maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
             ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, id } => {
                 // need to add events with more granularity for Branches

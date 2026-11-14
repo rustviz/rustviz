@@ -309,6 +309,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// a borrow (`Some(n)` on `it.next()`, #391): their borrow is part of
   /// that value's, and ends at their own last use (#575).
   pub pattern_copies: HashSet<String>,
+  /// Bindings under a `&` sub-pattern (`Some(&y)` on `orr`), by RAP
+  /// hash: the copy into each, from the matched value named here, is
+  /// of the value a reference stored in it points to (#874); `true`
+  /// when the binding is only a part of that value (`Some(&(a, b))`).
+  pub pointee_copies: HashMap<u64, (ResourceTy, bool)>,
   // While the pattern of `for (a, b) in &v` is registered: the borrow
   // of the head that each reference binding is (#576).
   pub pattern_lender: Option<(Evt, ResourceTy)>,
@@ -630,6 +635,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       unlent_refs: HashSet::new(),
       tuple_temp_refs: HashSet::new(),
       pattern_copies: HashSet::new(),
+      pointee_copies: HashMap::new(),
       pattern_lender: None,
       temp_count: 0,
       param_value_count: 0,
@@ -1512,7 +1518,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *self.unique_id += 1;
         let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None }
         } else {
           ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
         };
@@ -1559,7 +1565,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       *self.unique_id += 1;
       let (from, to) = (ResourceTy::Value(child), ResourceTy::Value(dest));
       self.add_external_event(line_num, if is_copy {
-        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None }
+        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None }
       } else {
         ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
       });
@@ -1887,7 +1893,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id, break_alt: None },
-      Evt::Copy => ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None },
+      Evt::Copy => {
+        // A `&` sub-pattern's binding (#874).
+        let pointee = lhs.extract_rap()
+          .and_then(|r| self.pointee_copies.get(r.hash()))
+          .filter(|(parent, _)| *parent == rhs)
+          .map(|(_, part)| *part);
+        let is_partial = is_partial && pointee.is_none();
+        ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee }
+      }
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
@@ -4459,7 +4473,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
               let mut sub = Vec::new();
               self.collect_pat_binding_events(sp, ty_results, parent, &parent_ty, scope, &mut sub);
               res.extend(sub.into_iter().map(|(r, e, ty)| {
-                let partial = copies_from_inside(&e, ty, parent_ty, parent).then_some(true);
+                let partial = (copies_from_inside(&e, ty, parent_ty, parent)
+                  && !self.pointee_copies.contains_key(r.hash())).then_some(true);
                 (r, e, parent.clone(), partial)
               }));
             }
@@ -4470,7 +4485,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let mut sub = Vec::new();
         self.collect_pat_binding_events(pat, ty_results, parent, &parent_ty, scope, &mut sub);
         res.extend(sub.into_iter().map(|(r, e, ty)| {
-          let partial = copies_from_inside(&e, ty, parent_ty, parent).then_some(true);
+          let partial = (copies_from_inside(&e, ty, parent_ty, parent)
+            && !self.pointee_copies.contains_key(r.hash())).then_some(true);
           (r, e, parent.clone(), partial)
         }));
       }
@@ -4646,8 +4662,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 Some(rustc_hir::ByRef::Yes(_, mutbl)) => Some(mutbl),
                 _ => None,
             };
+            // Under a `&` sub-pattern (`Some(&y)` on an `Option<&i32>`),
+            // a by-value binding copies the value the stored reference
+            // points to (#874).
+            let behind_ref = ref_pattern_above(&self.tcx, id);
             let evt = if let Some(mutbl) = binding_ref {
                 if bool_of_mut(mutbl) { Evt::MBorrow } else { Evt::SBorrow }
+            } else if behind_ref.is_some() {
+                if self.ty_is_copy(ty, pat.hir_id.owner) { Evt::Copy } else { Evt::Move }
             } else if parent_ty.is_ref() && *parent_ty != ty {
                 if bool_of_mut(parent_ty.ref_mutability().unwrap()) { Evt::MBorrow }
                 else { Evt::SBorrow }
@@ -4656,7 +4678,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 else { Evt::Move }
             };
 
-            res.push((self.raps.get(&name).unwrap().rap.to_owned(), evt, ty));
+            let rap = self.raps.get(&name).unwrap().rap.to_owned();
+            if let (Some(part), Evt::Copy) = (behind_ref, &evt) {
+                self.pointee_copies.insert(*rap.hash(), (parent.clone(), part));
+            }
+            res.push((rap, evt, ty));
+        }
+        // `Some(&y)` on an `Option<&i32>`: y copies the value the
+        // reference inside the matched value points to (#874). A `&`
+        // pattern matched against a reference scrutinee itself (`&v`
+        // on `r: &i32`) isn't drawn.
+        PatKind::Ref(inner, _, _) if !parent_ty.is_ref() => {
+            self.collect_pat_binding_events(inner, ty_results, parent, parent_ty, scope, res);
         }
         // `Ok(s) | Err(s)`: every alternative binds the same names, with
         // the same types and binding modes, out of the same matched
@@ -8037,6 +8070,31 @@ fn ty_has_std_sync_primitive<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
     }
   }
   go(tcx, ty, 0, &mut HashSet::new())
+}
+
+/// The `&` pattern a binding is under, inside the pattern it is part of
+/// (`y` in `Some(&y)`, `a` in `Some(&(a, b))`): `Some(part)`, `part`
+/// when the binding isn't the `&` pattern's whole operand. `None` when
+/// there is none, or when the `&` pattern is the whole pattern (`let &b
+/// = r;`), which matches the scrutinee itself rather than a reference
+/// stored in it (#874).
+pub(crate) fn ref_pattern_above(tcx: &TyCtxt<'_>, binding: rustc_hir::HirId) -> Option<bool> {
+  let in_pattern = |n: rustc_hir::Node<'_>| matches!(n, rustc_hir::Node::Pat(_) | rustc_hir::Node::PatField(_));
+  let mut cur = binding;
+  loop {
+    match tcx.parent_hir_node(cur) {
+      rustc_hir::Node::Pat(p) => {
+        if let PatKind::Ref(inner, _, _) = p.kind {
+          let is_root = !in_pattern(tcx.parent_hir_node(p.hir_id));
+          return (!is_root).then_some(inner.hir_id != binding);
+        }
+        cur = p.hir_id;
+      }
+      // `S { f: &y }`: the field's pattern is under a PatField.
+      rustc_hir::Node::PatField(f) => cur = f.hir_id,
+      _ => return None,
+    }
+  }
 }
 
 /// `pat` is a plain by-value binding (`r`, `mut r`): not `ref r`, not

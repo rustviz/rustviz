@@ -7071,6 +7071,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.bind_one(name.clone(), annotation, hirid, init, is_skipped);
         if nested {
           self.mark_copy_inside(&name, hirid, init, first_id);
+          self.mark_copy_pointee(&name, hirid, first_id);
         }
         if nested && !is_skipped && self.own_ref_binding(hirid).is_none() {
           if let Some(rap) = self.raps.get(&name).map(|rd| rd.rap.to_owned()) {
@@ -7149,6 +7150,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if let ExternalEvent::Copy { to: ResourceTy::Value(t), from: ResourceTy::Value(f), id, is_partial, .. } = e {
         if *id >= first_id && t.name() == name && !f.is_fn() {
           *is_partial = true;
+        }
+      }
+    }
+  }
+
+  /// `let Some(&y) = orr else { .. }`: `bind_one` drew y's copy from
+  /// orr, but y gets a copy of the value the reference inside orr
+  /// points to, as for `if let Some(&y) = orr` (#874).
+  fn mark_copy_pointee(&mut self, name: &str, hirid: HirId, first_id: usize) {
+    let Some(part) = crate::expr_visitor::ref_pattern_above(&self.tcx, hirid) else { return };
+    // (The line's arrows are drawn from `event_line_map`'s copy.)
+    let line_events = self.event_line_map.values_mut().flatten();
+    let events = self.preprocessed_events.iter_mut().chain(self.late_old_ends.iter_mut()).map(|(_, e)| e);
+    for e in events.chain(line_events) {
+      if let ExternalEvent::Copy { to: ResourceTy::Value(t), id, is_partial, pointee, .. } = e {
+        if *id >= first_id && t.name() == name {
+          *pointee = Some(part);
+          *is_partial = false;
         }
       }
     }

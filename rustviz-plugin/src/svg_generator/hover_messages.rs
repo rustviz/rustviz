@@ -893,6 +893,18 @@ pub fn event_dot_copy_inside_to(my_name: &String) -> String {
     format!("a value inside {0} is copied", styled_name_html(my_name))
 }
 
+// A `&` sub-pattern copies the value a reference stored inside my_name
+// points to (`if let Some(&x) = orr`): not my_name's value, nor a value
+// inside it (#874). `part`: only a value inside that one (`Some(&(a,
+// b))`).
+pub fn event_dot_copy_pointee_to(my_name: &String, part: bool) -> String {
+    if part {
+        format!("a value inside the value a reference inside {0} points to is copied", styled_name_html(my_name))
+    } else {
+        format!("the value a reference inside {0} points to is copied", styled_name_html(my_name))
+    }
+}
+
 // 1   0
 //     |
 // o<--*   the star event
@@ -1674,6 +1686,48 @@ pub fn event_dot_copy_from_inside(my_name: &String, target_name: &String) -> Str
         my_name,
         target_name
     )
+}
+
+// A `&` sub-pattern binds a copy of the value a reference stored inside
+// `target_name` points to (`let Some(&y) = orr` with orr: Option<&i32>):
+// y gets a copy of the i32 behind the reference, which is not inside orr
+// (#874). `part`: the binding is a value inside that one (`Some(&(a,
+// b))`).
+pub fn event_dot_copy_from_pointee(my_name: &String, target_name: &String, part: bool) -> String {
+    if part {
+        format!("{0} is initialized with a copy of a value inside the value a reference inside {1} points to", my_name, target_name)
+    } else {
+        format!("{0} is initialized with a copy of the value a reference inside {1} points to", my_name, target_name)
+    }
+}
+
+// `if let Some(&x) = v.get(0)`: x gets a copy of the value the reference
+// the call returned (inside an Option) points to, not the call's result
+// or a value inside it (#874). The wrapper is worded as in
+// `event_dot_init_from_call`.
+pub fn event_dot_copy_pointee_of_call(my_name: &String, callee: &String, inside: Option<&str>, part: bool) -> String {
+    let reference = reference_inside_call(callee, callee, inside);
+    if part {
+        format!("{0} is initialized with a copy of a value inside the value pointed to by {1}", my_name, reference)
+    } else {
+        format!("{0} is initialized with a copy of the value pointed to by {1}", my_name, reference)
+    }
+}
+
+/// "the reference inside the Option get() returns": where a `&`
+/// sub-pattern on a call's result finds its reference (#874). `shown` is
+/// the callee as displayed (styled or not), `callee` its plain name.
+fn reference_inside_call(shown: &str, callee: &str, inside: Option<&str>) -> String {
+    let last = callee.rsplit("::").next().unwrap_or(callee);
+    if last.starts_with(|c: char| c.is_uppercase()) {
+        let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
+        return format!("the reference inside {} {} value", article, last);
+    }
+    match inside {
+        Some(w @ ("Ok" | "Some")) => format!("the reference inside the {} that {}() returns", w, shown),
+        Some(w) if !w.is_empty() => format!("the reference inside the {} {}() returns", w, shown),
+        _ => format!("a reference inside the value {}() returns", shown),
+    }
 }
 
 pub fn event_dot_copyable_assign_copy_inside(my_name: &String, from_name: &String) -> String {
@@ -3568,6 +3622,13 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     // source is the call's result, not a variable (or anything)
     // named like the callee (#737). Constructors (`Some(5)`) and
     // macros keep the plain label.
+    // `if let Some(&x) = v.get(0)`: what x gets is the value the
+    // returned reference points to (#874), from a call or a constructor.
+    if let (ExternalEvent::Copy { into_closure: false, pointee: Some(part), .. }, ResourceTy::Value(ResourceAccessPoint::Function(f))) = (external_event, from) {
+        let what = if *part { "a value inside the value" } else { "the value" };
+        title = format!("Copy of {} pointed to by {} to {}", what,
+            reference_inside_call(&styled_from_string, &f.name, f.inside.as_deref()), styled_to_string);
+    }
     if let (ExternalEvent::Copy { into_closure: false, .. }, ResourceTy::Value(f @ ResourceAccessPoint::Function(_))) = (external_event, from) {
         let callee = f.name();
         let last = callee.rsplit("::").next().unwrap_or(&callee);
