@@ -1492,16 +1492,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Pattern guard (`x if x > 0`). The pattern `x` binds from
         // the scrutinee (`n`, Copy) — that's the "Copy from n to x"
         // event. The guard `x > 0` reads `x` like any comparison
-        // (#497). Both arms borrow `s`; merge is Unchanged.
+        // (#497); `>` is not an actor (#908). Both arms borrow `s`;
+        // merge is Unchanged.
         must_contain: &[
-            "Copy from x to >",
             "Move from String::from to s",
             "Copy from n to x",
             "show reads from s",
+            "x's value is copied",
         ],
         must_not_contain: &[
             "may have been moved",
             "moved or dropped in every branch",
+            "Copy from x to >",
+            "=>",
         ],
     },
     TooltipExpect {
@@ -2918,8 +2921,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // by value, i.e. copied, and stay usable. Field operands
         // (`a.x + a.y`) are copied out of their own columns. A
         // comparison on primitives (`x < y`) reads both operands the
-        // same way (#497); a literal operand has no column.
+        // same way (#497); a literal operand has no column. The
+        // operator is not an actor: no column, no arrow into it (#908).
         must_contain: &[
+            "x's value is copied",
+            "a.y's value is copied",
+            "Copy from a.x to d",
+            "y's value is copied",
+            "a.x's value is copied",
+        ],
+        must_not_contain: &[
+            "Move from x to +",
+            "x's resource is moved",
+            "Copy from x to z",
+            "Copy from x to bigger",
             "Copy from x to <",
             "Copy from y to <",
             "Copy from x to +",
@@ -2927,15 +2942,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from a.x to +",
             "Copy from a.y to +",
             "Copy from x to *",
-            "x's value is copied",
-            "a.y's value is copied",
-            "Copy from a.x to d",
-        ],
-        must_not_contain: &[
-            "Move from x to +",
-            "x's resource is moved",
-            "Copy from x to z",
-            "Copy from x to bigger",
+            "=<",
+            "=+",
+            "=*",
         ],
     },
     TooltipExpect {
@@ -3099,23 +3108,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "unary_operand_copies",
         // `-x` is `Neg::neg(x)` and `!b` is `Not::not(b)`: the operand
         // is taken by value. A primitive operand (local, field, `*r`)
-        // is copied and stays usable. An overloaded `Neg` on a
-        // non-Copy struct moves its operand, which then has nothing
-        // left to drop. A literal (`-5`) has no column.
+        // is copied and stays usable; a built-in operator is not an
+        // actor (#908). An overloaded `Neg` on a non-Copy struct is a
+        // call: it moves its operand, which then has nothing left to
+        // drop. A literal (`-5`) has no column.
         must_contain: &[
-            "Copy from x to -",
-            "Copy from b to !",
-            "Copy from p.y to -",
-            "Copy from *r to -",
             "b's value is copied",
             "Move from wave to -",
             "wave's resource is moved",
             "wave goes out of scope. No resource is dropped.",
+            "x's value is copied",
+            "p.y's value is copied",
+            "*r's value is copied",
         ],
         must_not_contain: &[
             "Move from x to -",
             "Move from b to !",
             "wave goes out of scope. Its resource is dropped.",
+            "Copy from x to -",
+            "Copy from b to !",
+            "Copy from p.y to -",
+            "Copy from *r to -",
+            "=!",
         ],
     },
     TooltipExpect {
@@ -3417,13 +3431,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z holds an immutable reference; it can read the borrowed value",
             "n holds a mutable reference; it can read and write the borrowed value",
             "k holds an immutable reference; it can read the borrowed value",
-            // `*n += *k` is an operator call (#260): both are copied
-            // into `+=`, not "assigned" from one to the other.
-            "Copy from *k to +=",
+            // `*n += *k` (#260): both are copied, not "assigned" from
+            // one to the other; `+=` is not an actor (#908).
             "the value n points to is modified through *n",
             "s holds a mutable reference; it can read and write the borrowed resource",
             "*s acquires ownership of a new resource; its previous resource is dropped",
             "q holds a mutable reference; it can read and write the borrowed resource",
+            "*k's value is copied",
         ],
         must_not_contain: &[
             "y holds a mutable reference; it can read and write the borrowed resource",
@@ -3436,6 +3450,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(copied from",
             "the resource s points to is modified through *s",
             "(moved from",
+            "Copy from *k to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -3480,10 +3496,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // operand, so both are borrowed for the call and stay usable
         // (they're printed at the end). Same for a derived PartialEq
         // struct and for fields. `i < n` on integers is built in: it
-        // copies both operands into `<` and borrows nothing (#497).
+        // copies both operands and borrows nothing (#497); `<` is not
+        // an actor (#908).
         must_contain: &[
-            "Copy from i to <",
-            "Copy from n to <",
             "== reads from a (implicitly borrowed)",
             "== reads from b (implicitly borrowed)",
             "< reads from a (implicitly borrowed)",
@@ -3495,6 +3510,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "== reads from q.name (implicitly borrowed)",
             "a's resource is immutably borrowed by ==; a is read-only while the borrow is live",
             "a goes out of scope. Its resource is dropped.",
+            "i's value is copied",
+            "n's value is copied",
         ],
         must_not_contain: &[
             "Move from a to ==",
@@ -3503,6 +3520,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from a to ==",
             "< reads from i (implicitly borrowed)",
             "< reads from i",
+            "Copy from i to <",
+            "Copy from n to <",
+            "=<",
         ],
     },
     TooltipExpect {
@@ -4959,7 +4979,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "compound_assign",
         // #260: `a op= b` used to be drawn as `a = b`. On i32s,
         // `acc += x` reads `acc` and `x` and writes the sum back:
-        // both are copied into the operator and `acc` gets a new value.
+        // both are copied and `acc` gets a new value. The built-in
+        // operator is not an actor (#908).
         // On a String, `s += &t` is `AddAssign::add_assign(&mut s,
         // &t)`: `s` is mutably borrowed and appended to in place
         // (nothing dropped, no borrow stored in `s`), `t` is borrowed
@@ -4969,14 +4990,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // points to is modified through *n", `v[i] += k` "modified
         // through v[0]"; the operator doesn't reborrow `r`.
         must_contain: &[
-            "Copy from x to +=",
             "x's value is copied",
             "acc is assigned a new value",
             // The old value of `acc` is read too, as in `acc = acc + x`.
-            "Copy from acc to +=",
             "acc's value is copied",
             // An i32 field: assigned a new value (#272), not "acquires ownership".
-            "Copy from a.total to +=",
             "a.total is assigned a new value",
             "+= reads from/writes to s (implicitly mutably borrowed)",
             "s's resource is mutably borrowed by +=; s can't be used while the borrow is live",
@@ -4984,11 +5002,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is immutably borrowed by +=; t is read-only while the borrow is live",
             "the resource r points to is modified through *r",
             "the resource v points to is modified through v[0]",
-            "Copy from by to +=",
             // `*n` is read too.
-            "Copy from *n to +=",
             "the value n points to is modified through *n",
             "s goes out of scope. Its resource is dropped.",
+            "a.total's value is copied",
+            "by's value is copied",
+            "*n's value is copied",
         ],
         must_not_contain: &[
             "acc is initialized with a copy of x",
@@ -5002,6 +5021,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource n points to is modified through *n (copied from by)",
             "+= reads from/writes to r (mutable reborrow",
             "r's resource is mutably borrowed by +=",
+            "Copy from x to +=",
+            "Copy from acc to +=",
+            "Copy from a.total to +=",
+            "Copy from by to +=",
+            "Copy from *n to +=",
+            "=+=",
         ],
     },
     // ─── Fields moved out on some paths only (#395) ─────────────────
@@ -6669,12 +6694,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "field_compound_assign_through_ref",
         // `p.x += k` / `r.x += k` / `p.name += "x"` through a reference
         // update the borrowed struct in place: "modified through", as
-        // for `*r += k`. The copy of k is the arrow's job; the dot used
-        // to add "(copied from k)" (#260). Nothing is assigned or
+        // for `*r += k`. The copy of k is drawn on k's column; the dot
+        // used to add "(copied from k)" (#260). Nothing is assigned or
         // dropped.
         must_contain: &[
-            // The operator is called with k, as for `*r += k` on main.
-            "Copy from k to +=",
+            // k is read; `+=` is not an actor (#908).
+            "k's value is copied",
             "the resource p points to is modified through p.x",
             "the resource p points to is modified through p.name",
             "the resource r points to is modified through r.x",
@@ -6686,6 +6711,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.x is assigned a copy of k",
             "r.x is assigned a copy of k",
             "p.name acquires ownership of a new resource; its previous resource is dropped",
+            "Copy from k to +=",
         ],
     },
 
@@ -7289,19 +7315,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "comparison_reads",
         // #497: `t < lim` on i32s reads both operands, as `t + lim`
-        // does (#241): each is copied into the operator, and the result
+        // does (#241): each is copied (the operator is not an actor,
+        // #908: no column, no arrow), and the result
         // (a bool) is a new value that isn't `t` or `lim` (`z` is bound
         // to a copyable value, not copied from either). The same in an
         // `if` condition (`==`) and with a literal (`t >= 3`: only `t`
         // names a column).
         must_contain: &[
-            "Copy from t to <",
-            "Copy from lim to <",
-            "Copy from t to +",
-            "Copy from lim to +",
-            "Copy from t to ==",
-            "Copy from lim to ==",
-            "Copy from t to >=",
             "t's value is copied",
             "lim's value is copied",
             "z is bound to a copyable value",
@@ -7311,6 +7331,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from t to z",
             "Copy from lim to >=",
             "Copy from t to big",
+            "Copy from t to <",
+            "Copy from lim to <",
+            "Copy from t to +",
+            "Copy from lim to +",
+            "Copy from t to ==",
+            "Copy from lim to ==",
+            "Copy from t to >=",
+            "=<",
+            "=+",
+            "===",
+            "=>=",
         ],
     },
     // An if-let arm's struct-field columns say one thing per row (#486): they
@@ -11798,6 +11829,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t is bound to a copyable value",
             "t goes out of scope",
             "k is initialized with a copy of t",
+            "u is bound to a copyable value",
+            "u goes out of scope",
+            "k2 is initialized with a copy of u",
         ],
         must_not_contain: &[],
     },
@@ -13806,14 +13840,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y is initialized with the value inc() returns",
             "Copy of the value inc_by_ref() returns to c",
             "c is initialized with the value inc_by_ref() returns",
-            "Copy from z to +",
             "the value x points to is immutably borrowed by +",
+            "z's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
             "is the owner of the resource",
+            "Copy from z to +",
+            "=+",
         ],
     },
     TooltipExpect {
@@ -13921,6 +13957,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "acquires ownership of a resource",
             "is the owner of the resource",
             "Copy from y to z",
+            "Copy from *y to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -13931,19 +13969,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's value is immutably borrowed by y; x is read-only while the borrow is live",
             "Immutable borrow from x to z",
             "x's value is immutably borrowed by z; x is read-only while the borrow is live",
-            "Copy from *y to +",
-            "Copy from *z to +",
             "Return immutably borrowed value from y to x",
             "Return immutably borrowed value from z to x",
             "c is bound to a copyable value",
-            "Copy from x to +=",
             "c's value is immutably borrowed by println!; c is read-only while the borrow is live",
+            "*y's value is copied",
+            "*z's value is copied",
+            "x's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
             "is the owner of the resource",
+            "Copy from *y to +",
+            "Copy from *z to +",
+            "Copy from x to +=",
+            "=+",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -13954,18 +13997,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's value is immutably borrowed by y; x is read-only while the borrow is live",
             "Immutable borrow from x to z",
             "x's value is immutably borrowed by z; x is read-only while the borrow is live",
-            "Copy from *y to +",
-            "Copy from *z to +",
             "c is bound to a copyable value",
             "c's value is immutably borrowed by println!; c is read-only while the borrow is live",
             "Return immutably borrowed value from y to x",
             "the value y points to is immutably borrowed by println!",
+            "*y's value is copied",
+            "*z's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
             "is the owner of the resource",
+            "Copy from *y to +",
+            "Copy from *z to +",
+            "=+",
         ],
     },
     TooltipExpect {
@@ -14001,9 +14047,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "basic_if",
         must_contain: &[
             "x is bound to a copyable value",
-            "Copy from x to +=",
             "x is assigned a new value",
             "x is bound to a value (in all branches above)",
+            "x's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
@@ -14012,22 +14058,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "is the owner of the resource",
             "mutably borrowed",
             "holds a mutable reference",
+            "Copy from x to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
         name: "basic_if10",
         must_contain: &[
             "x is bound to a copyable value",
-            "Copy from x to +=",
             "x is assigned a new value",
             "x is bound to a value (in all branches above)",
             "x's value is immutably borrowed by println!; x is read-only while the borrow is live",
+            "x's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
             "is the owner of the resource",
+            "Copy from x to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -14092,8 +14142,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound to a copyable value",
             "Copy from x to y",
             "y is initialized with a copy of x",
-            "Copy from x to +=",
             "x is assigned a new value",
+            "x's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
@@ -14103,22 +14153,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "mutably borrowed",
             "holds a mutable reference",
             "Move from x to y",
+            "Copy from x to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
         name: "basic_if5",
         must_contain: &[
             "x is bound to a copyable value",
-            "Copy from x to +=",
             "x is assigned a new value",
             "x is bound to a value (in all branches above)",
             "x's value is immutably borrowed by println!; x is read-only while the borrow is live",
+            "x's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
             "is the owner of the resource",
+            "Copy from x to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -14240,8 +14294,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Partial copy from x to c",
             "c is initialized with a copy of a value inside x",
             "a value inside x is copied",
-            "Copy from c to +",
             "x is initialized with an Apple value",
+            "c's value is copied",
         ],
         must_not_contain: &[
             "x is assigned a copy of z",
@@ -14254,6 +14308,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Fruit::Apple",
             "=Fruit::Banana",
             "=Fruit::Bean",
+            "Copy from c to +",
+            "=+",
         ],
     },
     TooltipExpect {
@@ -14262,11 +14318,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound to a copyable value",
             "Mutable borrow from x to y",
             "x's value is mutably borrowed by y; x can't be used while the borrow is live",
-            "Copy from *y to +=",
             "Move from y to z",
             "z is bound to a mutable reference",
             "Return mutably borrowed value from z to x",
             "the value z points to is immutably borrowed by println! through z; z is read-only while the borrow is live",
+            "*y's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
@@ -14274,6 +14330,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "acquires ownership of a resource",
             "is the owner of the resource",
             "Copy from y to z",
+            "Copy from *y to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -14283,11 +14341,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound to a copyable value",
             "Mutable borrow from x to y",
             "x's value is mutably borrowed by y; x can't be used while the borrow is live",
-            "Copy from *y to +=",
             "Move from y to z",
             "z is bound to a mutable reference",
             "Return mutably borrowed value from z to x",
             "the value z points to is immutably borrowed by println! through z; z is read-only while the borrow is live",
+            "*y's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
@@ -14465,8 +14523,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "n is bound to a copyable value",
             "Copy from n to read",
-            "Copy from n to +=",
             "n is assigned a new value",
+            "n's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
@@ -14474,6 +14532,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "acquires ownership of a resource",
             "is the owner of the resource",
             "Move from n to read",
+            "Copy from n to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -14645,8 +14705,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "n is bound to a copyable value",
             "Copy from n to read",
-            "Copy from n to +=",
             "n is assigned a new value",
+            "n's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
@@ -14654,6 +14714,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "acquires ownership of a resource",
             "is the owner of the resource",
             "Move from n to read",
+            "Copy from n to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -14682,13 +14744,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from s to _t",
             "s's resource is immutably borrowed by _t; s is read-only while the borrow is live",
             "Return immutably borrowed resource from _t to s",
-            "Copy from n to +=",
             "s goes out of scope. Its resource is dropped.",
+            "n's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "Move from n to read",
+            "Copy from n to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -15007,15 +15071,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "testShadow",
         must_contain: &[
             "x is bound to a copyable value",
-            "Copy from x to +",
             "x₂ is bound to a copyable value",
             "x₂'s value is immutably borrowed by println!; x₂ is read-only while the borrow is live",
+            "x's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
             "is the owner of the resource",
+            "Copy from x to +",
+            "=+",
         ],
     },
     TooltipExpect {
@@ -15075,13 +15141,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from s to _t",
             "s's resource is immutably borrowed by _t; s is read-only while the borrow is live",
             "Return immutably borrowed resource from _t to s",
-            "Copy from n to +=",
             "s goes out of scope. Its resource is dropped.",
+            "n's value is copied",
         ],
         must_not_contain: &[
             "(moved from",
             "(copied from",
             "Move from n to read",
+            "Copy from n to +=",
+            "=+=",
         ],
     },
     TooltipExpect {
@@ -18403,6 +18471,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a to z",
             "a's resource is moved",
             "z acquires ownership of a resource",
+        ],
+    },
+    // #908: an operator is never an actor (like a constructor, #768 /
+    // #873). A built-in operator on Copy values copies its operands: the
+    // copy is drawn on each operand's column, with no operator column and
+    // no arrow into it. `s1 == s2` borrows both Strings for the call
+    // (`PartialEq::eq(&s1, &s2)`); `s1 + &s2` is `Add::add(s1, &s2)`, a
+    // real call that moves s1, and keeps its arrow.
+    TooltipExpect {
+        name: "operator_not_actor_908",
+        must_contain: &[
+            "item's value is copied",
+            "x's value is copied",
+            "y's value is copied",
+            "b's value is copied",
+            "acc's value is copied",
+            "acc is assigned a new value",
+            "lt is bound to a copyable value",
+            "sum is bound to a copyable value",
+            "s1's resource is immutably borrowed by ==; s1 is read-only while the borrow is live",
+            "== reads from s1 (implicitly borrowed)",
+            "== reads from s2 (implicitly borrowed)",
+            "Move from s1 to +",
+            "s1's resource is moved",
+            "+ reads from s2",
+        ],
+        must_not_contain: &[
+            "Copy from item to ==",
+            "Copy from item to",
+            "Copy from x to",
+            "Copy from y to",
+            "Copy from b to",
+            "Copy from acc to",
+            "Move from s1 to ==",
+            "Copy from s1",
+            "s2's resource is moved",
+            "===",
+            "=<",
+            "=-",
+            "=!",
+            "=+=",
         ],
     },
 ];
@@ -23307,31 +23416,49 @@ fn a_break_value_in_a_branch_moves_where_the_loop_ends() {
 
 /// #731: in `let k = { let t = m * 2; t };` the block's `let` and the copy
 /// of its tail into `k` share a line. `t` is bound first, then copied
-/// into `k`, then goes out of scope below, with a line down its column.
-/// Before, the copy was drawn on the line's row and `t`'s binding and
-/// scope end on a row below it: `t` was copied before it had a value.
+/// into `k`, then goes out of scope. Before, the copy was drawn on the
+/// line's row and `t`'s binding and scope end on a row below it: `t` was
+/// copied before it had a value.
+///
+/// Since `*` is no longer an actor (#908), that line draws one arrow, so
+/// its dots share one row: `t`'s scope end is listed after the copy in
+/// the same dot, as for `let j = { let u = 2; u };`. The next line,
+/// `let (k2, q) = ({ let u = m * 2; u }, m);`, draws two arrows, which are
+/// stacked: `u`'s scope end goes on a row below its binding.
 #[test]
 fn a_block_tail_is_bound_before_it_is_copied() {
     let rv = run_with_local_backend("block_tail_copy_order");
     let timeline = rv.timeline_panel_string();
     let tips = tooltip_lines(&timeline);
-    let bound = "t is bound to a copyable value";
-    let copied = "t's value is copied";
-    let dots: Vec<&Vec<String>> = tips.iter().filter(|t| t.iter().any(|l| l == copied)).collect();
-    assert_eq!(dots.len(), 1, "dots copying t out: {:?}", dots);
-    let want = [bound.to_string(), copied.to_string()];
-    assert!(
-        dots[0].starts_with(&want),
-        "the dot where t is copied reads {:?}; t must be bound before it is copied",
-        dots[0]
-    );
-    let bound_at = dots_listing(&timeline, bound);
-    let copied_at = dots_listing(&timeline, copied);
-    let gone_at = dots_listing(&timeline, "t goes out of scope");
-    assert_eq!(bound_at.len(), 1, "t's binding dots: {:?}", bound_at);
-    assert_eq!(bound_at, copied_at, "t is bound and copied at the same row");
-    assert_eq!(gone_at.len(), 1, "t's scope-end dots: {:?}", gone_at);
-    assert!(gone_at[0].1 > bound_at[0].1, "t's scope end {:?} must be below its binding {:?}", gone_at, bound_at);
+    for (v, stacked) in [("t", false), ("u", true)] {
+        let bound = format!("{} is bound to a copyable value", v);
+        let copied = format!("{}'s value is copied", v);
+        let gone = format!("{} goes out of scope", v);
+        let dots: Vec<&Vec<String>> = tips.iter().filter(|t| t.iter().any(|l| *l == copied)).collect();
+        assert_eq!(dots.len(), 1, "dots copying {} out: {:?}", v, dots);
+        let want = [bound.clone(), copied.clone()];
+        assert!(
+            dots[0].starts_with(&want),
+            "the dot where {} is copied reads {:?}; {} must be bound before it is copied",
+            v, dots[0], v
+        );
+        let bound_at = dots_listing(&timeline, &bound);
+        let copied_at = dots_listing(&timeline, &copied);
+        let gone_at = dots_listing(&timeline, &gone);
+        assert_eq!(bound_at.len(), 1, "{}'s binding dots: {:?}", v, bound_at);
+        assert_eq!(bound_at, copied_at, "{} is bound and copied at the same row", v);
+        assert_eq!(gone_at.len(), 1, "{}'s scope-end dots: {:?}", v, gone_at);
+        if stacked {
+            assert!(gone_at[0].1 > bound_at[0].1, "{}'s scope end {:?} must be below its binding {:?}", v, gone_at, bound_at);
+        } else {
+            assert_eq!(gone_at, bound_at, "{}'s scope end shares the row of its binding", v);
+            assert!(
+                dots[0].ends_with(&[copied.clone(), gone.clone()]),
+                "the dot where {} is copied reads {:?}; {} must go out of scope after it is copied",
+                v, dots[0], v
+            );
+        }
+    }
 }
 
 /// The row numbers (1-based) of the code panel's lines whose row lies in

@@ -1444,9 +1444,10 @@ pub fn is_auto_borrowed(e: &Expr, typeck: &TypeckResults) -> bool {
 /// `a <op> b` where `<op>` is a built-in arithmetic / bitwise /
 /// comparison operator on primitives (`x + y`, `a.x * 2`, `n % 2`,
 /// `t < lim` with i32 operands), i.e. not a method call. Every
-/// primitive is `Copy`, so each operand is read by copying it into the
-/// operator (#241, #497; the comparison's trait method takes `&`, but
-/// a built-in one never borrows anything). Returns the operator's text plus
+/// primitive is `Copy`, so each operand is read by copying it (#241,
+/// #497; the comparison's trait method takes `&`, but a built-in one
+/// never borrows anything). The operator is not an actor (#908): the
+/// copy is drawn on the operand's column only. Returns the operator's text plus
 /// the operands that name a column (a local, a struct field, or `*r`),
 /// in source order; literals, calls, nested operators and indexing
 /// (`v[i]` copies an element, not `v`) are left out. The
@@ -1466,7 +1467,7 @@ pub fn builtin_binop_copied_operands<'tcx>(
   if operands.is_empty() { None } else { Some((op.node.as_str(), operands)) }
 }
 
-/// An operand of a built-in operator that is drawn as copied in: one
+/// An operand of a built-in operator that is drawn as copied: one
 /// that names a column (a local, a struct field, or `*r`). Literals,
 /// calls, nested operators and indexing (`v[i]` copies an element, not
 /// `v`) have no column of their own.
@@ -1485,8 +1486,9 @@ pub fn operand_names_column(e: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDa
 /// the operator's text and the operand when there's something to draw:
 /// - an overloaded operator is a method call, and its operand is an
 ///   argument like any other (moved, copied, or borrowed for `-&x`);
-/// - a built-in one on a primitive copies its operand in, which is
-///   drawn when the operand names a column (see `operand_names_column`).
+/// - a built-in one on a primitive copies its operand, which is drawn
+///   (on the operand's column only, #908) when the operand names a
+///   column (see `operand_names_column`).
 pub fn unary_op_operand<'tcx>(
   expr: &'tcx Expr<'tcx>,
   tcx: &TyCtxt<'tcx>,
