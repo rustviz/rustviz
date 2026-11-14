@@ -1982,6 +1982,63 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.exit_scopes.insert(*self.unique_id, ExitScope { in_closure: self.in_closure(expr), loop_lines });
   }
 
+  /// Whether a borrow made before the `if` without `else` `if_expr`
+  /// (on lines `split..=merge`, `if_decl` its own variables), whose
+  /// body always leaves by `break`, `return` or `continue`, may still
+  /// be live after the `if` but end on the body's way out: then the
+  /// `if` is drawn as a conditional on the borrowed columns, so that
+  /// the end in its arm (`end_borrows_at_exits_in`, as for an
+  /// `if`/`else`) has a place to go (#882). `for a in &v { ..; if c
+  /// { break; } }`: the loan v's iterator holds lasts to the loop's
+  /// end on the paths that go round again, but ends at the `break`.
+  fn borrow_may_end_at_exit(&self, if_expr: &'tcx Expr<'tcx>, split: usize, merge: usize, if_decl: &HashSet<ResourceAccessPoint>) -> bool {
+    let leaves = branch_leaves(self.tcx, if_expr);
+    if !leaves.exits.iter().all(|x| matches!(x, BranchExit::Return | BranchExit::Break | BranchExit::Continue))
+      || self.in_closure(if_expr)
+    {
+      return false;
+    }
+    let sm = self.tcx.sess.source_map();
+    let loop_lines = self.exit_frames.iter().rev()
+      .find_map(|f| match f {
+        ExitFrame::Loop { id, .. } => Some(self.tcx.hir_span(*id)),
+        ExitFrame::Branch { .. } => None,
+      })
+      .map(|sp| (sm.lookup_char_pos(sp.lo()).line, sm.lookup_char_pos(sp.hi()).line));
+    #[expect(clippy::disallowed_methods, reason = "if_decl is only tested with any; order doesn't matter")]
+    let candidates: Vec<(&String, &RefData)> = self.in_scope.iter()
+      .filter_map(|n| self.borrow_map.get(n).map(|rd| (n, rd)))
+      .filter(|(n, rd)| rd.assigned_at < split
+        && !if_decl.iter().any(|d| d.name() == n.as_str())
+        && rd.lender.extract_rap().is_some_and(|l| !l.is_fn())
+        // What each way out leaves (see `end_borrows_at_exits_in`).
+        && leaves.exits.iter().all(|x| match x {
+          BranchExit::Return => true,
+          BranchExit::Break => loop_lines.is_some() && !leaves.break_carries.iter().any(|c| c == *n),
+          // Not a `for` loop's pattern binding, whose loan the loop's
+          // iterator holds into the next iteration (#872).
+          BranchExit::Continue => loop_lines.is_some_and(|(lo, _)| lo < rd.assigned_at),
+          _ => false,
+        }))
+      .collect();
+    if candidates.is_empty() {
+      return false;
+    }
+    // Where the borrow ends after the `if`: the last line its loan is
+    // live on (rustc's), else the reference's own last live line. It
+    // must be live after the `if` and, for a `break` / `continue`, end
+    // in the loop (one used after the loop doesn't end at the `break`).
+    let loans = self.gather_borrow_data(self.bwf);
+    let in_loop = leaves.exits.iter().any(|x| matches!(x, BranchExit::Break | BranchExit::Continue));
+    candidates.iter().any(|(n, rd)| {
+      let end = loans.iter()
+        .filter_map(|m| if Self::borrow_span_match(rd, m) { Some(m.region.1) } else { Self::borrow_match(rd, m) })
+        .max()
+        .or_else(|| self.last_live_line(n, (split, usize::MAX)));
+      end.is_some_and(|end| end >= merge && (!in_loop || loop_lines.is_some_and(|(_, hi)| end <= hi)))
+    })
+  }
+
   /// Whether `e` is inside a closure of the function being visited.
   fn in_closure(&self, e: &'tcx Expr<'tcx>) -> bool {
     self.tcx.hir_parent_iter(e.hir_id)
@@ -4143,7 +4200,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // too when x may have no value on the implicit `else` path
         // (#244): the join says so.
         let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch
-          || assigns_maybe_init;
+          || assigns_maybe_init
+          || (self.expr_diverges(if_expr) && {
+            let sm = self.tcx.sess.source_map();
+            let (split, if_end) = (sm.lookup_char_pos(if_expr.span.lo()).line, sm.lookup_char_pos(if_expr.span.hi()).line);
+            self.borrow_may_end_at_exit(if_expr, split, if_end, &if_scope)
+          });
         // A tuple scrutinee's variables are moved whether or not the
         // body runs (#327), so that's a second path as well.
         if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {

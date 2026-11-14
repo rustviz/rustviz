@@ -15755,6 +15755,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "mv is bound to a copyable value",
         ],
     },
+    TooltipExpect {
+        name: "if_exit_borrow_end",
+        // #882: an `if` without `else` whose body always leaves (`break`,
+        // `continue`, `return`) is drawn as a conditional on the borrowed
+        // columns, with the borrow's end in its arm, as for an `if`/`else`.
+        // Main drew the `if` inline on those columns, with no end on the
+        // early path, so it had no join either: the "isn't moved in any of
+        // the branches above" lines fail on main. The arm's end texts are
+        // the same as the main path's (main drew them only there, at the
+        // loop's `}` / the last use), so where they are is checked in
+        // `a_one_armed_if_that_leaves_ends_the_borrow_in_its_arm`, which also
+        // checks that e's loan doesn't end at the `continue` (#872).
+        must_contain: &[
+            "Return immutably borrowed resource from a to v",
+            "a's immutable borrow ends",
+            "Return immutably borrowed resource from d to v",
+            "d's immutable borrow ends",
+            "Return immutably borrowed resource from r to t",
+            "Return immutably borrowed resource from w to t",
+            "w's immutable borrow ends",
+            "Return immutably borrowed resource from r to s",
+            "a isn't moved in any of the branches above",
+            "w isn't moved in any of the branches above",
+        ],
+        must_not_contain: &[
+            "(moved from",
+            "Move from v to",
+            "Move from t to",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -16760,6 +16790,41 @@ fn a_loop_that_can_break_keeps_its_loan_to_the_loop_end() {
     let (brk, cont) = (code_row_y(&code, "0 => break,"), code_row_y(&code, "1 => continue,"));
     assert!(d_ends.iter().any(|y| (y - brk).abs() < 1.0), "d's borrow doesn't end in the `break` arm (y={brk}): {d_ends:?}");
     assert!(d_ends.iter().all(|y| (y - cont).abs() > 1.0), "d's borrow ends in the `continue` arm (y={cont}): {d_ends:?}");
+}
+
+/// #882: an `if` without `else` whose body always leaves ends a borrow on
+/// that path while the paths that skip the body keep it, so it is drawn
+/// as a conditional on the borrowed columns with the end in its arm. Each
+/// end checked with rustc: the conflicting use (`v.push(..)`, `t.push(..)`,
+/// `s.push(..)` with `s: &mut String`) just before the `break` / `continue`
+/// / `return` compiles, and right after the `if` it is E0502. Main drew no
+/// end in the arm: `a` and `d` ended only on the loop's `}`, `r` and `w` at
+/// their last use after the `if`. A `for` binding's loan isn't ended by a
+/// `continue` (#872), and `q`, last used in the condition, has no end in
+/// the arm.
+#[test]
+fn a_one_armed_if_that_leaves_ends_the_borrow_in_its_arm() {
+    let rv = run_with_local_backend("if_exit_borrow_end");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let ends = |arrow: &str| -> Vec<f64> { arrow_points(&timeline, arrow).iter().map(|pts| pts[0].1).collect() };
+    let breaks = code_rows_y(&code, "break;");
+    let r_uses = code_rows_y(&code, "println!(\"{}\", r);");
+    let (cont, ret) = (code_row_y(&code, "continue;"), code_row_y(&code, "return 0;"));
+    for (arrow, row, at) in [
+        ("Return immutably borrowed resource from a to v", breaks[0], "the `break`"),
+        ("Return immutably borrowed resource from d to v", r_uses[0], "the `break` arm's last use of r"),
+        ("Return immutably borrowed resource from r to t", r_uses[0], "the `break` arm's last use of r"),
+        ("Return immutably borrowed resource from w to t", cont, "the `continue`"),
+        ("Return immutably borrowed resource from r to s", ret, "the `return`"),
+    ] {
+        let rows = ends(arrow);
+        assert!(rows.iter().any(|y| (y - row).abs() < 1.0), "{arrow}: no end at {at} (y={row}): {rows:?}");
+        assert!(rows.iter().any(|y| *y > row + 1.0), "{arrow}: no end on the path that skips the `if`, below y={row}: {rows:?}");
+    }
+    let e_ends = ends("Return immutably borrowed resource from e to v");
+    assert!(e_ends.iter().all(|y| (y - cont).abs() > 1.0), "e's loan ends at the `continue` (y={cont}): {e_ends:?}");
+    let q_ends = ends("Return immutably borrowed resource from q to t");
+    assert!(q_ends.iter().all(|y| (y - breaks[2]).abs() > 1.0), "q's borrow ends at the `break` (y={}), after its last use: {q_ends:?}", breaks[2]);
 }
 
 /// #870: `v.len()` while `r` (a `for` binding, a holder `it`) already
