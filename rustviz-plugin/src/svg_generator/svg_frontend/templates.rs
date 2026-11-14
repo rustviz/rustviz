@@ -147,6 +147,16 @@ pub static CSS_TEMPLATE: &'static str =
         stroke-width: 1px;
         stroke-dasharray: \"2 1\";
     }
+
+    /* a column while it is mutably lent out (#722): it can't be used
+       until the borrow ends. A faint row of round dots, unlike the
+       4px dashes of a branch arm that isn't running. */
+    .lent {
+        stroke-width: 2.5px;
+        stroke-dasharray: 0 6;
+        stroke-linecap: round;
+        stroke-opacity: 0.6;
+    }
     
     .functionIcon {
         paint-order: stroke;
