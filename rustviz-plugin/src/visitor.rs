@@ -807,6 +807,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       ImplicitRef::No
     };
+    // `x.show()` / `(&x).show()` with x a reference variable and
+    // `show(&self)` on Self = `&String`: the call borrows x itself (#938).
+    let of_ref_var = ref_var_receiver_borrow(rcvr, self.tcx.typeck(rcvr.hir_id.owner));
     match adjustment_map.get(rcvr.hir_id) {
       Some(adj_vec) => { 
         for a in adj_vec.iter() {
@@ -818,7 +821,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 AutoBorrowMutability::Mut{..} if matches!(rcvr_rty, ResourceTy::DerefField(..)) => {
                   let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
                   let result_has_lifetime = call_result_has_lifetime(expr, typeck);
-                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), true, result_has_lifetime, autoref);
+                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), true, result_has_lifetime, autoref, false);
                 }
                 AutoBorrowMutability::Mut{allow_two_phase_borrow: AllowTwoPhase::Yes} => {
                   // `r.push_str(..)` with r: `&mut String` is
@@ -840,11 +843,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     _ => is_implicit_mut_reborrow(rcvr, typeck) || is_explicit_reborrow(rcvr, typeck),
                   };
                   let result_has_lifetime = call_result_has_lifetime(expr, typeck);
-                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref);
+                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref, of_ref_var);
                 },
                 AutoBorrowMutability::Not => {
                   let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
-                  self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut);
+                  self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut, of_ref_var);
                 }
                 _ => {}
               }
@@ -971,7 +974,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let id = *self.unique_id;
             self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
               from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
-              result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
+              result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false,
             });
             *self.unique_id += 1;
           }
@@ -1101,7 +1104,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new() });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false });
       *self.unique_id += 1;
     }
   }
@@ -2756,7 +2759,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.update_rap(&rap, line_num);
             let implicit = if is_method_autoref(operand, typeck) { ImplicitRef::Autoref } else { ImplicitRef::No };
             let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
-            self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), implicit, false);
+            self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), implicit, false, false);
           }
         }
       }
@@ -2796,7 +2799,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           // decision); the operator isn't drawn reborrowing `r`.
           match self.resource_of_lhs(lhs_expr) {
             Some(ResourceTy::Value(rap)) => {
-              self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), false, false, ImplicitRef::Autoref);
+              self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), false, false, ImplicitRef::Autoref, false);
             }
             Some(lhs_rty @ (ResourceTy::Deref(_) | ResourceTy::Index(..) | ResourceTy::DerefField(..))) => {
               self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);

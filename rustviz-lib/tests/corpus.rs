@@ -16720,6 +16720,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=b goes out of scope. Its resource is dropped.",
         ],
     },
+    // ─── `show(&x)` with x a reference variable borrows x itself (#938) ───
+    TooltipExpect {
+        name: "ref_var_call_arg_938",
+        must_contain: &[
+            // show(&x) (x: &String, show(r: &&String)) borrows x, a value.
+            "x is immutably borrowed by show; x is read-only while the borrow is live",
+            "x is no longer immutably borrowed",
+            "show reads from x",
+            // show_m(&m) (m: &mut String): m can't be written through
+            // while show_m has it.
+            "m is immutably borrowed by show_m; m is read-only while the borrow is live",
+            "m is no longer immutably borrowed",
+            // bump(&mut m) (bump(r: &mut &mut String)) borrows m itself.
+            "m is mutably borrowed by bump; m can't be used while the borrow is live",
+            "m is no longer mutably borrowed",
+            "bump reads from/writes to m",
+            // show_str(&*y) / show_str(y) borrow what y points to.
+            "the resource y points to is immutably borrowed by show_str",
+            "show_str no longer borrows the resource y points to",
+            // w.show_self() / (&w).show_self() with Self = &String.
+            "w is immutably borrowed by show_self; w is read-only while the borrow is live",
+            "w is no longer immutably borrowed",
+            "show_self reads from w",
+        ],
+        must_not_contain: &[
+            "the resource x points to is immutably borrowed by show",
+            "show no longer borrows the resource x points to",
+            "the resource m points to is immutably borrowed by show_m",
+            "show_m no longer borrows the resource m points to",
+            "the resource m points to is mutably borrowed by bump",
+            "bump no longer borrows the resource m points to",
+            "the resource w points to is immutably borrowed by show_self",
+            "show_self no longer borrows the resource w points to",
+            "y is immutably borrowed by show_str",
+            "y is no longer immutably borrowed",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
