@@ -4178,7 +4178,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `let mut refs = Vec::new();` (a type that can hold references)
   /// whose variable is later the receiver of a `&mut self` method that
   /// can store a borrow into it (`refs.push(&s)`; see
-  /// `call_stores_into_receiver`, #392).
+  /// `call_stores_into_receiver`, #392), or is later assigned a whole
+  /// new value (`let mut q: Option<&String> = None; q = Some(r);`,
+  /// #875): `reassign_holder` then records the new value's borrow.
   fn filled_with_borrows_later(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> bool {
     if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
       return false;
@@ -4192,12 +4194,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     impl<'v, 'a, 'tcx> rustc_hir::intravisit::Visitor<'tcx> for StoreFinder<'v, 'a, 'tcx> {
       fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-        if let ExprKind::MethodCall(_, rcvr, _, _) = e.kind {
-          if let ExprKind::Path(QPath::Resolved(None, path)) = rcvr.kind {
-            if path.res == Res::Local(self.local) && self.ev.call_stores_into_receiver(e) {
-              self.found = true;
-            }
+        let is_local = |x: &Expr<'_>| matches!(x.kind,
+          ExprKind::Path(QPath::Resolved(None, path)) if path.res == Res::Local(self.local));
+        match e.kind {
+          ExprKind::MethodCall(_, rcvr, _, _) if is_local(rcvr) && self.ev.call_stores_into_receiver(e) => {
+            self.found = true;
           }
+          ExprKind::Assign(lhs, _, _) if is_local(lhs) => self.found = true,
+          _ => {}
         }
         rustc_hir::intravisit::walk_expr(self, e);
       }
