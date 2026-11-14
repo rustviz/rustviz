@@ -524,8 +524,9 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_08_let_else",
-        note: "minor: the else-branch `return` is not shown",
         must_contain: &[
+            // The `else` path drops s (a None) at its `return` (#906).
+            "L3 s goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "Move from s to x",
             "x's resource is moved to the caller",
             "Move from describe to d",

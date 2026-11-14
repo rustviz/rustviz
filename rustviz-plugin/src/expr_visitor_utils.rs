@@ -1004,6 +1004,10 @@ pub fn events_move_out_of_outer(
         // An `FnOnce` call moves the closure (#271).
         | ExternalEvent::ClosureCall { closure: ResourceTy::Value(rap), .. } =>
             !rap.is_fn() && !decls.contains(rap),
+        // A move out of `*b` can only take a Box's contents (a
+        // reference's referent can't be moved out of): `b` keeps its
+        // allocation, but no longer owns the contents (#905).
+        ExternalEvent::Move { from: ResourceTy::Deref(rap), .. } => !decls.contains(rap),
         // Moved into a name an or-pattern binds if its alternative
         // matched (#533): `if let (x, _) | (_, x) = t` (#597).
         ExternalEvent::OrAltMove { ro, .. } => !decls.contains(ro),

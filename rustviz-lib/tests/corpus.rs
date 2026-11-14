@@ -16350,9 +16350,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is moved",
             "*b's resource is moved",
             "p's resource is moved",
-            "t.0 goes out of scope. Its resource is dropped",
-            "b.0 goes out of scope. Its resource is dropped",
-            "p.a goes out of scope. Its resource is dropped",
+            // (Not "t.0 goes out of scope. Its resource is dropped" /
+            // b.0 / p.a: since #906 the `else` path drops each of them at
+            // its `return` with that text, true there. Each column has one
+            // scope end, which `must_contain` pins as "No resource is
+            // dropped.")
             "b goes out of scope. No resource is dropped",
             "p goes out of scope. No resource is dropped",
         ],
@@ -16913,6 +16915,63 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w has no value yet",
             "w is live in a conditional expression",
         ],
+    },
+    TooltipExpect {
+        name: "box_deref_move_if_no_else_905",
+        // #905: `if c { let w = *e; }` (and `take(*e2)`) with no `else`
+        // moves the Box's contents on one path only: on the path that
+        // skips the body, the String is still in the Box and is dropped
+        // at e's scope end (a drop flag decides); the allocation is freed
+        // either way. main drew the move as unconditional and said only
+        // the allocation was freed there.
+        must_contain: &[
+            "e goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed either way.",
+            "e2 goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed either way.",
+        ],
+        must_not_contain: &[
+            "e goes out of scope. Its contents were moved out earlier",
+            "e2 goes out of scope. Its contents were moved out earlier",
+        ],
+    },
+    TooltipExpect {
+        name: "let_else_exit_drops_906",
+        // #906: a let-else's `else` block runs when the pattern doesn't
+        // match and must leave; what's owned there is dropped on that
+        // path, the scrutinee included (it wasn't moved). main drew the
+        // `let` as one straight line: no drop at the `return` / `panic!`
+        // / `continue` (s and k are moved later, so they had no drop
+        // stated at all on that path). The drop of s / k at the exit reads
+        // like any scope end; s and k are moved before theirs, so these
+        // texts come from the exits only. A struct or Box with part
+        // columns (p, b, and q after `if k == 0 { return; }`) is dropped
+        // whole at the exit: main's `if` form said "q.a was moved out
+        // earlier, so only q.b is dropped" there, though `q.a` is moved
+        // after the `return`. (That text is true at q's scope end, so it
+        // can't be forbidden; "q goes out of scope. Its resource is
+        // dropped." appears only at the exit.) Nothing false was printed
+        // for the let-else itself, only nothing at all: no
+        // `must_not_contain`.
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "opt goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "k goes out of scope. Its resource is dropped.",
+            "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
+            "p.a goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "o goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "s isn't moved in any of the branches above",
+            "k isn't moved in any of the branches above",
+            "p goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "b.0 goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "q goes out of scope. Its resource is dropped.",
+            "q.a goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
+            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "q goes out of scope. q.a was moved out earlier, so only q.b is dropped.",
+            "This segment leads into the Some(t) branch.",
+            "This segment leads into the Ok(n) branch.",
+        ],
+        must_not_contain: &[],
     },
 ];
 
