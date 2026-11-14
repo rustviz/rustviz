@@ -15080,6 +15080,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from w to",
         ],
     },
+    TooltipExpect {
+        name: "ctor_ref_assign_875",
+        // #875: `q = Some(r);` (r a reference) stores r's borrow of z in q, so
+        // z stays borrowed until q's last use. main drew nothing on q's column
+        // for the assignment, and `t = Some(&a);` only "t is assigned a new
+        // value": no borrow of z, a or b by q / t. (No false text to forbid:
+        // the borrows were missing. Where each one ends is pinned by
+        // `assigned_value_holding_a_reference_keeps_the_lender_borrowed`.)
+        must_contain: &[
+            "Immutable borrow from z to q: Some's signature gives the value it returns the same lifetime as its argument; q isn't a reference, but its value holds one",
+            "z's resource is immutably borrowed by q; z is read-only while the borrow is live",
+            "q holds a value that immutably borrows z's resource (q isn't a reference itself)",
+            "Return immutably borrowed resource from q to z",
+            "Immutable borrow from a to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from t to a",
+            "Immutable borrow from b to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from t to b",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17449,6 +17469,32 @@ fn struct_overwrite_by_call_or_variable_ends_old_borrow_at_the_write() {
         assert!(end(v)[0].1 < code_row_y(&code, later), "{}'s borrow should end before `{}`", v, later);
     }
     assert_eq!(end("x").len(), 1, "{:?}", end("x"));
+}
+
+/// #875: `q = Some(r);` stores r's borrow of z in q: z is borrowed from
+/// the assignment's row until q's last use (the println!). `t = Some(&b);`
+/// replaces the borrow of a, which ends at t's last use before it, so the
+/// `a.push` after it compiles; b's lasts until the last println!.
+#[test]
+fn assigned_value_holding_a_reference_keeps_the_lender_borrowed() {
+    let rv = run_with_local_backend("ctor_ref_assign_875");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let start = |v: &str, by: &str| dots_with_tooltip(&svg, &format!("{}'s resource is immutably borrowed by {}; {} is read-only while the borrow is live", v, by, v));
+    let end = |v: &str| dots_with_tooltip(&svg, &format!("{}'s resource is no longer immutably borrowed", v));
+    let prints_t = code_rows_y(&code, "println!(\"{:?}\", t);");
+    assert_eq!(prints_t.len(), 2, "{:?}", prints_t);
+    for (v, by, from, to) in [
+        ("z", "q", code_row_y(&code, "q = Some(r);"), code_row_y(&code, "println!(\"{:?}\", q);")),
+        ("a", "t", code_row_y(&code, "t = Some(&a);"), prints_t[0]),
+        ("b", "t", code_row_y(&code, "t = Some(&b);"), prints_t[1]),
+    ] {
+        let s = start(v, by);
+        assert_eq!(s.len(), 1, "{} borrowed by {}: {:?}", v, by, s);
+        assert_eq!(s[0].1, from, "{}'s borrow by {} should start on the assignment's row", v, by);
+        let e = end(v);
+        assert_eq!(e.len(), 1, "{}'s borrow ends: {:?}", v, e);
+        assert_eq!(e[0].1, to, "{}'s borrow should end at {}'s last use", v, by);
+    }
 }
 
 /// #638: `o.inner = mk(&t);` is a partial write, so s's old borrow ends
