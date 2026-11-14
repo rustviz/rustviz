@@ -16245,6 +16245,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from t.0 to String::from",
         ],
     },
+    TooltipExpect {
+        name: "tuple_scrutinee_call_temp_942",
+        // #942: in `if let (Some(a), _) = (x, make())` the scrutinee tuple
+        // holds x's value and the String make() returns. The `_` doesn't
+        // bind it, so it is dropped with the tuple: in edition 2024 when
+        // the if branch ends, or before the else runs; for a `match`, at
+        // the end of its statement. main drew only x's part of the tuple,
+        // and never said make()'s String is dropped on any path (no false
+        // text, just no drop). Now it gets a `(temporary N)` column with
+        // the wording `if let Some(s) = make_vec().first()` already gets.
+        // When a pattern binds it (`m`, `(None, n)`), only what is left
+        // is dropped: the "nothing bound it" wording would be false.
+        must_contain: &[
+            "Move from make to (temporary)",
+            "This temporary String is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "Move from make to (temporary 2)",
+            "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "Move from make to (temporary 3)",
+            "This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Move from make to (temporary 4)",
+            "This temporary String is dropped at the end of the block's final expression, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+        ],
+        must_not_contain: &[
+            "=This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

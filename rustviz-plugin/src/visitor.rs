@@ -5888,6 +5888,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           (left && !moved.is_empty()).then_some(TempPart::UpdateBase(moved))
         }
+        // `(None, m)` on `match (x, make()) { .. }` (#942).
+        ExprKind::Tup(_) if path.is_none() => self.tuple_scrutinee_elem_part(top, typeck, env),
         _ => self.field_moved_part(top, path, left, typeck, env),
       },
       // `let Ok(s) = res() else { .. };` (#605).
@@ -6310,10 +6312,88 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           });
           !moves_out
         }
+        // `make()` in `if let (Some(a), _) = (x, make())`: an element of
+        // a tuple scrutinee that is drawn as "the temporary tuple" (#327)
+        // has no column of its own, so when no pattern takes anything
+        // out of it, it is drawn like any other scrutinee temporary
+        // (#942).
+        ExprKind::Tup(_) => !matches!(expr.kind, ExprKind::Field(..)) && self.unbound_tuple_scrutinee_elem(expr, typeck, env),
         _ => false,
       },
       _ => false,
     }
+  }
+
+  /// `make()` in `if let (Some(a), _) = (x, make())` / `match (x,
+  /// make()) { .. }`: an element (also inside a nested tuple literal) of
+  /// a tuple-literal scrutinee that `is_drawn_tuple_scrutinee`. Its field
+  /// path in the tuple, the patterns matched against the tuple, and
+  /// whether they are a `match`'s arms (else an `if let` / `while let`'s
+  /// one pattern). None for anything else (#942).
+  fn tuple_scrutinee_elem(&self, elem: &'tcx Expr<'tcx>) -> Option<(Vec<String>, Vec<&'tcx Pat<'tcx>>, bool)> {
+    use rustc_hir::Node;
+    if elem.span.from_expansion() || matches!(elem.kind, ExprKind::Tup(_)) {
+      return None;
+    }
+    let mut path: Vec<String> = Vec::new();
+    let mut top = elem;
+    while let Node::Expr(p) = self.tcx.parent_hir_node(top.hir_id) {
+      let ExprKind::Tup(elems) = p.kind else { break };
+      if p.span.from_expansion() {
+        return None;
+      }
+      path.insert(0, elems.iter().position(|e| e.hir_id == top.hir_id)?.to_string());
+      top = p;
+    }
+    if path.is_empty() || !self.is_drawn_tuple_scrutinee(top) {
+      return None;
+    }
+    let Node::Expr(m) = self.tcx.parent_hir_node(top.hir_id) else { return None };
+    match m.kind {
+      ExprKind::Match(_, arms, _) => Some((path, arms.iter().map(|a| a.pat).collect(), true)),
+      ExprKind::Let(l) => Some((path, vec![l.pat], false)),
+      _ => None,
+    }
+  }
+
+  /// True iff `elem` is a `tuple_scrutinee_elem` that no pattern binds
+  /// anything out of by value: all of it stays in the tuple, and is
+  /// dropped with it (#942).
+  fn unbound_tuple_scrutinee_elem(
+    &self,
+    elem: &'tcx Expr<'tcx>,
+    typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+    env: rustc_middle::ty::TypingEnv<'tcx>,
+  ) -> bool {
+    self.tuple_scrutinee_elem(elem)
+      .is_some_and(|(path, pats, _)| pats.iter().all(|p| self.path_left(p, &path, typeck, env) == Some(false)))
+  }
+
+  /// `temp_part_moved` for a `tuple_scrutinee_elem` that a pattern binds
+  /// some or all of by value (`(None, m)` on `(x, make())`, #942): what
+  /// is left of it, if anything, is dropped with the tuple. That is
+  /// something when an arm leaves some of it, or the `if let` pattern
+  /// may not match (then all of it is left).
+  fn tuple_scrutinee_elem_part(
+    &self,
+    elem: &'tcx Expr<'tcx>,
+    typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+    env: rustc_middle::ty::TypingEnv<'tcx>,
+  ) -> Option<TempPart> {
+    use rustc_hir::Node;
+    let (path, pats, is_match) = self.tuple_scrutinee_elem(elem)?;
+    let leaves = pats.iter().any(|p| self.path_left(p, &path, typeck, env).is_some());
+    if is_match {
+      return leaves.then_some(TempPart::Match(None));
+    }
+    if !leaves && !pats.iter().any(|p| pat_refutable(p)) {
+      return None;
+    }
+    let is_while = self.tcx.hir_parent_iter(elem.hir_id).find_map(|(_, n)| match n {
+      Node::Expr(i) if matches!(i.kind, ExprKind::If(..)) => Some(i),
+      _ => None,
+    }).is_some_and(|i| matches!(i.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)));
+    Some(if is_while { TempPart::WhileLet(None) } else { TempPart::IfLet(None) })
   }
 
   /// `&call()` (or `&mut call()`) where the `&` is an argument of a

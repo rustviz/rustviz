@@ -5633,7 +5633,7 @@ fn sub_pat_at(&self, pat: &'tcx Pat<'tcx>, step: &str,
 /// the place at field path `path` in it (#627: through nested tuple
 /// literals and a variable's parts): all of it (`Some(false)`), part of
 /// it (`Some(true)`) or nothing (`None`).
-fn path_left(&self, pat: &'tcx Pat<'tcx>, path: &[String],
+pub fn path_left(&self, pat: &'tcx Pat<'tcx>, path: &[String],
   typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> Option<bool> {
   let Some((step, rest)) = path.split_first() else { return self.pat_leaves(pat, typeck, env) };
   match pat.kind {
