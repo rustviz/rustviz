@@ -2160,6 +2160,17 @@ pub(crate) fn holds_copy_value(rty: &ResourceTy) -> bool {
         || matches!(rty, ResourceTy::Value(r) | ResourceTy::Deref(r) if r.points_to_copy())
 }
 
+// Whether a borrow's referent is a "value" in the dot's tooltip. A
+// referent with no column of its own (`&{}`, `&5`, `&S { a: 4 }`) is
+// `Anonymous`: the type of what the borrower points to says whether it
+// needs drop (#867). Referents that need drop get a `Temporary` column
+// and stay a "resource".
+fn borrow_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
+    holds_copy_value(from)
+        || (matches!(from, ResourceTy::Anonymous)
+            && borrower.extract_rap().is_some_and(|r| r.points_to_copy()))
+}
+
 // The lender of a borrow, when it is a reference r: the borrow is then
 // of what r points to, reached through r (#313).
 fn ref_lender(rty: &ResourceTy) -> Option<&ResourceAccessPoint> {
@@ -3150,7 +3161,7 @@ impl Event {
                 } else if is.holds_borrow() {
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref(), holds_copy_value(from))
                 } else {
-                    hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), holds_copy_value(from))
+                    hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), borrow_holds_value(from, is))
                 }
             }
             Event::StaticBorrow{ from, is, ..} => {
@@ -3159,7 +3170,7 @@ impl Event {
                 } else if is.holds_borrow() {
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref(), holds_copy_value(from))
                 } else {
-                    hover_messages::event_dot_static_borrow(&self.deref_name(my_name), holds_copy_value(from))
+                    hover_messages::event_dot_static_borrow(&self.deref_name(my_name), borrow_holds_value(from, is))
                 }
             }
             // A reference copied out of `it` gave back its part of the
