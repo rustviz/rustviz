@@ -618,7 +618,7 @@ pub fn collect_pat_bindings(
           }
         }
         // The temporary a `let r = &…;` keeps alive is declared with r.
-        if let Some(t) = rd.extended_temp.as_ref().and_then(|t| raps.get(t)) {
+        for t in rd.extended_temp.iter().filter_map(|t| raps.get(t)) {
           out.insert(t.rap.to_owned());
         }
       }

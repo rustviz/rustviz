@@ -16203,6 +16203,48 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=s immutably borrows a value",
         ],
     },
+    TooltipExpect {
+        name: "nested_extended_temporary",
+        // #856: `let w = W { r: &String::new() };`, `let t =
+        // (&String::from("t"), 1);`, `let s = Some(&String::from("s"));`:
+        // a temporary borrowed by a `&` inside a struct literal, tuple or
+        // constructor that a `let` initializes lives until the end of the
+        // block (temporary lifetime extension), like #400's `let r =
+        // &String::from("a");`. It gets a `(temporary N)` column that the
+        // field borrows from, dropped at scope end (or where `return`
+        // leaves early). Main drew no column and no drop for it, and had
+        // the field borrow from (and return the borrow to) the function
+        // `String::new`, which owns nothing. `show(&..)`'s temporary is
+        // still dropped at the end of its statement.
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "Immutable borrow from (temporary) to k.r",
+            "Return immutably borrowed resource from k.r to (temporary)",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it \
+             lived past its statement. Its resource is dropped.",
+            "Move from String::new to (temporary)",
+            "Immutable borrow from (temporary) to w.r",
+            "Return immutably borrowed resource from w.r to (temporary)",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept \
+             alive past the end of its statement. Its resource is dropped.",
+            "Move from String::from to (temporary 2)",
+            "Immutable borrow from (temporary 2) to t.0",
+            "Return immutably borrowed resource from t.0 to (temporary 2)",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept \
+             alive past the end of its statement. Its resource is dropped.",
+            "Move from String::from to (temporary 3)",
+            "(temporary 3) acquires ownership of a resource. This temporary value is borrowed by a let, \
+             so it lives until the end of the enclosing block, not just to the end of the statement",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept \
+             alive past the end of its statement. Its resource is dropped.",
+            "Move from String::from to (temporary 4)",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from k.r to String::from",
+            "Return immutably borrowed resource from w.r to String::new",
+            "Return immutably borrowed resource from t.0 to String::from",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

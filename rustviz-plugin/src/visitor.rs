@@ -6836,11 +6836,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.break_pats.retain(|(id, ..)| *id != init.hir_id);
       self.break_binds.retain(|(id, ..)| *id != init.hir_id);
     } else {
+      let mut nested_temps = Vec::new();
       if !is_skipped {
         self.visit_expr(init);
+        nested_temps = self.bind_nested_extended_temps(pat, init);
       }
       let first_id = *self.unique_id;
       self.bind_pat(pat, init, is_skipped);
+      // The temporaries the initializer keeps alive are declared with
+      // the pattern's bindings (#856).
+      if !nested_temps.is_empty() {
+        let mut names = Vec::new();
+        pat.each_binding(|_, hid, _, _| names.push(binding_name(&self.tcx, hid)));
+        for n in names {
+          if let Some(rd) = self.raps.get_mut(&n) {
+            rd.extended_temp.extend(nested_temps.iter().cloned());
+          }
+        }
+      }
       // `let (c, d) = *r;`: c and d copy values inside `*r`, as in
       // `match *r` (#886).
       if !is_skipped && !matches!(pat.kind, PatKind::Binding(..) | PatKind::Wild) {
@@ -6887,11 +6900,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     self.visit_expr(init);
 
+    // `&P { name: &make() }`: the temporaries the operand borrows are
+    // extended too (#856).
+    let mut nested = Vec::new();
+    self.walk_extending(operand, &mut nested);
     let line_num = expr_to_line(init, &self.tcx);
+    let tmp = self.extended_temp_column(operand, borrow_mut, tmp_ty, line_num);
+    let tmp_name = tmp.name().to_owned();
+
+    let name = binding_name(&self.tcx, hirid);
+    self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
+      line_num, ResourceTy::Value(tmp.clone()), VecDeque::new(), self.current_scope, !self.inside_branch,
+      self.ref_pointee_is_copy(lhs_ty, hirid.owner));
+    let r_data = self.raps.get_mut(&name).unwrap();
+    r_data.extended_temp.push(tmp_name);
+    r_data.extended_temp.extend(nested);
+    let r = r_data.rap.to_owned();
+    let evt = match borrow_mut {
+      Mutability::Mut => Evt::MBorrow,
+      Mutability::Not => Evt::SBorrow,
+    };
+    self.add_borrow_ev(line_num, evt, ResourceTy::Value(r), ResourceTy::Value(tmp), false);
+    true
+  }
+
+  /// The `(temporary N)` column of a temporary that a `let` extends:
+  /// it acquires `operand`'s value (of type `tmp_ty`) on `line_num` and
+  /// goes out of scope at the end of the enclosing block (#400). A
+  /// temporary borrowed by `&mut` is a mutable place.
+  fn extended_temp_column(&mut self, operand: &'tcx Expr<'tcx>, borrow_mut: Mutability, tmp_ty: rustc_middle::ty::Ty<'tcx>, line_num: usize) -> ResourceAccessPoint {
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
-    // `&mut Vec::new()` writes through the borrow: the temporary is
-    // a mutable place.
     self.define_lhs(tmp_name.clone(), borrow_mut == Mutability::Mut, operand, tmp_ty);
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let n_events = self.preprocessed_events.len();
@@ -6901,20 +6940,72 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // still holds the value from here on.
       self.add_ev(line_num, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false);
     }
+    tmp
+  }
 
-    let name = binding_name(&self.tcx, hirid);
-    self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
-      line_num, ResourceTy::Value(tmp.clone()), VecDeque::new(), self.current_scope, !self.inside_branch,
-      self.ref_pointee_is_copy(lhs_ty, hirid.owner));
-    let r_data = self.raps.get_mut(&name).unwrap();
-    r_data.extended_temp = Some(tmp_name);
-    let r = r_data.rap.to_owned();
-    let evt = match borrow_mut {
-      Mutability::Mut => Evt::MBorrow,
-      Mutability::Not => Evt::SBorrow,
-    };
-    self.add_borrow_ev(line_num, evt, ResourceTy::Value(r), ResourceTy::Value(tmp), false);
-    true
+  /// `let w = W { r: &String::new() };`, `let t = (&make(), 1);`,
+  /// `let s = Some(&make());`: a temporary borrowed inside the `let`'s
+  /// initializer, by a `&` that Rust's temporary lifetime extension
+  /// reaches (the operand of an extending `&`, and the fields of an
+  /// extending struct, tuple or array literal, tuple-struct / variant
+  /// constructor or cast), lives until the end of the enclosing block,
+  /// like #400's `let r = &String::from("a");`. Give each one that owns
+  /// a resource a `(temporary N)` column (#856), recorded by its `&` in
+  /// `nested_ext_temps` so whatever holds the reference borrows from it,
+  /// and returns their names: they go out of scope with `pat`'s
+  /// bindings. Called after `init` is visited and before `pat` is bound.
+  fn bind_nested_extended_temps(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) -> Vec<String> {
+    // `let (a, b) = &(make(), 1);` binds through the reference; not drawn.
+    if matches!(init.kind, ExprKind::AddrOf(..)) && !matches!(pat.kind, PatKind::Binding(..)) {
+      return Vec::new();
+    }
+    let mut out = Vec::new();
+    self.walk_extending(init, &mut out);
+    out
+  }
+
+  /// `bind_nested_extended_temps`'s walk over the extending expression `e`.
+  fn walk_extending(&mut self, e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
+    if e.span.from_expansion() {
+      return;
+    }
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    match e.kind {
+      ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) => {
+        // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary.
+        if matches!(operand.kind, ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)) {
+          return;
+        }
+        // Temporaries borrowed inside the operand are extended too, and
+        // are made first: the operand's value borrows from them.
+        self.walk_extending(operand, out);
+        let tmp_ty = typeck.expr_ty(operand);
+        if matches!(operand.kind, ExprKind::AddrOf(..)) || operand.span.from_expansion()
+          || !self.needs_drop(tmp_ty, e.hir_id.owner) {
+          return;
+        }
+        let tmp = self.extended_temp_column(operand, borrow_mut, tmp_ty, expr_to_line(operand, &self.tcx));
+        out.push(tmp.name().to_owned());
+        self.nested_ext_temps.insert(e.hir_id, tmp);
+      }
+      ExprKind::Struct(_, fields, _) => {
+        for f in fields {
+          self.walk_extending(f.expr, out);
+        }
+      }
+      ExprKind::Tup(elems) | ExprKind::Array(elems) => {
+        for el in elems {
+          self.walk_extending(el, out);
+        }
+      }
+      ExprKind::Call(callee, args) if is_ctor_path(callee, typeck) => {
+        for a in args {
+          self.walk_extending(a, out);
+        }
+      }
+      ExprKind::Cast(inner, _) => self.walk_extending(inner, out),
+      _ => {}
+    }
   }
 
   /// Structural pat-against-init decomposition. When the pattern's
@@ -8408,7 +8499,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     });
     for r in refs {
       if let Some(rd) = self.raps.get_mut(&r) {
-        rd.extended_temp = Some(tmp_name.clone());
+        rd.extended_temp.push(tmp_name.clone());
       }
     }
   }
