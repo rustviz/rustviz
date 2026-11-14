@@ -128,11 +128,26 @@ fn setup(args: SetupArgs) -> Result<()> {
     //    in-use xtask.exe (Windows holds an exclusive lock on
     //    running executables, unlike Linux / macOS where the file
     //    can be replaced under a live process).
-    section("cargo build --workspace --release (excluding xtask)");
+    //
+    //    `--exclude rustviz` plus a separate `-p rustviz`: that crate and
+    //    rustviz-cli both define a bin named `rustviz`, and linking both in
+    //    one cargo invocation makes them race on rustviz.exe on Windows
+    //    (LNK1104; cargo#6313).
+    section("cargo build --workspace --release (excluding xtask, rustviz)");
     run(
         "cargo",
-        &["build", "--workspace", "--release", "--exclude", "xtask"],
+        &[
+            "build",
+            "--workspace",
+            "--release",
+            "--exclude",
+            "xtask",
+            "--exclude",
+            "rustviz",
+        ],
     )?;
+    section("cargo build -p rustviz --release");
+    run("cargo", &["build", "-p", "rustviz", "--release"])?;
 
     // 6. Sandboxed runner image. Skipped silently when docker isn't on
     //    PATH so devs who only iterate against RV_RUNNER=local don't

@@ -223,6 +223,10 @@ checklist are in [`playground/SECURITY.md`](playground/SECURITY.md). Report find
 
 Issues and PRs welcome. Keep each PR focused on a single concern; for
 local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
+(On Windows, use `--workspace --exclude rustviz` and then `-p rustviz` as a
+separate command, for `build` and `test` alike: `rustviz` and `rustviz-cli`
+both produce a `rustviz` bin, and linking both in one invocation fails with
+LNK1104; CI does the same.)
 [`CLAUDE.md`](CLAUDE.md) has the project's ground rules (for human and AI
 contributors alike): tooltips must be semantically correct, tests must pin
 correct behaviour, and known gaps are tracked as issues labelled
