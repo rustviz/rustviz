@@ -15406,6 +15406,59 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*rw's value is copied",
         ],
     },
+    TooltipExpect {
+        name: "box_partial_move_890",
+        // #890: `let (s, n) = *b2;` on `b2: Box<(String, i32)>` moves only
+        // the String, out of b2.0 (n copies b2.1), as `let (s, n) = t;` does
+        // for a local tuple. main read "*b2's resource is moved" (the whole
+        // payload), drew no move on b2.0 and so said b2.0's String was
+        // dropped at scope end (it was moved into s), and said b2 drops
+        // nothing (the Box's heap allocation is freed). Same for struct
+        // patterns (`let P { a, .. } = *bp;` leaves bp.b in the Box, dropped
+        // with it), a whole move (`let (x, y) = *b4;`) and a field of the
+        // payload (`(*bo).pair`).
+        must_contain: &[
+            "Move from b2.0 to s",
+            "b2.0's resource is moved",
+            "Copy from b2.1 to n",
+            "n is initialized with a copy of b2.1",
+            "b2.0 goes out of scope. No resource is dropped.",
+            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from bp.a to a",
+            "bp.a's resource is moved",
+            "bp.a goes out of scope. No resource is dropped.",
+            "bp.b goes out of scope. Its resource is dropped.",
+            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation is freed.",
+            "Move from bq.s to s2",
+            "k is initialized with a copy of bq.k",
+            "bq goes out of scope. bq.s was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from b4.0 to x",
+            "Move from b4.1 to y",
+            "b4 goes out of scope. b4.0 and b4.1 were moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "Move from bo.pair.0 to s3",
+            "m is initialized with a copy of bo.pair.1",
+            "bo goes out of scope. bo.pair.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "*b2's resource is moved",
+            "*bp's resource is moved",
+            "*bq's resource is moved",
+            "*b4's resource is moved",
+            "bo.pair's resource is moved",
+            "Move from *b2 to s",
+            "Move from *bp to a",
+            "Move from *b4 to x",
+            "b2 goes out of scope. No resource is dropped.",
+            "bp goes out of scope. No resource is dropped.",
+            "bq goes out of scope. No resource is dropped.",
+            "b4 goes out of scope. No resource is dropped.",
+            "b2.0 goes out of scope. Its resource is dropped.",
+            "bp.a goes out of scope. Its resource is dropped.",
+            "bq.s goes out of scope. Its resource is dropped.",
+            "b4.0 goes out of scope. Its resource is dropped.",
+            "bo.pair.0 goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
