@@ -15785,6 +15785,55 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from t to",
         ],
     },
+    TooltipExpect {
+        name: "write_through_mut_ref_to_ref_897",
+        // #897: `*r = "x"` through `r: &mut &str` pointing to a reference
+        // with no column (a caller's, an element via `get_mut` or
+        // `&mut names[1]`) was refused ("internal error at
+        // visitor.rs:3517"): the write was taken to re-point the reference
+        // variable on r's alias chain, and the chain was empty. It is
+        // drawn like `*r = 5` through `r: &mut i32`. The chain names the
+        // references r borrows *through*, so it also misnamed `refs` (for
+        // `&mut refs[0]`), `v` (for `&mut v[1]`) and `x` (for `&mut *x`)
+        // as the place written: main ended `a`'s loan at `*p = &t` (refs
+        // still holds it), and said v and x now borrowed a string literal.
+        // `*p = &t` keeps t borrowed until refs' last use, as
+        // `refs[0] = &t` does. (#861: a write through get_mut isn't drawn
+        // on words's column, as for `Vec<i32>`.)
+        must_contain: &[
+            "r is a mutable borrow from the caller",
+            "*r is assigned a new value",
+            "r's mutable borrow ends",
+            "s is no longer mutably borrowed",
+            "Mutable borrow from words to w: w is a reference moved out of the value get_mut returned",
+            "*w is assigned a new value",
+            "words's resource is no longer mutably borrowed",
+            "Mutable borrow from names to e",
+            "*e is assigned a new value",
+            "Return mutably borrowed resource from e to names",
+            "names's resource is no longer mutably borrowed",
+            "Immutable borrow from t to *p",
+            "t's resource is immutably borrowed by *p; t is read-only while the borrow is live",
+            "*p immutably borrows a resource",
+            "t's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from refs to a",
+            "a's resource is no longer immutably borrowed",
+            "*q is assigned a new value",
+            "Return mutably borrowed resource from v to tags",
+            "*m is assigned a new value",
+            "Return mutably borrowed value from x to z",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from *p to a",
+            "*p's immutable borrow ends",
+            "v's mutable borrow of the string literal ends",
+            "Return mutably borrowed resource from *q to tags",
+            "*q's mutable borrow ends",
+            "x's mutable borrow of the string literal ends",
+            "Return mutably borrowed value from *m to z",
+            "*m's mutable borrow ends",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

@@ -2591,24 +2591,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     let n_events = self.preprocessed_events.len();
     self.match_rhs(dest.clone(), rhs, evt);
-    // A reference stored behind a reference parameter is handed back to
-    // the caller: its borrow lasts past this function's end.
-    if root.is_some_and(|(root, _)| self.is_ref_param(root)) {
+    self.end_stored_borrow(lhs, n_events, &dest, dest.clone());
+  }
+
+  /// After `match_rhs` drew `&x` (from event `n_events` on) going into
+  /// `dest`, a place with no column of its own (`v[0] = &u`, #282;
+  /// `*r = &u` with r pointing to an element, #897): x's loan ends where
+  /// the borrow checker ends it, drawn as an end from `end_from`. Not
+  /// for a place behind a reference parameter: the reference stored
+  /// there is handed back to the caller, and its borrow lasts past this
+  /// function's end.
+  pub fn end_stored_borrow(&mut self, lhs: &'tcx Expr<'tcx>, n_events: usize, dest: &ResourceTy, end_from: ResourceTy) {
+    if self.place_root(lhs).is_some_and(|(root, _)| self.is_ref_param(root)) {
       return;
     }
     // The borrow match_rhs just recorded, if any (a borrow of a
     // temporary, `v[0] = &String::new()`, has no lender column).
     let borrow = self.preprocessed_events[n_events..].iter().find_map(|(line, ev)| match ev {
-      ExternalEvent::StaticBorrow { from: from @ ResourceTy::Value(lender), to, .. } if *to == dest =>
+      ExternalEvent::StaticBorrow { from: from @ ResourceTy::Value(lender), to, .. } if to == dest =>
         Some((*line, from.clone(), lender.name().to_owned(), Evt::SDie)),
-      ExternalEvent::MutableBorrow { from: from @ ResourceTy::Value(lender), to, .. } if *to == dest =>
+      ExternalEvent::MutableBorrow { from: from @ ResourceTy::Value(lender), to, .. } if to == dest =>
         Some((*line, from.clone(), lender.name().to_owned(), Evt::MDie)),
       _ => None,
     });
     let Some((line, lender, lender_name, die)) = borrow else { return };
     if let Some(kill_line) = self.loan_end_line(line, &lender_name) {
-      // StaticDie/MutableDie { from: dest, to: lender }.
-      self.add_ev(kill_line, die, lender, dest, false);
+      // StaticDie/MutableDie { from: end_from, to: lender }.
+      self.add_ev(kill_line, die, lender, end_from, false);
     }
   }
 
