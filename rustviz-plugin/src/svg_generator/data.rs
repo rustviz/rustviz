@@ -4161,6 +4161,13 @@ impl Visualizable for VisualizationData {
             (State::ResourceMoved{ move_at_line, .. }, Event::Move{..}) if *move_at_line == event_line && event_line != 0 =>
                 (*previous_state).clone(),
 
+            // A write through what a `&mut` reference moved into a
+            // `for` loop's iterator hands out (`*y += 1` with y from
+            // `a.iter_mut().zip(b)`, #1076): it goes into the resource
+            // b points to, but b itself stays moved.
+            (State::ResourceMoved{ .. }, Event::Acquire{ is: ResourceTy::Index(..), .. }) if self.is_mutref(hash) =>
+                (*previous_state).clone(),
+
             // The current RAP reaquires a resource 
             (State::ResourceMoved{ .. }, Event::Acquire{ .. }) => {
                 if self.is_mut(hash) {

@@ -5206,7 +5206,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     match (pat.kind, head.kind) {
       (PatKind::Binding(BindingMode(rustc_hir::ByRef::No, _), hirid, _, None), _) => {
         if typeck.pat_ty(pat).ref_mutability() == Some(Mutability::Mut) && typeck.pat_adjustments().get(pat.hir_id).is_none() {
-          if let Some(root) = self.mut_call_chain_root(head) {
+          if let Some(root) = self.mut_call_chain_root(head).or_else(|| self.moved_mut_ref_arg(head)) {
             out.push((binding_name(&self.tcx, hirid), root));
           }
         }
@@ -5225,6 +5225,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.loop_pat_write_roots(pat, rcvr, out);
       }
       _ => {}
+    }
+  }
+
+  /// `b` in `a.iter_mut().zip(b)` with `b: &mut Vec<_>`: a `&mut`
+  /// reference variable passed as it is to an adapter, which moves it
+  /// in (#1076). What the adapter hands out points into the resource b
+  /// points to.
+  fn moved_mut_ref_arg(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    if !matches!(e.kind, ExprKind::Path(_)) || typeck.expr_ty(e).ref_mutability() != Some(Mutability::Mut)
+      || !typeck.expr_adjustments(e).is_empty() {
+      return None;
+    }
+    match get_rap(e, &self.tcx, &self.raps) {
+      ResourceTy::Value(r) if r.is_mutref() => Some(r),
+      _ => None,
     }
   }
 
@@ -7759,6 +7775,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // `for (i, a) in v.iter().enumerate()`: the loop's iterator
         // borrows `v` until the loop ends (#868).
         let loop_loans = self.keep_loop_head_loans(head_arg);
+        // `a.iter_mut().zip(b)` with `b: &mut Vec<_>` moves b into the
+        // loop's iterator, which writes through it until the loop ends
+        // (#1076).
+        let moved_ref_args: Vec<ResourceAccessPoint> = self.loop_head_ref_args(head_arg)
+          .into_iter().filter(|r| r.is_mutref()).collect();
         // `for x in it` where `it` is already an iterator
         // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
         // returns its argument unchanged, so the loop *moves*
@@ -8163,6 +8184,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .filter(|(l, _, _)| !carried.contains(l))
           .map(|(l, m, call)| (l, m, StaticLender::LoopIterator { call }))
           .chain(head_loan.map(|(l, m, lend)| (l, m, StaticLender::LoopHeadBorrow { lend })));
+        // The reference it moved in stays live until then: its borrow
+        // ends where the loop does, not where it was moved (#1076).
+        for r in moved_ref_args {
+          if self.borrow_map.contains_key(r.name()) {
+            let floor = self.borrow_floor.entry(r.name().to_owned()).or_insert(body_end);
+            *floor = (*floor).max(body_end);
+          }
+        }
         for (lender, is_mut, static_lender) in loop_loans {
           if !is_mut {
             let head_call = matches!(static_lender, StaticLender::LoopIterator { .. });

@@ -2929,8 +2929,18 @@ pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, r
 // `v.iter()`, shared; #1059): where the head's call lends it, and where
 // the loop ends. The iterator holds the reborrow until then, so v can't
 // be used (or is read-only) meanwhile, even after the last use of e.
-pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, is_mut: bool, pointee_copy: bool) -> String {
-    if is_mut {
+//
+// A `&T` passed as it is to the head's adapter (`a.iter_mut().zip(b)`
+// with `b: &Vec<_>`; #1076) is copied into the iterator, which reads
+// through the copy until the loop ends. b is a shared reference, so it
+// was read-only all along: no "b is read-only until the loop ends".
+pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, is_mut: bool, ref_is_mut: bool, pointee_copy: bool) -> String {
+    if !ref_is_mut {
+        format!(
+            "the {1} {0} points to is immutably borrowed by the `for` loop's iterator, through a copy of {0}, until the loop ends",
+            styled_name_html(ref_name), held(pointee_copy)
+        )
+    } else if is_mut {
         format!(
             "the {1} {0} points to is mutably borrowed by the `for` loop's iterator through {0}; {0} can't be used until the loop ends",
             styled_name_html(ref_name), held(pointee_copy)
