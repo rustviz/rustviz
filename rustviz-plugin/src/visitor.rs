@@ -4162,11 +4162,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if lhs_ty.is_ref() {
       return None;
     }
-    let owner = self.owner_behind_ref(r, "").filter(|o| !o.is_fn())
-      .or_else(|| self.callers_ref_behind_ref(r, 0))?;
+    let owner = self.part_holder(r, 0)?;
     let erase = |ty: rustc_middle::ty::Ty<'tcx>| self.tcx.erase_and_anonymize_regions(ty.peel_refs());
     let tys: Vec<_> = self.column_tys(owner.name(), lhs_expr.hir_id.owner).into_iter().map(erase).collect();
     (!tys.is_empty() && !tys.contains(&erase(lhs_ty))).then_some(owner)
+  }
+
+  /// The variable whose resource (or, for a reference parameter, the
+  /// caller's resource it points to) the reference r points into: r's
+  /// lender's owner, or the reference parameter r borrows through. For
+  /// a loop variable with no lender (`for e in v.iter_mut()` with v a
+  /// reference, #1046), the same for the head's receiver v, or v itself
+  /// when it is an owner (`v.iter_mut().rev()`) or a parameter.
+  fn part_holder(&self, r: &ResourceAccessPoint, depth: usize) -> Option<ResourceAccessPoint> {
+    let unlent = self.borrow_map.get(r.name()).is_some_and(|d| matches!(d.lender, ResourceTy::Anonymous));
+    match self.loop_ref_into.get(r.name()).filter(|_| unlent && depth < 16) {
+      Some(h) if !h.is_ref() => Some(h.clone()),
+      Some(h) if self.borrow_map.get(h.name()).is_some_and(|d| matches!(d.lender, ResourceTy::Caller)) => Some(h.clone()),
+      // `for row in v.iter_mut() { for e in row.iter_mut() { .. } }`.
+      Some(h) => self.part_holder(h, depth + 1),
+      None => self.owner_behind_ref(r, "").filter(|o| !o.is_fn())
+        .or_else(|| self.callers_ref_behind_ref(r, 0)),
+    }
   }
 
   /// The reference r borrows through whose lender is the caller (a
@@ -4220,13 +4237,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.add_ev(line_num, Evt::Bind, ResourceTy::Index(owner, place, write), ResourceTy::Anonymous, false);
   }
 
-  /// `*x op= k` with x a reference to part of a variable's resource:
-  /// see `write_part_behind_ref`.
+  /// `*x op= k` with x a reference to part of a variable's resource,
+  /// or to all of what a reference parameter points to: see
+  /// `write_part_behind_ref`, `whole_param_behind_ref`.
   fn write_part_behind_ref_update(&mut self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize) {
     let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
-    if let Some(owner) = self.part_owner_behind_ref(lhs_rty, lhs_expr, lhs_ty) {
+    if let Some(owner) = self.part_owner_behind_ref(lhs_rty, lhs_expr, lhs_ty)
+      .or_else(|| self.whole_param_behind_ref(lhs_rty, lhs_expr, lhs_ty)) {
       self.write_part_behind_ref(owner, lhs_rty, lhs_expr, line_num, PlaceWrite::Update);
     }
+  }
+
+  /// `*r = ..` / `*r += 1` with r a reborrow of all of what a reference
+  /// parameter v points to (`let r = &mut *v;`, #1048): v, whose column
+  /// stands for the caller's resource, so the write is drawn there too,
+  /// as for `*v = ..` / `*v += 1` written on v. None when `*r` is only
+  /// part of it (`part_owner_behind_ref`), or r is v itself.
+  fn whole_param_behind_ref(&self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, lhs_ty: rustc_middle::ty::Ty<'tcx>) -> Option<ResourceAccessPoint> {
+    let ResourceTy::Deref(r) = lhs_rty else { return None };
+    if lhs_ty.is_ref() {
+      return None;
+    }
+    let param = self.callers_ref_behind_ref(r, 0)?;
+    let erase = |ty: rustc_middle::ty::Ty<'tcx>| self.tcx.erase_and_anonymize_regions(ty.peel_refs());
+    let tys: Vec<_> = self.column_tys(param.name(), lhs_expr.hir_id.owner).into_iter().map(erase).collect();
+    tys.contains(&erase(lhs_ty)).then_some(param)
   }
 
   /// Whether `lhs_expr`, `*r` (or `**r`, …) of type `lhs_ty`, a
@@ -5011,6 +5046,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => PlaceWrite::Update,
       };
       self.write_part_behind_ref(owner, &lhs_rty, lhs_expr, line_num, write);
+    } else if let Some(param) = self.whole_param_behind_ref(&lhs_rty, lhs_expr, lhs_ty) {
+      // `*r = vec![9]` with `let r = &mut *v;` (#1048): the place is
+      // `*v`, written as on v's column for `*v = vec![9]`.
+      match &lhs_rty {
+        ResourceTy::Deref(r) if is_assign => {
+          let place = ResourceTy::Index(param.clone(), format!("*{}", param.name()), r.place_write());
+          self.add_ev(line_num, Evt::Bind, place, ResourceTy::Anonymous, false);
+        }
+        _ => self.write_part_behind_ref(param, &lhs_rty, lhs_expr, line_num, PlaceWrite::Update),
+      }
     }
 
     let n_before_drops = self.preprocessed_events.len();
@@ -6645,6 +6690,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // it (#885): the lender, whether the loan is mutable, and the id
         // of the borrow on the `for` line.
         let mut head_loan: Option<(ResourceTy, bool, usize)> = None;
+        // The loop variable's `loop_ref_into` entry, and the one it
+        // shadows (a loop nested in another with the same variable).
+        let mut loop_ref_prev: Option<(String, Option<ResourceAccessPoint>)> = None;
         if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
           let pat_name = binding_name(&self.tcx, pat_hirid);
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -6696,6 +6744,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
               l => l,
             };
+            // `for e in v.iter_mut()` with v a `&mut Vec<_>` (a
+            // parameter, or a local reference), `for e in
+            // v.iter_mut().rev()`: e has no lender, but a write through
+            // it goes into v's resource, or the resource v points to
+            // (#1046).
+            if matches!(lender, ResourceTy::Anonymous) && pat_ty.ref_mutability() == Some(Mutability::Mut) {
+              if let Some(root) = self.mut_call_chain_root(head_arg) {
+                let prev = self.loop_ref_into.insert(pat_name.clone(), root);
+                loop_ref_prev = Some((pat_name.clone(), prev));
+              }
+            }
             self.add_ref(
               pat_name.clone(),
               bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -6844,6 +6903,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // The body may run no times or many (#786).
         let inits = self.enter_loop_inits();
         self.visit_expr(body_expr);
+        match loop_ref_prev {
+          Some((name, Some(prev))) => { self.loop_ref_into.insert(name, prev); }
+          Some((name, None)) => { self.loop_ref_into.remove(&name); }
+          None => {}
+        }
         if let Some(loop_expr) = arms.first().map(|a| a.body) {
           self.leave_loop_inits(expr, loop_expr.hir_id, inits, true);
         }
@@ -6929,6 +6993,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if !is_mut {
             let head_call = matches!(static_lender, StaticLender::LoopIterator { .. });
             self.for_loop_iter_loans.push((lender.real_name(), for_line, body_end, head_call));
+          }
+          // A reference the iterator reborrows through (`v.iter_mut()`
+          // with `v: &mut Vec<_>`) stays live until the loop ends too:
+          // its own borrow ends after the iterator's (#1046).
+          if let ResourceTy::Value(r) = &lender {
+            if r.is_ref() && self.borrow_map.contains_key(r.name()) {
+              let floor = self.borrow_floor.entry(r.name().to_owned()).or_insert(body_end);
+              *floor = (*floor).max(body_end);
+            }
           }
           let id = *self.unique_id;
           *self.unique_id += 1;

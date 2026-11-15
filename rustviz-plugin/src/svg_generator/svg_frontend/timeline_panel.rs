@@ -1997,6 +1997,8 @@ fn render_dot(
                         data.title = title;
                     } else if let Some(title) = loop_head_lend_title(event, &name, rap, visualization_data) {
                         data.title = title;
+                    } else if let Some(title) = loop_iterator_ref_title(event, *line_number, rap, visualization_data) {
+                        data.title = title;
                     } else if let Some(title) = kept_closure_lend_title(event, &name, visualization_data) {
                         data.title = title;
                     } else if let Some(title) = closure_reborrow_lend_title(event, visualization_data) {
@@ -3138,6 +3140,59 @@ fn loop_head_lend_title(event: &Event, name: &String, rap: &ResourceAccessPoint,
     is_loop_head_lend(&visualization_data.external_events, id).then(|| {
         hover_messages::event_dot_lend_to_loop_iterator(name, is_mut, rap.is_copy_owner() || rap.is_plain_value())
     })
+}
+
+/// The dots of a `&mut` reference whose pointee a `for` loop's
+/// iterator reborrows (`for e in v.iter_mut()` with `v: &mut Vec<_>`;
+/// #1046): the head's call lends it there, but the loop's iterator holds
+/// the reborrow until the loop ends (`StaticLender::LoopIterator`).
+fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Option<String> {
+    if !rap.is_mutref() {
+        return None;
+    }
+    match event {
+        // The head's call (`iter_mut`), when the loop's end gives back
+        // what it lent: no other lend to that call comes between.
+        Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. } => {
+            fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, call: &str, out: &mut Vec<usize>) {
+                for (_, ev) in events {
+                    match ev {
+                        ExternalEvent::MutableDie { to: ResourceTy::Value(r), static_lender: Some(StaticLender::LoopIterator { call: c }), id, .. }
+                            if *r.hash() == hash && c == call => out.push(*id),
+                        ExternalEvent::Branch { branches, .. } => {
+                            for b in branches {
+                                loop_ends(&b.e_data, hash, call, out);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut ids = Vec::new();
+            loop_ends(&visualization_data.external_events, *rap.hash(), &f.name, &mut ids);
+            let history = &visualization_data.timelines.get(rap.hash())?.history;
+            let ends: Vec<usize> = history.iter().filter_map(|(l, e)| match e {
+                Event::MutableReacquire { id, .. } if ids.contains(id) => Some(*l),
+                _ => None,
+            }).collect();
+            let lends_to_call = |lo: usize, hi: usize| history.iter().any(|(l, e)| *l > lo && *l <= hi && matches!(e,
+                Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(g)), .. } if g.name == f.name));
+            ends.iter().any(|&end| end >= line && !lends_to_call(line, end))
+                .then(|| hover_messages::event_dot_lend_through_ref_to_loop_iterator(rap.name(), rap.points_to_copy()))
+        }
+        Event::MutableReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, .. } if still_borrowed_by.is_empty() => {
+            fn is_loop_end(events: &[(usize, ExternalEvent)], id: usize) -> bool {
+                events.iter().any(|(_, ev)| match ev {
+                    ExternalEvent::MutableDie { id: i, static_lender: Some(StaticLender::LoopIterator { .. }), .. } => *i == id,
+                    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| is_loop_end(&b.e_data, id)),
+                    _ => false,
+                })
+            }
+            is_loop_end(&visualization_data.external_events, *id)
+                .then(|| hover_messages::event_dot_loop_iterator_reacquire_through_ref(rap.name(), rap.points_to_copy()))
+        }
+        _ => None,
+    }
 }
 
 // The or-pattern reference (and whether its borrow is mutable) whose

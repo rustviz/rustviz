@@ -392,6 +392,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// loop variable of `for x in it`, #417): they get no lender, so no
   /// borrow is "returned" when they end.
   pub unlent_refs: HashSet<String>,
+  /// The variable a `for` loop variable with no lender points into
+  /// (`for e in v.iter_mut()` with v a `&mut Vec<_>` parameter or a
+  /// local reference, `for e in v.iter_mut().rev()`): the receiver the
+  /// head's method chain takes by `&mut`. A write `*e += 1` is drawn on
+  /// its column, or on the column of what it points into (#1046).
+  pub loop_ref_into: HashMap<String, ResourceAccessPoint>,
   /// `ref` / `ref mut` bindings out of a tuple-literal scrutinee's
   /// element (#580): they borrow the temporary tuple, which has no
   /// column, so their borrow's end is drawn as a plain end dot with no
@@ -853,6 +859,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ctor_arg_ids: HashMap::new(),
       exit_drops: HashSet::new(),
       unlent_refs: HashSet::new(),
+      loop_ref_into: HashMap::new(),
       tuple_temp_refs: HashSet::new(),
       ref_var_borrows: HashSet::new(),
       stored_ref_var_lends: HashSet::new(),
@@ -3110,6 +3117,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // reference the chain returns. `=` assigns to the place itself.
     let place = if is_update { chain } else { format!("{}{}", "*".repeat(derefs), chain) };
     Some(ResourceTy::Index(rap, place, write))
+  }
+
+  /// `v.iter_mut()`, `v.iter_mut().rev()`: the variable a method chain
+  /// starts from, when the chain's first call takes it by `&mut` (so
+  /// what the chain hands out points into its resource, or into the
+  /// resource it points to).
+  pub(crate) fn mut_call_chain_root(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let ExprKind::MethodCall(_, mut rcvr, _, _) = e.kind else { return None };
+    let mut first_call = e;
+    while let ExprKind::MethodCall(_, inner, _, _) = rcvr.kind {
+      first_call = rcvr;
+      rcvr = inner;
+    }
+    let def_id = self.tcx.typeck(e.hir_id.owner).type_dependent_def_id(first_call.hir_id)?;
+    let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
+    if sig.skip_binder().inputs().first()?.ref_mutability() != Some(Mutability::Mut) {
+      return None;
+    }
+    match get_rap(rcvr, &self.tcx, &self.raps) {
+      ResourceTy::Value(r) if !r.is_fn() => Some(r),
+      _ => None,
+    }
   }
 
   /// A method chain as written (`v.get_mut(0).unwrap()`), for a tooltip.
@@ -5992,7 +6021,11 @@ fn mark_kept_on_lines(&mut self, lo: usize, hi: usize, hashes: &[u64], fns: &[St
 /// back (#868), and return each lender (a variable that owns what it
 /// lends) with whether its loan is mutable and the call that lent it. Only the calls in `head`
 /// whose result can hold a borrow keep one: `v.len()` in
-/// `v.iter().take(v.len())` borrows `v` just for the call.
+/// `v.iter().take(v.len())` borrows `v` just for the call. A `&mut`
+/// reference the head's first call reborrows (`v.iter_mut()` with `v:
+/// &mut Vec<_>` a parameter, or `let v = &mut s;`) is a lender too:
+/// the iterator holds that reborrow of `*v` until the loop ends, so v
+/// can't be used until then (#1046).
 pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool, String)> {
   if !matches!(head.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
     return Vec::new();
@@ -6012,6 +6045,12 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
     let ids = self.mark_kept_on_lines(lo, hi, &[hash], &fns);
     if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
       out.push((l, is_mut, call));
+    }
+  }
+  if let Some(root) = self.mut_call_chain_root(head).filter(|r| r.is_ref()) {
+    let ids = self.mark_kept_on_lines(lo, hi, &[*root.hash()], &fns);
+    if let Some((true, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
+      out.push((ResourceTy::Value(root), true, call));
     }
   }
   out
