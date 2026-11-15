@@ -18402,8 +18402,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.name acquires ownership of a new resource. Its previous resource is dropped here only if p.name still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left p.name moved.",
             "p goes out of scope. p.name may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "v goes out of scope. Its resource is dropped.",
+            // cont_join's r: other time rounds leave it holding a value,
+            // so "nothing above moved it" was ambiguous (#1019).
+            "r goes out of scope. Its resource is dropped here only if r still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            "=r goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "s acquires ownership of a new resource; its previous resource is dropped",
             "=s goes out of scope. No resource is dropped.",
             "t acquires ownership of a new resource; its previous resource is dropped",
@@ -18697,6 +18701,70 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=x acquires ownership of a new resource; its previous resource is dropped",
             "s may have no value",
             "s may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_loop_entry_1019",
+        // #1019: a variable a branch above may have moved, assigned in a
+        // loop inside another loop that it was declared before (s, v, p).
+        // The inner assignment said "Its previous resource is dropped
+        // here only if no branch above moved it": on the outer loop's
+        // second time round it drops what the first left even when the
+        // branch moved it (c = true, k = 2: "b00" is dropped where "b10"
+        // is assigned). The join after `if c` said the old value "is
+        // dropped when s is assigned again" (with k = 0 it's dropped at
+        // the scope end). nested_moves' inner loop also moves s, so only
+        // the drop flag knows. A loop that moves its variable on some
+        // time rounds only (t, w, u): after it, "dropped here only if no
+        // branch above / nothing above moved it" was false with c = true
+        // (or the move on the first time round) and k = 2, where the
+        // second time round's "b" is dropped. Checked with rustc and a
+        // `Drop`-printing type: c = false / true, outer and inner loop
+        // 0, 1, 2 times round (k = 0..3 for the single loops).
+        // (Not pinned: the join inside the loop after `if n == 0 {
+        // drop(t); }` still says the value "is dropped when t goes out
+        // of scope", wrong when the loop comes back round and the
+        // assignment drops it: #1026.)
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when s is assigned again (or, if it isn't, when it goes out of scope).",
+            "v was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when v is assigned again (or, if it isn't, when it goes out of scope).",
+            "p was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when p is assigned again (or, if it isn't, when it goes out of scope).",
+            "p.name was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when p.name is assigned again (or, if it isn't, when it goes out of scope).",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag): it does unless a branch above moved it and s hasn't been assigned since.",
+            "v acquires ownership of a new resource. Its previous resource is dropped here only if v still holds it (Rust tracks this with a runtime drop flag): it does unless a branch above moved it and v hasn't been assigned since.",
+            "p acquires ownership of a new resource. Its previous resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag): it does unless a branch above moved it and p hasn't been assigned since.",
+            "p.name acquires ownership of a new resource. Its previous resource is dropped here only if p.name still holds it (Rust tracks this with a runtime drop flag): it does unless a branch above moved it and p.name hasn't been assigned since.",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have been moved: the loop can end after a time round that left s moved, so s can't be used after the loop",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t may have been moved: the loop can end after a time round that left t moved, so t can't be used after the loop",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "w may have been moved: the loop can end after a time round that left w moved, so w can't be used after the loop",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
+            "u may have been moved: the loop can end after a time round that left u moved, so u can't be used after the loop",
+            "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if the loop above assigned s or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "v goes out of scope. Its resource is dropped here only if the loop above assigned v or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "p.name goes out of scope. Its resource is dropped here only if the loop above assigned p.name or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "t acquires ownership of a new resource. Its previous resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag): the first time round the loop, only if no branch above moved it; a later time round, only if the time round before left t holding one.",
+        ],
+        must_not_contain: &[
+            "=s was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when s is assigned again.",
+            "=v was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when v is assigned again.",
+            "=p was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when p is assigned again.",
+            "=p.name was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when p.name is assigned again.",
+            "=s acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=v acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=p acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=p.name acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=t goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=w acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=u goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag): the first time round",
+            "v acquires ownership of a new resource. Its previous resource is dropped here only if v still holds it (Rust tracks this with a runtime drop flag): the first time round",
+            "p acquires ownership of a new resource. Its previous resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag): the first time round",
         ],
     },
 ];

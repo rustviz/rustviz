@@ -765,6 +765,12 @@ pub struct MaybeEntry {
   /// What it holds where the loop comes back round.
   pub round: Ownership,
   pub by_cond: bool,
+  /// `Some(moves)` when the loop is inside another loop that `ro` was
+  /// declared before (#1019): a run of it may follow an earlier one
+  /// (an earlier time round of the outer loop), so "the first time
+  /// round" isn't only after the branch above. `moves`: whether the
+  /// outermost such loop ever moves something out of `ro`.
+  pub nested: Option<bool>,
 }
 
 /// See `ExprVisitor::exit_frames`.
@@ -2034,7 +2040,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     fn any(events: &[(usize, ExternalEvent)], hash: u64) -> bool {
       events.iter().any(|(_, ev)| match ev {
         ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-          | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound, .. } => *ro.hash() == hash,
+          | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => *ro.hash() == hash,
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, hash)),
         _ => false,
       })
@@ -9453,7 +9459,7 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // a move further down (#992), and the end of a `while` / `for`
       // loop that can stop after such a time round.
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::WhileCondFail { .. } | MaybeMovedAt::Loop { .. }
-        | MaybeMovedAt::LabeledBlock | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound, .. } if ro.name() == rap_name => {
+        | MaybeMovedAt::LabeledBlock | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       // Moved into a name an or-pattern binds, if its alternative

@@ -3356,6 +3356,51 @@ pub fn event_dot_owner_drop_at_reassign_after_loop(my_name: &String, note: &str,
     )
 }
 
+// `event_dot_owner_drop_at_reassign_maybe_entry` in a loop inside
+// another that s was declared before (#1019): a run of the inner loop
+// may follow an earlier one that gave s a value, so the first time
+// round it isn't only the branch above that decides. When the loops
+// never move s (`moves` false), s holds a value here unless the branch
+// above moved it and nothing gave s a new one since; otherwise only the
+// drop flag knows.
+pub fn event_dot_owner_drop_at_reassign_outer_loop(my_name: &String, note: &str, by_cond: bool, moves: bool) -> String {
+    let (holds, rest) = split_drop_note(note);
+    let name = styled_name_html(my_name);
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
+         {0} still holds it (Rust tracks this with a runtime drop flag){3}.",
+        name, holds, rest,
+        if moves {
+            String::new()
+        } else {
+            format!(": it does unless {} moved it and {} hasn't been assigned since", moved_above_maybe(by_cond), name)
+        }
+    )
+}
+
+// After a loop that may end after a time round that moved s, when other
+// time rounds (or the path into the loop) leave s holding a value
+// (`MaybeMovedAt::LoopRound { kept: true }`, #1019): "only if nothing
+// above moved it" would read as if one move anywhere above settled it.
+pub fn event_dot_go_out_of_scope_maybe_kept(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} still holds it \
+         (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest
+    )
+}
+
+// The next assignment after such a loop.
+pub fn event_dot_owner_drop_at_reassign_maybe_kept(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
+         {0} still holds it (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest
+    )
+}
+
 // Its scope end, when it isn't assigned again.
 pub fn event_dot_go_out_of_scope_after_loop(my_name: &String, note: &str, before_loop: Option<bool>) -> String {
     let (holds, rest) = split_drop_note(note);

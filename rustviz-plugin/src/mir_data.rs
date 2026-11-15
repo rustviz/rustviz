@@ -708,6 +708,40 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
     }
 
+    /// What each user variable (and field of one) holds where the loop
+    /// `loop_span` is entered from before it (#1019), as for
+    /// `round_states_loop` but on the edges into its head that aren't
+    /// back edges. For a loop inside another, that's every run of it:
+    /// the outer loop's later times round come in this way too. Empty
+    /// when the loop isn't in this body or never comes back round.
+    pub fn entry_states_loop(&self, loop_span: Span) -> Vec<(String, Ownership)> {
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::MoveData;
+        let Some((entry, _)) = self.loop_head_edges(loop_span) else { return Vec::new() };
+        let body = &self.bwf.body;
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut out: Vec<(String, Ownership)> = Vec::new();
+        for (mpi, name) in self.move_path_names(&move_data) {
+            let may_hold = entry.iter().any(|&p| { init.seek_to_block_end(p); init.get().contains(mpi) });
+            let may_lack = entry.iter().any(|&p| { uninit.seek_to_block_end(p); uninit.get().contains(mpi) });
+            let own = match (may_hold, may_lack) {
+                (true, false) => Ownership::Held,
+                (false, _) => Ownership::None,
+                (true, true) => Ownership::Maybe,
+            };
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, own));
+            }
+        }
+        out
+    }
+
     /// The edges into the head of the loop `loop_span` (its
     /// `FalseUnwind` block): the blocks that enter it from before the
     /// loop (not dominated by the head), and those that come back to
