@@ -16574,6 +16574,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "to_string no longer borrows the resource w points to",
         ],
     },
+    TooltipExpect {
+        name: "scrutinee_literal_temps_954",
+        // Edition 2024 timings, checked with rustc and a Drop-printing type.
+        // #955: `if let P { a: Some(s), .. } = (P { a: x, b: make() })`:
+        // the literal's temporary is dropped before the `else` block, or
+        // when the matched block ends, not at the end of the `if let`
+        // statement (after the else); and the pattern moves x's String out
+        // into s, so "nothing ... moves it on" was false.
+        // #956: `(y, make_q().name)`: name is moved into the scrutinee
+        // tuple and dropped with it, at the same time as make_q()'s
+        // temporary (with tag). Main said only "everything in it but its
+        // field name", so name's drop was never stated; the temporary is
+        // now drawn as matched through its field name, like `match
+        // make_q().name`.
+        // #954: `let (Some(a), _) = (v, make()) else { .. }` is one tuple
+        // temporary: v is moved into it once and a is moved out of it.
+        // Main drew a second `(temporary 5)` for the same tuple, moved v
+        // into both and into a, and said nothing moves the first one on.
+        must_contain: &[
+            "x's resource is moved into a temporary that this `if let` examines; the temporary is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
+            "This temporary takes the value of x, which is moved into it",
+            "This temporary P is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "A temporary holds the value that make_q returns, for the `if let` to match its field name against. If the pattern matches, it can move that field, or parts of it, into its bindings; what is left in the temporary (all of it, if the pattern doesn't match) is dropped with it",
+            "This temporary Q is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it everything in it but what the pattern moved out of its field name (all of it, if the pattern didn't match)",
+            "This temporary Q is dropped at the end of this statement, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field name",
+            "v's resource is moved into a temporary that this `let`-`else` examines; the temporary is dropped as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match)",
+            "This temporary takes the value of v, which is moved into it",
+            "Partial move from (temporary 4) to a",
+            "The pattern moves (temporary 4)'s value, or part of it, into a",
+            "This temporary (Option<String>, String) is dropped as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match), and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+        ],
+        must_not_contain: &[
+            "Nothing binds the temporary to a variable or moves it on",
+            "x's resource is moved into a temporary that is dropped at the end of this statement",
+            "everything in it but its field name, which was moved out of it",
+            "v's resource is moved into a temporary that is dropped at the end of this statement",
+            "Move from v to a",
+            "=(temporary 5), immutable",
+            "The literal on the right of this let builds a temporary",
+            "built by the literal on the right of the let",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_field_bind_976",
+        // #976: `if let (Some(d), n) = (z, make_q().name)` was refused
+        // (no layout column: n was drawn moving out of make_q()'s column
+        // inside the branch). If the pattern doesn't match, name is
+        // dropped with the tuple, at the same time as the rest of
+        // make_q()'s value (#956).
+        must_contain: &[
+            "This temporary Q is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it everything in it but what the pattern moved out of its field name (all of it, if the pattern didn't match)",
+            "n acquires ownership of a resource",
+            "n goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "everything in it but its field name, which was moved out of it",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

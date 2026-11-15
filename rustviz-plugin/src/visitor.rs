@@ -5832,7 +5832,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       _ => {}
     }
-    self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part)
+    let let_else_literal = matches!(part, Some(TempPart::LetElse(None)))
+      && matches!(expr.kind, ExprKind::Tup(_) | ExprKind::Struct(..) | ExprKind::Array(_));
+    let tmp = self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part);
+    if let (true, Some(t)) = (let_else_literal, &tmp) {
+      self.note_let_else_literal_temp(expr, t.clone());
+    }
+    tmp
+  }
+
+  /// `let (Some(a), _) = (x, make()) else { .. }`: `tmp` is the one
+  /// temporary of the literal `lit`, which the variables in it (x)
+  /// were moved into. It is the literal's temporary for `bind_pat` too
+  /// (`literal_temps`, so no second one is made, and the variables
+  /// aren't moved again: `premoved`), and what the pattern binds by
+  /// value from x is moved out of it, not out of x (`match_rhs`, by
+  /// `let_else_literal_temps`) (#954).
+  fn note_let_else_literal_temp(&mut self, lit: &'tcx Expr<'tcx>, tmp: ResourceAccessPoint) {
+    let rustc_hir::Node::LetStmt(l) = self.tcx.parent_hir_node(lit.hir_id) else { return };
+    self.literal_temps.insert(l.hir_id, tmp.clone());
+    self.let_else_literal_temps.insert(lit.hir_id, tmp.clone());
+    let typeck = self.tcx.typeck(lit.hir_id.owner);
+    let mut todo = vec![lit];
+    while let Some(e) = todo.pop() {
+      let elems: Vec<&'tcx Expr<'tcx>> = match e.kind {
+        ExprKind::Struct(_, fields, _) => fields.iter().map(|f| f.expr).collect(),
+        ExprKind::Tup(items) | ExprKind::Array(items) => items.iter().collect(),
+        _ => Vec::new(),
+      };
+      for x in elems {
+        if is_place_expr(x) {
+          if self.needs_drop(typeck.expr_ty(x), lit.hir_id.owner) && fetch_rap(x, &self.tcx, &self.raps).is_some() {
+            self.let_else_literal_temps.insert(x.hir_id, tmp.clone());
+            self.premoved.insert(x.hir_id);
+          }
+        } else if matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
+          todo.push(x);
+        }
+      }
+    }
   }
 
   /// What `note_temporary_drop` says is moved out of the temporary
@@ -5925,13 +5963,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           (left && !moved.is_empty()).then_some(TempPart::UpdateBase(moved))
         }
-        // `(None, m)` on `match (x, make()) { .. }` (#942).
-        ExprKind::Tup(_) if path.is_none() => self.tuple_scrutinee_elem_part(top, typeck, env),
+        // `(None, m)` on `match (x, make()) { .. }` (#942), `(Some(a),
+        // _)` on `(x, make_p().name)` (#956).
+        ExprKind::Tup(_) if path.is_none() || self.tuple_scrutinee_elem(top).is_some() => self.tuple_scrutinee_elem_part(top, path, left, typeck, env),
         _ => self.field_moved_part(top, path, left, typeck, env),
       },
       // `let Ok(s) = res() else { .. };` (#605).
       Node::LetStmt(l) if l.els.is_some() => {
         if l.span.from_expansion() || !l.init.is_some_and(|i| i.hir_id == top.hir_id) {
+          return None;
+        }
+        // `let (Some(ref a), _) = (x, make()) else { .. }`: the `ref`
+        // binding keeps the literal's temporary alive to the end of the
+        // block, which #439's `literal_temp` draws (#954).
+        if matches!(top.kind, ExprKind::Tup(_) | ExprKind::Struct(..) | ExprKind::Array(_)) && !self.binds_by_value_only(l.pat) {
           return None;
         }
         (left || self.pat_leaves_temp_drop(l.pat, sty, typeck, env) || self.pat_rejects_drop(l.pat, sty, typeck, env))
@@ -6131,12 +6176,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// When `expr` is directly the scrutinee of a `match`, `if let`,
-  /// `while let` or a let chain's `let`: what examines it, and when its
+  /// `while let`, `let`-`else` or a let chain's `let`: what examines it, and when its
   /// temporary is dropped (`when` is where its scope ends). A `match`
   /// that ends a statement (or a 2024 block's final expression) drops it
   /// when the `match` ends.
   fn scrutinee_scope(&self, expr: &'tcx Expr<'tcx>, when: &str) -> Option<(String, String)> {
     use rustc_hir::Node;
+    // A `let`-`else`'s initializer (#954).
+    if let Node::LetStmt(l) = self.tcx.parent_hir_node(expr.hir_id) {
+      return (l.els.is_some() && l.init.is_some_and(|i| i.hir_id == expr.hir_id) && !l.span.from_expansion())
+        .then(|| ("`let`-`else`".to_owned(), when.to_owned()));
+    }
     let Node::Expr(parent) = self.tcx.parent_hir_node(expr.hir_id) else { return None };
     match parent.kind {
       ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) if s.hir_id == expr.hir_id && !parent.span.from_expansion() => {
@@ -6198,9 +6248,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       o.temp_part = part.clone();
       o.ctor_temp = part.is_none() && !expr.span.from_expansion()
         && matches!(expr.kind, ExprKind::Call(callee, _) if is_ctor_path(callee, self.tcx.typeck(expr.hir_id.owner)));
-      if part.is_none() {
-        o.scrutinee = scrutinee;
-      }
+      // (Also when the pattern moves part of it out, #955: what a
+      // variable moved into it says is when the temporary is dropped.)
+      o.scrutinee = scrutinee;
     }
     self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
@@ -6410,18 +6460,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// some or all of by value (`(None, m)` on `(x, make())`, #942): what
   /// is left of it, if anything, is dropped with the tuple. That is
   /// something when an arm leaves some of it, or the `if let` pattern
-  /// may not match (then all of it is left).
+  /// may not match (then all of it is left). A field of a call's result
+  /// (`make_p().name`, `field`; `left` when a field beside it needs
+  /// drop) is moved into the tuple, which is dropped with the call's
+  /// temporary: drawn as the temporary's field that the pattern is
+  /// matched against (#956).
   fn tuple_scrutinee_elem_part(
     &self,
     elem: &'tcx Expr<'tcx>,
+    field: Option<String>,
+    left: bool,
     typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
     env: rustc_middle::ty::TypingEnv<'tcx>,
   ) -> Option<TempPart> {
     use rustc_hir::Node;
     let (path, pats, is_match) = self.tuple_scrutinee_elem(elem)?;
-    let leaves = pats.iter().any(|p| self.path_left(p, &path, typeck, env).is_some());
+    let leaves = left || pats.iter().any(|p| self.path_left(p, &path, typeck, env).is_some());
     if is_match {
-      return leaves.then_some(TempPart::Match(None));
+      return leaves.then_some(TempPart::Match(field));
     }
     if !leaves && !pats.iter().any(|p| pat_refutable(p)) {
       return None;
@@ -6430,7 +6486,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Node::Expr(i) if matches!(i.kind, ExprKind::If(..)) => Some(i),
       _ => None,
     }).is_some_and(|i| matches!(i.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)));
-    Some(if is_while { TempPart::WhileLet(None) } else { TempPart::IfLet(None) })
+    Some(if is_while { TempPart::WhileLet(field) } else { TempPart::IfLet(field) })
   }
 
   /// `&call()` (or `&mut call()`) where the `&` is an argument of a
@@ -7301,6 +7357,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // timeline isn't empty.
       _ => self.bind_walk(pat, init, is_skipped),
     }
+  }
+
+  /// True iff no binding in `pat` is an explicit `ref` / `ref mut` one
+  /// (`own_ref_binding`).
+  fn binds_by_value_only(&self, pat: &'tcx Pat<'tcx>) -> bool {
+    let mut by_value = true;
+    pat.each_binding(|_, hid, _, _| by_value &= self.own_ref_binding(hid).is_none());
+    by_value
   }
 
   /// `let (p, (x, _) | (_, x)) = (s, u);`: the literal moves `u` into
