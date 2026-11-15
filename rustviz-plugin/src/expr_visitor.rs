@@ -2040,20 +2040,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// an `else`. `before`: what each holds where the conditional
   /// starts. That it may hold nothing there is also told by an arm
   /// whose assignment to it is a drop flag's (rustc's move data says
-  /// so where the drawing doesn't, #1027). Not a `let x;` local
-  /// (`maybe_init`, #244), a reference, or a value with nothing to
-  /// drop.
+  /// so where the drawing doesn't, #1027). A `let x;` local that may
+  /// be unassigned after the join (`maybe_init`, #244) only if it may
+  /// already hold a value where the conditional starts (`held_before`,
+  /// #1036): a loop above may have assigned it, or some branches of a
+  /// conditional above; otherwise the arms that assign it decide what's
+  /// dropped. Not a reference, or a value with nothing to drop.
   pub fn maybe_held_after(
     &self,
     live: &HashSet<ResourceAccessPoint>,
     arms: &[&[(usize, ExternalEvent)]],
     maybe_init: &HashSet<ResourceAccessPoint>,
+    held_before: &HashSet<ResourceAccessPoint>,
     before: impl Fn(&str) -> Ownership,
   ) -> HashSet<ResourceAccessPoint> {
     let mut out = HashSet::new();
     #[expect(clippy::iter_over_hash_type, reason = "only collects into a set; order doesn't matter")]
     for r in live {
-      if maybe_init.contains(r) || r.is_ref() || r.holds_value() {
+      let deferred = maybe_init.contains(r);
+      if (deferred && !held_before.contains(r)) || r.is_ref() || r.holds_value() {
         continue;
       }
       let name = r.name();
@@ -2066,7 +2071,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let drop_flag_assign = arms.iter().any(|a| a.iter().any(|(_, e)| matches!(e,
         ExternalEvent::OwnerDropAtReassign { ro, maybe_moved, maybe_init, .. }
           if ro.name() == name && (*maybe_moved || maybe_init.is_some()))));
-      if before(name) != Ownership::Held || drop_flag_assign {
+      if deferred || before(name) != Ownership::Held || drop_flag_assign {
         out.insert(r.clone());
       }
     }
@@ -5487,7 +5492,7 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     vars.sort_by_key(|r| *r.hash());
     vars.dedup_by_key(|r| *r.hash());
     for var in vars {
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, id: *self.unique_id });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, holds: None, id: *self.unique_id });
         *self.unique_id += 1;
     }
 }
@@ -5647,6 +5652,7 @@ pub fn register_iflet_let_bindings(
             if let Some(body_end) = emit_gos_at {
                 self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
                     ro: r.clone(),
+                    holds: None,
                     id: *self.unique_id,
                 });
                 *self.unique_id += 1;
@@ -7758,12 +7764,12 @@ pub fn print_out_of_scope(&mut self){
         }
       }
       if rap.is_global && !duplicate {
-        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id });
+        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
       for &scope in rap.extra_scopes.iter() {
-        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id });
+        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id });
         *self.unique_id += 1;
       }
     }

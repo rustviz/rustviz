@@ -1682,6 +1682,11 @@ pub enum ExternalEvent {
     },
     GoOutOfScope {
         ro: ResourceAccessPoint,
+        // What rustc's move data says the variable holds at this `}`,
+        // on the paths that get there through the code before it
+        // (`ownership_at_scope_ends`, #1036, #1037); `None` when it
+        // doesn't say. Set once the body has been visited.
+        holds: Option<ScopeEndHolds>,
         id: usize
     },
     // The previously-held resource of an owner is dropped when that
@@ -2300,7 +2305,8 @@ pub enum Event {
     },
     // this happens when a owner is returned this line,
     // or if this owner's scope ends at this line. The data must be dropped.
-    OwnerGoOutOfScope,
+    // `holds`: the ExternalEvent's.
+    OwnerGoOutOfScope { holds: Option<ScopeEndHolds> },
     // this happens when a vairable that is not an owner goes out of scope.
     // The data is not dropped in this case
     RefGoOutOfScope,
@@ -2650,6 +2656,20 @@ pub enum InitBy {
     DropFlag,
 }
 
+/// What a variable holds where it goes out of scope at the `}` of its
+/// block, on the paths that get there through the code before it, as
+/// rustc's move data says (#1036, #1037).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScopeEndHolds {
+    /// A value, on every such path: it's dropped there.
+    Value,
+    /// A value on some paths and not others: a runtime drop flag
+    /// decides whether anything is dropped.
+    Maybe,
+    /// Nothing, on any such path: nothing is dropped.
+    Nothing,
+}
+
 /// What a conditional's join leaves in a `let x;` local that only some
 /// of the branches reaching it assigned (#244; the Branch event's
 /// `maybe_init`), the others leaving it with no value.
@@ -2870,7 +2890,7 @@ impl Display for Event {
             Event::StaticReacquire{ from , ..} => { write!(f, "Partially acquires resource from {}", from.name()) },
             Event::InitRefParam{ param: _ , ..} => { write!(f, "Function parameter is initialized") },
             Event::ClosureCall{ is, .. } => { write!(f, "{} is moved into the call", is.name()) },
-            Event::OwnerGoOutOfScope => {
+            Event::OwnerGoOutOfScope { .. } => {
                 write!(f, "Goes out of Scope as an owner of resource" ) }
             Event::RefGoOutOfScope => {
                 write!(f, "Goes out of Scope as a reference to resource")
@@ -3046,7 +3066,7 @@ impl Event {
             Event::ClosureCall { fates, .. } => {
                 hover_messages::event_dot_closure_call_once(my_name, fates)
             }
-            Event::OwnerGoOutOfScope => {
+            Event::OwnerGoOutOfScope { .. } => {
                 hover_messages::event_dot_owner_go_out_of_scope(my_name)
             }
             Event::RefGoOutOfScope => {
@@ -4026,7 +4046,7 @@ impl Visualizable for VisualizationData {
                     State::FullPrivilege{ s: LineState::Full }
             },
 
-            (State::FullPrivilege{..}, Event::OwnerGoOutOfScope) =>
+            (State::FullPrivilege{..}, Event::OwnerGoOutOfScope { .. }) =>
                 State::OutOfScope,
 
             (State::FullPrivilege{..}, Event::RefGoOutOfScope) =>
@@ -4107,7 +4127,7 @@ impl Visualizable for VisualizationData {
               State::PartialPrivilege{s: LineState::Full}
             }
 
-            (State::PartialPrivilege{ .. }, Event::OwnerGoOutOfScope) =>
+            (State::PartialPrivilege{ .. }, Event::OwnerGoOutOfScope { .. }) =>
                 State::OutOfScope,
 
             (State::PartialPrivilege{ .. }, Event::RefGoOutOfScope) =>
@@ -4153,7 +4173,7 @@ impl Visualizable for VisualizationData {
             (_, Event::Branch { .. }) => { // technically not necessary - this is handled inside the compute_states function
                 State::OutOfScope
             }
-            (_, Event::OwnerGoOutOfScope) | (_, Event::RefGoOutOfScope) => State::OutOfScope,
+            (_, Event::OwnerGoOutOfScope { .. }) | (_, Event::RefGoOutOfScope) => State::OutOfScope,
 
             // OwnerDropAtReassign is paired with an Acquire/Move on
             // the same line that immediately re-establishes ownership,
@@ -4642,10 +4662,10 @@ impl Visualizable for VisualizationData {
         ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
           vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone()})]
         },
-        ExternalEvent::GoOutOfScope{ro,..} => {
+        ExternalEvent::GoOutOfScope{ro, holds, ..} => {
           match ro {
             ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-              vec![(line_num, Event::OwnerGoOutOfScope)]
+              vec![(line_num, Event::OwnerGoOutOfScope { holds: *holds })]
             },
             ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
               vec![(line_num, Event::RefGoOutOfScope)]
@@ -5019,10 +5039,10 @@ impl Visualizable for VisualizationData {
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern}, line_number);
             },
-            ExternalEvent::GoOutOfScope{ro, ..} => {
+            ExternalEvent::GoOutOfScope{ro, holds, ..} => {
                 match ro {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { holds }, line_number);
                     },
                     ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
                         maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope, line_number);

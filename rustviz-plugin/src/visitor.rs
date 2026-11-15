@@ -1807,7 +1807,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, early, part, id })
         }
         None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, early: false, part: None, id }),
-        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id }),
+        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id }),
       }
     }
     while let Some(t) = tuples.pop() {
@@ -5171,6 +5171,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `let x;` locals (#234); see join_uninit_locals.
     let uninit_before = self.uninit_locals.clone();
     let maybe_init_before = self.maybe_init_locals.clone();
+    // And from the same ones a loop above may not have assigned: an
+    // assignment in the if branch doesn't make one in the else branch
+    // a branch's to decide (#1036).
+    let by_loop_before = self.maybe_init_by_loop.clone();
     // An exit in a branch sees neither the other branch's events
     // nor the binding of the `if`'s value to a `let` (#410).
     let hide = self.rhs_ids_of([Some(if_expr), else_expr]);
@@ -5236,6 +5240,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let else_hash_lo = self.rap_hashes;
     let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
     let maybe_init_after_if = std::mem::replace(&mut self.maybe_init_locals, maybe_init_before.clone());
+    let by_loop_after_if = std::mem::replace(&mut self.maybe_init_by_loop, by_loop_before);
     let if_ids = if_lo..*self.unique_id;
     // A let-chain condition that moved a variable before a part
     // that then failed (#281): the else branch (or the implicit
@@ -5355,6 +5360,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let assigned_in_if: Vec<HirId> = known.iter()
       .filter(|id| !uninit_after_if.contains_key(id) && !maybe_init_after_if.contains(id))
       .copied().collect();
+    self.maybe_init_by_loop = &self.maybe_init_by_loop | &by_loop_after_if;
     // (A dead `else`, #987: only the if branch, which always runs.)
     let maybe_init = if dead_else {
       self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if, maybe_init_after_if)], &known)
@@ -5467,7 +5473,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let start = self.preprocessed_events.iter()
             .position(|(_, e)| body_ev.iter().any(|(_, b)| b.get_id() == e.get_id()))
             .unwrap_or(self.preprocessed_events.len());
-          !self.maybe_held_after(&body_live, &[&body_ev, &[]], &maybe_init,
+          !self.maybe_held_after(&body_live, &[&body_ev, &[]], &maybe_init, &self.deferred_cols(&maybe_init_before),
             |name| self.rap_ownership_before(start, name)).is_empty()
         };
         //
@@ -5520,7 +5526,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
-                    ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
+                    ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id },
                 ));
                 *self.unique_id += 1;
             }
@@ -5597,12 +5603,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let if_left = Self::left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
     let else_left = Self::left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
     for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
-      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
+      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id }));
       *self.unique_id += 1;
     }
 
     for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id }));
       *self.unique_id += 1;
     }
     if_decl.extend(if_inner);
@@ -5748,7 +5754,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // it says is the state where the `if` starts.)
     let reaching: Vec<&[(usize, ExternalEvent)]> = b_branches.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
-    let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, |name| self.rap_ownership_now(name));
+    let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &self.deferred_cols(&maybe_init_before), |name| self.rap_ownership_now(name));
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         live_vars: liveness,
@@ -5871,6 +5877,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // locals (#234); see join_uninit_locals.
     let uninit_before = self.uninit_locals.clone();
     let maybe_init_before = self.maybe_init_locals.clone();
+    // Likewise those a loop above may not have assigned (#1036); what
+    // each arm leaves of them is joined with the rest below.
+    let by_loop_before = self.maybe_init_by_loop.clone();
+    let mut by_loop_ends: HashSet<HirId> = HashSet::new();
     let mut uninit_ends = Vec::new();
     // An exit in an arm doesn't see the binding of any arm's
     // value to a `let` (#410): it happens after the match. The
@@ -5998,6 +6008,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.inside_branch = true;
       self.uninit_locals = uninit_before.clone();
       self.maybe_init_locals = maybe_init_before.clone();
+      self.maybe_init_by_loop = by_loop_before.clone();
       let body_lo = *self.unique_id;
       // An exit in the arm drops the tuple scrutinee (#327).
       let live = !scrutinee_moves.is_empty();
@@ -6029,6 +6040,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       let body_ids = body_lo..*self.unique_id;
       uninit_ends.push((Some(arm.body), std::mem::take(&mut self.uninit_locals), std::mem::take(&mut self.maybe_init_locals)));
+      by_loop_ends.extend(std::mem::take(&mut self.maybe_init_by_loop));
       self.inside_branch = prev_inside_branch;
 
       all_pat_decls = &all_pat_decls | &pat_decls;
@@ -6077,7 +6089,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id };
+        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), holds: None, id };
         if inline {
           self.add_external_event(end, gos);
         } else {
@@ -6120,6 +6132,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.arm_borrows_end(arm_borrows);
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
+    self.maybe_init_by_loop = by_loop_ends;
     let maybe_init = self.join_uninit_locals(uninit_ends, &known);
     self.exit_frames.pop();
     self.in_scope.truncate(entry_len);
@@ -6142,7 +6155,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // inside that arm — strip them out so they don't get a
     // branched timeline of their own.
     liveness = &liveness - &all_pat_decls;
-    self.add_match_branch(expr, (split, merge), liveness, branch_data, BranchType::Match(b_ty_names, b_slices), maybe_init);
+    let held_before = self.deferred_cols(&maybe_init_before);
+    self.add_match_branch(expr, (split, merge), liveness, branch_data, BranchType::Match(b_ty_names, b_slices), (maybe_init, held_before));
   }
 
   /// A `match` arm's tuple-like pattern (`(a, b) =>`, `Ok(x) =>`):
@@ -6443,7 +6457,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// The Branch event of a multi-arm `match`, once every arm is drawn.
-  fn add_match_branch(&mut self, expr: &'tcx Expr<'tcx>, (split, merge): (usize, usize), liveness: HashSet<ResourceAccessPoint>, branch_data: Vec<ExtBranchData>, branch_type: BranchType, maybe_init: HashSet<ResourceAccessPoint>) {
+  /// `maybe_init`: as for the Branch event; `held_before`: the `let x;`
+  /// locals that may hold a value as the `match` starts.
+  fn add_match_branch(&mut self, expr: &'tcx Expr<'tcx>, (split, merge): (usize, usize), liveness: HashSet<ResourceAccessPoint>, branch_data: Vec<ExtBranchData>, branch_type: BranchType, (maybe_init, held_before): (HashSet<ResourceAccessPoint>, HashSet<ResourceAccessPoint>)) {
     // add branch event. merge_point is the closing-brace
     // line of the match — same convention as If, where
     // merge_point is the line of the else-block's closing
@@ -6457,7 +6473,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let loop_assigned = self.loop_assigned_now(&liveness);
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
-    let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, |name| self.rap_ownership_now(name));
+    let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches: branch_data,
@@ -8588,7 +8604,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     liveness = &liveness - &decl_vars;
     let left = Self::left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id }));
       *self.unique_id += 1;
     }
     decl_vars.extend(decl);
@@ -10284,6 +10300,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .collect();
     self.maybe_init_locals = maybe;
     // A struct's field columns (`p.name`) got their values with it.
+    self.with_struct_members(&cols)
+  }
+
+  /// The columns of the `let x;` locals `ids` (a struct's fields' too).
+  fn deferred_cols(&self, ids: &HashSet<HirId>) -> HashSet<ResourceAccessPoint> {
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let cols = ids.iter()
+      .filter_map(|id| self.raps.get(&binding_name(&self.tcx, *id)).map(|rd| rd.rap.clone()))
+      .collect();
     self.with_struct_members(&cols)
   }
 

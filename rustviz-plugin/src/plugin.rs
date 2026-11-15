@@ -268,6 +268,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               continue;
             }
 
+            let from = pre_events.len();
             let mut visitor = ExprVisitor::new(
               tcx, body, hir_body, bwf, fn_start_line,
               &mut line_map2, &mut pre_events, rap_hash_num, &a_map,
@@ -276,6 +277,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             visitor.visit_body(hir_body);
             visitor.emit_borrow_ends();
             visitor.print_out_of_scope();
+            visitor.fill_scope_end_holds(from);
             rap_hash_num = visitor.rap_hashes;
             binding_columns.append(&mut visitor.binding_columns);
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
@@ -328,6 +330,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           continue;
         }
 
+        let from = pre_events.len();
         let mut visitor = ExprVisitor::new(
           tcx, body, hir_body, bwf, fn_start_line,
           &mut line_map2, &mut pre_events, rap_hash_num, &a_map,
@@ -336,6 +339,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         visitor.visit_body(hir_body);
         visitor.emit_borrow_ends();
         visitor.print_out_of_scope();
+        visitor.fill_scope_end_holds(from);
         rap_hash_num = visitor.rap_hashes;
         binding_columns.append(&mut visitor.binding_columns);
         merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
