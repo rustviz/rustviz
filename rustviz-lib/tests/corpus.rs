@@ -16356,6 +16356,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p goes out of scope. No resource is dropped",
         ],
     },
+    TooltipExpect {
+        name: "loop_var_name_reuse",
+        // #903: variables of one name that are never in scope together
+        // (two `for x` loops, sibling blocks' `let r = &w;`, `for y` then
+        // `let y = &u;`, two `if let Some(s) = &o`, two holders `it`, two
+        // `while let Some(e)`) share a column, and the later one's borrow
+        // replaced the earlier one's: the earlier borrow never ended, so
+        // its lender read "being shared" down to its next event. That text
+        // is right on the rows where the borrow is live, so the rows are
+        // checked in `a_reused_name_keeps_the_earlier_borrows_end`; main
+        // printed nothing false that a tooltip check can forbid.
+        must_contain: &[
+            "Return immutably borrowed resource from x to v",
+            "x's immutable borrow ends",
+            "v's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from r to w",
+            "r's immutable borrow ends",
+            "w's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from y to u",
+            "y's immutable borrow ends",
+            "u's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from s to o",
+            "s's immutable borrow ends",
+            "o's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from it to t",
+            "it's immutable borrow ends",
+            "t's resource is no longer immutably borrowed",
+            "q's resource is no longer borrowed by e, but is still immutably borrowed by it1",
+            "q's resource is no longer borrowed by e, but is still immutably borrowed by it2",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17430,6 +17462,49 @@ fn a_call_on_a_shared_variable_leaves_it_shared() {
         let free: Vec<_> = owner.iter().filter(|(a, b)| b.min(end_row) - a.max(call_row) > 0.5).collect();
         assert!(free.is_empty(), "{by}: v drawn as its unborrowed owner at {free:?}, between the call (y={call_row}) and the borrow's end (y={end_row})");
     }
+}
+
+/// #903: variables of one name that are never in scope together share a
+/// column, and the later one's borrow used to replace the earlier one's,
+/// whose end was lost. Each earlier borrow now ends where rustc ends it:
+/// the first `for x` / `for y` loop's on its closing `}` (the iterator
+/// borrows the lender until the loop ends; likewise it1, which the first
+/// `while let` calls `next()` on), the others at the variable's last use.
+/// From there to the lender's next event nothing borrows it (`w.push(4)`
+/// there compiles), so it isn't drawn "being shared" in between. The first
+/// `while let`'s `e` gives back its part of q's borrow at its last use.
+#[test]
+fn a_reused_name_keeps_the_earlier_borrows_end() {
+    let rv = run_with_local_backend("loop_var_name_reuse");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let close_after = |src: &str| {
+        let row = code_rows_y(&code, src)[0];
+        code_rows_y(&code, "}").into_iter().find(|y| *y > row).expect("the loop's closing brace")
+    };
+    for (var, end_row, next_row) in [
+        ("v", close_after("println!(\"{}\", x);"), code_row_y(&code, "let n = v.len();")),
+        ("w", code_row_y(&code, "println!(\"{}\", r[0]);"), code_row_y(&code, "w.push(4);")),
+        ("u", close_after("println!(\"{}\", y);"), code_row_y(&code, "u.push(String::from(\"b\"));")),
+        ("o", code_rows_y(&code, "println!(\"{}\", s);")[0], code_row_y(&code, "o = None;")),
+        ("t", code_rows_y(&code, "println!(\"{}\", it.count());")[0], code_row_y(&code, "t.push(4);")),
+        ("q", close_after("println!(\"{}\", e);"), code_row_y(&code, "q.push(3);")),
+    ] {
+        let ends = dots_listing_tooltip(&timeline, &format!("{var}'s resource is no longer immutably borrowed"));
+        assert!(ends.iter().any(|d| (d.1 - end_row).abs() < 1.0),
+            "{var}: the earlier borrow doesn't end on its row (y={end_row}): {ends:?}");
+        let early: Vec<_> = ends.iter().filter(|d| d.1 > end_row + 1.0 && d.1 < next_row - 1.0).collect();
+        assert!(early.is_empty(), "{var}: unborrowed again at {early:?}, between the borrow's end (y={end_row}) and the next event (y={next_row})");
+        let shared = state_lines_with_tooltip(&timeline, &format!("{var}'s resource is being shared by one or more variables"));
+        let stale: Vec<_> = shared.iter().filter(|(a, b)| b.min(next_row) - a.max(end_row) > 0.5).collect();
+        assert!(stale.is_empty(),
+            "{var}: drawn as shared at {stale:?}, after the earlier borrow's end (y={end_row}) and before the next event (y={next_row})");
+    }
+    // The first `while let`'s `e` copies a reference out of it1's item:
+    // its borrow ends at its last use, and it1 still borrows q.
+    let e_row = code_rows_y(&code, "println!(\"{}\", e);")[0];
+    let e_end = dots_listing_tooltip(&timeline, "q's resource is no longer borrowed by e, but is still immutably borrowed by it1");
+    assert!(e_end.len() == 1 && (e_end[0].1 - e_row).abs() < 1.0,
+        "e's borrow should end on its last use's row (y={e_row}): {e_end:?}");
 }
 
 /// The y ranges of the column lines whose tooltip is exactly `text`.
