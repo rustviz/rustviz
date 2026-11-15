@@ -2140,6 +2140,9 @@ pub struct LocalMention<'tcx> {
   /// The path expression that names it; `None` for a local a closure
   /// captures (`ClosureLocals::Captures`).
   pub expr: Option<&'tcx Expr<'tcx>>,
+  /// The closure expression that captures it, for a capture
+  /// (`ClosureLocals::Captures`); `None` for a path.
+  pub closure: Option<&'tcx Expr<'tcx>>,
 }
 
 /// Every mention of a local variable in `e` (the path expressions naming
@@ -2151,12 +2154,12 @@ pub fn locals_in<'tcx>(e: &'tcx Expr<'tcx>, closures: ClosureLocals<'tcx>) -> Ve
   impl<'tcx> Visitor<'tcx> for Find<'tcx> {
     fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
       if let Some(id) = local_of_path(e) {
-        self.out.push(LocalMention { id, expr: Some(e) });
+        self.out.push(LocalMention { id, expr: Some(e), closure: None });
       }
       if let (ExprKind::Closure(c), ClosureLocals::Captures(tcx)) = (e.kind, self.closures) {
         if let Some(upvars) = tcx.upvars_mentioned(c.def_id) {
           for id in upvars.keys() {
-            self.out.push(LocalMention { id: *id, expr: None });
+            self.out.push(LocalMention { id: *id, expr: None, closure: Some(e) });
           }
         }
       }
