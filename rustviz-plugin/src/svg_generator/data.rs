@@ -1143,10 +1143,13 @@ pub enum ImplicitRef {
 /// #997), which hold it as well; true when the moves are in different
 /// arms of an `if` / `match`, so only one of them happens; the clones
 /// of its value (`let w = hold.clone();`, #1003), which hold it as
-/// copies do; and true when a move is of a clone's value (`let x = w;`
-/// after `let w = hold.clone();`), so it comes after the clone.
+/// copies do; true when a move is of a clone's value (`let x = w;`
+/// after `let w = hold.clone();`), so it comes after the clone; and the
+/// other values made from hold's that rustc says hold the borrow too
+/// (`let w: Vec<&String> = hold.iter().copied().collect();`, #1015),
+/// each with the holder it was made from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StoredIn(pub Option<String>, pub Vec<String>, pub Vec<String>, pub bool, pub Vec<String>, pub bool);
+pub struct StoredIn(pub Option<String>, pub Vec<String>, pub Vec<String>, pub bool, pub Vec<String>, pub bool, pub Vec<(String, String)>);
 
 impl StoredIn {
     /// Takes the later holders (all but the place) from `other`.
@@ -1156,6 +1159,7 @@ impl StoredIn {
         self.3 = other.3;
         self.4 = other.4.clone();
         self.5 = other.5;
+        self.6 = other.6.clone();
     }
 }
 /// A method call whose receiver r is a reference to a reference

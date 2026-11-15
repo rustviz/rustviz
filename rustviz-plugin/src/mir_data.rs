@@ -531,6 +531,52 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         res
     }
 
+    /// rustc's loans issued for the borrow expression at `span` (`&s`):
+    /// indices into its borrow set, as in `KeptLoan::loan`.
+    pub fn loans_issued_in(&self, span: Span) -> Vec<usize> {
+        let bwf = self.bwf;
+        bwf.borrow_set.location_map().iter().enumerate()
+            .filter(|(_, (loc, _))| span.contains(self.location_to_span(**loc, bwf)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The variables that hold one of `loans` at some point, by rustc's
+    /// borrow checker: a variable whose type has a lifetime the loan is
+    /// in (Polonius' `origin_contains_loan_at`) while the variable is
+    /// live. `let w: Vec<&String> = v.iter().copied().collect();` after
+    /// `keepv(&mut v, &s)` gives w (and v): the signatures along the
+    /// chain tie w's lifetime to v's (#1015).
+    pub fn names_holding_loans(&self, loans: &[usize]) -> BTreeSet<String> {
+        let bwf = self.bwf;
+        let mut out: BTreeSet<String> = BTreeSet::new();
+        let Some(facts) = bwf.input_facts.as_ref() else { return out };
+        if loans.is_empty() {
+            return out;
+        }
+        let names = self.mir_local_names(bwf);
+        let mut of_origin: BTreeMap<Origin, Vec<Local>> = BTreeMap::new();
+        for (local, origin) in facts.use_of_var_derefs_origin.iter().chain(facts.drop_of_var_derefs_origin.iter()) {
+            if names.contains_key(local) {
+                let ls = of_origin.entry(*origin).or_default();
+                if !ls.contains(local) {
+                    ls.push(*local);
+                }
+            }
+        }
+        let p_output = Output::compute(facts, Algorithm::Naive, true);
+        #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a BTreeSet")]
+        for origins in p_output.origin_contains_loan_at.values() {
+            for (origin, held) in origins.iter() {
+                let Some(locals) = of_origin.get(origin) else { continue };
+                if held.iter().any(|l| loans.contains(&l.index())) {
+                    out.extend(locals.iter().filter_map(|l| names.get(l).cloned()));
+                }
+            }
+        }
+        out
+    }
+
     /// The last line in `lines` (first, last) on which the variable
     /// `name` (its RAP name, see `mir_local_names`) is live, from
     /// Polonius' liveness: its last use, or the end of a loop it's used
