@@ -17614,9 +17614,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
             "the resource ra points to is mutably borrowed by ra2 through ra; ra can't be used until the borrow ends",
+            // rb2 = &mut rb borrows rb itself, not what rb points to (#914).
+            "rb is mutably borrowed by rb2; rb can't be used until the borrow ends",
         ],
         // A reference owns nothing.
-        must_not_contain: &["ra's resource is mutably borrowed"],
+        must_not_contain: &[
+            "ra's resource is mutably borrowed",
+            "the resource rb points to is mutably borrowed by rb2 through rb; rb can't be used until",
+        ],
     },
     TooltipExpect {
         name: "closure_capture_through_ref",
@@ -22028,9 +22033,10 @@ fn a_column_lent_out_mutably_is_dotted_until_the_borrow_ends() {
             ("ra2 no longer borrows the resource ra points to", "ra2.push_str(\"!\");", 0),
             ("b's resource is mutably borrowed by rb; b can't be used while the borrow is live", "let mut rb = &mut b;", 0),
             ("b's resource is no longer mutably borrowed", "rb2.push_str(\"!\");", 0),
-            ("the resource rb points to is mutably borrowed by rb2 through rb; rb can't be used while the borrow is live",
+            // rb2 = &mut rb borrows rb itself (#914).
+            ("rb is mutably borrowed by rb2; rb can't be used while the borrow is live",
              "let rb2 = &mut rb; // fresh mutable borrow of rb: &mut &mut String", 0),
-            ("rb2 no longer borrows the resource rb points to", "rb2.push_str(\"!\");", 0),
+            ("rb is no longer mutably borrowed", "rb2.push_str(\"!\");", 0),
         ][..]),
         ("closure_capture_through_ref", &[
             ("s's resource is mutably borrowed by r; s can't be used while the borrow is live", "let r = &mut s;", 0),

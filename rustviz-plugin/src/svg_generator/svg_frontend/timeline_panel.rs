@@ -2797,13 +2797,17 @@ fn revoked_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
 /// holders (`it` and the `y` taken out of it) none is.
 fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize, path: &[(usize, usize)]) -> String {
     let through_ref = rap.is_mutref().then(|| rap.points_to_copy());
-    let ref_itself = rap.is_ref() && !rap.is_mutref();
-    let text = |to| hover_messages::state_lent_out(rap.name(), to, through_ref, ref_itself, rap.holds_value());
+    // `ref_itself`: a `&T` binding borrowed `&mut`, or a `&mut` reference
+    // borrowed itself (`&mut r`, not `&mut *r`; #914): r is what's lent.
+    let text = |to, of_ref_var: bool| {
+        let ref_itself = (rap.is_ref() && !rap.is_mutref()) || of_ref_var;
+        hover_messages::state_lent_out(rap.name(), to, through_ref, ref_itself, rap.holds_value())
+    };
     if loop_iterator_holds(visualization_data, rap, line) {
-        return text(hover_messages::LentTo::LoopIterator);
+        return text(hover_messages::LentTo::LoopIterator, false);
     }
     let Some(timeline) = visualization_data.timelines.get(rap.hash()) else {
-        return text(hover_messages::LentTo::Unknown);
+        return text(hover_messages::LentTo::Unknown, false);
     };
     let mut history = Vec::new();
     flat_history(&timeline.history, path, &mut history);
@@ -2814,30 +2818,34 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
         ResourceTy::Deref(r) => Some((format!("*{}", r.name()), false, false)),
         _ => None,
     };
-    let mut holders: Vec<Option<(String, bool, bool)>> = Vec::new();
+    // Each live lend's holder, and whether it borrows the reference
+    // column itself (`&mut r`, #914).
+    let mut holders: Vec<(Option<(String, bool, bool)>, bool)> = Vec::new();
     for (_, e) in history.iter().filter(|(l, _)| *l <= line) {
         match e {
-            Event::MutableLend { to, .. } => holders.push(key(to)),
+            Event::MutableLend { to, of_ref_var, .. } => holders.push((key(to), *of_ref_var)),
             Event::MutableReacquire { from, .. } => {
                 let k = key(from);
-                if let Some(i) = holders.iter().position(|h| *h == k) {
+                if let Some(i) = holders.iter().position(|h| h.0 == k) {
                     holders.remove(i);
                 }
             }
             _ => {}
         }
     }
+    let of_ref_var = !holders.is_empty() && holders.iter().all(|h| h.1);
     // A call that handed its borrow on to its result isn't the holder.
     let mut holders: Vec<(String, bool)> = holders.into_iter()
+        .map(|h| h.0)
         .filter(|h| !h.as_ref().is_some_and(|h| h.2))
         .map(|h| h.map_or((String::new(), false), |h| (h.0, h.1)))
         .collect();
     holders.sort();
     holders.dedup();
     match holders.as_slice() {
-        [(name, true)] if !name.is_empty() => text(hover_messages::LentTo::Closure(name)),
-        [(name, false)] if !name.is_empty() => text(hover_messages::LentTo::Var(name)),
-        _ => text(hover_messages::LentTo::Unknown),
+        [(name, true)] if !name.is_empty() => text(hover_messages::LentTo::Closure(name), of_ref_var),
+        [(name, false)] if !name.is_empty() => text(hover_messages::LentTo::Var(name), of_ref_var),
+        _ => text(hover_messages::LentTo::Unknown, of_ref_var),
     }
 }
 
