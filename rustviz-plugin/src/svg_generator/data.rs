@@ -1136,11 +1136,23 @@ pub enum ImplicitRef {
 /// `fn point<'a>(h: &mut H<'a>, t: &'a String)` may store `&t` in
 /// `hold` (#513). The borrow then outlives the call, so the lender's
 /// borrow doesn't end at the call; a separate StaticDie / MutableDie
-/// ends it where the borrow checker does. Holds the place's name, and
-/// the variables its value later moves on to while the borrow is live
-/// (`let w = hold;`, #990), which hold the borrow after it.
+/// ends it where the borrow checker does. Holds the place's name, the
+/// variables its value later moves on to while the borrow is live
+/// (`let w = hold;`, #990), which hold the borrow after it, and the
+/// copies of its value (`let w = hold;` with `hold: Option<&String>`,
+/// #997), which hold it as well; true when the moves are in different
+/// arms of an `if` / `match`, so only one of them happens.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StoredIn(pub Option<String>, pub Vec<String>);
+pub struct StoredIn(pub Option<String>, pub Vec<String>, pub Vec<String>, pub bool);
+
+impl StoredIn {
+    /// Takes the later holders (all but the place) from `other`.
+    pub fn set_holders(&mut self, other: &StoredIn) {
+        self.1 = other.1.clone();
+        self.2 = other.2.clone();
+        self.3 = other.3;
+    }
+}
 /// A method call whose receiver r is a reference to a reference
 /// borrows what's `derefs + 1` references away, not what r points to:
 /// `r.len()` with `r: &&String` is `str::len(&***r)` and borrows the
