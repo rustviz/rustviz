@@ -119,7 +119,7 @@
   --bg: #161923;
   --bg-panel: #161923;
   --bg-toolbar: #1f2433;
-  --bg-viz: #1d1f21;
+  --bg-viz: #191f26;
   --bg-titlebar: #282d3f;
   --border-titlebar: #10131b;
   --fg: #bcbdd0;
@@ -141,9 +141,9 @@
   --warning-border: #5c4a1c;
   --focus: #6cb6ff;
   --focus-titlebar: #6cb6ff;
-  --cm-bg: #1d1f21;
+  --cm-bg: #191f26;
   --cm-fg: #c5c8c6;
-  --cm-gutter-bg: #1d1f21;
+  --cm-gutter-bg: #191f26;
   --cm-gutter-fg: #868a8e;
   --cm-active-line: rgba(255, 255, 255, 0.04);
   --cm-selection: rgba(108, 182, 255, 0.25);

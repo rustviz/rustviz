@@ -14,7 +14,8 @@
 //! colours come from mdBook 0.5's `variables.css` and its code-block
 //! highlighters (`highlight.css` for light/rust, `tomorrow-night.css`
 //! for coal/navy, `ayu-highlight.css` for ayu), so a panel looks like
-//! a code block of the book around it. `light` is RustViz's original
+//! a code block of the book around it (navy takes ayu's bluer panel
+//! background, see `NAVY`). `light` is RustViz's original
 //! palette, unchanged.
 
 /// The value of every themed colour in one theme.
@@ -158,18 +159,20 @@ pub const COAL: Theme = Theme {
     columns: DARK_COLUMNS,
 };
 
-/// mdBook "navy": the same tomorrow-night code blocks as coal (mdBook
-/// uses one highlighter for both), navy's text and popup colours.
+/// mdBook "navy": tomorrow-night's code colours (mdBook highlights navy
+/// and coal alike), but on ayu's bluer code-block background: navy's own
+/// code blocks are tomorrow-night's neutral #1d1f21, which reads as a
+/// brownish grey slab on navy's blue page. Navy's text and popup colours.
 pub const NAVY: Theme = Theme {
     name: "navy",
-    bg: "#1d1f21",
+    bg: "#191f26",
     code: "#c5c8c6",
     comment: "#969896",
     string: "#81a2be",
     line_number: "#868a8e",
     caption: "#bcbdd0",
     arrow: "#8e9399",
-    drop_notch: "#1d1f21",
+    drop_notch: "#191f26",
     struct_fill: "#000000",
     struct_stroke: "#ffffff",
     underline: "#c5c8c6",
