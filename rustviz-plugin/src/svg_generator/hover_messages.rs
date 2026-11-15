@@ -515,7 +515,22 @@ fn temporary_source(from_name: &String) -> String {
 // binds by value (`match make() { Some(s) => .. }`). Nothing takes the
 // rest, which is dropped with the temporary; the drop says when.
 pub fn event_dot_unbound_temporary_part_acquire(from_name: &String, part: &TempPart) -> String {
-    let source = temporary_source(from_name);
+    temporary_part_acquire(temporary_source(from_name), part)
+}
+
+// The same for the value a constructor builds when a pattern takes it
+// apart (`match Some(make()) { Some(s) if .. => .., _ => .. }`, #807):
+// from what the call making its payload returns, if there is one.
+pub fn event_dot_ctor_temporary_part_acquire(from_name: Option<&String>, part: &TempPart) -> String {
+    let source = match from_name {
+        Some(f) => format!("is built from what {}", temporary_source(f)),
+        None => "the constructor builds".to_owned(),
+    };
+    temporary_part_acquire(source, part)
+}
+
+// "A temporary holds the value that {source}, ...".
+fn temporary_part_acquire(source: String, part: &TempPart) -> String {
     match part {
         TempPart::Field(f) => format!(
             "A temporary holds the value that {0}. Its field {1} is moved out of it; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
@@ -1143,13 +1158,28 @@ pub fn event_dot_move_to_scrutinee_temporary(my_name: &String, what: &str, when:
 }
 
 // "the temporary tuple (p, q)", or just "the temporary tuple" when the
-// scrutinee is too long to quote.
+// scrutinee is too long to quote. A constructor scrutinee taken apart
+// the same way (`match Some(f)`, #807) builds "the temporary value
+// Some(f)" (its text never starts with a parenthesis).
 fn temporary_tuple(tuple: &String) -> String {
     if tuple.is_empty() {
         "the temporary tuple".to_owned()
+    } else if !is_tuple_text(tuple) {
+        format!("the temporary value {}", styled_name_html(tuple))
     } else {
         format!("the temporary tuple {}", styled_name_html(tuple))
     }
+}
+
+// Whether a scrutinee temporary's text (see `temporary_tuple`) is a
+// tuple's, rather than a constructor's.
+fn is_tuple_text(tuple: &str) -> bool {
+    tuple.is_empty() || tuple.starts_with('(')
+}
+
+// "tuple", or "temporary" for a constructor's value (#807).
+fn tuple_noun(tuple: &str) -> &'static str {
+    if is_tuple_text(tuple) { "tuple" } else { "temporary" }
 }
 
 // `if let (Some(_), Some(r)) = (p, q)` / `match (x, y)`: building the
@@ -1166,6 +1196,7 @@ pub fn event_dot_move_to_tuple_temporary(my_name: &String, tuple: &String, value
 // else branch when the pattern doesn't match; a `match` keeps them to
 // the end of its statement.
 pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleLeft]) -> String {
+    let noun = tuple_noun(tuple);
     let tuple = temporary_tuple(tuple);
     let (lead, when) = match at {
         // Worded like event_dot_owner_drop_if_try_returns (#653).
@@ -1220,7 +1251,7 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
     }
     let items = join_and(&parts);
     if at == TupleDropAt::TryReturns {
-        return format!("{lead}{tuple} is dropped, and with it {items}. If the `?` succeeds, nothing happens to the tuple here.");
+        return format!("{lead}{tuple} is dropped, and with it {items}. If the `?` succeeds, nothing happens to the {noun} here.");
     }
     format!("{lead}{tuple} is dropped {when}, and with it {items}")
 }
@@ -3526,8 +3557,8 @@ pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]
         return format!(
             "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
              that binds {1} from {3}, {0}'s {4} is moved out of {5} into {6} here; otherwise it stays \
-             in the tuple",
-            me, bound, or_list(sources), bound_from, held(value), temporary_tuple(&tuple.to_owned()), styled_name_html(into)
+             in the {7}",
+            me, bound, or_list(sources), bound_from, held(value), temporary_tuple(&tuple.to_owned()), styled_name_html(into), tuple_noun(tuple)
         );
     }
     let otherwise = if value {

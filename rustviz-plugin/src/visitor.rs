@@ -2659,6 +2659,26 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             return;
           }
         }
+        // `match Some(f) { Some(x) => .. }`: the constructor is taken
+        // apart like a tuple literal (#807). What goes into it is drawn
+        // where the pattern puts it (`f` to `x`), and what the pattern
+        // leaves of a variable is dropped with the temporary on the
+        // variable's column. The constructor has no column: no event
+        // names it (it's registered for the code panel only).
+        if !expr.span.from_expansion() && self.literal_elems(expr).is_some() {
+          if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+            self.add_fn(name);
+          }
+          for arg in args.iter() {
+            self.visit_expr(arg);
+          }
+          // (After the arguments: the temporary takes what a call
+          // among them returned.)
+          if !self.is_drawn_tuple_scrutinee(expr) {
+            self.note_ctor_literal_temporary_drop(expr);
+          }
+          return;
+        }
         if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
           self.note_temporary_drop(expr, name, Vec::new());
         }
@@ -4884,8 +4904,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     // To my knowledge a match has to either contain a singular expression or Tuple
     // get all the 'parents' ie things being matched on and their types
-    let (parents, parents_ty) = match guard_expr.kind {
-      ExprKind::Tup(fields) => {
+    // (A constructor scrutinee `Some(f)` that a pattern takes apart is
+    // split like a tuple literal, #807.)
+    let split = match guard_expr.kind {
+      ExprKind::Tup(fields) => Some(fields),
+      _ => self.literal_elems(guard_expr),
+    };
+    let (parents, parents_ty) = match split {
+      Some(fields) => {
         let mut res = Vec::new();
         let mut res_ty = Vec::new();
         for field in fields.iter() {
@@ -5238,10 +5264,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Whether each sub-pattern destructures a part of a
     // variable (parallel to `subs`).
     let mut sub_is_part: Vec<bool> = Vec::new();
-    if matches!((arm_pat.kind, guard_expr.kind), (PatKind::Tuple(..), ExprKind::Tup(_))) && !guard_expr.span.from_expansion() {
+    if matches!(arm_pat.kind, PatKind::Tuple(..) | PatKind::TupleStruct(..)) && self.literal_elems(guard_expr).is_some() {
       // `match (a, (b, c)) { (p, (x, _)) => … }`: each
       // sub-pattern with its element, through nested tuple
-      // literals and `..` (#627).
+      // literals and `..` (#627); also `Some(x)` on `Some(f)`
+      // (#807).
       subs = self.literal_pat_parents(arm_pat, guard_expr);
       sub_is_part = vec![false; subs.len()];
     } else {
@@ -5251,8 +5278,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           Some(pp) => pp,
           None => (parents[parent_idx].clone(), parents_ty[parent_idx]),
         };
-        let scrutinee = match guard_expr.kind {
-          ExprKind::Tup(fields) if same_arity => &fields[parent_idx],
+        let scrutinee = match self.literal_elems(guard_expr) {
+          Some(fields) if same_arity => &fields[parent_idx],
           _ => guard_expr,
         };
         subs.push((p, parent, parent_ty, scrutinee));
@@ -5350,8 +5377,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let id = *self.unique_id;
         *self.unique_id += 1;
         let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
-        let scrutinee = match guard_expr.kind {
-          ExprKind::Tup(fields) if fields.len() == parents.len() => &fields[i],
+        let scrutinee = match self.literal_elems(guard_expr) {
+          Some(fields) if fields.len() == parents.len() => &fields[i],
           _ => guard_expr,
         };
         pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
@@ -6088,8 +6115,93 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// variables that a match or `if let` scrutinizes already has its
   /// moves and its drop drawn as "the temporary tuple (x, y)" (#327),
   /// so it gets no `(temporary)` column as well.
+  /// The same for a constructor scrutinee (`match Some(f)`, #807).
   fn is_drawn_tuple_scrutinee(&self, expr: &'tcx Expr<'tcx>) -> bool {
-    matches!(expr.kind, ExprKind::Tup(_)) && self.tuple_scrutinee_position(expr) && !self.tuple_scrutinee_moves(expr).is_empty()
+    self.literal_elems(expr).is_some() && self.tuple_scrutinee_position(expr) && !self.tuple_scrutinee_moves(expr).is_empty()
+  }
+
+  /// The elements of a literal that a `match` / `if let` takes apart
+  /// element by element (#327): a tuple literal `(x, y)`, or a tuple
+  /// struct / variant constructor `Some(f)`, `W(a, b)` (#807) that is
+  /// the scrutinee, or an element of such a literal, when a pattern
+  /// binds something that needs drop by value (`Some(x)` with `x:
+  /// String`). A constructor is never an actor (#768, #873): what goes
+  /// into it is drawn going straight to the binding that takes it (`f`
+  /// to `x`), and what the pattern leaves is dropped with the temporary
+  /// the constructor built, as for a tuple. A constructor whose
+  /// patterns bind nothing by value keeps its `(temporary)` column
+  /// (#794).
+  pub(crate) fn literal_elems(&self, e: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>]> {
+    if e.span.from_expansion() {
+      return None;
+    }
+    match e.kind {
+      ExprKind::Tup(elems) => Some(elems),
+      ExprKind::Call(callee, args) if !args.is_empty()
+        && is_ctor_path(callee, self.tcx.typeck(e.hir_id.owner))
+        && self.in_literal_scrutinee(e) => Some(args),
+      _ => None,
+    }
+  }
+
+  /// Whether the constructor call `e` is a scrutinee taken apart like a
+  /// tuple literal, or an element of one (see `literal_elems`).
+  fn in_literal_scrutinee(&self, e: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    let env = typing_env(self.tcx, e.hir_id.owner);
+    let mut cur = e;
+    loop {
+      let Node::Expr(p) = self.tcx.parent_hir_node(cur.hir_id) else { return false };
+      if p.span.from_expansion() {
+        return false;
+      }
+      let top = |c: &'tcx Expr<'tcx>| match c.kind {
+        ExprKind::Tup(_) => true,
+        _ => !self.is_unmoved_temporary(c, typeck, env),
+      };
+      match p.kind {
+        ExprKind::Tup(elems) if elems.iter().any(|x| x.hir_id == cur.hir_id) => cur = p,
+        ExprKind::Call(callee, args) if is_ctor_path(callee, typeck) && args.iter().any(|x| x.hir_id == cur.hir_id) => cur = p,
+        ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) => return s.hir_id == cur.hir_id && top(cur),
+        ExprKind::Let(l) => {
+          return l.init.hir_id == cur.hir_id
+            && matches!(self.tcx.parent_hir_node(p.hir_id),
+              Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == p.hir_id))
+            && top(cur);
+        }
+        _ => return false,
+      }
+    }
+  }
+
+  /// A constructor scrutinee taken apart like a tuple literal (#807)
+  /// that moves no variable in (`match Some(make()) { .. }`): what a
+  /// pattern leaves of it is dropped with its `(temporary)` column.
+  fn note_ctor_literal_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>) {
+    let ExprKind::Call(callee, _) = expr.kind else { return };
+    if self.scrutinee_scope(expr, "").is_none() {
+      return;
+    }
+    // (`record_temporary_drop` doesn't draw the constructor.)
+    if let Some(name) = hirid_to_var_name(callee.hir_id, &self.tcx) {
+      self.note_temporary_drop(expr, name, Vec::new());
+    }
+  }
+
+  /// The call whose result is the payload of the constructor `expr`
+  /// (`make()` in `Some(make())`): its column, when that is the only
+  /// argument. What a pattern binds from it is drawn from that column
+  /// too (`literal_pat_parents`).
+  fn ctor_payload_call(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let ExprKind::Call(_, [arg]) = expr.kind else { return None };
+    if !matches!(arg.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+      return None;
+    }
+    match self.rap_or_field_through_ref(arg) {
+      ResourceTy::Value(f @ ResourceAccessPoint::Function(_)) => Some(f),
+      _ => None,
+    }
   }
 
   /// A macro's or literal's temporary. A variable moved into it
@@ -6554,9 +6666,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let scrutinee = self.scrutinee_scope(expr, when);
 
     // The temporary gets a short column: it acquires the call's result
-    // here and is dropped where its scope ends.
-    self.add_fn(fn_name.clone());
-    let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
+    // here and is dropped where its scope ends. A constructor scrutinee
+    // taken apart by a pattern (`match Some(make()) { .. }`, #807) is no
+    // actor (#873): the temporary takes what the call making its payload
+    // returns, or, without one (`Some(format!(..))`), comes from nothing
+    // drawn.
+    let ctor_literal = matches!(expr.kind, ExprKind::Call(..)) && self.literal_elems(expr).is_some();
+    let source = if ctor_literal {
+      self.ctor_payload_call(expr)
+    } else {
+      self.add_fn(fn_name.clone());
+      Some(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned())
+    };
     // Numbered in one sequence with the `let`-extended temporaries
     // (#400): the label doesn't say which kind it is, the tooltips do.
     self.temp_count += 1;
@@ -6565,7 +6686,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
       o.unbound_temp = true;
       o.temp_part = part.clone();
-      o.ctor_temp = part.is_none() && !expr.span.from_expansion()
+      o.ctor_temp = (part.is_none() || ctor_literal) && !expr.span.from_expansion()
         && matches!(expr.kind, ExprKind::Call(callee, _) if is_ctor_path(callee, self.tcx.typeck(expr.hir_id.owner)));
       // (Also when the pattern moves part of it out, #955: what a
       // variable moved into it says is when the temporary is dropped.)
@@ -6577,10 +6698,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `Some(make());`: a constructor isn't an actor (#768); once its
     // arguments are visited, what was moved into it (a call's result, a
     // variable) is redrawn into the temporary instead (#783).
-    if matches!(&tmp, ResourceAccessPoint::Owner(Owner { ctor_temp: true, .. })) {
+    if matches!(&tmp, ResourceAccessPoint::Owner(Owner { ctor_temp: true, temp_part: None, .. })) {
       self.ctor_temps.insert(expr.hir_id, (tmp.clone(), *self.unique_id));
     }
-    self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false);
+    match source {
+      Some(fn_rap) => self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false),
+      None => self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false),
+    }
     // Variables moved into the temporary (`vec![s];`, #570; the fields
     // `P { n: 1, ..p }` takes from p, #574).
     for (src, src_line) in into {
@@ -8606,7 +8730,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     // A tuple-literal scrutinee (`match (a, (b, c))`): its elements,
     // through nested tuple literals (#627).
-    let from_literal = matches!(scrutinee, Some(e) if matches!(e.kind, ExprKind::Tup(_)) && !e.span.from_expansion());
+    let from_literal = scrutinee.is_some_and(|e| self.literal_elems(e).is_some());
     let sources = match scrutinee {
       Some(e) if from_literal => self.literal_sources(pat, e, ""),
       _ => self.or_alt_sources(pat, parents, parents_ty),
@@ -8904,11 +9028,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     e: &'tcx Expr<'tcx>,
     prefix: &str,
   ) -> Vec<BTreeMap<String, (String, Option<ResourceTy>)>> {
-    let ExprKind::Tup(elems) = e.kind else {
+    let Some(elems) = self.literal_elems(e) else {
       let typeck = self.tcx.typeck(e.hir_id.owner);
       return self.pat_sources(pat, &self.rap_or_field_through_ref(e), typeck.node_type(e.hir_id), prefix);
     };
     match pat.kind {
+      // `Err(x)` on `Ok(f)` (#807): it can't match, so it binds nothing
+      // from `f`.
+      PatKind::TupleStruct(..) if self.ctor_pat_mismatch(pat, e) => vec![BTreeMap::new()],
       PatKind::Or(alts) => {
         let mut out = Vec::new();
         for alt in alts {
@@ -8920,7 +9047,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         out
       }
-      PatKind::Tuple(ps, dd) => {
+      PatKind::Tuple(ps, dd) | PatKind::TupleStruct(_, ps, dd) => {
         let gap = elems.len().saturating_sub(ps.len());
         let mut out = vec![BTreeMap::new()];
         for (k, p) in ps.iter().enumerate() {

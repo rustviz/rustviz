@@ -5457,6 +5457,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to (temporary 12)",
             "Move from Some to",
             "A temporary holds the value that Some returns",
+            // `match Some(make()) { Some(s) => s, .. }`: s takes what
+            // make returned (#807).
+            "Partial move from Some to s",
         ],
     },
     TooltipExpect {
@@ -5872,12 +5875,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c's resource is moved",
             "d's resource is moved",
             "x's resource is moved into drop, which drops it",
+            "Move from a to x",
+            "Move from c to x",
             "n is bound to a copyable value",
-            "a goes out of scope. No resource is dropped.",
+            // a's String went to x, or, in the `None` arm, was dropped
+            // with the temporary (#807).
+            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
             "d goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
             "Move from b to Some",
+            // `Some(a)` / `Some(c)` whose pattern binds the String: no
+            // constructor actor (#807).
+            "Move from a to Some",
+            "Move from c to Some",
+            "Partial move from Some to x",
             "a goes out of scope. Its resource is dropped.",
             "b goes out of scope. Its resource is dropped.",
             "c goes out of scope. Its resource is dropped.",
@@ -8129,9 +8141,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // isn't a resource).
         must_contain: &[
             "n is bound to a copyable value",
+            // `match Some(c) { Some(x) => .. }`: c's String goes to x;
+            // `Some` is no actor (#807).
+            "Move from c to x",
         ],
         must_not_contain: &[
             "n is initialized with a copy of Anonymous resource",
+            "Move from c to Some",
+            "Partial move from Some to x",
         ],
     },
     // #410: a panic drops what the function owns, where it panics.
@@ -13259,8 +13276,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g's resource is moved",
             "h's resource is moved",
             "x's resource is moved into drop, which drops it",
+            // `Some(x)` binds the String: it goes from f / g / h to x, and
+            // the arm that doesn't take it drops it with the temporary
+            // (#807).
+            "Move from f to x",
+            "Move from g to x",
+            "Move from h to x",
+            "f's resource is moved into the temporary value Some(f)",
+            "The temporary value Some(f) is dropped after this arm, when the match ends, and with it f's resource",
+            "The pattern didn't match, so the temporary value Some(h) is dropped here, and with it h's resource",
         ],
         must_not_contain: &[
+            "Move from f to Some",
+            "Move from g to Some",
+            "Move from h to Some",
+            "Move from Some to x",
+            "Partial move from Some to x",
             "c's resource is moved into a temporary that is dropped at the end of this statement",
             "d's resource is moved into a temporary that is dropped at the end of this statement",
             "e's resource is moved into a temporary that is dropped at the end of this statement",
@@ -17497,6 +17528,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "lens, made from vk",
             "still immutably borrowed by lens",
             "still immutably borrowed by vk",
+        ],
+    },
+    // #807: a constructor scrutinee whose pattern binds the payload by
+    // value is never an actor (#873's decision (a)). `Some(f)` builds a
+    // temporary Option holding f's String; `Some(x)` moves it on to x.
+    // Drawn like a tuple-literal scrutinee (#327): f to x in the arm
+    // that binds it; in the other arm f's String is dropped with the
+    // temporary when the match ends. A call's payload keeps the call's
+    // arrow (`Some(make())`: make to r); a macro's has none
+    // (`Some(format!(..))`: m acquires a resource). Main drew
+    // "Move from f to Some" / "Partial move from Some to x".
+    TooltipExpect {
+        name: "ctor_scrutinee_807",
+        must_contain: &[
+            "Move from f to x",
+            "f's resource is moved into the temporary value Some(f)",
+            "The temporary value Some(f) is dropped after this arm, when the match ends, and with it f's resource",
+            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above.",
+            "Move from h to y",
+            "The pattern didn't match, so the temporary value Some(h) is dropped here, and with it h's resource",
+            "m acquires ownership of a resource",
+            "Move from String::from to c",
+            "Move from g to k",
+            "The temporary value Some(g) is dropped after this arm, when the match ends, and with it g's resource",
+            "Move from make to r",
+            "Move from make to (temporary)",
+            "A temporary holds the value that is built from what make returns, for the match to inspect. The pattern of the arm that runs can move parts of it into its bindings; what is left in it is dropped with the temporary after the match",
+            "Move from w to v",
+            "w goes out of scope. No resource is dropped.",
+            "Move from a to p",
+            "The temporary value Ok::<String, String>(a) is dropped after this arm, when the match ends, and with it a's resource",
+            "Move from b to t",
+            "b's resource is moved into the temporary tuple (Some(b), n)",
+            "The temporary tuple (Some(b), n) is dropped after this arm, when the match ends, and with it b's resource",
+        ],
+        must_not_contain: &[
+            "Move from f to Some",
+            "Move from h to Some",
+            "Move from g to Some",
+            "Move from b to Some",
+            "Move from a to Ok",
+            "Move from w to Wrapper",
+            "Move from Some to x",
+            "Move from Some to y",
+            "Move from Some to m",
+            "Move from Some to (temporary)",
+            "Partial move from Some",
+            "Partial move from Ok",
+            "Partial move from Wrapper",
+            "Move from Some",
+            "to Some",
+            "A temporary holds the value that Some returns",
+            // the constructor's column
+            "=Some",
+            "=Ok",
+            "=Wrapper",
+            // `Err(q)` can't match `Ok(a)`: q takes nothing from a
+            "Move from a to q",
         ],
     },
 ];
