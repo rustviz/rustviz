@@ -16809,8 +16809,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // arm's). The column was drawn into the `match` as if an `r`
         // existed there. Now the arm's `r` exists only in its arm, as it
         // does when it has a name of its own. (In `nested`, the inner
-        // `w`'s scope end at its block's `}` is still missing, before
-        // and after this fix: #931.)
+        // `w` goes out of scope at its block's `}`, #931: see
+        // `each_variable_sharing_a_column_goes_out_of_scope`.)
         must_contain: &[
             "r immutably borrows a resource",
             "r goes out of scope",
@@ -16820,6 +16820,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquires ownership of a resource",
             "s goes out of scope. Its resource is dropped.",
             "w immutably borrows a resource",
+            "w goes out of scope",
         ],
         must_not_contain: &[
             "r is live in a conditional expression",
@@ -16868,6 +16869,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "names acquires ownership of a new resource",
             "b.items acquires ownership of a new resource",
             "including every String it holds) is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "shared_column_scope_end",
+        // #931: same-named variables that are never in scope together
+        // share a column; when one was declared in a branch or loop body
+        // and the other wasn't, the second one's scope end was missing
+        // (an owner never said to be dropped). Each now goes out of
+        // scope where it would with a name of its own; the rows are
+        // checked by `each_variable_sharing_a_column_goes_out_of_scope`.
+        // The first `p` (a struct owning a `String`) also read "No
+        // resource is dropped.".
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "r goes out of scope",
+            "u goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+            "p goes out of scope. Its resource is dropped.",
+            "p.name goes out of scope. Its resource is dropped.",
+            "p.n goes out of scope",
+        ],
+        must_not_contain: &[
+            "p goes out of scope. No resource is dropped.",
         ],
     },
 ];
@@ -17987,6 +18011,58 @@ fn a_reused_name_keeps_the_earlier_borrows_end() {
     let e_end = dots_listing_tooltip(&timeline, "q's resource is no longer borrowed by e, but is still immutably borrowed by it1");
     assert!(e_end.len() == 1 && (e_end[0].1 - e_row).abs() < 1.0,
         "e's borrow should end on its last use's row (y={e_row}): {e_end:?}");
+}
+
+/// #931: variables of one name that are never in scope together share a
+/// column. When one was declared in a branch or loop body and the other
+/// wasn't, the second one's scope end wasn't drawn: an owner was never
+/// said to be dropped. Each one now goes out of scope at the first `}`
+/// after its last line, once, as it does with a name of its own.
+#[test]
+fn each_variable_sharing_a_column_goes_out_of_scope() {
+    let mut failures = Vec::new();
+    for (fixture, cases) in [
+        ("shared_column_scope_end", &[
+            ("s goes out of scope. Its resource is dropped.", &["println!(\"first {}\", s);", "println!(\"second {}\", s);"][..]),
+            ("r goes out of scope", &["println!(\"first {}\", r);", "println!(\"second {}\", r);"][..]),
+            ("u goes out of scope. Its resource is dropped.", &["println!(\"first {}\", u);", "println!(\"second {}\", u);"][..]),
+            ("q goes out of scope. Its resource is dropped.", &["println!(\"first {}\", q);", "println!(\"second {}\", q);"][..]),
+            ("p goes out of scope. Its resource is dropped.", &["println!(\"first {} {}\", p.name, p.n);", "println!(\"second {} {}\", p.name, p.n);"][..]),
+            ("p.name goes out of scope. Its resource is dropped.", &["println!(\"first {} {}\", p.name, p.n);", "println!(\"second {} {}\", p.name, p.n);"][..]),
+            ("p.n goes out of scope", &["println!(\"first {} {}\", p.name, p.n);", "println!(\"second {} {}\", p.name, p.n);"][..]),
+        ][..]),
+        ("shared_column_match_arm", &[
+            ("w goes out of scope", &["let w = &a;", "let w = &a;"][..]),
+        ][..]),
+        // The `if let`'s x₂ and the later `let`'s, which owns a String.
+        ("or_pattern_let_shadowed_name", &[
+            ("x₂ goes out of scope. Its resource is dropped.", &["if let (x, _) | (_, x) = u {", "let ((x, _) | (_, x)) = t;"][..]),
+        ][..]),
+    ] {
+        let rv = run_with_local_backend(fixture);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let closes = code_rows_y(&code, "}");
+        for (text, lines) in cases {
+            let ends = dots_listing_tooltip(&timeline, text);
+            let mut seen: HashMap<&str, usize> = HashMap::new();
+            let mut want = Vec::new();
+            for line in *lines {
+                // The nth time this line is listed, its nth row.
+                let nth = seen.entry(line).or_insert(0);
+                let row = code_rows_y(&code, line)[*nth];
+                *nth += 1;
+                let close = closes.iter().copied().find(|y| *y > row).expect("a `}` below");
+                want.push(close);
+                if !ends.iter().any(|d| (d.1 - close).abs() < 1.0) {
+                    failures.push(format!("{fixture}: no {text:?} on the `}}` row y={close} after {line:?}: {ends:?}"));
+                }
+            }
+            if ends.len() != want.len() {
+                failures.push(format!("{fixture}: {text:?} drawn {} times (want {}, at {want:?}): {ends:?}", ends.len(), want.len()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// #916: same-named references in different arms of a conditional share

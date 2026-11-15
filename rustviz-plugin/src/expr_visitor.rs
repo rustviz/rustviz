@@ -186,8 +186,15 @@ pub struct RapData {
   pub temp_owner: Option<rustc_hir::HirId>,
   // Same-named variables of sibling blocks share one column (#308);
   // `scope` is the first one's block end, and this holds the block ends
-  // of the later ones, each of which also ends the variable (#589).
+  // of the later ones declared outside any branch or loop body
+  // (registered with is_global = true), each of which also ends the
+  // variable (#589), even when the first one was declared in one (#931).
   pub extra_scopes: Vec<usize>,
+  // A later variable sharing the column of a first one declared outside
+  // any branch or loop body was declared in one (is_global = false): the
+  // construct that ends its block ends it (`emit_scope_end`), like a
+  // variable of its own (#931).
+  pub local_later: bool,
 }
 
 /// A `let` binding with no initializer (`let x;`), remembered until
@@ -1317,16 +1324,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     match self.raps.entry(key) {
       std::collections::hash_map::Entry::Vacant(v) => {
         self.rap_hashes += 1;
-        v.insert(RapData { rap: r, scope, is_global, fn_start_line, extended_temp: Vec::new(), temp_owner: None, extra_scopes: Vec::new() });
+        v.insert(RapData { rap: r, scope, is_global, fn_start_line, extended_temp: Vec::new(), temp_owner: None, extra_scopes: Vec::new(), local_later: false });
       }
       // A later variable of the same name in the same fn shares the
       // column of the first (sibling blocks, #308) and ends at its own
-      // block end (#589).
+      // block end (#589), whether or not either one is declared in a
+      // branch or loop body (#931).
       std::collections::hash_map::Entry::Occupied(mut o) => {
         let rd = o.get_mut();
-        if rd.is_global && is_global && rd.fn_start_line == fn_start_line && !r.is_fn()
-          && scope != rd.scope && !rd.extra_scopes.contains(&scope) {
-          rd.extra_scopes.push(scope);
+        if rd.fn_start_line == fn_start_line && !r.is_fn() {
+          if is_global && scope != rd.scope && !rd.extra_scopes.contains(&scope) {
+            rd.extra_scopes.push(scope);
+          } else if !is_global && rd.is_global {
+            rd.local_later = true;
+          }
         }
       }
     }
@@ -5016,8 +5027,9 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     // A name that shadows an outer variable resolves to the outer RAP
     // (add_rap keeps the first registration, see the README's shadowing
     // limitation); that one keeps its own scope end.
+    // (Or a later variable sharing the column of a global one, #931.)
     let is_block_local = |r: &ResourceAccessPoint| {
-      self.raps.get(r.name()).map_or(false, |rd| !rd.is_global && rd.rap.hash() == r.hash())
+      self.raps.get(r.name()).map_or(false, |rd| (!rd.is_global || rd.local_later) && rd.rap.hash() == r.hash())
     };
     // An unbound temporary (#457) is dropped by its own event, at the
     // end of its statement, not with the block.
@@ -5029,7 +5041,7 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     }).collect();
     for rd in self.raps.values() {
       if let ResourceAccessPoint::Struct(st) = &rd.rap {
-        if st.is_member && owners.contains(&st.owner) && !rd.is_global {
+        if st.is_member && owners.contains(&st.owner) && (!rd.is_global || rd.local_later) {
           vars.push(rd.rap.clone());
         }
       }
@@ -7086,12 +7098,18 @@ pub fn print_out_of_scope(&mut self){
     let left_already = self.all_paths_exit && !rap.rap.never_drops() && !rap.rap.is_ref();
     // An unbound temporary is dropped by its own `TemporaryDrop`, which
     // may sit in a branch (a let chain's later part, #604): no scope end.
-    if !rap.rap.is_fn() && rap.is_global && !left_already && !rap.rap.is_unbound_temporary() {
+    // A first variable declared in a branch or loop body was ended
+    // there; the later ones that share its column and aren't still are
+    // (#931).
+    if !rap.rap.is_fn() && (rap.is_global || !rap.extra_scopes.is_empty()) && !left_already && !rap.rap.is_unbound_temporary() {
+      // Only a scope end within the first variable's scope is its own:
+      // a later variable sharing the column, declared in a branch or
+      // loop body, was ended after it (#931).
       let mut duplicate = false;
-      for (_l, e) in self.preprocessed_events.iter() {
+      for (l, e) in self.preprocessed_events.iter() {
         match e.is_gos_ev() {
           Some(r) => {
-            if *r == rap.rap {
+            if *r == rap.rap && *l <= rap.scope {
               duplicate = true;
               break;
             }
@@ -7099,7 +7117,7 @@ pub fn print_out_of_scope(&mut self){
           None => {}
         }
       }
-      if !duplicate {
+      if rap.is_global && !duplicate {
         self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id });
         *self.unique_id += 1;
       }
