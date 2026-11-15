@@ -1141,9 +1141,12 @@ pub enum ImplicitRef {
 /// (`let w = hold;`, #990), which hold the borrow after it, and the
 /// copies of its value (`let w = hold;` with `hold: Option<&String>`,
 /// #997), which hold it as well; true when the moves are in different
-/// arms of an `if` / `match`, so only one of them happens.
+/// arms of an `if` / `match`, so only one of them happens; the clones
+/// of its value (`let w = hold.clone();`, #1003), which hold it as
+/// copies do; and true when a move is of a clone's value (`let x = w;`
+/// after `let w = hold.clone();`), so it comes after the clone.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StoredIn(pub Option<String>, pub Vec<String>, pub Vec<String>, pub bool);
+pub struct StoredIn(pub Option<String>, pub Vec<String>, pub Vec<String>, pub bool, pub Vec<String>, pub bool);
 
 impl StoredIn {
     /// Takes the later holders (all but the place) from `other`.
@@ -1151,6 +1154,8 @@ impl StoredIn {
         self.1 = other.1.clone();
         self.2 = other.2.clone();
         self.3 = other.3;
+        self.4 = other.4.clone();
+        self.5 = other.5;
     }
 }
 /// A method call whose receiver r is a reference to a reference

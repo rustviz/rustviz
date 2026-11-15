@@ -17385,6 +17385,57 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in w, so m stays borrowed while w is in use",
         ],
     },
+    // ─── a stored borrow's holder cloned (#1003) ───
+    TooltipExpect {
+        name: "stored_borrow_holder_clone_1003",
+        // Main didn't follow a clone of a holder (`let w = v.clone();`
+        // with v: Vec<&String>): look named v, which isn't used after
+        // the clone, and keepv's text left the clone out. rustc rejects
+        // moving each lender right after its look (the borrow is later
+        // used by the clone). Rows are checked in
+        // `a_stored_borrow_is_held_by_clones_of_its_holder`.
+        must_contain: &[
+            "keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, a clone of v, is in use",
+            "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
+            "keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use, and while wa, a clone of va, is in use",
+            "a's resource is no longer borrowed by look, but is still immutably borrowed by va and wa",
+            "keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while wb, a clone of vb, is in use",
+            "b's resource is no longer borrowed by look, but is still immutably borrowed by wb",
+            "keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use, and while wc, a clone of vc, is in use",
+            "c's resource is no longer borrowed by look, but is still immutably borrowed by wc",
+            "keepv reads from t; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use, and while h2.v, a clone of h.v, is in use",
+            "t's resource is no longer borrowed by look, but is still immutably borrowed by h2.v",
+            "keepv reads from m; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use, and while wm, a clone of vm, is in use, and after the borrow moves on to xm, while xm is in use",
+            "m's resource is no longer borrowed by look, but is still immutably borrowed by xm",
+            "keepd reads from g; keepd's signature lets it store this reference in d, so g stays borrowed while d is in use, and while e, a clone of d, is in use",
+            "g's resource is no longer borrowed by look, but is still immutably borrowed by d and e",
+        ],
+        must_not_contain: &[
+            // The clone holds the borrow too.
+            "=keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "=keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use",
+            "=keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
+            "=keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use",
+            "=keepv reads from t; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use",
+            "=keepv reads from m; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use",
+            "=keepd reads from g; keepd's signature lets it store this reference in d, so g stays borrowed while d is in use",
+            // The original isn't used after the clone: it holds nothing.
+            "=s's resource is no longer borrowed by look, but is still immutably borrowed by v",
+            "=a's resource is no longer borrowed by look, but is still immutably borrowed by va",
+            "=b's resource is no longer borrowed by look, but is still immutably borrowed by vb",
+            "=c's resource is no longer borrowed by look, but is still immutably borrowed by vc",
+            "=t's resource is no longer borrowed by look, but is still immutably borrowed by h.v",
+            "=m's resource is no longer borrowed by look, but is still immutably borrowed by vm",
+            // A clone isn't a copy: Vec<&String> isn't Copy.
+            "a copy of v,",
+            "a copy of va,",
+            "a copy of vb,",
+            "a copy of vc,",
+            "a copy of h.v,",
+            "a copy of vm,",
+            "a copy of d,",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -23278,6 +23329,47 @@ fn a_stored_borrow_is_held_by_its_live_holders_on_each_path() {
             if text.contains("but is still") && !extra.is_empty() {
                 failures.push(format!("{name}: \"{text}\" also at {extra:?}"));
             }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #1003: a clone of a stored borrow's holder (`let w = v.clone();`,
+/// `Clone::clone(&v)`, `v.to_vec()`, with v: Vec<&String>) holds copies
+/// of the references in v, so it keeps the lender borrowed as v does,
+/// each until its own last use (a Vec's drop doesn't use them); one of a
+/// type with its own Drop (D) until it is dropped. rustc rejects moving
+/// the lender right after each look below; the borrow ends where the
+/// last holder is last used. Main named the original holder at each
+/// look (v, va, vb, vc, h.v, vm, d).
+#[test]
+fn a_stored_borrow_is_held_by_clones_of_its_holder() {
+    let name = "stored_borrow_holder_clone_1003";
+    let still = |l: &str, h: &str| format!("{l}'s resource is no longer borrowed by look, but is still immutably borrowed by {h}");
+    let ended = |l: &str| format!("{l}'s resource is no longer immutably borrowed");
+    let cases: Vec<(String, &str)> = vec![
+        (still("s", "w"), "let n = look(&s);"),
+        (ended("s"), "println!(\"{} {}\", w.len(), n);"),
+        (still("a", "va and wa"), "let na = look(&a);"),
+        (ended("a"), "println!(\"{} {} {}\", va.len(), wa.len(), na);"),
+        (still("b", "wb"), "let nb = look(&b);"),
+        (ended("b"), "println!(\"{} {}\", wb.len(), nb);"),
+        (still("c", "wc"), "let nc = look(&c);"),
+        (ended("c"), "println!(\"{} {}\", wc.len(), nc);"),
+        (still("t", "h2.v"), "let nt = look(&t);"),
+        (ended("t"), "println!(\"{} {}\", h2.v.len(), nt);"),
+        (still("m", "xm"), "let nm = look(&m);"),
+        (ended("m"), "println!(\"{} {}\", xm.len(), nm);"),
+        (still("g", "d and e"), "let ng = look(&g);"),
+    ];
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let mut failures = Vec::new();
+    for (text, src) in &cases {
+        let row = code_rows_y(&code, src)[0];
+        let ys: Vec<f64> = dots_listing_tooltip(&timeline, text).iter().map(|d| d.1).collect();
+        if ys.len() != 1 || (ys[0] - row).abs() >= 1.0 {
+            failures.push(format!("\"{text}\" should be on `{src}` only (y={row}), got {ys:?}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
