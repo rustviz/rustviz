@@ -188,7 +188,8 @@ const BOOK: &[Snippet] = &[
         id: "c4_09_first_word_str",
         must_contain: &[
             "s is an immutable borrow from the caller",
-            "a reference from s is returned to the caller; the data it points to is not copied",
+            "a reference to s[0..i], reborrowed through s, is returned to the caller; the data it points to is not copied",
+            "a reference to s[..], reborrowed through s, is returned to the caller; the data it points to is not copied",
             "L13 word holds an immutable reference",
             "L13 Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
             "L14 Return immutably borrowed resource from word to my_string",
@@ -206,6 +207,9 @@ const BOOK: &[Snippet] = &[
             "the resource word points to",
             "Copy from first_word to word",
             "L13 my_string's resource is no longer immutably borrowed",
+            // `&s[0..i]` is a reference to part of the str s points to,
+            // reborrowed through s, not s's reference (#1071).
+            "a reference from s is returned to the caller",
         ],
         ..E
     },
@@ -1335,7 +1339,7 @@ const BOOK: &[Snippet] = &[
         id: "m_13_return_ref_from_vec",
         must_contain: &[
             "v is an immutable borrow from the caller",
-            "a reference from v is returned to the caller; the data it points to is not copied",
+            "a reference to v[0], reborrowed through v, is returned to the caller; the data it points to is not copied",
             "first reads from v",
             "L7 f holds an immutable reference",
             "L7 Immutable borrow from v to f: first's signature gives the reference it returns the same lifetime as its argument",
@@ -1347,6 +1351,10 @@ const BOOK: &[Snippet] = &[
             "f is the owner of the resource",
             "Return immutably borrowed resource from f to *f",
             "L7 v's resource is no longer immutably borrowed",
+            // `&v[0]` is a reference to one element, reborrowed through
+            // v, not v's reference (#1071).
+            "a reference from v is returned to the caller",
+            "v's immutable borrow ends",
         ],
         ..E
     },
