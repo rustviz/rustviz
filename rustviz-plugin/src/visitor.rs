@@ -5758,19 +5758,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// moves and its drop drawn as "the temporary tuple (x, y)" (#327),
   /// so it gets no `(temporary)` column as well.
   fn is_drawn_tuple_scrutinee(&self, expr: &'tcx Expr<'tcx>) -> bool {
-    use rustc_hir::Node;
-    if !matches!(expr.kind, ExprKind::Tup(_)) || self.tuple_scrutinee_moves(expr).is_empty() {
-      return false;
-    }
-    match self.tcx.parent_hir_node(expr.hir_id) {
-      Node::Expr(m) => match m.kind {
-        ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) => s.hir_id == expr.hir_id,
-        ExprKind::Let(l) if l.init.hir_id == expr.hir_id => matches!(self.tcx.parent_hir_node(m.hir_id),
-          Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == m.hir_id)),
-        _ => false,
-      },
-      _ => false,
-    }
+    matches!(expr.kind, ExprKind::Tup(_)) && self.tuple_scrutinee_position(expr) && !self.tuple_scrutinee_moves(expr).is_empty()
   }
 
   /// A macro's or literal's temporary. A variable moved into it

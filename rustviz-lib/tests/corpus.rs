@@ -16632,6 +16632,50 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "everything in it but its field name, which was moved out of it",
         ],
     },
+    TooltipExpect {
+        name: "tuple_scrutinee_var_field_977",
+        // #977: a variable's field in a tuple scrutinee (`(x, y.name)`,
+        // `(w, p.0)`, a Box's `(v, b.name)`) is moved into the temporary
+        // tuple like x, and dropped with it: before the `else` block if the
+        // pattern doesn't match, at the end of the matched block (edition
+        // 2024), after the match for `match`. Checked with rustc and a
+        // Drop-printing type. Main drew no move on the field's column and
+        // said its resource is dropped at the end of `main` (false: nothing
+        // is left in it), and the tuple's drop listed only x. With `(Some(c),
+        // n)` on `(u, q.name)` main said q.name might still be dropped at the
+        // end of `main` if the branch didn't run; the tuple took it either way.
+        must_contain: &[
+            "y.name's resource is moved into the temporary tuple (x, y.name)",
+            "The pattern didn't match, so the temporary tuple (x, y.name) is dropped here, before the else branch runs, and with it x's and y.name's resources",
+            "The temporary tuple (x, y.name) is dropped here, at the end of the if branch, and with it y.name's resource",
+            "y goes out of scope. y.name was moved out earlier, so only y.tag is dropped.",
+            "y.name goes out of scope. No resource is dropped: y.name was moved or dropped in every branch above.",
+            "p.0's resource is moved into the temporary tuple (w, p.0)",
+            "The temporary tuple (w, p.0) is dropped after this arm, when the match ends, and with it p.0's resource",
+            "The temporary tuple (w, p.0) is dropped after this arm, when the match ends, and with it w's and p.0's resources",
+            "p goes out of scope. p.0 was moved out earlier, so only p.1 is dropped.",
+            "q.name's resource is moved into the temporary tuple (u, q.name)",
+            "The pattern didn't match, so the temporary tuple (u, q.name) is dropped here, and with it u's and q.name's resources",
+            "q goes out of scope. q.name was moved out earlier, so only q.tag is dropped.",
+            "q.name goes out of scope. No resource is dropped: q.name was moved or dropped in every branch above.",
+            "b.name's resource is moved into the temporary tuple (v, b.name)",
+            "The temporary tuple (v, b.name) is dropped here, at the end of the if branch, and with it b.name's resource",
+            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation is freed.",
+        ],
+        must_not_contain: &[
+            "=y.name goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. Its resource is dropped.",
+            "=The pattern didn't match, so the temporary tuple (x, y.name) is dropped here, before the else branch runs, and with it x's resource",
+            "=p.0 goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+            "=The temporary tuple (w, p.0) is dropped after this arm, when the match ends, and with it w's resource",
+            "q.name was moved in at least one branch above",
+            "q.name goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "q.name was moved out in at least one branch above",
+            "=b.name goes out of scope. Its resource is dropped.",
+            "=b goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
