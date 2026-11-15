@@ -1073,17 +1073,19 @@ pub fn ref_var_borrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
     && typeck.expr_ty_adjusted(addr_of).builtin_deref(true).is_some_and(|t| t.is_ref())
 }
 
-/// True iff `addr_of` is `&mut r` with `r` a local reference variable
-/// that rustc coerces through r (`let s: &mut String = &mut m;`,
-/// `f(&mut m)` with `f(s: &mut String)`): the adjustments deref twice
-/// and borrow `*m`, so this is the reborrow `&mut *m` (#926). The
-/// complement of `ref_var_borrow` for `&mut <local ref>`.
+/// True iff `addr_of` is `&mut r` / `&r` with `r` a local reference
+/// variable that rustc coerces through r (`let s: &mut String = &mut
+/// m;`, `let s: &String = &x;`, `f(&mut m)` with `f(s: &mut String)`,
+/// `f(&x)` with `f(s: &String)`): the adjustments deref twice and
+/// borrow `*m` / `*x`, so this is the reborrow `&mut *m` / `&*x` (#926,
+/// #939). Not `&x` unsized to a `&dyn Trait`: that derefs once and
+/// borrows x itself (the trait object is x's `&T`).
 pub fn is_coerced_ref_var_reborrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
-  let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, Mutability::Mut, inner) = addr_of.kind else { return false };
+  let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, inner) = addr_of.kind else { return false };
   matches!(inner.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
     && typeck.expr_ty(inner).is_ref()
     && !typeck.expr_ty_adjusted(addr_of).builtin_deref(true).is_some_and(|t| t.is_ref())
-    && !typeck.expr_adjustments(addr_of).is_empty()
+    && typeck.expr_adjustments(addr_of).iter().filter(|a| matches!(a.kind, Adjust::Deref(_))).count() >= 2
 }
 
 /// True iff `operand` (the expression under a `&` / `&mut`, or a

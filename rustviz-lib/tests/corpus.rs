@@ -16490,6 +16490,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "add reads from/writes to gn",
         ],
     },
+    // ─── `&gx` coerced to `&String` is a reborrow of `*gx` (#939) ───
+    TooltipExpect {
+        name: "shared_coerced_reborrow_939",
+        must_contain: &[
+            // let s: &String = &gx; reads like the written `&*x2`.
+            "Immutable reborrow from gx to s",
+            "Immutable reborrow from x2 to q",
+            "Return immutably borrowed resource from s to *gx",
+            "Return immutably borrowed resource from q to *x2",
+            "the resource gx points to is immutably borrowed by s",
+            "s no longer borrows the resource gx points to",
+            "s immutably borrows a resource",
+            // let t: &String = &gm; (gm: &mut String) reads like `&*gw`.
+            "Immutable reborrow from gm to t",
+            "Immutable reborrow from gw to u",
+            "Return immutably borrowed resource from t to *gm",
+            "Return immutably borrowed resource from u to *gw",
+            "the resource gm points to is immutably borrowed by t through gm; gm is read-only while the borrow is live",
+            // show_str(&gy) borrows what gy points to, for the call.
+            "the resource gy points to is immutably borrowed by show_str",
+            "show_str reads from gy",
+            "show_str no longer borrows the resource gy points to",
+            // `&mut gv` unsized to `&mut dyn Write` points to gv itself:
+            // not a reborrow (its dots are #947).
+            "Mutable borrow from gv to dv",
+            "Return mutably borrowed resource from dv to gv",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from gx to s",
+            "Return immutably borrowed resource from s to gx",
+            "Immutable borrow from gm to t",
+            "Return immutably borrowed resource from t to gm",
+            "gx is immutably borrowed by s",
+            "gy is immutably borrowed by show_str",
+            "Mutable reborrow from gv to dv",
+            "Return mutably borrowed resource from dv to *gv",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
