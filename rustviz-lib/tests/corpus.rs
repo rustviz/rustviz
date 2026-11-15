@@ -17658,6 +17658,40 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["s's resource is mutably borrowed by r; s can't be used until the borrow ends"],
         must_not_contain: &["s's resource is mutably borrowed; s can't be used"],
     },
+    TooltipExpect {
+        name: "get_mut_param_967",
+        // #967: a write through a reference into part of what a `&mut Vec`
+        // parameter points to (`v.get_mut(0).unwrap()`, `&mut w[1]`,
+        // `if let Some(m) = u.get_mut(1)`) wasn't drawn on the parameter's
+        // column, while `v[0] += 1` is ("the resource v points to is
+        // modified through v[0]"). It is now, in that wording: v holds a
+        // reference, so "v's resource" would be false. `*n = ..` drops
+        // only the String in names[0], not the caller's Vec. The
+        // parameters' and x's own texts are unchanged. (The row test
+        // below pins which column each write is on: `*y = 7` and `*n =
+        // ..` were already stated on y's and n's columns.)
+        must_contain: &[
+            "the resource v points to is modified through x",
+            "the resource w points to is modified through r",
+            "the resource u points to is modified through m",
+            "*y is assigned a new value",
+            "*n acquires ownership of a new resource; its previous resource is dropped",
+            "v is a mutable borrow from the caller",
+            "v holds a mutable reference; it can read and write the borrowed resource",
+            "the resource v points to is mutably borrowed by x through v; v can't be used while the borrow is live",
+            "x no longer borrows the resource v points to",
+            "v's mutable borrow ends",
+            "the value x points to is modified through *x",
+            "x's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "v's resource is modified through x",
+            "w's resource is modified through r",
+            "names acquires ownership of a new resource",
+            "names goes out of scope. Its resource is dropped",
+            "the resource names points to is dropped",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -23431,6 +23465,30 @@ fn get_mut_writes_are_drawn_on_the_collection() {
                 Some(t) => w.is_some_and(|w| lines.iter().position(|l| l == t).is_some_and(|e| w < e)),
                 None => w.is_some(),
             }
+        });
+        assert!(dots.contains(&at), "`{}`: expected {:?} (then {:?}) on {}'s column at {:?}, found {:?}", line, write, then, column, at, dots);
+    }
+}
+
+/// #967: a write through a reference into part of what a `&mut Vec`
+/// parameter points to is drawn on the parameter's column, on the
+/// write's row, before the end of the reborrow it was done through.
+#[test]
+fn get_mut_writes_through_a_ref_param_are_drawn_on_it() {
+    let rv = run_with_local_backend("get_mut_param_967");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (column, line, write, then) in [
+        ("v", "*x += 1;", "the resource v points to is modified through x", "x no longer borrows the resource v points to"),
+        ("w", "*r *= 2;", "the resource w points to is modified through r", "r no longer borrows the resource w points to"),
+        ("u", "*m += 10;", "the resource u points to is modified through m", "m no longer borrows the resource u points to"),
+        ("t", "*y = 7;", "*y is assigned a new value", "y no longer borrows the resource t points to"),
+        ("names", "*n = String::from(\"z\");", "*n acquires ownership of a new resource; its previous resource is dropped",
+            "n no longer borrows the resource names points to"),
+    ] {
+        let at = (label_x(&tl, column), code_row_y(&code, line));
+        let dots = dots_where(&tl, |lines| {
+            let w = lines.iter().position(|l| l == write);
+            w.is_some_and(|w| lines.iter().position(|l| l == then).is_some_and(|e| w < e))
         });
         assert!(dots.contains(&at), "`{}`: expected {:?} (then {:?}) on {}'s column at {:?}, found {:?}", line, write, then, column, at, dots);
     }
