@@ -118,6 +118,11 @@ pub fn render_code_panel(
             y = y + LINE_SPACE;
             visual_row += 1;
             extra_line_num -= 1;
+            // Rows keyed after one of these: a second branch on the same
+            // source line as the first (`if c { (f, g) } else { (h, k) }`
+            // with two arrows in each) stacks its arrows below the
+            // first's (#1011).
+            extra_line_num += l_map.get(&visual_row).copied().unwrap_or(0);
         }
         if !is_synthetic_blank {
             source_line += 1;

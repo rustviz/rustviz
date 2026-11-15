@@ -243,6 +243,11 @@ pub enum ArmBind<'tcx> {
   /// Taken apart by a pattern whose variables are already declared
   /// (`let (a, b) = if …`, #1007).
   Pat(&'tcx Pat<'tcx>),
+  /// To a variable that may hold a value already (`v = if …` with v
+  /// owning a String, #1010): its old value is dropped where the
+  /// branch's value arrives, if the branch left it there (and its
+  /// type needs drop: the `bool`).
+  Reassign(ResourceTy, Evt, ResourceAccessPoint, bool),
 }
 
 /// A `let` binding with no initializer (`let x;`), remembered until
@@ -374,6 +379,18 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // pattern that were declared ahead of the conditional (`let (a, b) =
   // if …`, #1007): `define_lhs` leaves an existing variable alone.
   pub bind_existing: bool,
+  // While the branches' values of `v = if …` are paired with a v that
+  // may hold a value (#1010): v. Each branch is paired once it has
+  // been visited, where v's old value is dropped (see `ArmBind::Reassign`).
+  pub reassign_arms: Option<(ResourceAccessPoint, bool)>,
+  // While a branch's value is paired (`pair_pat_with_value`): the
+  // scope that branch body is (its block, or a match arm's body), which
+  // owns the temporary of a literal value the pattern leaves parts of
+  // (#1011).
+  pub branch_value_owner: Option<rustc_hir::HirId>,
+  // The drops of those temporaries, drawn once the value is paired: line,
+  // temporary, its type.
+  pub branch_temp_drops: Vec<(usize, ResourceAccessPoint, String)>,
 
   // A constructor call's HirId -> the range of event ids its arguments
   // used (moves and copies into the constructor). The constructor is
@@ -856,6 +873,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       defer_arm_binds: None,
       deferred_arm_binds: HashMap::new(),
       bind_existing: false,
+      reassign_arms: None,
+      branch_value_owner: None,
+      branch_temp_drops: Vec::new(),
       ctor_arg_ids: HashMap::new(),
       exit_drops: HashSet::new(),
       unlent_refs: HashSet::new(),
@@ -2297,6 +2317,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `match_rhs` for one branch of an `if` / `match` whose value is
   /// bound to `lhs`, recording the event ids it used (`rhs_arm_ids`).
   fn match_rhs_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt) {
+    // `v = if …` reassigning v (#1010): each branch is paired after it
+    // is visited, when what it did to v is known. (A nested
+    // conditional pairs each of its own branches.)
+    if let Some((old, drops)) = self.reassign_arms.clone().filter(|_| !branch_value_is_conditional(body)) {
+      self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Reassign(lhs, evt, old, drops));
+      return;
+    }
     if self.defer_arm_binds.is_some_and(|within| self.arm_value_uses_local_in(body, within)) {
       self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Rhs(lhs, evt));
       return;
@@ -2350,6 +2377,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       match bind {
         ArmBind::Rhs(lhs, evt) => self.match_rhs(lhs, body, evt),
         ArmBind::Pat(pat) => self.pair_pat_with_value(pat, body),
+        ArmBind::Reassign(lhs, evt, old, drops) => self.reassign_from_arm(lhs, body, evt, old, drops),
       }
     }
     self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
@@ -2386,7 +2414,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.bind_pat_arms(pat, value);
       return;
     }
-    if self.defer_arm_binds.is_some_and(|within| self.arm_value_uses_local_in(body, within)) {
+    // (Also a literal whose parts the pattern leaves in a temporary
+    // of the branch, #1011: it is declared in the branch, once visited.)
+    if self.defer_arm_binds.is_some_and(|within| self.arm_value_uses_local_in(body, within))
+      || pat_leaves_parts(pat) {
       self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Pat(pat));
       return;
     }
@@ -2404,8 +2435,60 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     let prev = std::mem::replace(&mut self.bind_existing, true);
+    let owner = match body.kind {
+      ExprKind::Block(b, _) => b.hir_id,
+      _ => body.hir_id,
+    };
+    let prev_owner = self.branch_value_owner.replace(owner);
     self.bind_pat(pat, value, false);
     self.bind_existing = prev;
+    self.branch_value_owner = prev_owner;
+    for (line, tmp, ty) in std::mem::take(&mut self.branch_temp_drops) {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: "at the end of this statement".to_owned(), literal: true, early: false, part: None, id });
+    }
+  }
+
+  /// Pairs the value of branch body `body`, now visited, with `lhs`, a
+  /// variable that may hold a value already (`v = if c { f } else { g
+  /// };`, #1010), as `v = f;` in the branch would: v's old value, if
+  /// it still has it here, is dropped where the new one arrives. A
+  /// branch of type `!` gives no value and drops nothing; nor does one
+  /// whose value is v's own (`v = if c { v } else { g };`): v keeps its
+  /// value on that path.
+  fn reassign_from_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt, old: ResourceAccessPoint, drops: bool) {
+    let Some(value) = branch_value_expr(body) else { return };
+    if self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value).is_none_or(|ty| ty.is_never()) {
+      return;
+    }
+    if matches!(value.kind, ExprKind::Path(_)) && fetch_rap(value, &self.tcx, &self.raps).is_some_and(|r| r.hash() == old.hash()) {
+      return;
+    }
+    let held = self.rap_ownership_now(old.name());
+    let n_events = self.preprocessed_events.len();
+    self.match_rhs(lhs, body, evt);
+    let is_old = |r: &ResourceTy| r.hash() == old.hash();
+    let new = &self.preprocessed_events[n_events..];
+    if !drops || held == Ownership::None {
+      return;
+    }
+    let line = new.iter()
+      .find(|(_, ev)| matches!(ev,
+        ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is_old(to)))
+      .map_or_else(|| span_end_line(&value.span, &self.tcx), |(l, _)| *l);
+    let maybe_moved = held == Ownership::Maybe;
+    let by_cond = maybe_moved && self.moved_by_chain_condition(&old);
+    self.add_external_event(line, ExternalEvent::OwnerDropAtReassign {
+      ro: old,
+      id: *self.unique_id,
+      maybe_moved,
+      by_cond,
+      parts: None,
+      maybe_init: None,
+      payload: false,
+    });
+    *self.unique_id += 1;
   }
 
   /// Removes from `preprocessed_events`, and returns in order, the
@@ -9887,6 +9970,26 @@ pub fn branch_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> 
     _ => return None,
   }
   Some(out)
+}
+
+/// Whether branch body `body`'s value is itself an `if` / `match`, each
+/// of whose branches is paired on its own.
+pub fn branch_value_is_conditional<'tcx>(body: &'tcx Expr<'tcx>) -> bool {
+  branch_value_expr(body).is_some_and(|v| !v.span.from_expansion()
+    && matches!(v.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)))
+}
+
+/// Whether `pat` leaves a part of the value it takes apart unbound (a
+/// `_`, a `..`): that part stays in the value (#439, #1011).
+pub fn pat_leaves_parts(pat: &Pat<'_>) -> bool {
+  let mut leaves = false;
+  pat.walk_always(|p| match p.kind {
+    PatKind::Wild => leaves = true,
+    PatKind::Tuple(_, dd) | PatKind::TupleStruct(_, _, dd) if dd.as_opt_usize().is_some() => leaves = true,
+    PatKind::Struct(_, _, rest) if rest.is_some() => leaves = true,
+    _ => {}
+  });
+  leaves
 }
 
 /// The expression branch body `body` evaluates to: its block's tail,
