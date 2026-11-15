@@ -1816,7 +1816,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, early, part, id })
         }
         None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, early: false, part: None, id }),
-        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id }),
+        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early: None }),
       }
     }
     while let Some(t) = tuples.pop() {
@@ -1993,6 +1993,180 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// Whether the `return` `ret` sits directly in a loop body: only
+  /// statements and blocks, or bodies drawn inline (an `if let` whose
+  /// pattern always matches, a one-arm `match`), between them, not an
+  /// `if` / `match` drawn as a branch, a closure or a `let`'s value. Its
+  /// drops are then drawn nowhere near it (#1020): the loop body is drawn
+  /// inline, and may not run, so they stay at the scope ends.
+  fn directly_in_loop_body(&self, ret: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    use rustc_span::DesugaringKind;
+    let mut child = ret.hir_id;
+    for (id, node) in self.tcx.hir_parent_iter(ret.hir_id) {
+      let from = std::mem::replace(&mut child, id);
+      match node {
+        Node::Stmt(_) | Node::Block(_) | Node::Arm(_) => {}
+        Node::Expr(Expr { kind: ExprKind::Loop(..), .. }) => return true,
+        Node::Expr(Expr { kind: ExprKind::Block(..) | ExprKind::DropTemps(_), .. }) => {}
+        // A `while` loop's body is the then-branch of the `if` it
+        // desugars to.
+        Node::Expr(x @ Expr { kind: ExprKind::If(c, then, _), .. }) => {
+          let inline = if x.span.is_desugaring(DesugaringKind::WhileLoop) {
+            true
+          } else {
+            !x.span.from_expansion() && self.always_matching_if_let(c)
+          };
+          if !inline || then.hir_id != from {
+            return false;
+          }
+        }
+        // A `for` loop's body is the `Some(pat) =>` arm of the `match`
+        // it desugars to.
+        Node::Expr(Expr { kind: ExprKind::Match(_, _, rustc_hir::MatchSource::ForLoopDesugar), .. }) => {}
+        Node::Expr(x @ Expr { kind: ExprKind::Match(_, [_], rustc_hir::MatchSource::Normal), .. })
+          if !x.span.from_expansion() => {}
+        _ => return false,
+      }
+    }
+    false
+  }
+
+  /// A `return` directly in a loop body (`directly_in_loop_body`): its
+  /// drops aren't drawn, so the scope ends after it, where they are,
+  /// say they happen at the `return` instead (#1020). Recorded here, and
+  /// marked on those events once the function is visited
+  /// (`mark_loop_returns`). A variable the loop body declared never
+  /// reaches its closing brace on a path through the body (it is dropped
+  /// at the `return`, or at an exit drawn with its own drops); one
+  /// declared before the loop, the loop's iterator and its head's
+  /// temporaries are dropped at the `return` only if it runs (the loop
+  /// body may not).
+  fn note_return_in_loop(&mut self, ret: &'tcx Expr<'tcx>) {
+    if self.in_closure(ret) || ret.span.from_expansion() || !self.directly_in_loop_body(ret) {
+      return;
+    }
+    let Some(len) = self.exit_frames.iter().rev().find_map(|f| match f {
+      ExitFrame::Loop { len, .. } => Some(*len),
+      ExitFrame::Branch { .. } => None,
+    }) else { return };
+    let line = expr_to_line(ret, &self.tcx);
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut vars = Vec::new();
+    for (idx, name) in self.in_scope.iter().enumerate().rev() {
+      if !seen.insert(name.as_str()) {
+        continue;
+      }
+      let Some(rd) = self.raps.get(name) else { continue };
+      if rd.rap.is_fn() || self.skip_raps.contains(name) || (rd.rap.is_temporary() && rd.scope < line) {
+        continue;
+      }
+      vars.push((rd.rap.clone(), idx >= len));
+    }
+    let iters = self.loop_iterators.iter().map(|(_, ro)| ro.clone()).collect();
+    self.loop_returns.push(LoopReturn { line, vars, iters });
+  }
+
+  /// Marks the scope ends that the `return`s `note_return_in_loop`
+  /// recorded come before (#1020), once the function is visited:
+  /// - the `GoOutOfScope` of each variable in scope at one of them that
+  ///   comes after it (not one at an exit drawn with its own drops, in
+  ///   `exit_ids`, nor that of a later variable sharing the column, #589):
+  ///   for a variable the loop body declared, its first, at the body's
+  ///   end;
+  /// - the drop of a `for` loop's head temporary where the loop ends;
+  /// - the drop of a `for` loop's iterator variable where its loop ends.
+  pub fn mark_loop_returns(&mut self, exit_ids: &HashSet<usize>) {
+    let returns = std::mem::take(&mut self.loop_returns);
+    if returns.is_empty() {
+      return;
+    }
+    // Each scope end of a variable: its line, and whether it is a later
+    // variable's of the same name (#589).
+    let shared_lines = |ro: &ResourceAccessPoint| self.raps.get(ro.name())
+      .filter(|rd| rd.rap.hash() == ro.hash()).map(|rd| rd.extra_scopes.clone()).unwrap_or_default();
+    let mut ends: Vec<(usize, u64)> = Vec::new();
+    {
+      let mut collect = |line: usize, ev: &mut ExternalEvent| {
+        if let ExternalEvent::GoOutOfScope { ro, id, .. } = ev {
+          if !exit_ids.contains(id) {
+            ends.push((line, *ro.hash()));
+          }
+        }
+      };
+      walk(self.preprocessed_events.as_mut_slice(), &mut collect);
+      walk_map(&mut *self.event_line_map, &mut collect);
+    }
+    // (return line, variable) -> the line of the scope end it comes
+    // before: every one after it, or (`always`) the first.
+    let ends_after = |r: &LoopReturn, ro: &ResourceAccessPoint, always: bool, line: usize| {
+      if line <= r.line || shared_lines(ro).contains(&line) {
+        return false;
+      }
+      !always || ends.iter().filter(|(l, h)| h == ro.hash() && *l > r.line).map(|(l, _)| *l).min() == Some(line)
+    };
+    let mut mark = |line: usize, ev: &mut ExternalEvent| match ev {
+      ExternalEvent::GoOutOfScope { ro, early, id, .. } if !exit_ids.contains(id) => {
+        let mut e = EarlyReturns::default();
+        for r in &returns {
+          match r.vars.iter().find(|(v, _)| v.hash() == ro.hash()) {
+            Some((_, true)) if ends_after(r, ro, true, line) => { e.always.get_or_insert(r.line); }
+            Some((_, false)) if ends_after(r, ro, false, line) => e.maybe.push(r.line),
+            _ => {}
+          }
+        }
+        if e != EarlyReturns::default() {
+          *early = Some(e);
+        }
+      }
+      // A `for` loop's head temporary, where the loop ends.
+      ExternalEvent::TemporaryDrop { ro, when, id, .. } if !exit_ids.contains(id) => {
+        let lines: Vec<usize> = returns.iter()
+          .filter(|r| r.line < line && r.vars.iter().any(|(v, always)| v.hash() == ro.hash() && !always))
+          .map(|r| r.line).collect();
+        let suffix = crate::svg_generator::hover_messages::or_at_returns(&lines);
+        if !lines.is_empty() && !when.ends_with(&suffix) {
+          when.push_str(&suffix);
+        }
+      }
+      ExternalEvent::LoopIteratorDrop { ro, left: LoopLeft::End, early, .. } => {
+        // (Events of the functions visited before are walked too: leave
+        // theirs alone.)
+        let lines: Vec<usize> = returns.iter().filter(|r| r.line < line && r.iters.iter().any(|i| i.hash() == ro.hash())).map(|r| r.line).collect();
+        if !lines.is_empty() {
+          *early = lines;
+        }
+      }
+      _ => {}
+    };
+    walk(self.preprocessed_events.as_mut_slice(), &mut mark);
+    walk_map(&mut *self.event_line_map, &mut mark);
+
+    // Every event, those in branches too (with each branch's line map).
+    fn walk(events: &mut [(usize, ExternalEvent)], f: &mut impl FnMut(usize, &mut ExternalEvent)) {
+      for (line, ev) in events.iter_mut() {
+        walk_one(*line, ev, f);
+      }
+    }
+    fn walk_map(map: &mut BTreeMap<usize, Vec<ExternalEvent>>, f: &mut impl FnMut(usize, &mut ExternalEvent)) {
+      for (line, evs) in map.iter_mut() {
+        for ev in evs.iter_mut() {
+          walk_one(*line, ev, f);
+        }
+      }
+    }
+    fn walk_one(line: usize, ev: &mut ExternalEvent, f: &mut impl FnMut(usize, &mut ExternalEvent)) {
+      if let ExternalEvent::Branch { branches, .. } = ev {
+        for b in branches.iter_mut() {
+          walk(&mut b.e_data, f);
+          walk_map(&mut b.line_map, f);
+        }
+      } else {
+        f(line, ev);
+      }
+    }
+  }
+
   /// A `?` inside a `for` loop over an iterator variable returns early
   /// on `Err` / `None`, dropping that iterator with the rest (#649).
   /// Conditional, so it ends no column (like `note_try`'s dots).
@@ -2043,7 +2217,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub fn add_loop_iterator_drop(&mut self, ro: ResourceAccessPoint, line: usize, left: LoopLeft) -> usize {
     let id = *self.unique_id;
     *self.unique_id += 1;
-    self.add_external_event(line, ExternalEvent::LoopIteratorDrop { ro, left, id });
+    self.add_external_event(line, ExternalEvent::LoopIteratorDrop { ro, left, id, early: Vec::new() });
     id
   }
 
@@ -3776,6 +3950,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if !self.in_closure(expr) {
           self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
         }
+        self.note_return_in_loop(expr);
       }
 
       // a block eg: {}
@@ -5759,7 +5934,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
-                    ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id },
+                    ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None },
                 ));
                 *self.unique_id += 1;
             }
@@ -5836,12 +6011,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let if_left = Self::left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
     let else_left = Self::left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
     for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
-      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id }));
+      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
 
     for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     if_decl.extend(if_inner);
@@ -6324,7 +6499,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), holds: None, id };
+        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), holds: None, id, early: None };
         if inline {
           self.add_external_event(end, gos);
         } else {
@@ -8867,7 +9042,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     liveness = &liveness - &decl_vars;
     let left = Self::left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     decl_vars.extend(decl);

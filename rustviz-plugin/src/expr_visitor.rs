@@ -484,6 +484,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `break 'outer` out of the loops inside `'outer` (#592). Each is
   // paired with its loop's id (the desugared `loop` expression).
   pub loop_iterators: Vec<(rustc_hir::HirId, ResourceAccessPoint)>,
+  // The `return`s directly in a loop body (#1020): see `LoopReturn`.
+  pub loop_returns: Vec<LoopReturn>,
   // The `(temporary N)` column of each unbound temporary that a field
   // is moved out of (`make_q().a`), by the expression that makes it
   // (#469).
@@ -796,6 +798,22 @@ pub struct MaybeEntry {
   pub nested: Option<bool>,
 }
 
+/// A `return` directly in a loop body (#1020), not in an `if` / `match`
+/// drawn as a branch: what it drops, which the scope ends after it say.
+/// See `note_return_in_loop`.
+pub struct LoopReturn {
+  /// The `return`'s line.
+  pub line: usize,
+  /// Each variable (or temporary) in scope there, and whether its scope
+  /// end is never reached on a path through the loop body (`always`:
+  /// declared in the body, whose closing brace the `return` comes
+  /// before).
+  pub vars: Vec<(ResourceAccessPoint, bool)>,
+  /// The iterator variables of the `for` loops it leaves (`for s in
+  /// it`), dropped where those loops end otherwise.
+  pub iters: Vec<ResourceAccessPoint>,
+}
+
 /// See `ExprVisitor::exit_frames`.
 #[derive(Clone)]
 pub enum ExitFrame {
@@ -895,6 +913,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       temp_drops_noted: HashSet::new(),
       unbranched_temps: HashSet::new(),
       loop_iterators: Vec::new(),
+      loop_returns: Vec::new(),
       temp_cols: HashMap::new(),
       nested_ext_temps: HashMap::new(),
       let_else_literal_temps: HashMap::new(),
@@ -5680,7 +5699,7 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     vars.sort_by_key(|r| *r.hash());
     vars.dedup_by_key(|r| *r.hash());
     for var in vars {
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, holds: None, id: *self.unique_id });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
     }
 }
@@ -5842,6 +5861,7 @@ pub fn register_iflet_let_bindings(
                     ro: r.clone(),
                     holds: None,
                     id: *self.unique_id,
+                    early: None,
                 });
                 *self.unique_id += 1;
             }
@@ -7935,6 +7955,8 @@ pub fn print_out_of_scope(&mut self){
   // Except the drop of an `unbranched_temps` temporary, which is
   // `early`: a dot that doesn't end its column.
   let exit_drops = std::mem::take(&mut self.exit_drops);
+  // (Including those kept in a branch, for `mark_loop_returns`.)
+  let exit_ids = exit_drops.clone();
   self.preprocessed_events.retain(|(_, e)| !exit_drops.contains(&e.get_id())
     || matches!(e, ExternalEvent::TemporaryDrop { early: true, .. }));
   // Visit RAPs in declaration order, not `self.raps`' hash order, so
@@ -7972,16 +7994,17 @@ pub fn print_out_of_scope(&mut self){
         }
       }
       if rap.is_global && !duplicate {
-        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id });
+        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
       for &scope in rap.extra_scopes.iter() {
-        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id });
+        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
     }
   }
+  self.mark_loop_returns(&exit_ids);
 }
   
   /// A borrow held by a reference declared inside an `if` / `match`
