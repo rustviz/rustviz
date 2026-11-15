@@ -1294,6 +1294,13 @@ pub enum TupleDropAt {
     Else,
     /// The pattern didn't match, and there is no else.
     NoElse,
+    /// The pattern always matches the literal it takes apart (`(x, _)`
+    /// on `(f, s)`, `Some(x)` on `Some(f)`, #981), so the else branch
+    /// never runs: nothing is dropped on it. The dot says so.
+    NeverElse,
+    /// The same, with no else: the body is never skipped (a body drawn
+    /// as a branch, e.g. one that always returns).
+    NeverSkipped,
     /// After this match arm, when the match ends.
     MatchArm,
     /// After this match arm, at the end of the statement the match is
