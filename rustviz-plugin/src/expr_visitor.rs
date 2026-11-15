@@ -3583,8 +3583,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// copies it (no borrow). Empty when the closure's borrows end with
   /// the call; None when the closure captures r some other way (all of
   /// `*self`, for `self.len()`, or `self` itself, as a `move` closure
-  /// does), or the call's result may hold its borrows without holding
-  /// the closure (rustc says it does).
+  /// does), or a value between the closure and the call's result keeps
+  /// its borrows without holding the closure. The call's result itself
+  /// may (`boxed(|x| … self.n)` returning `Box<dyn Fn + 'a>`, #1104):
+  /// when rustc says the closure's loans outlive the call, the result
+  /// holds them.
   fn closure_field_captures(&self, call: &'tcx Expr<'tcx>, closure: &'tcx Expr<'tcx>, r_id: rustc_hir::HirId, r: &ResourceAccessPoint) -> Option<Vec<(ResourceTy, bool)>> {
     use rustc_middle::hir::place::{PlaceBase, ProjectionKind};
     let ExprKind::Closure(c) = closure.kind else { return None };
@@ -3610,11 +3613,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         break;
       }
       if !holds_closure(t) {
-        if !matches!(p.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
-          || self.loans_issued_in_kept_after_call(p.span, closure.span) != Some(false) {
+        if !matches!(p.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
           return None;
         }
-        kept = false;
+        match self.loans_issued_in_kept_after_call(p.span, closure.span) {
+          Some(false) => kept = false,
+          // `boxed(|x| … self.n)` returning `Box<dyn Fn + 'a>`: the
+          // result doesn't name the closure but holds its borrows (#1104).
+          Some(true) if p.hir_id == call.hir_id => {}
+          _ => return None,
+        }
         break;
       }
       cur = p;

@@ -247,12 +247,23 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// precise (location-sensitive subset relations) and can end a loan
     /// earlier than rustc does, which would draw a lender free where
     /// rustc still rejects using it.
+    ///
+    /// Cleanup blocks (the unwind path of a call that may panic) are
+    /// left out: no code of the program runs there, only drops, and
+    /// their span is the end of the scope. A `Box<dyn Fn + '_>` that
+    /// is called and then moved into `drop` is still dropped on the
+    /// unwind path out of the call, so the loan its closure holds is
+    /// in scope there, but the program can use the lender right after
+    /// `drop(g)` (#1104).
     fn nll_loan_end_lines(&self, body_with_facts: &BodyWithBorrowckFacts<'tcx>) -> HashMap<BorrowIndex, usize> {
         let body = &body_with_facts.body;
         let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
         let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
         let mut ends: HashMap<BorrowIndex, usize> = HashMap::new();
         for (block, data) in body.basic_blocks.iter_enumerated() {
+            if data.is_cleanup {
+                continue;
+            }
             for statement_index in 0..=data.statements.len() {
                 let location = Location { block, statement_index };
                 cursor.seek_before_primary_effect(location);

@@ -20673,6 +20673,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Return immutably borrowed resource from f to self",
         ],
     },
+    TooltipExpect {
+        name: "boxed_closure_borrow_1104",
+        // #1104: `let g = boxed(|x| … self.n)` with `boxed<'a>(f: impl Fn(&i32)
+        // -> bool + 'a) -> Box<dyn Fn(&i32) -> bool + 'a>` drew no borrow into
+        // g (just "Move from boxed to g"), so self's dot on the
+        // `self.other.push(0);` row said "self's mutable borrow ends" while
+        // `g(&1)` on the next row reads self.n through the closure, and in
+        // `local` s's borrow ended on the `println!` row. Checked with rustc:
+        // `self.n += 1` anywhere before g is dropped is E0506 ("borrow might
+        // be used here, when `g` is dropped and runs the destructor for type
+        // `Box<dyn Fn(&i32) -> bool>`"), `self.other.push(0)` compiles, and
+        // `s.push(..)` after `g(&1)` is E0502. After `drop(h)`, `t.push('c')`
+        // compiles. Where the borrows end is pinned by
+        // `a_boxed_closure_keeps_its_borrows_until_dropped`.
+        must_contain: &[
+            "self holds a mutable reference, but self.n is immutably borrowed by g, so self.n is read-only while the borrow is live",
+            "self.n's value is immutably borrowed by g; self.n is read-only while the borrow is live",
+            "g holds a value that immutably borrows self.n (g isn't a reference itself)",
+            "Immutable borrow from self.n to g: boxed's signature gives the value it returns the same lifetime as its argument; g isn't a reference, but its value holds one",
+            "Return immutably borrowed value from g to self.n",
+            "self.n's value is no longer immutably borrowed",
+            "s's resource is immutably borrowed by g; s is read-only while the borrow is live",
+            "g holds a value that immutably borrows s's resource (g isn't a reference itself)",
+            "Immutable borrow from s to g: boxed's signature gives the value it returns the same lifetime as its argument; g isn't a reference, but its value holds one",
+            "s's resource is no longer borrowed by println!, but is still immutably borrowed by g",
+            "Return immutably borrowed resource from g to s",
+            "t's resource is immutably borrowed by h; t is read-only while the borrow is live",
+            "Immutable borrow from t to h: boxed's signature gives the value it returns the same lifetime as its argument; h isn't a reference, but its value holds one",
+            "h's immutable borrow ends",
+            "Return immutably borrowed resource from h to t",
+            "u's resource is no longer borrowed by println!, but is still immutably borrowed by k",
+            "m holds a value that immutably borrows the data r points to (m isn't a reference itself)",
+            "Immutable borrow from r to m: boxed's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
+        ],
+        must_not_contain: &[
+            // g / h drawn as plain owners of what boxed returned, with no
+            // borrow (the false "ends" texts are positional; see the
+            // geometry test).
+            "=Move from boxed to g",
+            "=Move from boxed to h",
+            // g borrows only self.n, not all of self (#1101's fallback).
+            "Immutable borrow from self to g",
+            "the resource self points to is immutably borrowed by g through self",
+            "borrows the data self points to",
+            "currently shared through it",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28019,4 +28066,37 @@ fn a_closure_find_does_not_keep_borrows_only_the_receiver_field() {
         let texts = state_lines_with_tooltip(&tl, text);
         assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
     }
+}
+
+/// #1104 (`boxed_closure_borrow_1104`): a closure returned as `Box<dyn Fn
+/// + 'a>` keeps its captures' borrows in g until g is dropped (it has drop
+/// glue). #1105's plugin drew no borrow into g: self's mutable borrow
+/// ended on the `self.other.push(0);` row, before `g(&1)` reads self.n,
+/// and s's borrow ended on the `println!` row of `local`. With `drop(h)`
+/// the borrow ends there, not at the end of the scope (the unwind path out
+/// of `h(&1)` still drops h, but no code runs there).
+#[test]
+fn a_boxed_closure_keeps_its_borrows_until_dropped() {
+    let rv = run_with_local_backend("boxed_closure_borrow_1104");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let next_row = |at: f64, next: &str| code_rows_y(&code, next).into_iter().find(|&y| y > at).unwrap_or_else(|| panic!("no {:?} after y={}", next, at));
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    // kept: self's borrow ends where g is dropped, at the closing brace.
+    let kept_end = next_row(row("g(&1)"), "}");
+    assert_eq!(ys("self's mutable borrow ends"), vec![kept_end], "self's borrow must end where g is dropped");
+    assert_eq!(ys("self.n's value is no longer immutably borrowed"), vec![kept_end]);
+    // local: s stays borrowed past `println!` until g is dropped.
+    let local_end = next_row(row("let ok = g(&1);"), "}");
+    let s_back = ys("s's resource is no longer immutably borrowed");
+    assert_eq!(s_back, vec![local_end], "s given back before g is dropped");
+    // dropped: t is given back on the `drop(h);` row, before `t.push('c');`.
+    assert_eq!(ys("t's resource is no longer immutably borrowed"), vec![row("drop(h);")]);
+    assert_eq!(ys("h's immutable borrow ends"), vec![row("drop(h);")]);
+    // through_ref: m's borrow of what r points to lasts at least until m
+    // is called (rustc keeps it until m is dropped; r's own borrow of v,
+    // drawn to the closing brace, shows that).
+    let m_end = ys("m's immutable borrow ends");
+    assert_eq!(m_end.len(), 1, "{:?}", m_end);
+    assert!(m_end[0] >= row("let hit = m(&1);"), "m's borrow ends before m is called: {:?}", m_end);
 }

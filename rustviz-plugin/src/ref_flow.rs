@@ -252,6 +252,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
+    // A parameter type that must outlive a lifetime the result carries
+    // can be stored in the result under that lifetime: `boxed<'a>(f:
+    // impl Fn() + 'a) -> Box<dyn Fn() + 'a>` boxes `f`, and the result
+    // holds the borrows the closure captured (#1104). The result names
+    // only `'a`, not the parameter, so this comes from the `F: 'a`
+    // bound.
+    if let Some(def_id) = def_id {
+      for (clause, _) in self.tcx.predicates_of(def_id).predicates.iter() {
+        let Some(pred) = clause.as_type_outlives_clause() else { continue };
+        let ty::OutlivesPredicate(t, r) = pred.skip_binder();
+        if let ty::Param(p) = t.kind() {
+          if regions.contains(&r) && carries_ref(p.index) && !params.contains(&p.index) {
+            params.push(p.index);
+          }
+        }
+      }
+    }
     if regions.is_empty() && params.is_empty() {
       return Some(Vec::new());
     }
