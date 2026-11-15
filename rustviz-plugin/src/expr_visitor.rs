@@ -3559,7 +3559,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if of_ref_var {
           self.stored_ref_var_lends.insert((place.name().to_owned(), from_ro.real_name()));
         }
-        let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new());
+        let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new(), Vec::new(), false);
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
@@ -7689,50 +7689,57 @@ pub fn print_out_of_scope(&mut self){
         first_and_moved(self.preprocessed_events, base, rd.assigned_at, &mut seen);
         let from = seen.0.unwrap_or(rd.assigned_at);
         let moved = seen.1;
-        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false })
+        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new() })
       })
       .collect();
     // A borrow a call may have stored in `v` (`keep(&mut v, &s)`,
     // #513) keeps s shared until the loan ends, as a live `let r = &s;`
     // does (#974). Once `v` is moved on (`let w = v;`, `let h = H { v
     // };`, `let w = pass(v);`), the borrow goes with its value: w holds
-    // it from there on (#990), and the call's text names w too.
-    let mut moved_on: Vec<(usize, Vec<String>)> = Vec::new();
+    // it from there on (#990), and the call's text names w too. A copy
+    // of v (`v: Option<&String>`) holds it as well as v, each while it
+    // is in use; a move in one arm of an `if` / `match` hands it on
+    // only on that arm's path (#997).
+    let mut moved_on: Vec<(usize, StoredIn)> = Vec::new();
+    let mut ends: Vec<(usize, Vec<Sharer>)> = Vec::new();
+    let raps = &self.raps;
+    let hash_of = |name: &str| raps.get(name).map(|rd| *rd.rap.hash());
     for sb in self.stored_borrows.iter() {
-      let Some(rd) = self.raps.get(&sb.holder) else { continue };
-      let mut holder = sb.holder.clone();
-      let mut hash = *rd.rap.hash();
-      let mut from = sb.at;
-      let mut names: Vec<String> = Vec::new();
-      loop {
-        let next = holder_move(self.preprocessed_events, sb.id, &holder, from, sb.until);
-        if !sb.is_mut {
-          sharers.push(Sharer {
-            name: holder.clone(), hash, from, to: sb.until, moved: next.as_ref().map(|(m, _)| *m), lenders: vec![sb.lender.clone()], from_kept_call: false, stored: true,
-          });
-        }
-        let Some((m, Some(dest))) = next else { break };
-        if names.contains(&dest) || dest == sb.holder {
-          break;
-        }
-        hash = self.raps.get(&dest).map_or(hash, |rd| *rd.rap.hash());
-        names.push(dest.clone());
-        holder = dest;
-        from = m;
+      let Some(hash) = hash_of(&sb.holder) else { continue };
+      let list = stored_call_list(self.preprocessed_events, sb.id).unwrap_or(self.preprocessed_events);
+      let mut walk = HolderWalk {
+        lender: sb.lender.clone(), hash_of: &hash_of, seen: vec![sb.holder.clone()], holders: Vec::new(), hops: Vec::new(),
+      };
+      walk.follow(list, &sb.holder, hash, sb.at, sb.until, false);
+      // The call's borrow end is the event after it (see
+      // `stored_borrow`).
+      ends.push((sb.id + 1, walk.holders.clone()));
+      if !sb.is_mut {
+        sharers.extend(walk.holders);
       }
-      if !names.is_empty() {
-        moved_on.push((sb.id, names));
+      if !walk.hops.is_empty() {
+        let pick = |copy: bool| walk.hops.iter().filter(|h| h.1 == copy).map(|h| h.0.clone()).collect::<Vec<_>>();
+        let moved = pick(false);
+        // Two moves of one holder's value are in different arms, so
+        // only one of them happens (`match k { 0 => { let w = v; } 1 =>
+        // { let x = v; } }`); otherwise they're one after the other.
+        let alternatives = walk.hops.iter().enumerate()
+          .any(|(i, h)| !h.1 && walk.hops[i + 1..].iter().any(|o| !o.1 && o.2 == h.2));
+        moved_on.push((sb.id, StoredIn(None, moved, pick(true), alternatives)));
       }
     }
-    for (id, names) in moved_on.iter() {
-      set_stored_moved_to(self.preprocessed_events, *id, names);
+    for (die_id, holders) in ends.iter() {
+      end_stored_borrow_in_arms(self.preprocessed_events, *die_id, holders, self.unique_id);
+    }
+    for (id, holders) in moved_on.iter() {
+      set_stored_moved_to(self.preprocessed_events, *id, holders);
       for evs in self.event_line_map.values_mut() {
         for e in evs.iter_mut() {
           if let ExternalEvent::PassByStaticReference { id: i, stored_in, .. }
             | ExternalEvent::PassByMutableReference { id: i, stored_in, .. } = e
           {
             if i == id {
-              stored_in.1 = names.clone();
+              stored_in.set_holders(holders);
             }
           }
         }
@@ -7753,6 +7760,7 @@ pub fn print_out_of_scope(&mut self){
         lenders: vec![lender.clone()],
         from_kept_call: *head_call,
         stored: false,
+        gaps: Vec::new(),
       });
     }
     let mut noted: HashMap<usize, Vec<String>> = HashMap::new();
@@ -7952,6 +7960,7 @@ fn hoist_ends_in(events: &mut [(usize, ExternalEvent)], outer: &HashSet<Resource
 
 /// A reference or holder that shares one or more lenders, for
 /// `note_sharers_across_calls`.
+#[derive(Clone)]
 struct Sharer {
   name: String,
   hash: u64,
@@ -7970,6 +7979,15 @@ struct Sharer {
   /// A borrow a call may have stored in it (`keep(&mut v, &s)`, #974),
   /// not a loan of its own in `borrow_map`.
   stored: bool,
+  /// Lines (first, last) it doesn't hold the loan on: the rest of an
+  /// arm that moved its value on (`if c { let w = v; .. }`, #997).
+  gaps: Vec<(usize, usize)>,
+}
+
+impl Sharer {
+  fn in_gap(&self, line: usize) -> bool {
+    self.gaps.iter().any(|&(a, b)| a <= line && line <= b)
+  }
 }
 
 /// The first line from `start` on that an event of `events` (branches
@@ -8005,77 +8023,277 @@ fn first_and_moved(events: &[(usize, ExternalEvent)], base: &str, start: usize, 
   }
 }
 
-/// The first move, after line `start` and up to `until`, of the value
-/// `holder` (a variable or a field of one) holds, and the variable or
-/// field it moves to (#990): `w` for `let w = v;`, `h.v` for `let h =
-/// H { v };`, `h2.v` for holder `h.v` and `let h2 = h;`, and for `let
-/// w = pass(v);` the variable the call's result goes to. Only a move on
-/// the path of the call `call_id` that stored the borrow (in the same
-/// event list, not in an arm of a later `if` / `match`) is followed; a
-/// move in an arm, or into something without a column of its own
-/// (`take(v)`, `stash(&mut z, v)`), gives the line without a
-/// destination.
-fn holder_move(events: &[(usize, ExternalEvent)], call_id: usize, holder: &str, start: usize, until: usize) -> Option<(usize, Option<String>)> {
-  fn moves<'e>(events: &'e [(usize, ExternalEvent)], nested: bool, out: &mut Vec<(usize, bool, &'e ResourceTy, &'e ResourceTy)>) {
-    for (line, ev) in events {
-      match ev {
-        ExternalEvent::Branch { branches, .. } => {
-          for b in branches {
-            moves(&b.e_data, true, out);
+/// The event list (top level or an arm's) that holds the call `call_id`
+/// that may have stored a borrow (`keep(&mut v, &s)`).
+fn stored_call_list(events: &[(usize, ExternalEvent)], call_id: usize) -> Option<&[(usize, ExternalEvent)]> {
+  events.iter().find_map(|(_, ev)| match ev {
+    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| stored_call_list(&b.e_data, call_id)),
+    _ => None,
+  }).or_else(|| events.iter().any(|(_, ev)| ev.get_id() == call_id
+    && matches!(ev, ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. })).then_some(events))
+}
+
+/// A move or copy of the value a stored borrow's holder holds (#990,
+/// #997), on `line`, to `dest` (None: into something without a column
+/// of its own, `take(v)`, or not followed).
+struct Hop<'e> {
+  line: usize,
+  dest: Option<String>,
+  copy: bool,
+  /// The event list it is in: where `dest` goes on from.
+  list: &'e [(usize, ExternalEvent)],
+  /// The last line of the `if` / `match` arm it is in, when that arm
+  /// is nested in the list the walk looks at: only that arm's path
+  /// hands the borrow on.
+  arm_end: Option<usize>,
+}
+
+/// The moves and copies, after line `from` and up to `hi`, of the value
+/// `holder` (a variable or a field of one) holds, in `list` and its
+/// nested conditionals: `w` for `let w = v;`, `h.v` for `let h = H { v
+/// };`, `h2.v` for holder `h.v` and `let h2 = h;`, and for a move `let
+/// w = pass(v);` the variable the call's result goes to. A move in a
+/// loop body ends the hold there, without a destination.
+fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize, hi: usize, arm_end: Option<usize>, out: &mut Vec<Hop<'e>>) {
+  for (line, ev) in list {
+    let (src, to, copy) = match ev {
+      ExternalEvent::Branch { branches, branch_type, .. } => {
+        for (a, b) in branches.iter().enumerate() {
+          if matches!(branch_type, BranchType::Loop(..)) {
+            let mut inner = Vec::new();
+            holder_hops(&b.e_data, holder, from, hi, None, &mut inner);
+            out.extend(inner.into_iter().filter(|h| !h.copy).map(|h| Hop { dest: None, list, arm_end, ..h }));
+          } else {
+            let (_, end) = branch_type.get_start_end(a);
+            holder_hops(&b.e_data, holder, from, hi.min(end), Some(end), out);
           }
         }
-        ExternalEvent::Move { from, to, .. } => out.push((*line, nested, from, to)),
-        _ => {}
+        continue;
+      }
+      ExternalEvent::Move { from, to, .. } => (from, to, false),
+      // A copy of the whole value (`let w = v;`, `H { v }`), not of a
+      // part of it or of what a reference in it points to.
+      ExternalEvent::Copy { from, to, is_partial: false, into_closure: false, closure_value: false, pointee: None, .. } => (from, to, true),
+      _ => continue,
+    };
+    if *line <= from || *line > hi {
+      continue;
+    }
+    let ResourceTy::Value(f) = src else { continue };
+    if f.is_fn() {
+      continue;
+    }
+    let Some(rest) = holder.strip_prefix(f.name().as_str()).filter(|r| r.is_empty() || r.starts_with('.')) else { continue };
+    let dest = match to {
+      // A copy passed to a call isn't followed into its result (`let n
+      // = count(v);` returns a number, not the borrow).
+      ResourceTy::Value(callee) if callee.is_fn() && !copy => list.iter().find_map(|(l, e)| match e {
+        ExternalEvent::Move { from: ResourceTy::Value(c), to: ResourceTy::Value(d), .. } if l == line && c == callee && !d.is_fn() =>
+          Some(d.name().to_owned()),
+        _ => None,
+      }),
+      ResourceTy::Value(d) if !d.is_fn() => Some(format!("{}{}", d.name(), rest)),
+      _ => None,
+    };
+    out.push(Hop { line: *line, dest, copy, list, arm_end });
+  }
+}
+
+/// The last line, after `from` and up to `hi`, that an event of
+/// `events` (branches included) uses `holder` or the variable it is a
+/// field of: where it stops holding a borrow when nothing drops it
+/// later (a Copy value has no drop).
+fn last_use(events: &[(usize, ExternalEvent)], holder: &str, from: usize, hi: usize) -> Option<usize> {
+  let base = holder.split('.').next().unwrap_or(holder);
+  let named = |r: &ResourceTy| matches!(r, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))
+    && r.real_name().split('.').next() == Some(base);
+  let mut last = None;
+  for (line, ev) in events {
+    let found = match ev {
+      ExternalEvent::Branch { branches, .. } => branches.iter().filter_map(|b| last_use(&b.e_data, holder, from, hi)).max(),
+      ExternalEvent::Bind { .. } | ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }
+      | ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
+      | ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. }
+        if *line > from && *line <= hi =>
+      {
+        let (a, b) = ResourceAccessPoint_extract(ev);
+        (named(a) || named(b)).then_some(*line)
+      }
+      _ => None,
+    };
+    last = last.max(found);
+  }
+  last
+}
+
+/// Follows a borrow a call may have stored (`keep(&mut v, &s)`, #513)
+/// through the moves and copies of its holder's value while the loan
+/// is live (#990, #997).
+struct HolderWalk<'w> {
+  lender: String,
+  hash_of: &'w dyn Fn(&str) -> Option<u64>,
+  seen: Vec<String>,
+  /// Each holder, as a sharer of the lender.
+  holders: Vec<Sharer>,
+  /// The variables the borrow went on to, in order, whether by a copy
+  /// (true) or a move, and the holder it went on from.
+  hops: Vec<(String, bool, String)>,
+}
+
+impl HolderWalk<'_> {
+  /// `holder` holds the borrow from line `from` on, up to `hi` at the
+  /// latest; `list` is the event list it got it in. With `trim` (a copy
+  /// of the value, or a value moved on in one arm), it holds it until
+  /// its last use, not until the loan ends; so does a value that is
+  /// copied (a Copy value has no drop to keep it in use).
+  fn follow(&mut self, list: &[(usize, ExternalEvent)], holder: &str, hash: u64, from: usize, hi: usize, trim: bool) {
+    let mut hops = Vec::new();
+    holder_hops(list, holder, from, hi, None, &mut hops);
+    hops.sort_by_key(|h| h.line);
+    // A move in `list` itself ends its hold; one in an arm only for the
+    // rest of that arm.
+    let cut = hops.iter().find(|h| !h.copy && h.arm_end.is_none()).map(|h| h.line);
+    let end = cut.unwrap_or(hi);
+    hops.retain(|h| h.line <= end);
+    // (It still holds the value on the move's line.)
+    let mut gaps: Vec<(usize, usize)> = hops.iter().filter(|h| !h.copy).filter_map(|h| h.arm_end.map(|e| (h.line + 1, e))).collect();
+    let to = if trim || hops.iter().any(|h| h.copy && h.dest.is_some()) {
+      last_use(list, holder, from, end).unwrap_or(from)
+    } else {
+      hi
+    };
+    dead_arm_gaps(list, holder, from, to, &mut gaps);
+    self.holders.push(Sharer {
+      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps,
+    });
+    for h in hops {
+      let Some(dest) = h.dest else { continue };
+      if self.seen.contains(&dest) {
+        continue;
+      }
+      self.seen.push(dest.clone());
+      self.hops.push((dest.clone(), h.copy, holder.to_owned()));
+      let hash = (self.hash_of)(&dest).unwrap_or(hash);
+      self.follow(h.list, &dest, hash, h.line, h.arm_end.map_or(hi, |e| e.min(hi)), trim || h.copy || h.arm_end.is_some());
+    }
+  }
+}
+
+/// The lines of the arms of an `if` / `match` in `list` that a holder
+/// whose hold ends on `to`, in another arm, is dead in from its last use
+/// there on (#997): `keepv(&mut v, &s); if c { look(&s); } else {
+/// v.len(); }` leaves s unborrowed in the `if` arm, as rustc does.
+fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
+  for (_, ev) in list {
+    let ExternalEvent::Branch { branches, branch_type, .. } = ev else { continue };
+    if matches!(branch_type, BranchType::Loop(..)) {
+      continue;
+    }
+    let ranges: Vec<(usize, usize)> = (0..branches.len()).map(|a| branch_type.get_start_end(a)).collect();
+    let Some(j) = ranges.iter().position(|&(a, b)| a <= to && to <= b) else { continue };
+    for (i, b) in branches.iter().enumerate() {
+      let (start, end) = ranges[i];
+      if i == j {
+        dead_arm_gaps(&b.e_data, holder, from, to, out);
+      } else if end > from {
+        let first = last_use(&b.e_data, holder, from, end).map_or(start.max(from + 1), |u| u + 1);
+        if first <= end {
+          out.push((first, end));
+        }
       }
     }
   }
-  // The event list the call is in.
-  fn list_of(events: &[(usize, ExternalEvent)], call_id: usize) -> Option<&[(usize, ExternalEvent)]> {
-    events.iter().find_map(|(_, ev)| match ev {
-      ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| list_of(&b.e_data, call_id)),
-      _ => None,
-    }).or_else(|| events.iter().any(|(_, ev)| ev.get_id() == call_id
-      && matches!(ev, ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. })).then_some(events))
-  }
-  let mut all = Vec::new();
-  moves(list_of(events, call_id).unwrap_or(events), false, &mut all);
-  let &(line, nested, from, to) = all.iter()
-    .filter(|(line, _, from, _)| *line > start && *line <= until && match from {
-      ResourceTy::Value(f) if !f.is_fn() => holder == f.name().as_str()
-        || holder.strip_prefix(f.name().as_str()).is_some_and(|rest| rest.starts_with('.')),
-      _ => false,
-    })
-    .min_by_key(|(line, _, _, _)| *line)?;
-  let ResourceTy::Value(f) = from else { return None };
-  let dest = match to {
-    _ if nested => None,
-    ResourceTy::Value(callee) if callee.is_fn() => {
-      // Moved into a call whose result goes on to a variable.
-      all.iter().find_map(|(l, n, fr, t)| match (fr, t) {
-        (ResourceTy::Value(c), ResourceTy::Value(dest)) if *l == line && !n && c == callee && !dest.is_fn() =>
-          Some(dest.name().to_owned()),
-        _ => None,
-      })
+}
+
+/// The last line in `start..=end` that one of a stored borrow's
+/// `holders` holds it on, if any.
+fn held_until(holders: &[Sharer], start: usize, end: usize) -> Option<usize> {
+  holders.iter().filter_map(|h| {
+    let mut l = h.to.min(end).min(h.moved.unwrap_or(usize::MAX));
+    while let Some(&(a, _)) = h.gaps.iter().find(|&&(a, b)| a <= l && l <= b) {
+      l = a.checked_sub(1)?;
     }
-    ResourceTy::Value(dest) => Some(format!("{}{}", dest.name(), &holder[f.name().len()..])),
-    _ => None,
+    (l >= start && l >= h.from).then_some(l)
+  }).max()
+}
+
+/// The end of a borrow a call stored (`keepv(&mut u, &t)`, #513) is at
+/// the loan's last line, the last holder's last use on any path. When
+/// that's inside an arm of an `if` / `match`, it was drawn on the
+/// lender's column outside the arms, in the middle of the conditional,
+/// and the join drew the column twice over (#997). End it in every arm
+/// instead: in the arm holding that line there, and in each other arm
+/// after the last line a holder holds it on that arm's path (`let x =
+/// u; .. x.len()`), or where the arm starts if none does.
+fn end_stored_borrow_in_arms(events: &mut Vec<(usize, ExternalEvent)>, die_id: usize, holders: &[Sharer], unique_id: &mut usize) -> bool {
+  let is_die = |e: &ExternalEvent| e.get_id() == die_id && matches!(e,
+    ExternalEvent::StaticDie { from: ResourceTy::Index(..), .. } | ExternalEvent::MutableDie { from: ResourceTy::Index(..), .. });
+  if let Some(i) = events.iter().position(|(_, e)| is_die(e)) {
+    if arm_holding(events, events[i].0).is_some() {
+      let ev = events.remove(i);
+      place_in_arms(events, ev, holders, unique_id);
+    }
+    return true;
+  }
+  events.iter_mut().any(|(_, e)| match e {
+    ExternalEvent::Branch { branches, .. } => branches.iter_mut().any(|b| end_stored_borrow_in_arms(&mut b.e_data, die_id, holders, unique_id)),
+    _ => false,
+  })
+}
+
+/// The `if` / `match` among `events` (not a loop) with an arm that
+/// holds `line`.
+fn arm_holding(events: &[(usize, ExternalEvent)], line: usize) -> Option<usize> {
+  events.iter().position(|(_, e)| matches!(e, ExternalEvent::Branch { branches, branch_type, .. }
+    if !matches!(branch_type, BranchType::Loop(..))
+      && (0..branches.len()).any(|a| { let (s, t) = branch_type.get_start_end(a); s <= line && line <= t })))
+}
+
+/// `end_stored_borrow_in_arms`: puts the borrow end `ev` into each arm
+/// of the conditional among `events` that holds its line (and so on
+/// into nested ones), or among `events` after its line's events.
+fn place_in_arms(events: &mut Vec<(usize, ExternalEvent)>, ev: (usize, ExternalEvent), holders: &[Sharer], unique_id: &mut usize) {
+  let Some(k) = arm_holding(events, ev.0) else {
+    let at = events.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
+    events.insert(at, ev);
+    return;
   };
-  Some((line, dest))
+  let ExternalEvent::Branch { branches, live_vars, branch_type, .. } = &mut events[k].1 else { return };
+  // The lender gets its value back in each arm, so it has a column in
+  // the conditional.
+  if let ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } = &ev.1 {
+    if let Some(l) = to.extract_rap() {
+      live_vars.insert(l.clone());
+    }
+  }
+  for (a, arm) in branches.iter_mut().enumerate() {
+    let (s, t) = branch_type.get_start_end(a);
+    let line = if s <= ev.0 && ev.0 <= t { ev.0 } else { held_until(holders, s, t).unwrap_or(s) };
+    let mut copy = ev.1.clone();
+    if a > 0 {
+      if let ExternalEvent::StaticDie { id, .. } | ExternalEvent::MutableDie { id, .. } = &mut copy {
+        *id = *unique_id;
+        *unique_id += 1;
+      }
+    }
+    place_in_arms(&mut arm.e_data, (line, copy), holders, unique_id);
+  }
 }
 
 /// Records, on the call event `id` that may have stored a borrow
-/// (`keep(&mut v, &s)`), the variables v's value moves on to (#990).
-fn set_stored_moved_to(events: &mut [(usize, ExternalEvent)], id: usize, names: &[String]) {
+/// (`keep(&mut v, &s)`), the variables v's value moves on to (#990)
+/// and the copies of it that hold the borrow too (#997).
+fn set_stored_moved_to(events: &mut [(usize, ExternalEvent)], id: usize, holders: &StoredIn) {
   for (_, ev) in events.iter_mut() {
     match ev {
       ExternalEvent::Branch { branches, .. } => {
         for b in branches.iter_mut() {
-          set_stored_moved_to(&mut b.e_data, id, names);
+          set_stored_moved_to(&mut b.e_data, id, holders);
         }
       }
       ExternalEvent::PassByStaticReference { id: i, stored_in, .. }
       | ExternalEvent::PassByMutableReference { id: i, stored_in, .. } if *i == id => {
-        stored_in.1 = names.to_vec();
+        stored_in.set_holders(holders);
       }
       _ => {}
     }
@@ -8103,7 +8321,7 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
           .filter(|s| {
             let started = s.from < *line
               || (s.from_kept_call && s.from == *line && kept.iter().any(|(l, n)| l == line && n == lender.name()));
-            started && s.to >= *line && s.moved.is_none_or(|m| m >= *line)
+            started && s.to >= *line && s.moved.is_none_or(|m| m >= *line) && !s.in_gap(*line)
               && s.lenders.iter().any(|l| l == lender.name())
           })
           .map(|s| s.name.clone())
@@ -8134,7 +8352,7 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
         };
         let mut names: Vec<String> = Vec::new();
         for s in sharers.iter().filter(|s| (s.stored || stored_end) && s.name != holder
-            && s.from <= *line && s.to > *line && s.moved.is_none_or(|m| m > *line)
+            && s.from <= *line && s.to > *line && s.moved.is_none_or(|m| m > *line) && !s.in_gap(*line)
             && s.lenders.iter().any(|l| l == lender.name()))
         {
           if !names.contains(&s.name) {

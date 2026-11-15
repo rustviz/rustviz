@@ -17321,6 +17321,70 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d's resource is no longer borrowed by look",
         ],
     },
+    // ─── a stored borrow's holders: copies, and moves in one arm (#997) ───
+    TooltipExpect {
+        name: "stored_borrow_holder_copy_or_arm_997",
+        // Main named v at look(&s) although only its copy w is used
+        // after it, left the copies out of keep's text, and in the arms
+        // said the lender was free (or held by a holder that's dead on
+        // that path). Texts that are right on other rows (the real end,
+        // the other arm) are checked by row in
+        // `a_stored_borrow_is_held_by_its_live_holders_on_each_path`.
+        must_contain: &[
+            "keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, a copy of v, is in use",
+            "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
+            "keep reads from a; keep's signature lets it store this reference in va, so a stays borrowed while va is in use, and while wa, a copy of va, is in use",
+            "a's resource is no longer borrowed by look, but is still immutably borrowed by va and wa",
+            "a's resource is no longer borrowed by look, but is still immutably borrowed by va",
+            "keep reads from b; keep's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while wb and xb, copies of vb, are in use",
+            "b's resource is no longer borrowed by look, but is still immutably borrowed by xb",
+            "keepv reads from t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use, and after the borrow moves on to x, while x is in use",
+            "t's resource is no longer borrowed by look, but is still immutably borrowed by x",
+            "t's resource is no longer borrowed by look, but is still immutably borrowed by u",
+            "keepv reads from d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use, and after the borrow moves on to wd or xd (whichever branch runs), while that variable is in use",
+            "d's resource is no longer borrowed by look, but is still immutably borrowed by wd",
+            "d's resource is no longer borrowed by look, but is still immutably borrowed by xd",
+            "d's resource is no longer borrowed by look, but is still immutably borrowed by vd",
+            "keep reads from e; keep's signature lets it store this reference in ve, so e stays borrowed while ve is in use, and while we, a copy of ve, is in use",
+            "e's resource is no longer borrowed by look, but is still immutably borrowed by we",
+            "e's resource is no longer borrowed by look, but is still immutably borrowed by ve",
+            "f's resource is no longer borrowed by look, but is still immutably borrowed by vf",
+        ],
+        must_not_contain: &[
+            // Copies hold the borrow too.
+            "=keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "=keep reads from b; keep's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
+            // v / vb / wb aren't used after the copy: they hold nothing.
+            "s's resource is no longer borrowed by look, but is still immutably borrowed by v",
+            "b's resource is no longer borrowed by look, but is still immutably borrowed by vb",
+            "but is still immutably borrowed by wb",
+            // On the if arm's path ve is dead.
+            "but is still immutably borrowed by ve and we",
+            // wd and xd are alternatives, not one after the other.
+            "moves on to wd, then xd",
+        ],
+    },
+    TooltipExpect {
+        name: "stored_borrow_end_in_arms_997",
+        // Main said t was free after look(&t) in the `else if` arm while
+        // u still held it, and its keep texts left out x / y. Where the
+        // borrow ends in each arm is checked by row in
+        // `a_stored_borrow_is_held_by_its_live_holders_on_each_path`.
+        must_contain: &[
+            "keepv reads from t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use, and after the borrow moves on to x, while x is in use",
+            "t's resource is no longer borrowed by look, but is still immutably borrowed by u",
+            "keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in w, so m stays borrowed while w is in use, and after the borrow moves on to y, while y is in use",
+            "a's resource is no longer borrowed by look, but is still immutably borrowed by va",
+            "s's resource is no longer borrowed by look, but is still immutably borrowed by v",
+            "keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and after the borrow moves on to wb, then yb, while each of them is in use",
+            "b's resource is no longer borrowed by look, but is still immutably borrowed by yb",
+        ],
+        must_not_contain: &[
+            "(whichever branch runs)",
+            "=keepv reads from t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use",
+            "=keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in w, so m stays borrowed while w is in use",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -23146,6 +23210,74 @@ fn a_stored_borrow_moves_on_with_its_holders_value() {
         let free: Vec<_> = owner.iter().filter(|(a, b)| b.min(end_row) - a.max(store_row) > 0.5).collect();
         if !free.is_empty() {
             failures.push(format!("{name}: drawn as \"{owner_text}\" at {free:?}, between the store (y={store_row}) and the end (y={end_row})"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #997: after `keep(&mut v, &s)` may store `&s` in v, the borrow is
+/// held by whatever holds v's value while it is in use, path by path
+/// (rustc's loan liveness): both v and a copy of it (`let w = v;` with
+/// `v: Option<&String>`) until their own last uses; after a move in one
+/// arm, the new owner on that arm's path and v on the others; and on an
+/// arm where v isn't used again, nothing. rustc rejects moving the
+/// lender right after each `look` below that names a holder, and
+/// accepts it after f's in the if arm (and t's / a's in the last arm of
+/// `stored_borrow_end_in_arms_997`). Main named v after the copy (s,
+/// b), only v (a), and in the arms said the lender was free (t, d) or
+/// held by a holder that's dead there (e, f). A loan that ends inside
+/// an arm now ends in every arm, after that path's last holder's last
+/// use (x.len(), u.len(), y.len(), w.len(), va.len()); main drew one end
+/// outside the arms, mid-conditional.
+#[test]
+fn a_stored_borrow_is_held_by_its_live_holders_on_each_path() {
+    let (copy_or_arm, in_arms) = ("stored_borrow_holder_copy_or_arm_997", "stored_borrow_end_in_arms_997");
+    let still = |l: &str, h: &str| format!("{l}'s resource is no longer borrowed by look, but is still immutably borrowed by {h}");
+    let ended = |l: &str, kind: &str| format!("{l}'s resource is no longer {kind} borrowed");
+    // (fixture, the text, its row's source, which of the rows showing it)
+    let cases: Vec<(&str, String, &str, usize)> = vec![
+        (copy_or_arm, still("s", "w"), "let n = look(&s);", 0),
+        (copy_or_arm, still("a", "va and wa"), "let na = look(&a);", 0),
+        (copy_or_arm, still("a", "va"), "let ma = look(&a);", 0),
+        (copy_or_arm, still("b", "xb"), "let nb = look(&b);", 0),
+        (copy_or_arm, still("t", "x"), "let n = look(&t);", 0),
+        (copy_or_arm, still("t", "u"), "let n = look(&t);", 1),
+        (copy_or_arm, still("d", "wd"), "let n0 = look(&d);", 0),
+        (copy_or_arm, still("d", "xd"), "let n1 = look(&d);", 0),
+        (copy_or_arm, still("d", "vd"), "let n2 = look(&d);", 0),
+        (copy_or_arm, still("e", "we"), "let ne = look(&e);", 0),
+        (copy_or_arm, still("e", "ve"), "let ne = look(&e);", 1),
+        (copy_or_arm, ended("f", "immutably"), "let nf = look(&f);", 0),
+        (copy_or_arm, still("f", "vf"), "let nf = look(&f);", 1),
+        (copy_or_arm, ended("t", "immutably"), "println!(\"{} {}\", x.len(), n);", 0),
+        (copy_or_arm, ended("t", "immutably"), "println!(\"{} {}\", u.len(), n);", 0),
+        (in_arms, ended("t", "immutably"), "println!(\"{}\", x.len());", 0),
+        (in_arms, still("t", "u"), "let n = look(&t);", 0),
+        (in_arms, ended("t", "immutably"), "println!(\"{} {}\", u.len(), n);", 0),
+        (in_arms, ended("t", "immutably"), "let n = look(&t);", 1),
+        (in_arms, ended("m", "mutably"), "println!(\"{}\", y.len());", 0),
+        (in_arms, ended("m", "mutably"), "println!(\"{}\", w.len());", 0),
+        (in_arms, ended("a", "immutably"), "println!(\"{} {}\", va.len(), n);", 0),
+    ];
+    let mut failures = Vec::new();
+    for name in [copy_or_arm, in_arms] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let mine: Vec<&(&str, String, &str, usize)> = cases.iter().filter(|c| c.0 == name).collect();
+        for (_, text, src, nth) in &mine {
+            let row = code_rows_y(&code, src)[*nth];
+            let ys: Vec<f64> = dots_listing_tooltip(&timeline, text).iter().map(|d| d.1).collect();
+            if !ys.iter().any(|y| (y - row).abs() < 1.0) {
+                failures.push(format!("{name}: \"{text}\" should be on `{src}` (#{nth}, y={row}), got {ys:?}"));
+            }
+            // A holder named on a row it doesn't hold the borrow on. (A
+            // borrow's end is checked only where it's listed: it is also
+            // at the start of an arm no holder reaches.)
+            let rows: Vec<f64> = mine.iter().filter(|c| c.1 == *text).map(|c| code_rows_y(&code, c.2)[c.3]).collect();
+            let extra: Vec<&f64> = ys.iter().filter(|y| !rows.iter().any(|r| (*y - r).abs() < 1.0)).collect();
+            if text.contains("but is still") && !extra.is_empty() {
+                failures.push(format!("{name}: \"{text}\" also at {extra:?}"));
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

@@ -4082,8 +4082,8 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         // (`point(&mut hold, &t)`, #513): the borrow lasts past
         // the call, until the borrow checker ends it.
         let stored_suffix: String = match external_event {
-            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to), .. }
-            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to), .. } => {
+            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives), .. }
+            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives), .. } => {
                 let styled_place = styled_name_html(place);
                 // The place's value moves on while the borrow is live
                 // (`let w = hold;`, `let w = pass(hold);`): the borrow
@@ -4094,14 +4094,34 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
                         ", and after the borrow moves on to {0}, while {0} is in use",
                         styled_name_html(one),
                     ),
+                    // Moves in different arms: only one happens (#997).
+                    many if *alternatives => {
+                        let names: Vec<String> = many.iter().map(|n| styled_name_html(n)).collect();
+                        let (last, rest) = names.split_last().expect("two or more");
+                        format!(
+                            ", and after the borrow moves on to {}{} or {} (whichever branch runs), while that variable is in use",
+                            rest.join(", "), if rest.len() > 1 { "," } else { "" }, last,
+                        )
+                    }
                     many => format!(
                         ", and after the borrow moves on to {}, while each of them is in use",
                         many.iter().map(|n| styled_name_html(n)).collect::<Vec<_>>().join(", then "),
                     ),
                 };
+                // A copy of the place's value (`let w = hold;` with
+                // `hold: Option<&String>`) holds the borrow too (#997).
+                let copied = match copied_to.as_slice() {
+                    [] => String::new(),
+                    [one] => format!(", and while {}, a copy of {}, is in use", styled_name_html(one), styled_place),
+                    many => format!(
+                        ", and while {}, copies of {}, are in use",
+                        join_names(&many.iter().map(|n| styled_name_html(n)).collect::<Vec<_>>()),
+                        styled_place,
+                    ),
+                };
                 format!(
-                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}",
-                    styled_fn_name, styled_place, styled_from_name, styled_place, moved_on,
+                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}{}",
+                    styled_fn_name, styled_place, styled_from_name, styled_place, moved_on, copied,
                 )
             }
             _ => String::new(),
