@@ -8910,6 +8910,11 @@ pub fn print_out_of_scope(&mut self){
         Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new() })
       })
       .collect();
+    // An arm whose path ends the reference's loan (it returns, or the
+    // last use is in another arm) doesn't hold it after that end (#796).
+    for s in sharers.iter_mut() {
+      ended_arm_gaps(self.preprocessed_events, &s.name, &s.lenders, s.from, s.to, &mut s.gaps);
+    }
     // A borrow a call may have stored in `v` (`keep(&mut v, &s)`,
     // #513) keeps s shared until the loan ends, as a live `let r = &s;`
     // does (#974). Once `v` is moved on (`let w = v;`, `let h = H { v
@@ -9499,6 +9504,37 @@ fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to:
         dead_arm_gaps(&b.e_data, holder, from, to, out);
       } else if end > from {
         let first = last_use(&b.e_data, holder, from, end).map_or(start.max(from + 1), |u| u + 1);
+        if first <= end {
+          out.push((first, end));
+        }
+      }
+    }
+  }
+}
+
+/// The lines of the arms of an `if` / `match` in `list` that come after
+/// the end of `holder`'s loan of one of `lenders` drawn in that arm
+/// (#796): `let u = &h; if c { println!("{}", h); return; }
+/// println!("{}", u);` ends u's borrow at the arm's start, so the arm's
+/// `println!` leaves h unborrowed, not "still borrowed by u". The end's
+/// own line counts too unless the arm uses `holder` there.
+fn ended_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, lenders: &[String], from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
+  for (_, ev) in list {
+    let ExternalEvent::Branch { branches, branch_type, .. } = ev else { continue };
+    for (i, b) in branches.iter().enumerate() {
+      ended_arm_gaps(&b.e_data, holder, lenders, from, to, out);
+      if matches!(branch_type, BranchType::Loop(..)) {
+        continue;
+      }
+      let (_, end) = branch_type.get_start_end(i);
+      let ended = b.e_data.iter().filter_map(|(line, e)| match e {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. }
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. }
+          if r.name() == holder && lenders.iter().any(|n| n == l.name()) && from <= *line && *line <= to.min(end) => Some(*line),
+        _ => None,
+      }).min();
+      if let Some(l) = ended {
+        let first = if last_use(&b.e_data, holder, l - 1, l) == Some(l) { l + 1 } else { l };
         if first <= end {
           out.push((first, end));
         }

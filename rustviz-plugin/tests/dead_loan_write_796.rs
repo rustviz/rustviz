@@ -79,7 +79,7 @@ fn parts() {
     println!("{} {:?}", f.n, g);
 }
 
-// On the path that returns, the reference isn't used again.
+// On the path that returns, u isn't used again: its borrow ends at h = 2.
 fn returns(z: i32) {
     let mut h = 8;
     let u = &h;
