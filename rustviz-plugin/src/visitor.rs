@@ -2172,6 +2172,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       !(ids.contains(&e.get_id()) && exit_drops.contains(&e.get_id())));
   }
 
+  /// The dead `else` block `e` of a lone `if let` whose pattern always
+  /// matches (#987) was visited while event ids `ids` were handed out:
+  /// remove its events (and those binding its value to a `let`), which
+  /// never happen. Returns each variable in `outer` (those in scope
+  /// before the `if`) that one of them touched, with the line of the
+  /// first such event: where a `DeadElseNote` says the branch never runs.
+  fn discard_dead_else(&mut self, ids: std::ops::Range<usize>, e: &'tcx Expr<'tcx>, outer: &[String]) -> Vec<(usize, ResourceAccessPoint)> {
+    let rhs = self.rhs_arm_ids.get(&e.hir_id).copied();
+    let dead = |id: usize| ids.contains(&id) || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&id));
+    let mut gone: Vec<(usize, ExternalEvent)> = Vec::new();
+    self.preprocessed_events.retain(|(l, ev)| {
+      if dead(ev.get_id()) {
+        gone.push((*l, ev.clone()));
+        false
+      } else {
+        true
+      }
+    });
+    for evs in self.event_line_map.values_mut() {
+      evs.retain(|ev| !dead(ev.get_id()));
+    }
+    self.late_old_ends.retain(|(_, ev)| !dead(ev.get_id()));
+    // (A struct's field columns, `p.name`, count as `p`'s.)
+    let is_outer = |r: &ResourceAccessPoint| !r.is_fn()
+      && r.name().split('.').next().is_some_and(|base| outer.iter().any(|o| o == base));
+    gone.sort_by_key(|(l, ev)| (*l, ev.get_id()));
+    let mut notes: Vec<(usize, ResourceAccessPoint)> = Vec::new();
+    for (line, ev) in &gone {
+      let mut touched = HashSet::new();
+      collect_event_live_vars(std::slice::from_ref(&(*line, ev.clone())), &mut touched);
+      for r in in_decl_order(&touched) {
+        if is_outer(r) && !notes.iter().any(|(_, n)| n == r) {
+          notes.push((*line, r.clone()));
+        }
+      }
+    }
+    notes
+  }
+
   /// The ranges of event ids that bind the value of each of these
   /// branch bodies to a `let` (`rhs_arm_ids`), for those that have one.
   fn rhs_ids_of(&self, bodies: impl IntoIterator<Item = Option<&'tcx Expr<'tcx>>>) -> Vec<std::ops::Range<usize>> {
@@ -4451,6 +4490,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // literal the way it was built (`(x, _)` on `(f, s)`, `Some(x)` on
     // `Some(f)`, #981). Its body always runs.
     let always_matches = iflet_tuple.is_some_and(|l| self.let_always_matches(l.pat, l.init));
+    // Its `else` block, if any, is dead code (#987): rustc warns
+    // `irrefutable_let_patterns`, and the compiled program has no else
+    // block (its MIR drops what the block would have moved at scope
+    // end, unconditionally). The block is visited, so its variables
+    // and calls are known, but its events are discarded and the `if`
+    // is drawn as one without an `else`; a dot on each outer variable
+    // it used says the branch never runs (`dead_else_notes`).
+    let dead_else = always_matches && else_expr.is_some();
+    let mut dead_else_notes: Vec<(usize, ResourceAccessPoint)> = Vec::new();
     // Restored, not reset: this `if` may sit inside another branch
     // (#410).
     let prev_inside_branch = self.inside_branch;
@@ -4585,19 +4633,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // so what the `else` asks of the events so far (does `s`
         // still own a value its reassignment drops?) doesn't see the
         // if-body's moves (#245).
-        if_ev_early = Some(self.take_branch_events(if_ids.clone(), Some(if_expr), &pre_split));
+        // (A dead `else`'s events are discarded: the if-body's stay
+        // where they are, drawn as for an `if` without `else`.)
+        if !dead_else {
+          if_ev_early = Some(self.take_branch_events(if_ids.clone(), Some(if_expr), &pre_split));
+        }
         // Nor are the if-body's `if let` bindings: an exit in the
         // `else` doesn't drop them.
+        let outer: Vec<String> = self.in_scope[..entry_len].to_vec();
         self.in_scope.truncate(entry_len);
-        self.arm_borrows_next(&mut arm_borrows);
-        self.arm_frames.push(arm_lines(self, e));
-        self.visit_expr(e);
-        self.arm_frames.pop();
-        get_decl_of_expr(e, &self.tcx, &self.raps)
+        if dead_else {
+          // Nothing it does to the loans counts either.
+          let borrows = self.borrow_map.clone();
+          let arm_loans = self.arm_loans.len();
+          let lo = *self.unique_id;
+          self.arm_frames.push(arm_lines(self, e));
+          self.visit_expr(e);
+          self.arm_frames.pop();
+          self.borrow_map = borrows;
+          self.arm_loans.truncate(arm_loans);
+          dead_else_notes = self.discard_dead_else(lo..*self.unique_id, e, &outer);
+          HashSet::new()
+        } else {
+          self.arm_borrows_next(&mut arm_borrows);
+          self.arm_frames.push(arm_lines(self, e));
+          self.visit_expr(e);
+          self.arm_frames.pop();
+          get_decl_of_expr(e, &self.tcx, &self.raps)
+        }
       }
       None => HashSet::new(),
     };
-    let mut else_inner = self.raps_declared_since(else_hash_lo, &uninit_before);
+    // From here on, an `if` whose `else` is dead is drawn as one
+    // without an `else` (#987).
+    let else_expr = else_expr.filter(|_| !dead_else);
+    if dead_else {
+      // Whatever `let x;` locals it assigned are as the if branch
+      // left them: the else never runs.
+      self.uninit_locals = uninit_after_if.clone();
+      self.maybe_init_locals = maybe_init_after_if.clone();
+    }
+    let mut else_inner = if dead_else { HashSet::new() } else { self.raps_declared_since(else_hash_lo, &uninit_before) };
     if let Some(e) = else_expr {
       else_inner = &else_inner | &bindings_within(e, &self.tcx, &self.raps);
     }
@@ -4612,16 +4688,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let assigned_in_if: Vec<HirId> = known.iter()
       .filter(|id| !uninit_after_if.contains_key(id) && !maybe_init_after_if.contains(id))
       .copied().collect();
-    let maybe_init = self.join_uninit_locals(vec![
-      (Some(if_expr), uninit_after_if, maybe_init_after_if),
-      (else_expr, uninit_after_else, maybe_init_after_else),
-    ], &known);
+    // (A dead `else`, #987: only the if branch, which always runs.)
+    let maybe_init = if dead_else {
+      self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if, maybe_init_after_if)], &known)
+    } else {
+      self.join_uninit_locals(vec![
+        (Some(if_expr), uninit_after_if, maybe_init_after_if),
+        (else_expr, uninit_after_else, maybe_init_after_else),
+      ], &known)
+    };
     // A `let x;` local the if branch assigned that may still have
     // no value after the `if` (#244). (Not a reference: it owns
     // nothing a drop flag could drop.)
     let assigns_maybe_init = assigned_in_if.iter().any(|id| self.maybe_init_locals.contains(id)
       && !self.tcx.typeck(id.owner).node_type(*id).is_ref());
     let else_ids = if_ids.end..*self.unique_id;
+    // A dead `else`'s notes (#987), on its own lines, after the `if`
+    // as it is drawn. (Not on a line the if branch ends on, `} else {
+    // take(g); }`, where the column may have a dot of the if branch's.)
+    let if_end_line = self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line;
+    for (line, ro) in std::mem::take(&mut dead_else_notes).into_iter().filter(|(l, _)| *l > if_end_line) {
+      self.preprocessed_events.push((line, ExternalEvent::DeadElseNote { ro, id: *self.unique_id }));
+      *self.unique_id += 1;
+    }
     self.exit_frames.pop();
     // The `if let` bindings go out of scope with the `if`.
     self.in_scope.truncate(entry_len);
@@ -4853,9 +4942,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         liveness.insert(r.clone());
       }
       // A pattern that always matches (#981): this path never runs.
+      // (Its `else` block, if any, is dead and was taken out above,
+      // #987.)
       let at = match (always_matches, else_expr.is_some()) {
-        (true, true) => TupleDropAt::NeverElse,
-        (true, false) => TupleDropAt::NeverSkipped,
+        (true, _) => TupleDropAt::NeverSkipped,
         (false, true) => TupleDropAt::Else,
         (false, false) => TupleDropAt::NoElse,
       };

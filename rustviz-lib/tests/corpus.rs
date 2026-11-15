@@ -18026,11 +18026,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from g to take",
             "g goes out of scope. No resource is dropped.",
             "The temporary tuple (b, c) is dropped here, at the end of the if branch, and with it c's resource",
-            "h's resource is moved into the temporary tuple (h, k)",
-            "The pattern always matches the temporary tuple (h, k), so the else branch never runs and nothing is dropped here: the tuple is dropped when the if branch ends",
+            "k's resource is moved into the temporary tuple (h, k)",
             "The temporary tuple (h, k) is dropped here, at the end of the if branch, and with it k's resource",
-            "m's resource is moved into the temporary value Some(m)",
-            "The pattern always matches the temporary value Some(m), so the else branch never runs and nothing is dropped here: the temporary is dropped when the if branch ends",
+            // The `else` blocks are dead code, not drawn as a path
+            // (#987): h, k and m end as after an `if let` without one.
+            "h goes out of scope. No resource is dropped.",
+            "k goes out of scope. No resource is dropped.",
+            "m goes out of scope. No resource is dropped.",
             "The pattern always matches the temporary tuple (p, q), so the body is never skipped and nothing is dropped here: the tuple is dropped when the if branch ends",
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
             // controls: these patterns can fail
@@ -18044,6 +18046,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The pattern didn't match, so the temporary tuple (h, k)",
             "The pattern didn't match, so the temporary value Some(m)",
             "The pattern didn't match, so the temporary tuple (p, q)",
+            // no else path for a dead `else` block (#987)
+            "so the else branch never runs and nothing is dropped here",
+            "h was moved or dropped in every branch above",
+            "k was moved or dropped in every branch above",
+            "m was moved or dropped in every branch above",
             // the body always runs and moves g: no drop flag
             "g was moved in at least one branch above",
             "Rust tracks this with a runtime drop flag",
@@ -18053,7 +18060,84 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b was moved or dropped in every branch above",
         ],
     },
+    TooltipExpect {
+        // #987: the `else` of a lone `if let` whose pattern always
+        // matches is dead code; the compiled program has no else block.
+        // Nothing in it is drawn as happening (g, r and s2 are never
+        // moved, h never reassigned), and every variable ends as after
+        // an `if let` without an `else`: g, r and s2 are dropped at the
+        // end of the function, with no drop flag.
+        name: "edition2024/dead_else_987",
+        must_contain: &[
+            "Move from f to x",
+            "f goes out of scope. No resource is dropped.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to g",
+            "g goes out of scope. Its resource is dropped.",
+            "Move from p to x",
+            "q's resource is moved into the temporary tuple (p, q)",
+            "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it q's resource",
+            "p goes out of scope. No resource is dropped.",
+            "q goes out of scope. No resource is dropped.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r",
+            "r goes out of scope. Its resource is dropped.",
+            "Move from s1 to y",
+            "s1 goes out of scope. No resource is dropped.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to s2",
+            "s2 goes out of scope. Its resource is dropped.",
+            "y goes out of scope. Its resource is dropped.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to h",
+            "h goes out of scope. Its resource is dropped.",
+            // control: `Some(x)` can fail, so the else runs when o is None
+            "Move from k to take",
+            "k was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when k goes out of scope.",
+            "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // the dead else's events
+            "Move from g to drop",
+            "g's resource is moved into drop",
+            "Move from r to take",
+            "Move from s2 to y",
+            "Move from String::from to h",
+            "h acquires ownership of a new resource",
+            "y acquired ownership of a resource (in all branches above)",
+            // ... and the drop-flag joins they made
+            "f was moved in at least one branch above",
+            "g was moved in at least one branch above",
+            "r was moved in at least one branch above",
+            "a was moved in at least one branch above",
+            "s1 was moved in at least one branch above",
+            "s2 was moved in at least one branch above",
+            "b was moved in at least one branch above",
+            "=f goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=g goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=r goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "=s2 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            // #989's else-path dot for the tuple: there is no else path
+            "The pattern always matches the temporary tuple (p, q), so the else branch never runs",
+            "p was moved or dropped in every branch above",
+            "q was moved or dropped in every branch above",
+        ],
+    },
 ];
+
+/// #987: a dot that says nothing is dropped is a plain dot, not a drop
+/// dot (a `<g>` with a triangle): the dead `else`'s note, and #981's
+/// dot on the path that skips a body that always returns.
+#[test]
+fn never_runs_dots_are_not_drop_dots() {
+    for (name, text) in [
+        ("edition2024/dead_else_987", "so this else branch never runs: nothing in it happens to"),
+        ("edition2024/irrefutable_iflet_literal_981", "so the body is never skipped and nothing is dropped here"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let timeline = rv.timeline_panel_string();
+        let has = |kind: &str| start_tags(&timeline, kind).into_iter()
+            .any(|t| t.contains("data-tooltip-text=") && t.contains(text));
+        assert!(has("circle"), "{name}: no plain dot says {text:?}");
+        assert!(!has("g"), "{name}: a drop dot says {text:?}");
+    }
+}
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

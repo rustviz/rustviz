@@ -1266,9 +1266,9 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
         TupleDropAt::Else => ("The pattern didn't match, so ", "here, before the else branch runs"),
         TupleDropAt::NoElse => ("The pattern didn't match, so ", "here"),
         // A pattern that can't fail on the literal (#981): the path
-        // this dot is on never runs, so nothing is dropped on it.
-        TupleDropAt::NeverElse => return format!(
-            "The pattern always matches {tuple}, so the else branch never runs and nothing is dropped here: the {noun} is dropped when the if branch ends"),
+        // this dot is on never runs, so nothing is dropped on it (a
+        // plain dot, not a drop, #987). (An `else` block is then dead
+        // code and isn't drawn as a path at all.)
         TupleDropAt::NeverSkipped => return format!(
             "The pattern always matches {tuple}, so the body is never skipped and nothing is dropped here: the {noun} is dropped when the if branch ends"),
         TupleDropAt::MatchArm => ("", "after this arm, when the match ends"),
@@ -3404,6 +3404,16 @@ pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
         "{0} isn't returned on this path, but its borrow lasts as long as the result (same lifetime {1})",
         styled_name_html(my_name),
         lifetime
+    )
+}
+
+/// The `else` block of a lone `if let` whose pattern always matches is
+/// dead code (#987): it never runs, so what it does to `my_name` isn't
+/// drawn. Its first line there says so (a dot, not a drop).
+pub fn event_dot_dead_else_note(my_name: &String) -> String {
+    format!(
+        "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to {0}",
+        styled_name_html(my_name)
     )
 }
 

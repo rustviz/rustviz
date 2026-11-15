@@ -1295,11 +1295,11 @@ pub enum TupleDropAt {
     /// The pattern didn't match, and there is no else.
     NoElse,
     /// The pattern always matches the literal it takes apart (`(x, _)`
-    /// on `(f, s)`, `Some(x)` on `Some(f)`, #981), so the else branch
-    /// never runs: nothing is dropped on it. The dot says so.
-    NeverElse,
-    /// The same, with no else: the body is never skipped (a body drawn
-    /// as a branch, e.g. one that always returns).
+    /// on `(f, s)`, `Some(x)` on `Some(f)`, #981), so the body is never
+    /// skipped (a body drawn as a branch, e.g. one that always returns):
+    /// nothing is dropped on the path that skips it. The dot says so; it
+    /// is a plain dot, not a drop (#987). (With an `else` block, that
+    /// block is dead code and isn't drawn as a path, #987.)
     NeverSkipped,
     /// After this match arm, when the match ends.
     MatchArm,
@@ -1873,6 +1873,15 @@ pub enum ExternalEvent {
         lifetime: String,
         id: usize
     },
+    // The `else` block of a lone `if let` whose pattern always matches
+    // (#987) is dead code: its events aren't drawn, and this dot on the
+    // column of each outer variable it used, on the line of its first
+    // use there, says nothing in it happens to `ro`. A dot; the state is
+    // unchanged.
+    DeadElseNote {
+        ro: ResourceAccessPoint,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -1992,6 +2001,7 @@ impl ExternalEvent {
             &ExternalEvent::ChainFailAssign { id, .. } |
             &ExternalEvent::ChainFailUse { id, .. } |
             &ExternalEvent::TiedParamNote { id, .. } |
+            &ExternalEvent::DeadElseNote { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -2279,6 +2289,8 @@ pub enum Event {
     ChainFailUse { uses: Vec<ChainUse>, definite: bool, no_else: bool, is_ref: bool },
     // See ExternalEvent::TiedParamNote.
     TiedParamNote { lifetime: String },
+    // See ExternalEvent::DeadElseNote.
+    DeadElseNote,
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -2832,6 +2844,9 @@ impl Display for Event {
             Event::TiedParamNote { .. } => {
                 write!(f, "Not returned on this path; its borrow lasts as long as the result")
             },
+            Event::DeadElseNote => {
+                write!(f, "This else branch never runs")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -3007,6 +3022,9 @@ impl Event {
             }
             Event::ChainFailUse { uses, definite, no_else, is_ref } => {
                 hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *no_else, *is_ref)
+            }
+            Event::DeadElseNote => {
+                hover_messages::event_dot_dead_else_note(my_name)
             }
             Event::TiedParamNote { lifetime, .. } => {
                 hover_messages::event_dot_tied_param_note(my_name, lifetime)
@@ -4091,6 +4109,7 @@ impl Visualizable for VisualizationData {
             // The borrows have ended (#688): no change.
             (_, Event::ChainFailUse { .. }) => (*previous_state).clone(),
             (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
+            (_, Event::DeadElseNote) => (*previous_state).clone(),
 
 
             (_, _) => State::Invalid,
@@ -4565,6 +4584,9 @@ impl Visualizable for VisualizationData {
           let rc = if place.is_some() { None } else { ro.rc_drop() };
           vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, no_else: *no_else })]
         },
+        ExternalEvent::DeadElseNote{ .. } => {
+          vec![(line_num, Event::DeadElseNote)]
+        },
         ExternalEvent::TiedParamNote{ lifetime, .. } => {
           vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
         },
@@ -4615,7 +4637,8 @@ impl Visualizable for VisualizationData {
             }
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
             | ExternalEvent::LoopMaybeInit { ro, .. }
-            | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. } => {
+            | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
+            | ExternalEvent::DeadElseNote { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_external_event(line_number, event, true));
                 }
@@ -4941,6 +4964,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::TiedParamNote{ro, lifetime, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime }, line_number);
+            },
+            ExternalEvent::DeadElseNote{ro, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);
             },
             ExternalEvent::ChainFailUse{ro, uses, definite, no_else, ..} => {
                 let is_ref = ro.is_ref();
