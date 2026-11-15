@@ -10057,10 +10057,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "a copy of the value r points to is returned to the caller",
             "a copy of **y, the value behind the reference y points to, is returned to the caller",
+            // `first(&t)` with `r: &&'a String`: the result is a copy of t (#1084)
+            "Immutable borrow from s to u: first's signature gives the reference it returns the same lifetime as t",
         ],
         must_not_contain: &[
             "a reference from r is returned to the caller",
             "a reference from y is returned to the caller",
+            "first's signature gives the reference it returns the same lifetime as its argument",
         ],
     },
     // ─── Temporaries of macros, literals, if-let / for heads (#469) ──
@@ -19963,6 +19966,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=n goes out of scope",
             // Nor is anything left in g to say about after the move.
             "g goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #1084: a result whose lifetime appears only inside a reference
+    // argument's type (`rows: &Vec<&'a Vec<i32>>` -> `&'a i32`) has the
+    // lifetime of the references stored in that argument, not the
+    // argument's own: `rows.push(&row)` compiles while f is in use.
+    // Main said "the same lifetime as its argument" / "as both
+    // arguments". `outer` (`&'a Vec<&'a Vec<i32>>`) ties the argument
+    // itself and keeps the old wording. `get(&rw)` (`x: &T`, `T =
+    // &String`) copies rw itself out: the result has rw's lifetime.
+    TooltipExpect {
+        name: "lifetime_inside_arg_1084",
+        must_contain: &[
+            "Immutable borrow from row to f: inner's signature gives the reference it returns the same lifetime as the references stored in rows",
+            "Immutable borrow from s to g: copied_out's signature gives the reference it returns the same lifetime as the references stored in names",
+            "Immutable borrow from cols to o: outer's signature gives the reference it returns the same lifetime as its argument, so it may point into either, and both stay borrowed while o is in use",
+            "Immutable borrow from col to o: outer's signature gives the reference it returns the same lifetime as its argument, so it may point into either, and both stay borrowed while o is in use",
+            "Immutable borrow from t to p: pick's signature gives the reference it returns the same lifetime as its first argument and the references stored in others, so it may point into either, and both stay borrowed while p is in use",
+            "Immutable borrow from u to p: pick's signature gives the reference it returns the same lifetime as its first argument and the references stored in others, so it may point into either, and both stay borrowed while p is in use",
+            "Immutable borrow from a1 to z: both's signature gives the reference it returns the same lifetime as the references stored in va and vb, so it may point into either, and both stay borrowed while z is in use",
+            "Immutable borrow from b1 to z: both's signature gives the reference it returns the same lifetime as the references stored in va and vb, so it may point into either, and both stay borrowed while z is in use",
+            "Immutable borrow from w to c: get's signature gives the reference it returns the same lifetime as rw",
+        ],
+        must_not_contain: &[
+            "inner's signature gives the reference it returns the same lifetime as its argument",
+            "copied_out's signature gives the reference it returns the same lifetime as its argument",
+            "pick's signature gives the reference it returns the same lifetime as both arguments",
+            "both's signature gives the reference it returns the same lifetime as both arguments",
+            "get's signature gives the reference it returns the same lifetime as its argument",
+            // rows / names / others aren't kept borrowed by the result
+            "Immutable borrow from rows to f",
+            "Immutable borrow from names to g",
+            "Immutable borrow from others to p",
+            "Immutable borrow from va to z",
+            "Immutable borrow from vb to z",
         ],
     },
 ];
