@@ -1,3 +1,6 @@
+// The caption's y (35) is the baseline of the timeline panel's column-header
+// row for a fn starting on line 1: FIRST_ROW_Y - 5 - LINE_SPACE (see
+// `get_y_axis_pos`); the test below keeps them equal.
 pub static CODE_PANEL_TEMPLATE : &'static str = 
 "<svg width=\"{{tl_width}}px\" height=\"{{height}}px\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">
 
@@ -12,7 +15,7 @@ pub static CODE_PANEL_TEMPLATE : &'static str =
     </defs>
 
     <g>
-        <text id=\"caption\" x=\"30\" y=\"50\">Hover over the visualization for more information.</text>
+        <text id=\"caption\" x=\"30\" y=\"35\">Hover over the visualization for more information.</text>
     </g>
 
     {{ code }}
@@ -264,4 +267,16 @@ pub fn max_hash_in(svg: &str) -> u64 {
         .filter_map(|rest| rest.split('"').next()?.parse::<u64>().ok())
         .max()
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::svg_generator::data::{FIRST_ROW_Y, LINE_SPACE};
+
+    #[test]
+    fn caption_is_on_the_column_header_row() {
+        let header_y = FIRST_ROW_Y - 5 - LINE_SPACE;
+        assert!(CODE_PANEL_TEMPLATE.contains(&format!("y=\"{}\">Hover over the visualization", header_y)));
+    }
 }
