@@ -399,6 +399,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// level, where `end_outer_borrows_in_arms` moves each into the arm that
   /// holds its line and ends the borrow in the other arms.
   pub late_old_ends: Vec<(usize, ExternalEvent)>,
+  /// Where the possible borrows of a reference that an or-pattern in an
+  /// `if let` / `while let` / `let` binds from different places end
+  /// (`OrAltBorrow { end: true, .. }`, #734). They're added in
+  /// `emit_borrow_ends`, after the whole body is visited, where
+  /// `nest_borrow_ends_in_arms` moves each into the arm that declares
+  /// the reference, as for its other borrow ends.
+  pub or_ref_ends: Vec<(usize, ExternalEvent)>,
   /// Loans a reference was given in an arm of an `if` / `match` that
   /// another arm's, or the conditional's end, replaced in `borrow_map`
   /// (`c = &y;` in one arm, `c = &z;` in the next, #806): the arms are
@@ -658,6 +665,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ref_carriers: Vec::new(),
       taken_over_loans: HashSet::new(),
       late_old_ends: Vec::new(),
+      or_ref_ends: Vec::new(),
       arm_loans: Vec::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
@@ -4798,6 +4806,12 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
 /// `None` and end the bindings themselves (the if-let path from its
 /// `if_decl` set, the while-let path after visiting the body).
 ///
+/// `body_end`: the last line of the body the bindings are in scope in
+/// (of the match arm, for an `if let` guard). An or-pattern's
+/// reference bound from different places (`if let (Some(ref x), _) |
+/// (_, Some(ref x)) = t`) keeps every place borrowed until its last use
+/// there (#734).
+///
 /// Returns the set of bindings registered. The if-let caller unions
 /// these into its `if_decl` set so `append_decl_branch_events` can
 /// populate each binding's timeline with a Branch-shaped event;
@@ -4817,6 +4831,7 @@ pub fn register_iflet_let_bindings(
     &mut self,
     let_expr: &'tcx rustc_hir::LetExpr<'tcx>,
     emit_gos_at: Option<usize>,
+    body_end: usize,
 ) -> (HashSet<ResourceAccessPoint>, usize) {
     let scrutinee = let_expr.init;
     let typeck_res = self.tcx.typeck(scrutinee.hir_id.owner);
@@ -4879,10 +4894,10 @@ pub fn register_iflet_let_bindings(
     // Copies first (stable, so each group keeps pattern order).
     let (mut copies, others): (Vec<_>, Vec<_>) =
         decls.into_iter().partition(|(_, evt, _, _)| matches!(evt, Evt::Copy));
-    // A copied or-pattern name is just bound: nothing moves.
-    let _ = self.if_let_or_conflict_events(&or_conflicts, &mut copies, let_line, &moved_into_scrutinee, &tuple_name);
-    let mut first_other = None;
     let mut registered: HashSet<ResourceAccessPoint> = HashSet::new();
+    // A copied or-pattern name is just bound: nothing moves.
+    let _ = self.if_let_or_conflict_events(&or_conflicts, &mut copies, let_line, &moved_into_scrutinee, &tuple_name, body_end, false, &mut registered);
+    let mut first_other = None;
     // The moves into an or-pattern's name happen only when the pattern
     // matches: in the branch (their ids follow the copies), drawn after
     // the bindings and the moves into a tuple scrutinee, which holds
@@ -4902,7 +4917,9 @@ pub fn register_iflet_let_bindings(
             self.add_external_event(let_line, b);
         }
         first_other = Some(*self.unique_id);
-        or_events = self.if_let_or_conflict_events(&or_conflicts, &mut groups[1], let_line, &moved_into_scrutinee, &tuple_name);
+        // (A reference bound from different places is drawn by its
+        // `OrAltBorrow` events, and declared in `registered`.)
+        or_events = self.if_let_or_conflict_events(&or_conflicts, &mut groups[1], let_line, &moved_into_scrutinee, &tuple_name, body_end, false, &mut registered);
       }
       for (binding_rap, evt, from, is_partial) in std::mem::take(&mut groups[g]) {
         if matches!(evt, Evt::Move) {
@@ -6797,6 +6814,10 @@ pub fn print_out_of_scope(&mut self){
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } =>
           to.extract_rap().and_then(|lender| arm_declaring(self.preprocessed_events, r, lender, *line)),
+        // An or-pattern reference's (#734), with each place it may
+        // borrow.
+        ExternalEvent::OrAltBorrow { ro, into, end: true, .. } =>
+          arm_declaring(self.preprocessed_events, into, ro, *line),
         _ => None,
       };
       match path {
@@ -6821,6 +6842,14 @@ pub fn print_out_of_scope(&mut self){
 
   // This is where we annotate all RefDie events that were not handled by the assignment operator
   pub fn emit_borrow_ends(&mut self){
+
+    // An or-pattern reference's possible borrows (#734) are drawn by
+    // their `OrAltBorrow` events, not by an end here.
+    for (_, ev) in &self.or_ref_ends {
+      if let ExternalEvent::OrAltBorrow { into, .. } = ev {
+        self.borrow_map.remove(into.name());
+      }
+    }
 
     // first refine the loans that we've computed using MIR information
     // this is necessary for some cases where we can't know where a lifetime actually ends
@@ -7162,6 +7191,9 @@ pub fn print_out_of_scope(&mut self){
       }
     }
     for (line, ev) in std::mem::take(&mut self.late_old_ends) {
+      self.add_external_event(line, ev);
+    }
+    for (line, ev) in std::mem::take(&mut self.or_ref_ends) {
       self.add_external_event(line, ev);
     }
     hoist_ends_on_other_arms_lines(self.preprocessed_events);
