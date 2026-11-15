@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -925,7 +925,7 @@ fn render_labels_string(
 ) {
     // Default label-y matches the legacy "all labels at the top of
     // the SVG" behavior; per-fn RAPs override below.
-    const DEFAULT_LABEL_Y: i64 = 70;
+    const DEFAULT_LABEL_Y: i64 = FIRST_ROW_Y - 20;
     for (hash, column_data) in resource_owners_layout.iter() {
         // Position the label on the row directly above the fn's
         // first source line so each fn gets its own label header
@@ -6076,7 +6076,7 @@ fn render_struct_box(
     // Default y matches the legacy "all labels at the top of the
     // SVG" layout (label_y=70, box=50..80). Per-fn struct boxes
     // override below to track their fn's label row.
-    const DEFAULT_BOX_Y: i64 = 50;
+    const DEFAULT_BOX_Y: i64 = FIRST_ROW_Y - 40;
     for (owner, owner_x, last_x, owner_half, last_half) in structs_info.structs.iter() {
         let owner_hash = *owner as u64;
         let y = match fn_start_lines.get(&owner_hash) {
@@ -6106,7 +6106,7 @@ fn render_struct_box(
 }
 
 fn get_y_axis_pos(line_number : usize) -> i64 {
-    85 - LINE_SPACE + LINE_SPACE * line_number as i64
+    FIRST_ROW_Y - 5 - LINE_SPACE + LINE_SPACE * line_number as i64
 }
 
 #[cfg(test)]

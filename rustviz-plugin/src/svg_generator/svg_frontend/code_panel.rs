@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{ExternalEvent, LINE_SPACE};
+use crate::svg_generator::data::{ExternalEvent, FIRST_ROW_Y, LINE_SPACE};
 use crate::svg_generator::svg_frontend::syntax;
 use handlebars::Handlebars;
 use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet}};
@@ -47,7 +47,7 @@ pub fn render_code_panel(
 
     /* Render the code segment of the svg to a String */
     let x = 20;
-    let mut y = 90;
+    let mut y = FIRST_ROW_Y;
     let mut output = String::from("    <g id=\"code\">\n");
     // Three counters move at three different rates and aren't
     // interchangeable:

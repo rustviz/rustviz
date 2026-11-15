@@ -20,6 +20,13 @@ use crate::svg_generator::{
  * Basic Data Structure Needed by Lifetime Visualization
  */
 pub static LINE_SPACE: i64 = 30;
+/// Baseline y of the first code row. Both panels hang off this one value
+/// (the code rows, the timeline's row grid, its column-label row and the
+/// default struct box), so they stay aligned. The one-line caption sits
+/// one caption-line (20px) above it.
+pub const FIRST_ROW_Y: i64 = 70;
+/// Where the first row used to sit, under the old two-line caption.
+pub const OLD_FIRST_ROW_Y: i64 = 90;
 
 /// A conditional whose branches share source lines: all on one line
 /// (`let s = if c { a } else { b };`), or with the join one line below
