@@ -43,8 +43,8 @@ fn ctor_else(m: String) {
     }
 }
 
-// A body that always returns is drawn as a branch; the path that skips
-// it never runs.
+// A body that always returns is drawn inline too (#995): there's no path
+// that skips it.
 fn early(p: String, q: String) -> usize {
     if let (r, _) = (p, q) {
         return r.len();
