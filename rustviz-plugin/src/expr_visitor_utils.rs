@@ -1059,6 +1059,19 @@ pub fn innermost_addr_of_operand<'tcx>(expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tc
   }
 }
 
+/// True iff `addr_of` is `&mut r` with `r` a local reference variable
+/// that stays borrowed as itself: the result is a `&mut &mut T` /
+/// `&mut &T` pointing to r, not a reborrow of what r points to (#914).
+/// Not when rustc coerces the result through r (`let s: &mut String =
+/// &mut m;` derefs twice and reborrows `*m`): the adjusted type then
+/// no longer points to a reference.
+pub fn ref_var_borrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
+  let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, Mutability::Mut, inner) = addr_of.kind else { return false };
+  matches!(inner.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
+    && typeck.expr_ty(inner).is_ref()
+    && typeck.expr_ty_adjusted(addr_of).builtin_deref(true).is_some_and(|t| t.is_ref())
+}
+
 /// True iff `operand` (the expression under a `&` / `&mut`, or a
 /// method receiver) is a place reached through a reference, so that
 /// borrowing it is a reborrow:

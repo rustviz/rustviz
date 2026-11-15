@@ -432,12 +432,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from rd to rd2",
             // Lend dots: a `&mut` source can't be used while the
             // borrow is live; an owner lent immutably is read-only.
-            // ra / rb own nothing: what's borrowed is what they point to
-            // (#313). (rb2 = &mut rb also borrows rb itself; the dot
-            // doesn't distinguish that, see the PR for #313.)
+            // ra owns nothing: what ra2 borrows is what ra points to
+            // (#313). rb2 = &mut rb borrows rb itself, a reference, so a
+            // value (#914).
             "the resource ra points to is mutably borrowed by ra2 through ra; ra can't be used while the borrow is live",
             "ra2 no longer borrows the resource ra points to",
-            "the resource rb points to is mutably borrowed by rb2 through rb; rb can't be used while the borrow is live",
+            "rb is mutably borrowed by rb2; rb can't be used while the borrow is live",
+            "rb is no longer mutably borrowed",
+            "rb2 mutably borrows a value",
+            "Return mutably borrowed value from rb2 to rb",
             "c's resource is immutably borrowed by rc; c is read-only while the borrow is live",
             // A `&String` source was already read-only, so the
             // borrow adds no restriction worth stating.
@@ -449,6 +452,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*ra's resource is no longer mutably borrowed",
             "rc's resource is immutably borrowed by rc2",
             "Mutable reborrow from rb to rb2",
+            "the resource rb points to is mutably borrowed by rb2 through rb",
+            "rb2 no longer borrows the resource rb points to",
+            "=rb2 mutably borrows a resource",
+            "Return mutably borrowed resource from rb2 to rb",
             "Immutable borrow from rc to rc2",
             "Immutable reborrow from rd to rd2",
             "rc's resource is immutably borrowed by rc2; rc is read-only while the borrow is live",
@@ -16073,6 +16080,49 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "being shared by one or more variables",
         ],
     },
+    // ─── `&mut r` with r a reference variable borrows r itself (#914) ───
+    TooltipExpect {
+        name: "mut_borrow_of_ref_var_914",
+        must_contain: &[
+            // k = &mut m (m: &mut String) borrows m, not what m points to.
+            "Mutable borrow from m to k",
+            "m is mutably borrowed by k; m can't be used while the borrow is live",
+            "m is no longer mutably borrowed",
+            // What k borrows is the reference m holds: a value (#484).
+            "k mutably borrows a value",
+            "k holds a mutable reference; it can read and write the borrowed value",
+            "Return mutably borrowed value from k to m",
+            // r = &mut x (x: &String): the lender dot was right already.
+            "x is mutably borrowed by r; x can't be used while the borrow is live",
+            "x is no longer mutably borrowed",
+            "r mutably borrows a value",
+            "Return mutably borrowed value from r to x",
+            // A reborrow `&mut *m2` keeps its wording: q borrows h's resource.
+            "Mutable reborrow from m2 to q",
+            "the resource m2 points to is mutably borrowed by q through m2; m2 can't be used while the borrow is live",
+            "q no longer borrows the resource m2 points to",
+            "q mutably borrows a resource",
+            // So does `&mut gm` coerced to a `&mut String`, which reborrows *gm.
+            "the resource gm points to is mutably borrowed by s through gm; gm can't be used while the borrow is live",
+            "s no longer borrows the resource gm points to",
+            "s mutably borrows a resource",
+        ],
+        must_not_contain: &[
+            "the resource m points to is mutably borrowed by k through m",
+            "k no longer borrows the resource m points to",
+            "=k mutably borrows a resource",
+            "k holds a mutable reference; it can read and write the borrowed resource",
+            "Return mutably borrowed resource from k to m",
+            "=r mutably borrows a resource",
+            "Return mutably borrowed resource from r to x",
+            "m2 is mutably borrowed by q",
+            "m2 is no longer mutably borrowed",
+            "=q mutably borrows a value",
+            "gm is mutably borrowed by s",
+            "gm is no longer mutably borrowed",
+            "=s mutably borrows a value",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -20245,7 +20295,7 @@ fn reference_column_reaches_its_last_use() {
             "y immutably borrows a value",
             "println! no longer borrows the value y points to",
         ][..]),
-        ("aliasing2", &["println! no longer borrows the resource b points to"][..]),
+        ("aliasing2", &["println! no longer borrows the value b points to"][..]),
         ("ref_reassign_wording", &[
             "println! no longer borrows the value r points to",
             "r is assigned a copy of s's reference",
