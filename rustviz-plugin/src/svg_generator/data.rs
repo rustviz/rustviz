@@ -1516,6 +1516,10 @@ pub enum ExternalEvent {
         // #870): `from` stays shared when the call gives its borrow
         // back.
         still_borrowed_by: Vec<String>,
+        // The argument is `&r` with r a reference variable, so the call
+        // borrows r itself, not what r points to (`show(&x)` with
+        // `show(r: &&String)`, #938); see StaticBorrow.
+        of_ref_var: bool,
         id: usize
     },
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
@@ -1533,6 +1537,9 @@ pub enum ExternalEvent {
         stored_in: StoredIn, // see PassByStaticReference
         result_keeps_borrow: bool,
         break_alt: Option<BreakAlt>, // see PassByStaticReference
+        // `&mut r` with r a reference variable (`bump(&mut m)` with
+        // `bump(r: &mut &mut String)`, #938); see PassByStaticReference.
+        of_ref_var: bool,
         id: usize
     },
     GoOutOfScope {
@@ -4309,30 +4316,30 @@ impl Visualizable for VisualizationData {
         },
         // A reference the call may store (`StoredIn`) is given back
         // later, by its own StaticDie / MutableDie.
-        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, still_borrowed_by, ..} => {
+        ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, still_borrowed_by, of_ref_var, ..} => {
           if to_o { 
-            vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: false}),
+            vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
             (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})] 
           }
           else if stored_in.0.is_some() || *result_keeps_borrow {
-            vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: false})]
+            vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var})]
           }
           else { 
-            vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: false}),
-            (line_num,  Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: still_borrowed_by.clone(), of_ref_var: false})]
+            vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
+            (line_num,  Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: still_borrowed_by.clone(), of_ref_var: *of_ref_var})]
           }
         },
-        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
+        ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
           if to_o { 
-            vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: false}),
+            vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
             (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})]
           }
           else if stored_in.0.is_some() || *result_keeps_borrow {
-            vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: false})]
+            vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var})]
           }
           else { 
-            vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: false}),
-            (line_num,  Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: Vec::new(), of_ref_var: false})]
+            vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
+            (line_num,  Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: Vec::new(), of_ref_var: *of_ref_var})]
           }
         },
         ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
@@ -4680,19 +4687,19 @@ impl Visualizable for VisualizationData {
             // and the end of that borrow gives it back (#171).
             // A reference the call may store (`StoredIn`, #513) is given
             // back to `from` later, by its own StaticDie / MutableDie.
-            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, still_borrowed_by, ..} => {
-                maybe_append_event(self, &from_ro.to_owned(), Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var: false}, line_number);
-                maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var: false}, line_number);
+            ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, still_borrowed_by, of_ref_var, ..} => {
+                maybe_append_event(self, &from_ro.to_owned(), Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var}, line_number);
+                maybe_append_event(self, &to_ro.to_owned(), Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var}, line_number);
                 if stored_in.0.is_none() && !result_keeps_borrow {
-                    maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by, of_ref_var: false}, line_number);
+                    maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by, of_ref_var}, line_number);
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::StaticDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, ..} => {
-                maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var: false}, line_number);
-                maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var: false}, line_number);
+            ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
+                maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var}, line_number);
+                maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var}, line_number);
                 if stored_in.0.is_none() && !result_keeps_borrow {
-                    maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by: Vec::new(), of_ref_var: false}, line_number);
+                    maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by: Vec::new(), of_ref_var}, line_number);
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },

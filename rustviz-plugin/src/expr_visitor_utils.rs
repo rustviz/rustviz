@@ -1094,6 +1094,24 @@ pub fn is_coerced_ref_var_reborrow(addr_of: &Expr, typeck: &TypeckResults) -> bo
     && typeck.expr_adjustments(addr_of).iter().filter(|a| matches!(a.kind, Adjust::Deref(_))).count() >= 2
 }
 
+/// True iff the method receiver `rcvr` hands the callee a reference to
+/// the local reference variable r itself, not to what r points to:
+/// `r.show()` autoref'd (`fn show(&self)` with Self = `&String`), or
+/// `(&r).show()` / `(&mut r).bump()` written (#938). The receiver
+/// counterpart of `ref_var_borrow`. Not `r.len()`, which derefs
+/// through r and borrows `*r`.
+pub fn ref_var_receiver_borrow(rcvr: &Expr, typeck: &TypeckResults) -> bool {
+  let (inner, written) = match rcvr.kind {
+    ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, inner) => (inner, 1),
+    _ => (rcvr, 0),
+  };
+  let adjs = typeck.expr_adjustments(rcvr);
+  matches!(inner.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
+    && typeck.expr_ty(inner).is_ref()
+    && adjs.iter().filter(|a| matches!(a.kind, Adjust::Deref(_))).count() == written
+    && matches!(adjs.last().map(|a| &a.kind), Some(Adjust::Borrow(AutoBorrow::Ref(..))))
+}
+
 /// True iff `operand` (the expression under a `&` / `&mut`, or a
 /// method receiver) is a place reached through a reference, so that
 /// borrowing it is a reborrow:

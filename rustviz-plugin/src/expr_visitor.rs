@@ -2022,10 +2022,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new() },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
-        result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
+        result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false,
       },
       Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false },
       Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
@@ -2278,20 +2278,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `add_ev` for a `PassByMRef`, tagged with whether the call
   /// reborrows the `&mut` argument, whether the call's result
   /// can carry that reborrow past the call, and whether Rust
-  /// inserted the `&mut` (see `ImplicitRef`).
-  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef) {
+  /// inserted the `&mut` (see `ImplicitRef`), and whether `arg` is a
+  /// reference variable borrowed itself (`of_ref_var`, #938).
+  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef, of_ref_var: bool) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None,
+      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var,
     });
     *self.unique_id += 1;
   }
 
-  /// `add_ev` for a `PassBySRef` with an explicit `ImplicitRef`.
-  pub fn add_pass_by_sref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool) {
+  /// `add_ev` for a `PassBySRef` with an explicit `ImplicitRef`;
+  /// `of_ref_var` as for `add_pass_by_mref_ev`.
+  pub fn add_pass_by_sref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool, of_ref_var: bool) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
-      from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(),
+      from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var,
     });
     *self.unique_id += 1;
   }
@@ -2598,8 +2600,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           self.update_rap(&from_rap, line_num);
           match kind {
             rustc_middle::ty::BorrowKind::Mutable =>
-              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No),
-            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), ImplicitRef::No, false),
+              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No, false),
+            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), ImplicitRef::No, false, false),
           }
           drew_any = true;
         }
@@ -3387,6 +3389,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     // type-check the arg and add event accordingly
     if arg_ty.is_ref() {
+      // `show(&x)` / `bump(&mut m)` with x / m a reference variable and
+      // a `&&String` / `&mut &mut String` parameter: the call borrows
+      // x / m itself, not what it points to (#938).
+      let of_ref_var = ref_var_borrow(arg, tycheck_results);
       // `point(&mut hold, &t)` where point's signature lets it store
       // `&t` in `hold`: t stays borrowed past the call (#513).
       if let Some((place, end_line)) = self.stored_borrow(arg, &from_ro, line_num) {
@@ -3396,21 +3402,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
-            implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in, break_alt: None,
+            implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in, break_alt: None, of_ref_var,
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in, break_alt: None, still_borrowed_by: Vec::new(),
+            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in, break_alt: None, still_borrowed_by: Vec::new(), of_ref_var,
           }
         });
         *self.unique_id += 1;
         // StaticDie/MutableDie { from: place, to: lender }: drawn on
         // the lender's column only, like a borrow stored in an element.
-        self.add_ev(end_line, if mutable { Evt::MDie } else { Evt::SDie }, from_ro, place, false);
+        let mut die = self.ext_ev_of_evt(if mutable { Evt::MDie } else { Evt::SDie }, from_ro, place, *self.unique_id, false);
+        if let ExternalEvent::StaticDie { of_ref_var: o, .. } | ExternalEvent::MutableDie { of_ref_var: o, .. } = &mut die {
+          *o = of_ref_var;
+        }
+        self.add_external_event(end_line, die);
+        *self.unique_id += 1;
         return;
       }
       match arg_ty.ref_mutability().unwrap() {
-        Mutability::Not => self.add_ev(line_num, Evt::PassBySRef, to_ro, from_ro, false),
+        Mutability::Not => self.add_pass_by_sref_ev(line_num, to_ro, from_ro, ImplicitRef::No, false, of_ref_var),
         Mutability::Mut => {
           // Reborrow if written `f(&mut *r)`, or if rustc inserted
           // the reborrow for `f(r)` (param type `&mut T`). `take(r)`
@@ -3438,7 +3449,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             rustc_hir::Node::Expr(call) => call_result_has_lifetime(call, tycheck_results),
             _ => true,
           };
-          self.add_pass_by_mref_ev(line_num, to_ro, from_ro, is_reborrow, result_has_lifetime, ImplicitRef::No)
+          self.add_pass_by_mref_ev(line_num, to_ro, from_ro, is_reborrow, result_has_lifetime, ImplicitRef::No, of_ref_var)
         }
       }
     }
