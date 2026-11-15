@@ -227,7 +227,12 @@ fn html_escape(s: &str) -> String {
 const STYLE_CSS: &str = r#"
     body { margin: 1em; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
     .vis-container { display: flex; align-items: flex-start; gap: 1em; }
-    .vis-container > svg { background: #f1f1f1; }
+    .vis-container > svg { background: var(--rv-bg); }
+    /* The panels switch to their navy palette when the system prefers
+       dark (no data-rv-theme set); match the page to it. */
+    @media (prefers-color-scheme: dark) {
+        body { background: #161923; color: #bcbdd0; }
+    }
 "#;
 
 /// One-shot toolchain + plugin bootstrap, equivalent to running

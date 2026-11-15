@@ -83,12 +83,12 @@ pub fn render_code_panel(
         // tick `source_line`.
         let fmt_line = if is_synthetic_blank {
             format!(
-                "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
+                "<tspan class=\"line-number\">{:>width$}  </tspan>{}",
                 "", line_string, width = num_width,
             )
         } else {
             format!(
-                "<tspan fill=\"#AAA\">{:>width$}  </tspan>{}",
+                "<tspan class=\"line-number\">{:>width$}  </tspan>{}",
                 source_line, line_string, width = num_width,
             )
         };
@@ -110,7 +110,7 @@ pub fn render_code_panel(
             // Pad with the same width as a real number so the
             // content column doesn't jiggle row-to-row.
             let empty_line = format!(
-                "<tspan fill=\"#AAA\">{:>width$}  </tspan>",
+                "<tspan class=\"line-number\">{:>width$}  </tspan>",
                 "", width = num_width,
             );
             data.insert("LINE".to_string(), empty_line);

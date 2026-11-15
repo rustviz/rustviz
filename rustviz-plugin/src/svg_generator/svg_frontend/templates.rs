@@ -43,13 +43,13 @@ pub static TIMELINE_PANEL_TEMPLATE: &'static str =
         <!-- used when pass to function by ref -->
         <g id=\"functionDot\">
              <circle cx=\"0\" cy=\"0\" r=\"5\" fill=\"transparent\"/>
-             <text class=\"functionIcon\" dx=\"-3.5\" dy=\"0\" fill=\"#6e6b5e\">f</text>
+             <text class=\"functionIcon\" dx=\"-3.5\" dy=\"0\">f</text>
         </g>
         <marker id=\"arrowHead\" viewBox=\"0 0 10 10\"
             refX=\"0\" refY=\"4\"
             markerUnits=\"strokeWidth\"
             markerWidth=\"3px\" markerHeight=\"3px\"
-            orient=\"auto\" fill=\"gray\">
+            orient=\"auto\" class=\"arrow-head\">
             <path d=\"M 0 0 L 8.5 4 L 0 8 z\" fill=\"inherit\"/>
         </marker>
         <!-- glow highlight filter -->
@@ -78,13 +78,8 @@ pub static TIMELINE_PANEL_TEMPLATE: &'static str =
 
 pub static CSS_TEMPLATE: &'static str = 
 "/* general setup */
-    :root {
-        --bg-color:#f1f1f1;
-        --text-color: #6e6b5e;
-    }
-    
     svg {
-        background-color: var(--bg-color);
+        background-color: var(--rv-bg);
     }
     
     text {
@@ -98,6 +93,7 @@ pub static CSS_TEMPLATE: &'static str =
     }
     
     #caption {
+        fill: var(--rv-caption);
         font-size: 0.875em;
         font-family: \"Open Sans\", sans-serif;
         font-style: italic;
@@ -105,7 +101,7 @@ pub static CSS_TEMPLATE: &'static str =
     
     /* code related styling */
     text.code {
-        fill: #6e6b5e;
+        fill: var(--rv-code);
         white-space: pre;
         font-family: \"Source Code Pro\", Consolas, \"Ubuntu Mono\", Menlo, \"DejaVu Sans Mono\", monospace, monospace !important;
         font-size: 0.875em;
@@ -116,12 +112,21 @@ pub static CSS_TEMPLATE: &'static str =
     }
 
     text.code .comment {
-        fill: #8a8a8a;
+        fill: var(--rv-comment);
         font-style: italic;
     }
 
     text.code .string {
-        fill: #3a6bb5;
+        fill: var(--rv-string);
+    }
+
+    text.code .line-number {
+        fill: var(--rv-line-number);
+    }
+
+    /* the line under the code a hovered element refers to (helpers.js) */
+    .emph {
+        stroke: var(--rv-underline);
     }
 
     text.label {
@@ -161,7 +166,7 @@ pub static CSS_TEMPLATE: &'static str =
     .functionIcon {
         paint-order: stroke;
         stroke-width: 3px;
-        fill: var(--bg-color);
+        fill: var(--rv-bg);
         font-size: 20px;
         font-family: times;
         font-weight: lighter;
@@ -175,9 +180,18 @@ pub static CSS_TEMPLATE: &'static str =
         font-style: italic;
         paint-order: stroke;
         stroke-width: 3px;
-        fill: var(--bg-color) !important;
+        fill: var(--rv-bg) !important;
     }
     
+    /* move, copy and call arrows */
+    .arrow-shaft {
+        stroke: var(--rv-arrow);
+    }
+
+    .arrow-head {
+        fill: var(--rv-arrow);
+    }
+
     /* flex related styling */
     .flex-container {
         display: flex;
@@ -216,34 +230,27 @@ pub static CSS_TEMPLATE: &'static str =
 
 
 
-/// Column colours, indexed by `data-hash`. Hash 0 is the code panel's
-/// colour for function names (fill only); every resource access point
-/// and called function gets the next hash from 1 up.
-const HASH_PALETTE: [&str; 13] = [
-    "#6e6b5e", // 0: function names
-    "#1893ff", "#ff7f50", "#8635ff", "#dc143c", "#0a810a", "#008080",
-    "#ff6cce", "#00d6fc", "#b99f35", "#15a710", "#000000", "#463ae9",
-];
+/// Number of column colours (`--rv-c1`..`--rv-c12`, see `themes.rs`).
+const COLUMN_COLOURS: u64 = super::themes::LIGHT.columns.len() as u64;
 
 /// The `[data-hash="N"]` colour rules for hashes `0..=max_hash` (at
-/// least the whole palette). Hashes past the palette reuse its colours
-/// 1..=12 in order, so every column's state lines get a stroke however
+/// least the whole palette). Hash 0 is the code panel's colour for
+/// function names (fill only, the code colour); every resource access
+/// point and called function gets the next hash from 1 up, coloured
+/// `--rv-c1`.. in order. Hashes past the palette reuse its colours
+/// in order, so every column's state lines get a stroke however
 /// many variables the program has. Without a rule a column's lines had
 /// no stroke at all (#279). Only the colour cycles: `data-hash` itself
 /// stays unique, since it's also what links code-panel names to their
 /// columns on hover.
 pub fn hash_css(max_hash: u64) -> String {
-    let cycle = (HASH_PALETTE.len() - 1) as u64;
-    let last = max_hash.max(cycle);
+    let last = max_hash.max(COLUMN_COLOURS);
     let mut css = String::from("\n    /* hash based styling */\n");
-    css.push_str(&format!(
-        "    [data-hash=\"0\"] {{ fill: {}; }}\n",
-        HASH_PALETTE[0]
-    ));
+    css.push_str("    [data-hash=\"0\"] { fill: var(--rv-code); }\n");
     for h in 1..=last {
-        let c = HASH_PALETTE[((h - 1) % cycle + 1) as usize];
+        let c = (h - 1) % COLUMN_COLOURS + 1;
         css.push_str(&format!(
-            "    [data-hash=\"{h}\"] {{ fill: {c}; stroke: {c}; }}\n"
+            "    [data-hash=\"{h}\"] {{ fill: var(--rv-c{c}); stroke: var(--rv-c{c}); }}\n"
         ));
     }
     css

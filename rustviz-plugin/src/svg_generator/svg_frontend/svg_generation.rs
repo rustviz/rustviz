@@ -6,6 +6,7 @@ use handlebars::Handlebars;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::svg_generator::svg_frontend::templates::*;
+use crate::svg_generator::svg_frontend::themes::theme_css;
 use log::info;
 use crate::svg_generator::hover_messages::escape_tooltip_attrs;
 
@@ -1151,7 +1152,8 @@ pub fn render_svg(
         visualization_name: "vis".to_owned(),
         // Both panels share one stylesheet, with a colour rule for
         // every hash either of them uses.
-        css: CSS_TEMPLATE.to_owned()
+        css: theme_css()
+            + CSS_TEMPLATE
             + &hash_css(max_hash_in(&code_panel_string).max(max_hash_in(&timeline_panel_string))),
         code: code_panel_string,
         diagram: timeline_panel_string,
