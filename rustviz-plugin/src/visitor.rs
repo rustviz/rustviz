@@ -73,9 +73,12 @@ enum ChainEffectKind {
   /// assignment drops the old value. `held`: it held a value before the
   /// part (a place always does).
   Assign { rap: ResourceAccessPoint, place: Option<String>, drops_old: bool, held: bool },
-  /// `rap`, a reference, is given a new one, `&lender` (`r = &s`,
-  /// #603): `old` / `new` are its loans before and after the part.
-  AssignRef { rap: ResourceAccessPoint, lender: ResourceAccessPoint, mutable: bool, old: Option<RefData>, new: Option<RefData> },
+  /// `rap`, a reference, is given a new one that borrows `lender`
+  /// (`r = &s`, #603; `r = first(&v)`, `r = longest(&a, &b)`, #1068):
+  /// `old` / `new` are its loans before and after the part, `rhs` the
+  /// assigned expression (see `assigned_rhs`).
+  AssignRef { rap: ResourceAccessPoint, lender: ResourceAccessPoint, mutable: bool, old: Option<RefData>, new: Option<RefData>,
+    rhs: Option<AssignedRhs> },
   /// `rap` is lent to `to` (a function the part calls, or with
   /// `binding` a binding of the chain), which doesn't last past the
   /// condition but happened on the path into the `else` too (#688).
@@ -147,25 +150,53 @@ struct ChainFailUse {
 }
 
 /// A reference that the condition of an `if` let-chain (or a match
-/// guard) assigns a new one, `&new`, before a part that can still fail
-/// (#603): on the failing path it points to `new` or to `old`, which it
+/// guard) assigns a new one, `&s`, before a part that can still fail
+/// (#603): on the failing path it points to `s` or to `t`, which it
 /// pointed to before, and the borrow checker treats both as borrowed
-/// while it's live. See `ExternalEvent::OrAltBorrow`'s `chain`.
+/// while it's live. See `ExternalEvent::OrAltBorrow`'s `chain`. The new
+/// one can be a call's result tied to one or several arguments, and the
+/// old one too (`first(&v)`, `longest(&a, &b)`; #1068): each lender has
+/// its own loan.
 #[derive(Clone)]
 struct ChainFailRef {
   rap: ResourceAccessPoint,
-  new: ResourceAccessPoint,
-  old: ResourceAccessPoint,
+  /// The lenders of the new and of the old reference, each with its
+  /// loan: (index in rustc's borrow set, last line in scope).
+  new: Vec<(ResourceAccessPoint, (usize, usize))>,
+  old: Vec<(ResourceAccessPoint, (usize, usize))>,
   mutable: bool,
-  /// The loans: (index in rustc's borrow set, last line in scope).
-  new_loan: (usize, usize),
-  old_loan: (usize, usize),
-  /// Span of the `&new` expression.
-  new_span: rustc_span::Span,
+  /// The assigned expression as written, and whether the new / old
+  /// reference came from something other than `&x` of a variable (a
+  /// call's result, `&v[0]`): it points into its lenders.
+  rhs: String,
+  new_via_call: bool,
+  old_via_call: bool,
+  /// The function the assigned expression calls, which its lenders are
+  /// lent to.
+  callee: Option<String>,
+  /// What the old reference points to when that has no column (a
+  /// string literal, a static); `old` is then empty.
+  old_static: Option<StaticLender>,
+  /// The new reference's loan as `borrow_map` holds it, for
+  /// `loan_end_overrides`.
+  new_id: (LoanId, ResourceTy),
   /// The condition's writes through `rap` (for "may have been changed").
   changes: bool,
   /// The line of the assignment.
   line: usize,
+}
+
+/// The right-hand side of `r = …` in a let-chain part (see
+/// `ExprVisitor::assigned_rhs`).
+#[derive(Clone)]
+struct AssignedRhs {
+  /// As written, whitespace collapsed.
+  text: String,
+  span: rustc_span::Span,
+  /// `&x` / `&mut x` of a variable.
+  direct: bool,
+  /// The function or method it calls (`first(&v)`, `s.as_str()`).
+  callee: Option<String>,
 }
 
 /// What `chain_fail_moves` finds: see there.
@@ -634,6 +665,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           push(ChainEffectKind::AssignRef {
             rap: rap.clone(), lender: lender.clone(), mutable: matches!(ev, ExternalEvent::MutableBorrow { .. }),
             old: loans.get(rap.name()).cloned(), new: self.borrow_map.get(rap.name()).cloned(),
+            rhs: self.assigned_rhs(part, rap.name()),
           }),
         ExternalEvent::StaticBorrow { to, .. }
         | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) =>
@@ -755,30 +787,60 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             m.dropped.push(dest_name);
           }
         }
-        ChainEffectKind::AssignRef { rap, lender, mutable, old, new } => {
+        ChainEffectKind::AssignRef { rap, lender, mutable, old, new, rhs } => {
           let refuse = || -> ! {
             panic!("{} that {} (`{}`, line {}) aren't supported yet: the assignment lasts even when {}",
               what_kind, CHAIN_ASSIGN_REF.replace("the condition", outside), rap.name(), eff.line, later)
           };
-          // Drawn when the reference held one plain variable's loan
-          // before, and the new one is `&s` of another (#603). Not in a
-          // loop's body, where the loans can come back round to the
-          // condition: where they end isn't worked out for that.
-          let (Some(old), Some(new)) = (old, new) else { refuse() };
+          // Drawn when the reference held a loan of one or more plain
+          // variables before (`&t`, `longest(&a, &b)`), and the new one
+          // borrows others: `&s` (#603), or a call's result tied to its
+          // arguments (`first(&v)`, #1068). Not in a loop's body, where
+          // the loans can come back round to the condition: where they
+          // end isn't worked out for that.
+          let (Some(old), Some(new), Some(rhs)) = (old, new, rhs) else { refuse() };
           if walk.in_loop {
             refuse();
           }
-          let old_lender = match (&old.lender, old.co_lenders.is_empty()) {
-            (ResourceTy::Value(t), true) if t != lender && !t.is_fn() => t.clone(),
-            _ => refuse(),
+          let lenders = |rd: &RefData| -> Option<Vec<ResourceAccessPoint>> {
+            rd.all_lenders().into_iter().map(|l| match l {
+              ResourceTy::Value(t) if !t.is_fn() => Some(t),
+              _ => None,
+            }).collect()
           };
-          if refs.iter().any(|r| r.rap == *rap) || new.lender != ResourceTy::Value(lender.clone()) {
+          // An old reference to data with no column (`let mut r: &str =
+          // "lit";`) is said by what it points to.
+          let old_static = match (&old.lender, &old.static_lender) {
+            (ResourceTy::Anonymous, Some(sl @ (StaticLender::Literal { .. } | StaticLender::Static(_)
+              | StaticLender::PointeeOfStatic(_) | StaticLender::PointeeOfConst(_) | StaticLender::PromotedConst(_))))
+              if old.co_lenders.is_empty() => Some(sl.clone()),
+            _ => None,
+          };
+          let old_l = if old_static.is_some() { Some(Vec::new()) } else { lenders(old) };
+          let (Some(new_l), Some(old_l)) = (lenders(&new), old_l) else { refuse() };
+          if !new_l.contains(lender) || new_l.iter().any(|l| old_l.contains(l)) {
             refuse();
           }
-          let (Some(new_span), Some(new_loan), Some(old_loan)) = (new.borrow_span, self.loan_of(&new), self.loan_of(old)) else { refuse() };
+          let Some(new_id) = new.loan().map(|id| (id, new.lender.clone())) else { refuse() };
+          // A call tied to several arguments makes one event per lender.
+          if let Some(r) = refs.iter().find(|r| r.rap == *rap) {
+            if r.new_id != new_id {
+              refuse();
+            }
+            continue;
+          }
+          let borrows = self.gather_borrow_data(self.bwf);
+          let with_loans = |rd: &RefData, ls: Vec<ResourceAccessPoint>, within: Option<rustc_span::Span>| {
+            ls.into_iter().map(|l| Some((self.loan_of_lender(&borrows, rd, &l, within)?, l)))
+              .map(|o| o.map(|(loan, l)| (l, loan)))
+              .collect::<Option<Vec<_>>>()
+          };
+          let (Some(new_loans), Some(old_loans)) = (with_loans(&new, new_l, Some(rhs.span)), with_loans(old, old_l, None)) else { refuse() };
           refs.push(ChainFailRef {
-            rap: rap.clone(), new: lender.clone(), old: old_lender, mutable: *mutable,
-            new_loan, old_loan, new_span, changes: *mutable && self.chain_writes_through(chain_lo, rap),
+            rap: rap.clone(), new: new_loans, old: old_loans, mutable: *mutable,
+            rhs: rhs.text.clone(), new_via_call: !rhs.direct, old_via_call: old.borrow_span.is_none(), callee: rhs.callee.clone(),
+            old_static,
+            new_id, changes: *mutable && self.chain_writes_through(chain_lo, rap),
             line: eff.line,
           });
         }
@@ -807,8 +869,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
+    // The call that made a new reference (`r = first(&v)`, #1068) lends
+    // v for as long as r holds the result: that borrow hasn't ended.
+    for u in uses.iter_mut() {
+      for r in refs.iter().filter(|r| r.new.iter().any(|(l, _)| *l == u.rap)) {
+        u.uses.retain(|c| Some(&c.to) != r.callee.as_ref());
+      }
+    }
     uses.retain(|u| !out.iter().any(|m| m.rap == u.rap) && !assigns.iter().any(|a| a.rap == u.rap)
-      && !refs.iter().any(|r| r.rap == u.rap));
+      && !refs.iter().any(|r| r.rap == u.rap) && !u.uses.is_empty());
     if let Some(r) = refs.iter().find(|r| out.iter().any(|m| m.rap == r.rap) || assigns.iter().any(|a| a.rap == r.rap)) {
       panic!("{} that {} (`{}`) and also move it or write through it aren't supported yet: both last even when {}",
         what_kind, CHAIN_ASSIGN_REF.replace("the condition", outside), r.rap.name(), later);
@@ -901,29 +970,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut ends = Vec::new();
     for r in fail.refs.iter() {
       let parts: Vec<rustc_span::Span> = part.into_iter().collect();
-      let (new_last, new_past) = self.loan_scope_in(r.new_loan.0, &parts, whole);
-      let (old_last, old_past) = self.loan_scope_in(r.old_loan.0, &parts, whole);
-      let (new_last, old_last) = (new_last.first().copied().flatten(), old_last.first().copied().flatten());
-      let from = vec![r.new.name().to_owned(), r.old.name().to_owned()];
+      // Where each lender's loan is in scope on this path: (lender,
+      // loan, last line inside `part`, in scope after `whole`).
+      let scope = |ls: &[(ResourceAccessPoint, (usize, usize))]| ls.iter().map(|(l, loan)| {
+        let (last, past) = self.loan_scope_in(loan.0, &parts, whole);
+        (l.clone(), *loan, last.first().copied().flatten(), past)
+      }).collect::<Vec<_>>();
+      let (new, old) = (scope(&r.new), scope(&r.old));
+      let from: Vec<String> = new.iter().chain(old.iter()).map(|(l, ..)| l.name().to_owned()).collect();
+      let chain = ChainRef { path, rhs: r.rhs.clone(), new: new.len(), new_via_call: r.new_via_call, old_via_call: r.old_via_call,
+        old_static: r.old_static.clone() };
       let alt = |this: &mut Self, ro: &ResourceAccessPoint, end: bool, first: bool| {
         let id = *this.unique_id;
         *this.unique_id += 1;
-        ExternalEvent::OrAltBorrow { ro: ro.clone(), into: r.rap.clone(), from: from.clone(), mutable: r.mutable, end, first, chain: Some(path), id }
+        ExternalEvent::OrAltBorrow { ro: ro.clone(), into: r.rap.clone(), from: from.clone(), mutable: r.mutable, end, first,
+          chain: Some(chain.clone()), id }
       };
-      if !(new_past || old_past || new_last.is_some() || old_last.is_some()) {
+      if new.iter().chain(old.iter()).all(|(_, _, last, past)| last.is_none() && !past) {
         // `r` isn't used again on this path: `s`'s borrow has ended (as
         // for a call the condition lent it to, #688), and `t`'s ends
         // where the path starts, unless it ended before the condition
         // (`r` was used last before it).
-        let id = *self.unique_id;
-        *self.unique_id += 1;
-        evs.push(ExternalEvent::ChainFailUse { ro: r.new.clone(),
-          uses: vec![ChainUse { to: r.rap.name().to_owned(), mutable: r.mutable, binding: false, changes: r.changes }],
-          definite: false, path, id });
-        if r.old_loan.1 >= r.line {
+        for (l, ..) in new.iter() {
           let id = *self.unique_id;
           *self.unique_id += 1;
-          let (from, to) = (ResourceTy::Value(r.rap.clone()), ResourceTy::Value(r.old.clone()));
+          evs.push(ExternalEvent::ChainFailUse { ro: l.clone(),
+            uses: vec![ChainUse { to: r.rap.name().to_owned(), mutable: r.mutable, binding: false, changes: r.changes }],
+            definite: false, path, id });
+        }
+        for (l, ..) in old.iter().filter(|(_, loan, ..)| loan.1 >= r.line) {
+          let id = *self.unique_id;
+          *self.unique_id += 1;
+          let (from, to) = (ResourceTy::Value(r.rap.clone()), ResourceTy::Value(l.clone()));
           evs.push(if r.mutable {
             ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
           } else {
@@ -932,21 +1010,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         continue;
       }
-      let ev = alt(self, &r.new, false, true);
-      evs.push(ev);
-      let ev = alt(self, &r.old, false, false);
-      evs.push(ev);
-      // `r`'s own end goes with `s`'s, unless that one is after the
-      // conditional (drawn by `emit_borrow_ends`).
-      if !new_past {
-        let ev = alt(self, &r.new, true, true);
-        ends.push((new_last.unwrap_or(fail_line), ev));
+      for (i, (l, ..)) in new.iter().chain(old.iter()).enumerate() {
+        let ev = alt(self, l, false, i == 0);
+        evs.push(ev);
       }
-      let ev = alt(self, &r.old, true, false);
-      if old_past {
-        self.late_old_ends.push((r.old_loan.1, ev));
-      } else {
-        ends.push((old_last.unwrap_or(fail_line), ev));
+      // `r`'s own end goes with `s`'s, unless that one is after the
+      // conditional (drawn by `emit_borrow_ends`, with the new
+      // reference's other lenders).
+      for (i, (l, _, last, past)) in new.iter().enumerate() {
+        if !past {
+          let ev = alt(self, l, true, i == 0);
+          ends.push((last.unwrap_or(fail_line), ev));
+        }
+      }
+      for (l, loan, last, past) in old.iter() {
+        let ev = alt(self, l, true, false);
+        if *past {
+          self.late_old_ends.push((loan.1, ev));
+        } else {
+          ends.push((last.unwrap_or(fail_line), ev));
+        }
       }
     }
     let mut next_id = || {
@@ -979,11 +1062,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (`chain_fail_events`).
   fn chain_ref_then_ends(&mut self, fail: &ChainFail, then: rustc_span::Span, whole: rustc_span::Span) {
     for r in fail.refs.iter() {
-      let (last, past) = self.loan_scope_in(r.new_loan.0, &[then], whole);
-      if !past {
-        if let Some(line) = last[0] {
-          self.loan_end_overrides.push((r.new_span, line));
+      // (A call's lenders share the result's lifetime: one end.)
+      let mut end = None;
+      for (_, loan) in r.new.iter() {
+        let (last, past) = self.loan_scope_in(loan.0, &[then], whole);
+        if past {
+          end = None;
+          break;
         }
+        end = end.max(last[0]);
+      }
+      if let Some(line) = end {
+        self.loan_end_overrides.push((r.new_id.0, r.new_id.1.clone(), line));
       }
     }
   }
@@ -1013,19 +1103,62 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     loans
   }
 
-  /// The loan `rd` holds: its index in rustc's borrow set and the last
-  /// line rustc has it in scope.
-  fn loan_of(&self, rd: &RefData) -> Option<(usize, usize)> {
-    let loans = self.gather_borrow_data(self.bwf);
+  /// The loan of `lender` that `rd` holds: its index in rustc's borrow
+  /// set and the last line rustc has it in scope. One made by `&x` is
+  /// the loan issued at that expression. Otherwise (a call's result,
+  /// `first(&v)`, `longest(&a, &b)`, or `&v[0]`, which borrows `v` for
+  /// `Index::index`) it is one of that lender's issued on its line, or
+  /// inside that expression: the one made inside `within` (the assigned
+  /// expression), else the one in scope longest.
+  fn loan_of_lender(&self, loans: &[crate::mir_data::MIRBorrowData], rd: &RefData, lender: &ResourceAccessPoint, within: Option<rustc_span::Span>) -> Option<(usize, usize)> {
+    let root = lender.name().split('.').next().unwrap_or(lender.name()).to_owned();
+    let of_lender = |b: &&crate::mir_data::MIRBorrowData| b.borrowed_place.as_deref() == Some(root.as_str())
+      && within.is_none_or(|w| w.contains(b.span));
+    let longest = |it: &mut dyn Iterator<Item = &'_ crate::mir_data::MIRBorrowData>| {
+      it.max_by_key(|b| (b.region.1, std::cmp::Reverse(b.borrow_idx))).map(|b| (b.borrow_idx, b.region.1))
+    };
     match rd.loan()? {
-      LoanId::Span(sp) => loans.iter().find(|b| b.span == sp),
-      LoanId::Line(l) => {
-        let ResourceTy::Value(lender) = &rd.lender else { return None };
-        let root = lender.name().split('.').next().unwrap_or(lender.name()).to_owned();
-        loans.iter().find(|b| b.region.0 == l && b.borrowed_place.as_deref() == Some(root.as_str()))
-      }
-    }.map(|b| (b.borrow_idx, b.region.1))
+      LoanId::Span(sp) if rd.lender == ResourceTy::Value(lender.clone()) => match loans.iter().find(|b| b.span == sp) {
+        Some(b) if b.borrowed_place.as_deref() == Some(root.as_str()) => Some((b.borrow_idx, b.region.1)),
+        _ => longest(&mut loans.iter().filter(|b| sp.contains(b.span)).filter(of_lender)),
+      },
+      LoanId::Span(_) => None,
+      LoanId::Line(l) => longest(&mut loans.iter().filter(|b| b.region.0 == l).filter(of_lender)),
+    }
   }
+
+  /// The right-hand side of the last assignment `name = …` in `part`.
+  fn assigned_rhs(&self, part: &'tcx Expr<'tcx>, name: &str) -> Option<AssignedRhs> {
+    struct Find<'a, 'tcx> { name: &'a str, found: Option<&'tcx Expr<'tcx>> }
+    impl<'a, 'tcx> intravisit::Visitor<'tcx> for Find<'a, 'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Assign(lhs, rhs, _) = e.kind {
+          if let ExprKind::Path(rustc_hir::QPath::Resolved(None, p)) = lhs.kind {
+            if p.segments.len() == 1 && p.segments[0].ident.as_str() == self.name {
+              self.found = Some(rhs);
+            }
+          }
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let mut f = Find { name, found: None };
+    intravisit::Visitor::visit_expr(&mut f, part);
+    let rhs = f.found?;
+    let text = self.tcx.sess.source_map().span_to_snippet(rhs.span).ok()?;
+    let direct = matches!(rhs.kind, ExprKind::AddrOf(_, _, inner) if matches!(inner.kind, ExprKind::Path(_)));
+    let callee = match rhs.kind {
+      ExprKind::Call(f, _) => match f.kind {
+        ExprKind::Path(QPath::Resolved(_, p)) => p.segments.last().map(|s| s.ident.to_string()),
+        ExprKind::Path(QPath::TypeRelative(_, seg)) => Some(seg.ident.to_string()),
+        _ => None,
+      },
+      ExprKind::MethodCall(seg, ..) => Some(seg.ident.to_string()),
+      _ => None,
+    };
+    Some(AssignedRhs { text: text.split_whitespace().collect::<Vec<_>>().join(" "), span: rhs.span, direct, callee })
+  }
+
 
   /// True if an event of the let-chain from `preprocessed_events[chain_lo..]`
   /// writes through the chain's binding `b`, or lends it on mutably

@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -3067,8 +3067,8 @@ fn timeline_segment_title(
     // it as borrowed either way.
     if matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) && !rap.is_ref() {
         if let Some((into, mutable, chain)) = or_alt_lend_at(visualization_data, rap, line) {
-            if let Some(sources) = chain {
-                return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, mutable, rap.holds_value());
+            if let Some((sources, chain)) = chain {
+                return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, chain, mutable, rap.holds_value());
             }
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
@@ -3445,7 +3445,7 @@ fn or_alt_lend_at<'a>(
     visualization_data: &'a VisualizationData,
     rap: &ResourceAccessPoint,
     line: Option<usize>,
-) -> Option<(&'a ResourceAccessPoint, bool, Option<&'a [String]>)> {
+) -> Option<(&'a ResourceAccessPoint, bool, Option<(&'a [String], &'a ChainRef)>)> {
     fn lends<'a>(history: &'a [(usize, Event)], out: &mut Vec<(usize, &'a Event)>) {
         for (l, e) in history {
             match e {
@@ -3472,7 +3472,7 @@ fn or_alt_lend_at<'a>(
         None => None,
     };
     match found {
-        Some(Event::OrAltLend { into, mutable, chain, sources, .. }) => Some((into, *mutable, chain.map(|_| sources.as_slice()))),
+        Some(Event::OrAltLend { into, mutable, chain, sources, .. }) => Some((into, *mutable, chain.as_ref().map(|c| (sources.as_slice(), c)))),
         _ => None,
     }
 }

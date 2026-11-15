@@ -20031,6 +20031,90 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_call_ref_1068",
+        // #1068 (item 1): the new reference is a call's result, not `&x`.
+        // `r = first(&v)`: on the else path r points into v (the length check
+        // failed) or to t (`y` was `None`); rustc keeps both borrowed to the
+        // else's `println!` (`v.push(..)` / `t.push(..)` before it are E0502,
+        // after it they compile). On the if path t's loan ends at the write and
+        // v's at the body's `println!`. The `&v` lent to `first` is the loan r
+        // holds, so "the else branch runs after that borrow has ended" would be
+        // false. `method` (`q = s.as_str()`) and `index` (`p = &w[0]`, no else,
+        // p read after the `if`) are the same. main refused all three ("`if
+        // let` chains that assign a new reference … aren't supported yet").
+        // Rows: `chain_call_reference_borrows_end_on_each_path`.
+        must_contain: &[
+            "r may have been assigned a new reference: when the condition assigns first(&v) to r and then turns out false, the else branch runs after that assignment, so here r points into v or to t",
+            "r points into v or to t here. If the condition assigned first(&v) to r before turning out false, v's resource is immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats v as borrowed either way: v is read-only while r's borrow is live.",
+            "r points into v or to t here. If the condition turned out false before assigning first(&v) to r, t's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats t as borrowed either way: t is read-only while r's borrow is live.",
+            "r's borrow ends here, so v's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned first(&v) to r)",
+            "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned first(&v) to r)",
+            "q may have been assigned a new reference: when the condition assigns s.as_str() to q and then turns out false, the else branch runs after that assignment, so here q points into s or into u",
+            "q's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned s.as_str() to q)",
+            "p may have been assigned a new reference: when the condition assigns &w[0] to p and then turns out false, the body is skipped but the assignment has happened, so after the if p points into w or to u",
+            "w's resource may be immutably borrowed by p (p points into w or to u); either way, w is read-only until p's borrow ends",
+            "p's borrow ends here, so u's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &w[0] to p)",
+        ],
+        must_not_contain: &[
+            "v may have been immutably borrowed: when the condition lends v to first",
+            "s may have been immutably borrowed: when the condition lends s to as_str",
+            "points to v",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_assigns_call_ref_1068",
+        // #1068 (item 1) for a match guard: `r = first(&v)` in the guard. Every
+        // later arm starts with r pointing into v or to t, both borrowed to r's
+        // last use there. main refused the program.
+        must_contain: &[
+            "r may have been assigned a new reference: when the guard on line 11 assigns first(&v) to r and then turns out false, matching goes on with the later arms after that assignment, so here r points into v or to t (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "r points into v or to t here. If the guard on line 11 turned out false before assigning first(&v) to r, or didn't run (its arm's pattern didn't match), t's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats t as borrowed either way: t is read-only while r's borrow is live.",
+            "r's borrow ends here, so v's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the guard on line 11 had assigned first(&v) to r)",
+        ],
+        must_not_contain: &[
+            "v may have been immutably borrowed: when the guard on line 11 lends v to first",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_ref_lenders_1068",
+        // #1068 (item 2): references with several lenders. In `main` r's old
+        // reference is `longest(&a, &b)`: on the else path r points to s or
+        // into a or b, and rustc keeps all three borrowed to the else's
+        // `println!`. In `tied` the new one is `longest(&c, &d)` and q is read
+        // after the `if`: c, d and t stay borrowed to that read (`c.push` /
+        // `t.push` before it are E0502, after it compile). main refused both.
+        must_contain: &[
+            "r may have been assigned a new reference: when the condition assigns &s to r and then turns out false, the else branch runs after that assignment, so here r points to s, into a or into b",
+            "r points to s, into a or into b here. If the condition turned out false before assigning &s to r, a's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats a as borrowed either way: a is read-only while r's borrow is live.",
+            "r points to s, into a or into b here. If the condition turned out false before assigning &s to r, b's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats b as borrowed either way: b is read-only while r's borrow is live.",
+            "r's borrow ends here, so a's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "r's borrow ends here, so b's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "r's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "q may have been assigned a new reference: when the condition assigns longest(&c, &d) to q and then turns out false, the else branch runs after that assignment, so here q points into c, into d or to t",
+            "c's resource may be immutably borrowed by q (q points into c, into d or to t); either way, c is read-only until q's borrow ends",
+            "d's resource may be immutably borrowed by q (q points into c, into d or to t); either way, d is read-only until q's borrow ends",
+            "q's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned longest(&c, &d) to q)",
+            "c's resource is no longer immutably borrowed",
+            "d's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "q's borrow ends here, so c's resource",
+            "q's borrow ends here, so d's resource",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_ref_from_literal_1068",
+        // #1068 (item 2): r's old reference is to a string literal, which has
+        // no column. On the else path r points to s or to the literal; s is
+        // borrowed to the else's `println!` either way. main refused it.
+        must_contain: &[
+            "r may have been assigned a new reference: when the condition assigns &s to r and then turns out false, the else branch runs after that assignment, so here r points to s or to a string literal",
+            "r points to s or to a string literal here. If the condition assigned &s to r before turning out false, s's resource is immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats s as borrowed either way: s is read-only while r's borrow is live.",
+            "r's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -23716,9 +23800,11 @@ fn outer_borrow_ends_at_exit() {
 /// The `if` counterpart of `guard_that_assigns_a_reference_in_a_loop_is_refused`
 /// (#198, #281, #603): the lasting effects of a let-chain's condition
 /// that the else branch still can't be drawn with are refused, rather
-/// than drawn in the if branch only: a new reference that isn't `&x` of
-/// a variable (here another reference, `r = q`: which loans r holds on
-/// the else path isn't worked out), and `r = &s` in a loop's body.
+/// than drawn in the if branch only: a new reference copied from another
+/// reference (`r = q`: s's loan is then held by q and maybe by r, and
+/// its end on the else path is the later of their last uses, #1068),
+/// and `r = &s` in a loop's body. (A call's result, `r = first(&v)`,
+/// and references with several lenders are drawn since #1068.)
 #[test]
 fn if_let_chain_lasting_effects_still_refused() {
     env::set_var("RV_RUNNER", "local");
@@ -26771,6 +26857,50 @@ fn chain_reference_borrows_end_on_each_path() {
             assert_eq!(on(&dots, row), 1, "{end}: {dots:?}, none on the later arm's println! row ({row})");
         }
     }
+}
+
+/// #1068: a let-chain part (or a match guard) that assigns a reference
+/// that isn't `&x` of a variable, or whose old or new reference has
+/// several lenders, before a part that fails. Each borrow ends where
+/// rustc ends it on each path, checked with conflicting uses (E0502
+/// before the row, accepted after it).
+#[test]
+fn chain_call_reference_borrows_end_on_each_path() {
+    let on = |dots: &[(f64, f64)], row: f64| dots.iter().filter(|d| (d.1 - row).abs() < 1.0).count();
+    let rv = run_with_local_backend("edition2024/chain_assigns_call_ref_1068");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let cond = code_row_y(&code, "if let Some(_n) = y && { r = first(&v); r.len() > 3 } {");
+    let body = code_row_y(&code, "println!(\"long {}\", r);");
+    let els = code_row_y(&code, "println!(\"short {}\", r);");
+    // The path into the body: t's loan ends at the write, v's at the
+    // body's println!.
+    let t_back = dots_listing_tooltip(&timeline, "t's resource is no longer immutably borrowed");
+    let v_back = dots_listing_tooltip(&timeline, "v's resource is no longer immutably borrowed");
+    assert_eq!((t_back.len(), on(&t_back, cond)), (1, 1), "t's loan on the body's path ends at the write: {t_back:?} (row {cond})");
+    assert_eq!((v_back.len(), on(&v_back, body)), (1, 1), "v's loan on the body's path ends at its println!: {v_back:?} (row {body})");
+    // The else branch: both to its println!.
+    for who in ["v", "t"] {
+        let end = format!("r's borrow ends here, so {who}'s resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned first(&v) to r)");
+        let dots = dots_listing_tooltip(&timeline, &end);
+        assert_eq!((dots.len(), on(&dots, els)), (1, 1), "{end}: {dots:?}, not on the else branch's println! row ({els})");
+    }
+
+    // A new reference tied to two arguments, read after the `if`: both
+    // lenders, and the old one, stay borrowed to that read.
+    let rv = run_with_local_backend("edition2024/chain_assigns_ref_lenders_1068");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let cond = code_row_y(&code, "if let Some(_n) = y && { q = longest(&c, &d); q.len() > 3 } {");
+    let read = code_row_y(&code, "println!(\"{}\", q);");
+    let t_back = dots_listing_tooltip(&timeline, "t's resource is no longer immutably borrowed");
+    assert_eq!((t_back.len(), on(&t_back, cond)), (1, 1), "t's loan on the body's path ends at the write: {t_back:?} (row {cond})");
+    for who in ["c", "d"] {
+        let dots = dots_listing_tooltip(&timeline, &format!("{who}'s resource is no longer immutably borrowed"));
+        assert_eq!((dots.len(), on(&dots, read)), (1, 1), "{who} stays borrowed to the read after the if: {dots:?} (row {read})");
+    }
+    // (Its row has a second line for the read's return arrows.)
+    let end = "q's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned longest(&c, &d) to q)";
+    let dots = dots_listing_tooltip(&timeline, end);
+    assert!(dots.len() == 1 && dots[0].1 > read - 1.0 && dots[0].1 < read + 31.0, "t stays borrowed to the read after the if: {dots:?} (row {read})");
 }
 
 /// #1069: a `let r;` reference given a loan in each arm of an `if` /
