@@ -1,5 +1,14 @@
 //! Scraping SVG start tags. The plugin's SVG is regular enough that this
-//! saves pulling an XML parser into the dev-dependencies.
+//! needs no XML parser; `xml_error` is the one strict parse, which checks
+//! that a panel is well-formed XML (#1049).
+
+/// `Some(message)` if `svg` is not well-formed XML. A browser shows an
+/// error banner instead of the drawing when an SVG file opened on its own,
+/// or embedded with `<object>`, is malformed (the playground's inline HTML
+/// parse is lenient and hides it).
+pub fn xml_error(svg: &str) -> Option<String> {
+    roxmltree::Document::parse(svg).err().map(|e| e.to_string())
+}
 
 /// Value of attribute `name` in the start tag `tag` (`<circle cx=".." ..`),
 /// matching only whole attribute names (`y` doesn't match inside `cy` or

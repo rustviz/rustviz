@@ -27,3 +27,8 @@ tempfile = "3"
 [target.'cfg(unix)'.dependencies]
 # kill(2) on the runner's process group at the deadline.
 libc = "0.2"
+
+[dev-dependencies]
+# Strict XML parse of every rendered panel (#1049): the SVG is also opened
+# on its own and embedded with <object>, where a browser rejects malformed XML.
+roxmltree = "0.20"
