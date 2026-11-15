@@ -16043,6 +16043,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=t.1.n goes out of scope. Its resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "call_in_iter_loop",
+        // #900: a call on v inside a `for` loop whose iterator borrows v
+        // with no loop variable to name it (`v.iter().enumerate()`,
+        // `w.iter().map(..)`, `s.chars()`, `&u` under a copying
+        // pattern) gives back only its own borrow: the iterator borrows
+        // v until the loop's `}`. So does `t.len()` in the head `t.iter()
+        // .take(t.len())`, which runs after `iter` has borrowed t. Main
+        // said "v's resource is no longer immutably borrowed" at the call
+        // and drew v as its unborrowed owner from there (t: for the whole
+        // loop). That text is right on the loop's `}`, so the
+        // rows are checked in `a_call_inside_an_iterator_loop_leaves_the_lender_shared`.
+        must_contain: &[
+            "v's resource is no longer borrowed by len, but is still immutably borrowed by the `for` loop's iterator",
+            "w's resource is no longer borrowed by len, but is still immutably borrowed by the `for` loop's iterator",
+            "s's resource is no longer borrowed by len, but is still immutably borrowed by the `for` loop's iterator",
+            "u's resource is no longer borrowed by len, but is still immutably borrowed by the `for` loop's iterator",
+            "t's resource is no longer borrowed by len, but is still immutably borrowed by the `for` loop's iterator",
+            "v's resource is immutably borrowed by the `for` loop's iterator; v is read-only until the loop ends",
+            "w's resource is immutably borrowed by the `for` loop's iterator; w is read-only until the loop ends",
+            "s's resource is immutably borrowed by the `for` loop's iterator; s is read-only until the loop ends",
+            "u's resource is immutably borrowed by the `for` loop's iterator; u is read-only until the loop ends",
+            "t's resource is immutably borrowed by the `for` loop's iterator; t is read-only until the loop ends",
+            "v's resource is no longer immutably borrowed",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+        ],
+        must_not_contain: &[
+            "being shared by one or more variables",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17263,6 +17293,52 @@ fn for_ref_copy_of_stored_ref_borrows_only_via_the_iterator() {
         assert!(
             (first_below - close_row).abs() < 1.0,
             "{name}: {var}'s borrow should end on the loop's closing row (y={close_row}), not at y={first_below}",
+        );
+    }
+}
+
+/// #900: a call on v inside a `for` loop whose iterator borrows v
+/// (`for (i, a) in v.iter().enumerate() { v.len(); }`) gives back only
+/// its own borrow: the iterator borrows v until the loop's `}` (#868).
+/// The call's dot says so, v isn't unborrowed between the call and the
+/// loop's `}`, and the segment from the `for` row to the `}` row is the
+/// loop iterator's. `t.len()` in the head `t.iter().take(t.len())` runs
+/// once `iter` has borrowed t, so it too leaves t borrowed by the
+/// iterator.
+#[test]
+fn a_call_inside_an_iterator_loop_leaves_the_lender_shared() {
+    let name = "call_in_iter_loop";
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (var, for_src, call_src) in [
+        ("v", "for (i, a) in v.iter().enumerate() {", "println!(\"{} {} {}\", i, a, v.len());"),
+        ("w", "for x in w.iter().map(|n| n + 1) {", "println!(\"{} {}\", x, w.len());"),
+        ("s", "for c in s.chars() {", "println!(\"{} {}\", c, s.len());"),
+        ("u", "for &y in &u {", "println!(\"{} {}\", y, u.len());"),
+        ("t", "for z in t.iter().take(t.len()) {", "for z in t.iter().take(t.len()) {"),
+    ] {
+        let for_row = code_row_y(&code, for_src);
+        let call_row = code_row_y(&code, call_src);
+        let close_row = code_rows_y(&code, "}")
+            .into_iter()
+            .find(|y| *y > call_row)
+            .expect("the loop's closing brace");
+        let still = dots_listing_tooltip(&timeline, &format!("{var}'s resource is no longer borrowed by len, but is still immutably borrowed by the `for` loop's iterator"));
+        assert!(
+            still.len() == 1 && (still[0].1 - call_row).abs() < 1.0,
+            "{name}: {var}'s dot where len's borrow ends should be on the call row (y={call_row}): {still:?}",
+        );
+        let back = dots_listing_tooltip(&timeline, &format!("{var}'s resource is no longer immutably borrowed"));
+        let early: Vec<_> = back.iter().filter(|d| d.1 > for_row - 1.0 && d.1 < close_row - 1.0).collect();
+        assert!(early.is_empty(), "{name}: {var} is unborrowed at {early:?}, above the loop's `}}` (y={close_row})");
+        assert!(back.iter().any(|d| (d.1 - close_row).abs() < 1.0), "{name}: {var} isn't unborrowed on the loop's `}}` row (y={close_row}): {back:?}");
+        let owner = state_lines_with_tooltip(&timeline, &format!("{var} is the owner of the resource"));
+        let free: Vec<_> = owner.iter().filter(|(a, b)| b.min(close_row) - a.max(for_row) > 0.5).collect();
+        assert!(free.is_empty(), "{name}: {var} drawn as its unborrowed owner at {free:?}, inside the loop (y={for_row}..{close_row})");
+        let held = state_lines_with_tooltip(&timeline, &format!("{var}'s resource is immutably borrowed by the `for` loop's iterator; {var} is read-only until the loop ends"));
+        assert!(
+            held.iter().any(|(a, b)| *a <= call_row + 0.5 && *b >= close_row - 0.5),
+            "{name}: {var}'s segment from the call (y={call_row}) to the loop's `}}` (y={close_row}) isn't the loop iterator's: {held:?}",
         );
     }
 }

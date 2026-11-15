@@ -443,6 +443,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // iterator's loan: a `continue` doesn't end it, since `next()` uses
   // the iterator again (#872).
   pub for_loop_loans: HashSet<String>,
+  // The shared loans a `for` loop's iterator holds with no loop
+  // variable to name it (`for (i, a) in v.iter().enumerate()`, `for &y
+  // in &v`; #868, #885): the lender, the `for` line, the loop's closing
+  // line, and whether a call in the head made it (`iter`, rather than
+  // `&v`). A call on the lender in the body leaves it shared by the
+  // iterator (#900).
+  pub for_loop_iter_loans: Vec<(String, usize, usize, bool)>,
   // `let r = loop { … break k; };` (#431): the loop's id, what its
   // `break` values go to (`r`) and how (move or copy). A `break` with a
   // value, in that loop, pairs the value with `r` the way `let r = k;`
@@ -674,6 +681,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       borrow_floor: HashMap::new(),
       for_moved_holders: HashSet::new(),
       for_loop_loans: HashSet::new(),
+      for_loop_iter_loans: Vec::new(),
       in_scope: Vec::new(),
       exit_frames: Vec::new(),
       literal_temps: HashMap::new(),
@@ -7240,10 +7248,25 @@ pub fn print_out_of_scope(&mut self){
         first_and_moved(self.preprocessed_events, base, rd.assigned_at, &mut seen);
         let from = seen.0.unwrap_or(rd.assigned_at);
         let moved = seen.1;
-        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders })
+        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false })
       })
       .collect();
     sharers.sort_by(|a, b| a.hash.cmp(&b.hash).then_with(|| a.name.cmp(&b.name)));
+    // A `for` loop's iterator that borrows the lender with no loop
+    // variable to name it (`for (i, a) in v.iter().enumerate() {
+    // v.len(); }`) shares it until the loop's `}` (#900). It has no
+    // column, so it comes after the variables.
+    for (lender, from, to, head_call) in &self.for_loop_iter_loans {
+      sharers.push(Sharer {
+        name: crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned(),
+        hash: u64::MAX,
+        from: *from,
+        to: *to,
+        moved: None,
+        lenders: vec![lender.clone()],
+        from_kept_call: *head_call,
+      });
+    }
     note_sharers_in(self.preprocessed_events, &sharers);
   }
 
@@ -7441,6 +7464,10 @@ struct Sharer {
   moved: Option<usize>,
   /// The names of the variables it shares.
   lenders: Vec<String>,
+  /// A call on its `from` line counts too, once the call whose result
+  /// keeps the loan has borrowed the lender there: `v.len()` in `for x
+  /// in v.iter().take(v.len())` runs while `iter`'s result holds v.
+  from_kept_call: bool,
 }
 
 /// The first line from `start` on that an event of `events` (branches
@@ -7478,7 +7505,13 @@ fn first_and_moved(events: &[(usize, ExternalEvent)], base: &str, start: usize, 
 
 /// `note_sharers_across_calls` over `events`, branches included.
 fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer]) {
+  // The lenders a call whose result keeps the borrow has borrowed so
+  // far, with its line.
+  let mut kept: Vec<(usize, String)> = Vec::new();
   for (line, ev) in events.iter_mut() {
+    if let ExternalEvent::PassByStaticReference { from: ResourceTy::Value(lender), result_keeps_borrow: true, .. } = ev {
+      kept.push((*line, lender.name().to_owned()));
+    }
     match ev {
       ExternalEvent::PassByStaticReference { from: ResourceTy::Value(lender), stored_in, result_keeps_borrow, still_borrowed_by, .. }
         if stored_in.0.is_none() && !*result_keeps_borrow && !lender.is_ref() =>
@@ -7487,10 +7520,20 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer]) {
         // visited before it too; its sharers are on its own lines, so
         // they leave those events alone.
         let names: Vec<String> = sharers.iter()
-          .filter(|s| s.from < *line && s.to >= *line && s.moved.is_none_or(|m| m >= *line)
-            && s.lenders.iter().any(|l| l == lender.name()))
+          .filter(|s| {
+            let started = s.from < *line
+              || (s.from_kept_call && s.from == *line && kept.iter().any(|(l, n)| l == line && n == lender.name()));
+            started && s.to >= *line && s.moved.is_none_or(|m| m >= *line)
+              && s.lenders.iter().any(|l| l == lender.name())
+          })
           .map(|s| s.name.clone())
-          .collect();
+          .fold(Vec::new(), |mut names, n| {
+            // (Nested loops over the lender: one mention.)
+            if !names.contains(&n) {
+              names.push(n);
+            }
+            names
+          });
         if !names.is_empty() {
           *still_borrowed_by = names;
         }

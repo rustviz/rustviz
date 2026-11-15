@@ -1331,7 +1331,9 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
 // of the borrow is given back, but `holders` (`it`) still hold it, so
 // the lender is still borrowed.
 pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, holders: &[String], mutable: bool, holds_value: bool) -> String {
-    let holders: Vec<String> = holders.iter().map(|n| styled_name_html(n)).collect();
+    let holders: Vec<String> = holders.iter()
+        .map(|n| if n == LOOP_ITERATOR_HOLDER { n.clone() } else { styled_name_html(n) })
+        .collect();
     format!(
         "{0}'s {1} is no longer borrowed by {2}, but is still {3} borrowed by {4}",
         styled_name_html(my_name),
@@ -2575,6 +2577,11 @@ pub fn event_dot_lend_to_loop_iterator(my_name: &String, is_mut: bool, holds_val
         state_borrowed_by_loop_iterator(my_name, holds_value)
     }
 }
+
+/// The holder named, in `event_dot_reacquire_still_borrowed`, for a
+/// borrow only a `for` loop's iterator holds (#900). Not a variable, so
+/// not styled as one.
+pub const LOOP_ITERATOR_HOLDER: &str = "the `for` loop's iterator";
 
 // PartialPrivilege of a variable that only a `for` loop's iterator
 // borrows (`for c in s.chars()`, `for (i, a) in v.iter().enumerate()`;

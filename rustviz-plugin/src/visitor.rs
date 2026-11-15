@@ -5578,6 +5578,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .map(|(l, m, call)| (l, m, StaticLender::LoopIterator { call }))
           .chain(head_loan.map(|(l, m, lend)| (l, m, StaticLender::LoopHeadBorrow { lend })));
         for (lender, is_mut, static_lender) in loop_loans {
+          if !is_mut {
+            let head_call = matches!(static_lender, StaticLender::LoopIterator { .. });
+            self.for_loop_iter_loans.push((lender.real_name(), for_line, body_end, head_call));
+          }
           let id = *self.unique_id;
           *self.unique_id += 1;
           let (from, to) = (ResourceTy::Anonymous, lender);
