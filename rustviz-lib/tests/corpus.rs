@@ -18038,9 +18038,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "k goes out of scope. No resource is dropped.",
             "m goes out of scope. No resource is dropped.",
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
-            // a body that always returns is drawn inline too (#995)
-            "p goes out of scope. No resource is dropped.",
-            "q goes out of scope. No resource is dropped.",
+            // a body that always returns is drawn inline too (#995), and
+            // r is dropped at the `return`, which every path takes (#1004)
+            "r goes out of scope. Its resource is dropped.",
             // controls: these patterns can fail
             "The pattern didn't match, so the temporary tuple (o, u) is dropped here, and with it o's and u's resources",
             "The pattern didn't match, so the temporary value Some(e) is dropped here, and with it e's resource",
@@ -18174,17 +18174,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // its body, so it's drawn inline like a plain block (or a one-arm
         // `match`) even when the body always returns / breaks or assigns
         // a `let y;` local: no path that skips it, no "maybe moved" join,
-        // no drop flag. (Known gap, as for a one-arm `match`: the code
-        // after an `if` whose body always returns is drawn, and the
-        // return's drops (x's, g's) are drawn at the scope ends, #1004.)
+        // no drop flag. A body that always returns leaves the function
+        // there: x and g are dropped on the `return` row, and `g.len()`
+        // after the `if` never runs (#1004).
         name: "edition2024/irrefutable_iflet_inline_995",
         must_contain: &[
             "Move from f to x",
-            "f goes out of scope. No resource is dropped.",
+            "x goes out of scope. Its resource is dropped.",
+            "g goes out of scope. Its resource is dropped.",
             "a goes out of scope. No resource is dropped.",
             "s1 goes out of scope. No resource is dropped.",
             "y goes out of scope. Its resource is dropped.",
-            "p goes out of scope. No resource is dropped.",
+            // w (p's String) and r are dropped at the `return` too (#1004)
+            "w goes out of scope. Its resource is dropped.",
+            "r goes out of scope. Its resource is dropped.",
             "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r",
             "Move from s to t",
             "s goes out of scope. No resource is dropped.",
@@ -18204,6 +18207,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Rust tracks this with a runtime drop flag",
             "s may have been moved",
             "is live in a conditional expression",
+            // `g.len()` never runs (#1004)
+            "g's resource is immutably borrowed by len",
         ],
     },
     TooltipExpect {
@@ -18369,6 +18374,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y acquires ownership of a new resource. Its previous resource is dropped here only if",
             "z acquires ownership of a new resource. Its previous resource is dropped here only if",
             "m acquires ownership of a new resource. Its previous resource is dropped here only if",
+        ],
+    },
+    TooltipExpect {
+        // #1004: a body that always runs and always returns (an `if let`
+        // whose pattern always matches, a one-arm `match`), drawn inline,
+        // leaves the function there: x and g (y and q) are dropped on the
+        // `return` row, and the code after it never runs. It used to draw
+        // `g.len()` as running (a borrow of g after its String was
+        // dropped) and the drops at the scope ends. After an `if` / `else`
+        // whose branches both return (#515), `let z = a;` never runs:
+        // a is dropped at each `return`, not moved into z.
+        name: "inline_exit_1004",
+        must_contain: &[
+            "Move from f to x",
+            "x goes out of scope. Its resource is dropped.",
+            "g goes out of scope. Its resource is dropped.",
+            "Move from p to y",
+            "y goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "g's resource is immutably borrowed by len",
+            "q's resource is immutably borrowed by len",
+            "b's resource is immutably borrowed by len",
+            "Move from a to z",
+            "a's resource is moved",
+            "z acquires ownership of a resource",
         ],
     },
 ];
@@ -21672,6 +21706,29 @@ fn borrow_ends_before_lender_drop_at_exit() {
         assert!(ok.iter().any(|(_, dy)| *dy == y),
             "{}: no dot on the {:?} row lists {:?} after {:?}; dots listing the drop: {:?}",
             name, row, drop, before, dots_listing_tooltip(&timeline, drop));
+    }
+}
+
+/// A body drawn inline that always returns (#1004): what the `return`
+/// drops is dropped on its row, not where the variables' scopes end.
+#[test]
+fn inline_exit_drops_are_on_the_return_row() {
+    for (name, drop, row) in [
+        ("inline_exit_1004", "x goes out of scope. Its resource is dropped.", "return x.len();"),
+        ("inline_exit_1004", "g goes out of scope. Its resource is dropped.", "return x.len();"),
+        ("inline_exit_1004", "y goes out of scope. Its resource is dropped.", "return y.len() + 1;"),
+        ("inline_exit_1004", "q goes out of scope. Its resource is dropped.", "return y.len() + 1;"),
+        ("edition2024/irrefutable_iflet_literal_981", "r goes out of scope. Its resource is dropped.", "return r.len();"),
+        ("edition2024/irrefutable_iflet_inline_995", "w goes out of scope. Its resource is dropped.", "return w.len();"),
+        ("edition2024/irrefutable_iflet_inline_995", "r goes out of scope. Its resource is dropped.", "return w.len();"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+        let y = code_row_y(&code, row);
+        let ok = dots_where(&timeline, |lines| lines.iter().any(|l| l == drop));
+        assert!(ok.iter().any(|(_, dy)| *dy == y),
+            "{}: no dot on the {:?} row lists {:?}; dots listing it: {:?}",
+            name, row, drop, dots_listing_tooltip(&timeline, drop));
     }
 }
 

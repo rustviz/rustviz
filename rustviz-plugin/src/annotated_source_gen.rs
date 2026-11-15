@@ -125,6 +125,10 @@ pub fn annotate_src(&mut self, name: String, s: Span, is_func: bool, hash: u64) 
 }
 
 pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
+  // Code that never runs (#1004) wasn't visited.
+  if self.dead_code.contains(&expr.hir_id) {
+    return;
+  }
   // Most macro/desugar-generated subtrees should be skipped — they
   // refer to synthetic items the visitor never registered. But a few
   // specific desugar shapes wrap *user-written* code in synthetic
@@ -449,6 +453,9 @@ pub fn annotate_local(&mut self, loc: &'tcx LetStmt<'tcx>) {
 }
 
 pub fn annotate_stmt(&mut self, stmt: &'tcx Stmt<'tcx>) {
+  if self.dead_code.contains(&stmt.hir_id) {
+    return;
+  }
   match stmt.kind {
     StmtKind::Let(ref local) => {
       self.annotate_local(local);

@@ -2220,6 +2220,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .collect()
   }
 
+  /// Visits the statements of `b`, and its tail, up to where every
+  /// path has left the function (`all_paths_exit`, #515): what comes
+  /// after that never runs, so nothing is drawn for it (#1004). (Set
+  /// only by a conditional directly in the function's body, so only
+  /// the rest of the body, and of blocks directly in it, is skipped.)
+  fn visit_live_stmts(&mut self, b: &'tcx rustc_hir::Block<'tcx>) {
+    for st in b.stmts {
+      if self.all_paths_exit {
+        self.dead_code.insert(st.hir_id);
+      } else {
+        self.visit_stmt(st);
+      }
+    }
+    if let Some(e) = b.expr {
+      if self.all_paths_exit {
+        self.dead_tail = true;
+        self.dead_code.insert(e.hir_id);
+      } else {
+        self.visit_expr(e);
+      }
+    }
+  }
+
+  /// A body drawn inline (an `if let` whose pattern always matches, a
+  /// one-arm `match`) directly in the function's body that always
+  /// leaves the function (`return`, a panic): the exit's drops, among
+  /// events `ids`, are what ends those variables (#1004). They stay on
+  /// the function's own columns, and every path has left the function
+  /// (`all_paths_exit`): the code after it never runs and draws
+  /// nothing (`visit_live_stmts`), and no scope end drops what the
+  /// exit did.
+  fn keep_inline_exit_drops(&mut self, ids: std::ops::Range<usize>) {
+    let kept: HashSet<usize> = self.preprocessed_events.iter()
+      .map(|(_, e)| e.get_id())
+      .filter(|id| ids.contains(id) && self.exit_drops.contains(id))
+      .collect();
+    self.exit_drops.retain(|id| !kept.contains(id));
+    self.all_paths_exit = true;
+  }
+
   /// `drop_locals_on_exit` for a panic call inside a branch.
   fn note_panic(&mut self, call: &'tcx Expr<'tcx>) {
     if let Some(line) = self.panic_line(call) {
@@ -2554,7 +2594,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     let tail = tail.filter(|e| self.fn_ret && !matches!(e.kind, ExprKind::Ret(_)));
     let plain_tail = tail.filter(|e| !self.mark_branch_returns(e));
     self.visit_expr(body.value); // visit fn body
-    if let Some(e) = plain_tail {
+    // (Not a tail that never runs, #1004.)
+    if let Some(e) = plain_tail.filter(|_| !self.dead_tail) {
       self.return_to_caller(e);
     }
     self.annotate_expr(body.value); // then annotate the body
@@ -3193,7 +3234,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         self.current_scope = new_scope;
         let before = label.map(|_| self.rap_names());
         let entry_len = self.in_scope.len();
-        self.visit_block(block); // visit all the statements in the block
+        self.visit_live_stmts(block); // visit the statements in the block
         self.in_scope.truncate(entry_len);
           self.current_scope = prev_scope;
         // A bare block (`{ let u = …; }`) in a branch: its locals aren't
@@ -4928,8 +4969,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 .map(|(_, e)| e.get_id()).collect();
               self.exit_drops.retain(|id| !tuple_drops.contains(id));
             }
-            self.discard_exit_drops(if_ids.clone());
-            for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
+            // A body that always runs and always leaves the function
+            // (#1004): its exit's drops are drawn, and nothing after.
+            let leaves_fn = always_matches && self.at_fn_level(expr) && self.ends_at_exits(if_expr, true);
+            if leaves_fn {
+              self.keep_inline_exit_drops(if_ids.clone());
+            } else {
+              self.discard_exit_drops(if_ids.clone());
+            }
+            let left = Self::left_at_exits(leaves_fn, &if_decl);
+            for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
                     ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
@@ -5268,6 +5317,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // events are already in preprocessed_events from the
     // arm's visit_expr below.
     let inline = arms.len() == 1;
+    // A lone arm that always leaves the function (`x => return …`),
+    // directly in its body (#1004): see `keep_inline_exit_drops`.
+    let leaves_fn = inline && self.at_fn_level(expr) && self.ends_at_exits(arms[0].body, true);
     // Every arm starts from the same uninitialized `let x;`
     // locals (#234); see join_uninit_locals.
     let uninit_before = self.uninit_locals.clone();
@@ -5472,7 +5524,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
       // add gos events, except in an arm that always leaves at
       // an exit that drops them (#630)
-      let arm_left = Self::left_at_exits(!inline && self.ends_at_exits(arm.body, true), &arm_decls);
+      // (A lone arm that always leaves the function drops them there
+      // too, #1004.)
+      let arm_left = Self::left_at_exits((!inline || leaves_fn) && self.ends_at_exits(arm.body, true), &arm_decls);
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
@@ -5529,7 +5583,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // lone arm isn't drawn: the arm isn't a column of its
     // own (#410).
     if inline {
-        self.discard_exit_drops(match_lo..*self.unique_id);
+        // Unless it always leaves the function (#1004).
+        if leaves_fn {
+          self.keep_inline_exit_drops(match_lo..*self.unique_id);
+        } else {
+          self.discard_exit_drops(match_lo..*self.unique_id);
+        }
         return;
     }
     // Variables introduced by an arm's pattern only exist

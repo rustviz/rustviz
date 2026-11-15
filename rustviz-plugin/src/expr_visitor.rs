@@ -567,6 +567,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
   pub all_paths_exit: bool,
+  // Set when, once `all_paths_exit` was set, a block's tail was left
+  // unvisited: it never runs (#1004).
+  pub dead_tail: bool,
+  // The statements and tails left unvisited for that reason; the code
+  // panel doesn't annotate them either.
+  pub dead_code: HashSet<rustc_hir::HirId>,
 
   // Earliest line a reference's borrow may be drawn ending at, keyed
   // by the reference's name (#372). A `match` arm binding that
@@ -837,6 +843,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       defer_old_ends: false,
       break_moves: Vec::new(),
       all_paths_exit: false,
+      dead_tail: false,
+      dead_code: HashSet::new(),
       borrow_floor: HashMap::new(),
       for_moved_holders: HashSet::new(),
       for_loop_loans: HashSet::new(),
