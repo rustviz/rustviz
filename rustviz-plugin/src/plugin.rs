@@ -361,7 +361,10 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
       }
       ItemKind::Enum(_ident, _generics, e_def) => {
         for variant in e_def.variants.iter() {
-          let ctor_name = tcx.hir_name(variant.data.ctor_hir_id().unwrap()).as_str().to_owned();
+          // The variant's own name; struct-like variants have no constructor
+          // fn (no ctor HirId), and no fn entry in the rap map, so nothing is
+          // annotated for them (#907).
+          let ctor_name = variant.ident.name.as_str().to_owned();
           let parent_name = tcx.hir_name(tcx.parent_hir_id(variant.hir_id)).as_str().to_owned();
           annotate_enum_variant(ctor_name.as_str(), parent_name.as_str(), &variant, &rap_map, & mut a_line_map, &tcx);
         }
