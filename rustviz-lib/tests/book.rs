@@ -1871,6 +1871,13 @@ fn check(s: &Snippet, outcome: &Outcome, failures: &mut Vec<String>, notes: &mut
         failures.push(format!("{}: timeline has no tooltip-trigger elements", s.id));
         return;
     }
+    // Every tooltip says something (#919: a join dot's was empty).
+    let empty = timeline.split("data-tooltip-text=\"").skip(1)
+        .filter(|c| c.split('"').next().is_some_and(|t| t.trim().is_empty()))
+        .count();
+    if empty > 0 {
+        failures.push(format!("{}: {} empty tooltip(s) in the timeline", s.id, empty));
+    }
 
     let mut off = off_canvas_ys(code);
     off.extend(off_canvas_ys(timeline));

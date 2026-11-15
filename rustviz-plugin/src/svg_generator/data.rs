@@ -727,6 +727,16 @@ impl ResourceAccessPoint {
         }
     }
 
+    /// See `Owner::holds`: what dropping this also drops, e.g. `the
+    /// String it holds`.
+    pub fn holds_phrase(&self) -> Option<&str> {
+        match self {
+            ResourceAccessPoint::Owner(Owner { holds: Some(h), .. })
+            | ResourceAccessPoint::Struct(Struct { holds: Some(h), .. }) => Some(h),
+            _ => None,
+        }
+    }
+
     /// True iff this RAP is an unbound temporary (#457): a call's
     /// result that nothing binds, dropped by an event of its own. It
     /// is labelled like a lifetime-extended one (`temporary_label`),
