@@ -17748,8 +17748,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // copies out of it (all of COUNT, ORIGIN.x, PRIMES[1]), `&COUNT`
         // borrows it, `fetch_add` borrows HITS, `TOTAL += 1` assigns
         // TOTAL. `primes` returns a reference to PRIMES, so nothing is
-        // copied to the caller.
+        // copied to the caller (#1053).
         must_contain: &[
+            "a reference to PRIMES is returned to the caller; the data it points to is not copied. PRIMES is a static, so the borrow can last for the whole program",
             "COUNT is a static: it lives for the whole program and is never dropped",
             "Copy from COUNT to n",
             "n is initialized with a copy of COUNT",
@@ -17789,6 +17790,59 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "&amp;",
             "`&amp;&amp;`",
+        ],
+    },
+    TooltipExpect {
+        name: "return_element_copy",
+        // #1052: returning `v[0]` / `g[1][0]` / `PRIMES[0]` / `ORIGIN.x`
+        // copies that one element or field to the caller (dot and arrow);
+        // the holder keeps all of it. `first_of` returns an i32 copied
+        // out of what v points to, not a reference, so v's borrow ends
+        // there.
+        must_contain: &[
+            "v[0] is copied out of v's value and returned to the caller",
+            "g[1][0] is copied out of g's value and returned to the caller",
+            "v[0] is copied out of the resource v points to and returned to the caller",
+            "v's immutable borrow ends",
+            "w[0] is copied out of w's resource and returned to the caller",
+            "w goes out of scope. Its resource is dropped.",
+            "w[1] is copied out of w's resource and returned to the caller",
+            "PRIMES[0] is copied out of PRIMES's value and returned to the caller",
+            "ORIGIN.x is copied out of ORIGIN's value and returned to the caller",
+        ],
+        must_not_contain: &[
+            // Only the element is copied, not the whole array / Vec /
+            // static.
+            "v's value is copied to the caller",
+            "g's value is copied to the caller",
+            "w's value is copied to the caller",
+            "PRIMES's value is copied to the caller",
+            "ORIGIN's value is copied to the caller",
+            // first_of returns an i32, not a reference into v.
+            "a reference from v is returned to the caller; the data it points to is not copied",
+        ],
+    },
+    TooltipExpect {
+        name: "return_static_ref",
+        // #1053: `&PRIMES` / `&PRIMES[0]` / `&ORIGIN.x` returned hands a
+        // reference to (part of) the static to the caller; nothing is
+        // copied, and the borrow doesn't end in the function. In `either`
+        // each branch returns a reference to a different static.
+        must_contain: &[
+            "a reference to PRIMES is returned to the caller; the data it points to is not copied. PRIMES is a static, so the borrow can last for the whole program",
+            "a reference to PRIMES[0] is returned to the caller; the data it points to is not copied. PRIMES is a static, so the borrow can last for the whole program",
+            "a reference to ORIGIN.x is returned to the caller; the data it points to is not copied. ORIGIN is a static, so the borrow can last for the whole program",
+            "a reference to ODDS is returned to the caller; the data it points to is not copied. ODDS is a static, so the borrow can last for the whole program",
+            "PRIMES is a static: it lives for the whole program and is never dropped",
+        ],
+        must_not_contain: &[
+            "PRIMES's value is copied",
+            "ORIGIN's value is copied",
+            "ODDS's value is copied",
+            "PRIMES's value is moved",
+            "PRIMES goes out of scope",
+            "borrow of PRIMES ends",
+            "from the caller",
         ],
     },
 ];

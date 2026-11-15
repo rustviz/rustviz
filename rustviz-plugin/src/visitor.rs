@@ -197,7 +197,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // reborrowed.
     let reborrow = if lhs_ty.is_ref() { self.reborrow_through_ref(e) } else { None };
     let evt = if reborrow.is_some() { Evt::Copy } else { evt };
-    let from_ro = if let Some(rty) = deref.or(reborrow) { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
+    // `v[0]` / `ORIGIN.x` returned: a copy of one element or field, on
+    // the holder's column (#1052). `&PRIMES` / `&PRIMES[0]`: a reference
+    // to (part of) a static goes to the caller (#1053).
+    // Like a reborrow, a `&mut STATIC` returned is drawn as a copy of
+    // the reference: the static isn't moved.
+    let part = if deref.is_none() && reborrow.is_none()
+      && (matches!(evt, Evt::Copy) || matches!(e.kind, ExprKind::AddrOf(..))) { self.returned_part(e) } else { None };
+    let evt = if part.is_some() { Evt::Copy } else { evt };
+    let from_ro = if let Some(rty) = deref.or(reborrow).or(part) { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
       // A unit struct / enum constructor (`Marker`) or a fn item
       // named as the returned value has no column of its own, and
       // neither has the caller: an arrow between the two can't be
@@ -210,8 +218,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // rather than a copy.
       None => self.field_through_ref(e).unwrap_or(ResourceTy::Anonymous),
     }};
-    // `&PRIMES` / `&PRIMES[0]` returned: a reference to (part of) a
-    // static, not a copy of it (#690). Not drawn.
+    // Any other reference to (part of) a static returned (one that
+    // `returned_part` doesn't name): not a copy of it (#690). Not drawn.
     if lhs_ty.is_ref() && !matches!(e.kind, ExprKind::Path(..))
       && matches!(&from_ro, ResourceTy::Value(r) if r.is_static()) {
       return;

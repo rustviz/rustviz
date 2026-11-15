@@ -3094,6 +3094,14 @@ impl Event {
                 // the reference in slots[0] points to (#438).
                 hover_messages::event_dot_copy_through_element(place)
             }
+            // `&PRIMES` returned: a reference to the static (#1053).
+            Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::Index(r, place, _), .. } if place.starts_with('&') => {
+                hover_messages::event_dot_static_ref_to_caller(r.name(), place)
+            }
+            // `v[0]` returned: a copy of the element (#1052).
+            Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::Index(r, place, _), .. } => {
+                hover_messages::event_dot_copy_element_to_caller(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
+            }
             // `let first = v[0];`: one element is copied out of the
             // resource v owns (or points to); v keeps all of it.
             Event::Duplicate{ is: ResourceTy::Index(r, place, _), .. } => {
