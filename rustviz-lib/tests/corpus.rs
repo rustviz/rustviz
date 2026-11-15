@@ -445,7 +445,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // A `&String` source was already read-only, so the
             // borrow adds no restriction worth stating.
             "the resource rc points to is immutably borrowed by rc2",
-            "the resource rd points to is immutably borrowed by rd2",
+            // rd2 = &rd borrows rd itself, a reference, so a value; rd
+            // can't be reassigned while rd2 is live (#925).
+            "rd is immutably borrowed by rd2; rd is read-only while the borrow is live",
+            "rd is no longer immutably borrowed",
+            "rd2 immutably borrows a value",
+            "Return immutably borrowed value from rd2 to rd",
         ],
         must_not_contain: &[
             "ra's resource is mutably borrowed by ra2; ra can't be used while the borrow is live",
@@ -459,6 +464,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from rc to rc2",
             "Immutable reborrow from rd to rd2",
             "rc's resource is immutably borrowed by rc2; rc is read-only while the borrow is live",
+            "the resource rd points to is immutably borrowed by rd2",
+            "rd2 no longer borrows the resource rd points to",
+            "=rd2 immutably borrows a resource",
+            "Return immutably borrowed resource from rd2 to rd",
         ],
     },
     TooltipExpect {
@@ -13668,13 +13677,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from x to a",
             "x's value is immutably borrowed by a; x is read-only while the borrow is live",
             "Immutable borrow from a to b",
-            "the value a points to is immutably borrowed by b",
-            "the value b points to is immutably borrowed by c",
+            // b = &a / c = &b borrow the reference variables a / b
+            // themselves, not what they point to (#925).
+            "a is immutably borrowed by b; a is read-only while the borrow is live",
+            "b is immutably borrowed by c; b is read-only while the borrow is live",
+            "a is no longer immutably borrowed",
+            "b is no longer immutably borrowed",
             "Return immutably borrowed value from a to x",
             "Return immutably borrowed value from b to a",
             "the value c points to is immutably borrowed by println!",
         ],
         must_not_contain: &[
+            "the value a points to is immutably borrowed by b",
+            "the value b points to is immutably borrowed by c",
+            "b no longer borrows the value a points to",
+            "c no longer borrows the value b points to",
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
@@ -13784,14 +13801,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from x to a",
             "x's value is immutably borrowed by a; x is read-only while the borrow is live",
             "Immutable borrow from a to b",
-            "the value a points to is immutably borrowed by b",
-            "the value b points to is immutably borrowed by c",
+            // b = &a / c = &b borrow the reference variables a / b
+            // themselves, not what they point to (#925).
+            "a is immutably borrowed by b; a is read-only while the borrow is live",
+            "b is immutably borrowed by c; b is read-only while the borrow is live",
+            "a is no longer immutably borrowed",
+            "b is no longer immutably borrowed",
             "Return immutably borrowed value from a to x",
             "Return immutably borrowed value from b to a",
             "the value a points to is immutably borrowed by println!",
             "the value b points to is immutably borrowed by println!",
         ],
         must_not_contain: &[
+            "the value a points to is immutably borrowed by b",
+            "the value b points to is immutably borrowed by c",
+            "b no longer borrows the value a points to",
+            "c no longer borrows the value b points to",
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
@@ -16121,6 +16146,61 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "gm is mutably borrowed by s",
             "gm is no longer mutably borrowed",
             "=s mutably borrows a value",
+        ],
+    },
+    // ─── `&r` with r a reference variable borrows r itself (#925) ───
+    TooltipExpect {
+        name: "shared_borrow_of_ref_var_925",
+        must_contain: &[
+            // rr = &x (x: &String) borrows x, not what x points to.
+            "Immutable borrow from x to rr",
+            "x is immutably borrowed by rr; x is read-only while the borrow is live",
+            "x is no longer immutably borrowed",
+            // What rr borrows is the reference x holds: a value (#484).
+            "rr immutably borrows a value",
+            "rr holds an immutable reference; it can read the borrowed value",
+            "Return immutably borrowed value from rr to x",
+            // k = &m (m: &mut String): m can't be written through while
+            // k is live.
+            "Immutable borrow from m to k",
+            "m is immutably borrowed by k; m is read-only while the borrow is live",
+            "m is no longer immutably borrowed",
+            "k immutably borrows a value",
+            "Return immutably borrowed value from k to m",
+            // y = &p (p: &i32): p was a value already; the dot is p's own.
+            "p is immutably borrowed by y; p is read-only while the borrow is live",
+            "p is no longer immutably borrowed",
+            "Return immutably borrowed value from y to p",
+            // A reborrow `&*x2` keeps its wording: q borrows b's resource.
+            "Immutable reborrow from x2 to q",
+            "the resource x2 points to is immutably borrowed by q",
+            "q no longer borrows the resource x2 points to",
+            "q immutably borrows a resource",
+            "Return immutably borrowed resource from q to *x2",
+            // So does `&gx` coerced to a `&String`, which reborrows *gx.
+            // (Its arrows still say "Immutable borrow from gx to s", not
+            // a reborrow, #939, so they aren't pinned here.)
+            "the resource gx points to is immutably borrowed by s",
+            "s no longer borrows the resource gx points to",
+            "s immutably borrows a resource",
+        ],
+        must_not_contain: &[
+            "the resource x points to is immutably borrowed by rr",
+            "rr no longer borrows the resource x points to",
+            "=rr immutably borrows a resource",
+            "Return immutably borrowed resource from rr to x",
+            "the resource m points to is immutably borrowed by k through m",
+            "k no longer borrows the resource m points to",
+            "=k immutably borrows a resource",
+            "Return immutably borrowed resource from k to m",
+            "the value p points to is immutably borrowed by y",
+            "y no longer borrows the value p points to",
+            "x2 is immutably borrowed by q",
+            "x2 is no longer immutably borrowed",
+            "=q immutably borrows a value",
+            "gx is immutably borrowed by s",
+            "gx is no longer immutably borrowed",
+            "=s immutably borrows a value",
         ],
     },
 ];
