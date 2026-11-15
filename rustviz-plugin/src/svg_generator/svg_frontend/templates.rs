@@ -12,8 +12,7 @@ pub static CODE_PANEL_TEMPLATE : &'static str =
     </defs>
 
     <g>
-        <text id=\"caption\" x=\"30\" y=\"30\">Hover over timeline events (dots), states (vertical lines),</text>
-        <text id=\"caption\" x=\"30\" y=\"50\">and actions (arrows) for extra information.</text>
+        <text id=\"caption\" x=\"30\" y=\"30\">Hover over the visualization for more information.</text>
     </g>
 
     {{ code }}
