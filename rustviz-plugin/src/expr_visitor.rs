@@ -3878,15 +3878,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// reference to a place reached through the reference variable
   /// `self` / `p` / `ps` / `v`, a reborrow of what it points to (#784,
   /// #1065, #1071). `DerefField(self, "&self.s")`, drawn on the
-  /// reference's column. `&*x` (the place `x` points to as a whole) is
-  /// not this: it resolves to the variable. None when the place is
-  /// itself a reference (`&self.r` with `r: &T`).
+  /// reference's column. Also `&mut *v` (all of what `v` points to),
+  /// `&v[0][1]` reborrowed through the reference `v[0]` held in what
+  /// `v` points to, and a reference a call returns into what `v`
+  /// points to (`v.get_mut(0).unwrap()`; #1078). None when the place
+  /// is itself a reference (`&self.r` with `r: &T`).
   pub fn reborrow_through_ref(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
     if e.span.from_expansion() {
       return None;
     }
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    // `v.get_mut(0).unwrap()` / `v.first().unwrap()` with `v` a
+    // reference: a reference into what v points to (#1078).
+    if matches!(e.kind, ExprKind::MethodCall(..) | ExprKind::Call(..)) {
+      let r = self.call_reborrows_through(e)?;
+      let is_mut = typeck.node_type(e.hir_id).ref_mutability().is_some_and(|m| m.is_mut());
+      let place = crate::svg_generator::hover_messages::reborrow_place_via_call(is_mut, &r.method, &r.target);
+      return Some(ResourceTy::DerefField(r.through, place, PlaceWrite::Update));
+    }
     let ExprKind::AddrOf(_, _, place) = e.kind else { return None };
     let text = || self.tcx.sess.source_map().span_to_snippet(e.span).ok().filter(|s| !s.contains('\n'));
+    // `&mut *v` / `&*v` with `v` a reference: an explicit reborrow of
+    // all of what v points to (#1078).
+    if let ExprKind::Unary(UnOp::Deref, inner) = place.kind {
+      if !matches!(inner.kind, ExprKind::Path(QPath::Resolved(None, _))) || !typeck.node_type(inner.hir_id).is_ref() {
+        return None;
+      }
+      let rap = expr_to_rap_name(inner, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .map(|rd| rd.rap.to_owned())
+        .filter(|r| r.is_ref() && !r.is_static() && !r.is_fn())?;
+      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
+    }
     // `&ps[1].y` / `&mut ps[0].x` with `ps` a reference: a field of an
     // element of what ps points to (#1065).
     if let Some(rap) = self.element_field_holder(place).filter(|r| r.is_ref()) {
@@ -3899,8 +3922,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // `&mut v[0]` / `&xs[i]` / `&mut g[i][j]` with `v` / `xs` / `g` a
     // reference: an element of what it points to (#1071).
     if !std::ptr::eq(p, place) && matches!(p.kind, ExprKind::Path(_)) {
-      let rap = self.element_holder_ref(place, p)?;
-      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
+      if let Some(rap) = self.element_holder_ref(place, p) {
+        return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
+      }
+      // `&v[0][1]` with `v: &Vec<&Vec<i32>>`: the element is in what
+      // the reference `v[0]` points to, so it is reborrowed through
+      // `v[0]`, not through v (#1078).
+      let ExprKind::Index(through, _, _) = place.kind else { return None };
+      if !typeck.node_type(through.hir_id).is_ref() || !matches!(through.kind, ExprKind::Index(..)) {
+        return None;
+      }
+      let rap = self.element_holder_ref(through, p)?;
+      let through_text = self.plain_source_text(through)?;
+      return Some(ResourceTy::DerefField(rap, crate::svg_generator::hover_messages::reborrow_place_through(&text()?, &through_text), PlaceWrite::Update));
     }
     let ExprKind::Field(..) = p.kind else { return None };
     let ResourceTy::DerefField(rap, _, w) = self.field_through_ref(p)? else { return None };
@@ -6446,7 +6480,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
 /// Set `result_keeps_borrow` on the pass-by-reference events that
 /// `call`'s evaluation emitted from one of `lenders`: those borrows
 /// continue in the call's result (see `emit_call_result_borrows`).
-fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy]) {
+pub fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy]) {
   let lo = span_to_line(&call.span, &self.tcx);
   let hi = span_end_line(&call.span, &self.tcx);
   let hashes: Vec<u64> = lenders.iter().filter_map(|l| l.extract_rap().map(|r| *r.hash())).collect();
@@ -10404,7 +10438,9 @@ fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, 
       ExternalEvent::PassByStaticReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
       | ExternalEvent::PassByMutableReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. } =>
         fns.contains(&f.name) && match (from, place) {
-          (ResourceTy::Value(r), None) => hashes.contains(r.hash()),
+          // `self.items.first()` with the whole reference as lender: the
+          // place passed is inside what it points to (#1078).
+          (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _), None) => hashes.contains(r.hash()),
           (ResourceTy::DerefField(r, p, _), Some(want)) => hashes.contains(r.hash()) && p == want,
           _ => false,
         },

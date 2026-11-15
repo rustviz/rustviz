@@ -20352,6 +20352,51 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "it goes out of scope. Its resource is dropped",
         ],
     },
+    TooltipExpect {
+        name: "return_call_reborrow",
+        // #1078: a reference returned through a reference parameter by a
+        // call (`v.get_mut(0).unwrap()`, `xs.first().unwrap()`,
+        // `ys.iter().min().unwrap()`, `self.items.first().unwrap()`) points
+        // into what the parameter points to: the call's borrow goes on in
+        // the caller (rustc keeps the caller's Vec borrowed while the
+        // result is used), so it doesn't end in the function. `&mut *w` is
+        // a reborrow, not a move of w. `&rows[0][1]` (rows: `&Vec<&'a
+        // Vec<i32>>`) is reborrowed through the reference rows[0], not
+        // through rows. `names.first().copied()` hands back the `&'a str`
+        // stored in the Vec, so first's borrow of what names points to
+        // does end there.
+        must_contain: &[
+            "a mutable reference into v (from get_mut), reborrowed through v, is returned to the caller; the data it points to is not copied",
+            "a reference into xs (from first), reborrowed through xs, is returned to the caller; the data it points to is not copied",
+            "a reference into ys (from iter), reborrowed through ys, is returned to the caller; the data it points to is not copied",
+            "a mutable reference to *w, reborrowed through w, is returned to the caller; the data it points to is not copied",
+            "a reference to *u, reborrowed through u, is returned to the caller; the data it points to is not copied",
+            "a reference to rows[0][1], reborrowed through rows[0], is returned to the caller; the data it points to is not copied",
+            "a reference into self.items (from first), reborrowed through self, is returned to the caller; the data it points to is not copied",
+            "first no longer borrows the resource names points to",
+            "Return mutably borrowed resource from a to v",
+        ],
+        must_not_contain: &[
+            // Before #1078: the call's borrow ended in the function and
+            // nothing said the result goes to the caller.
+            "get_mut no longer borrows the resource v points to",
+            "v's mutable borrow ends",
+            "first no longer borrows the resource xs points to",
+            "xs's immutable borrow ends",
+            "iter no longer borrows the resource ys points to",
+            "ys's immutable borrow ends",
+            "self.items's resource is no longer immutably borrowed",
+            "self's immutable borrow ends",
+            // `&mut *w` / `&*u` reborrow; w isn't moved.
+            "w's mutable reference is moved to the caller",
+            "a reference from u is returned to the caller",
+            // `&rows[0][1]` isn't rows's reference, nor reborrowed through rows.
+            "a reference from rows is returned to the caller",
+            "reborrowed through rows,",
+            // `copied` returns the stored `&str`, not a reference into names.
+            "reborrowed through names",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
