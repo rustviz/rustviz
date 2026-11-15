@@ -17100,6 +17100,54 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m is assigned a new value",
         ],
     },
+    // ─── `refs.push(&x)` stores a borrow of x itself (#973) ───
+    TooltipExpect {
+        name: "stored_ref_var_push_973",
+        // refs is a `Vec<&&String>`: it borrows the variable x (the
+        // reference x holds is a value, #484), as `let rr = &x;` does
+        // (#925). The end rows are checked by
+        // `a_stored_borrow_keeps_its_lender_shared_until_the_holders_last_use`.
+        must_contain: &[
+            "x is immutably borrowed by refs; x is read-only while the borrow is live",
+            "refs holds a value that immutably borrows x's value (refs isn't a reference itself)",
+            "x is no longer borrowed by look, but is still immutably borrowed by refs",
+            "x is no longer immutably borrowed",
+            "Return immutably borrowed value from refs to x",
+            "m is mutably borrowed by muts; m can't be used while the borrow is live",
+            "muts holds a value that mutably borrows m's value (muts isn't a reference itself)",
+            "m is no longer mutably borrowed",
+            "Return mutably borrowed value from muts to m",
+        ],
+        must_not_contain: &[
+            // refs doesn't borrow what x points to, a.
+            "the resource x points to is immutably borrowed by refs",
+            "refs no longer borrows the resource x points to",
+            "Return immutably borrowed resource from refs to x",
+            "refs holds a value that immutably borrows the data x points to",
+            "the resource m points to is mutably borrowed by muts",
+            "muts no longer borrows the resource m points to",
+            "Return mutably borrowed resource from muts to m",
+            "muts holds a value that mutably borrows the data m points to",
+        ],
+    },
+    // ─── a borrow `keep(&mut v, &s)` stored keeps s shared (#974) ───
+    TooltipExpect {
+        name: "stored_borrow_sharers_974",
+        // The false "s's resource is no longer immutably borrowed" (on
+        // look's dot and r's end) and "t's resource is no longer
+        // immutably borrowed" (on u's end) are also the right texts on
+        // the real end rows, so the rows are checked by
+        // `a_stored_borrow_keeps_its_lender_shared_until_the_holders_last_use`.
+        must_contain: &[
+            "keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "s's resource is no longer borrowed by look, but is still immutably borrowed by v",
+            "s's resource is no longer borrowed by r, but is still immutably borrowed by v",
+            "t's resource is no longer borrowed by u, but is still immutably borrowed by q",
+            "x is no longer borrowed by look_ref, but is still immutably borrowed by w",
+            "y is no longer borrowed by look_ref, but is still immutably borrowed by ry",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -22830,4 +22878,56 @@ fn write_through_mut_ref_to_ref_ends_its_line_at_the_last_use() {
         let want = (code_row_y(&code, borrow), code_row_y(&code, last_use));
         assert_eq!(spans, vec![want], "{}: one line from `{}` to `{}`", name, borrow, last_use);
     }
+}
+
+/// #973, #974: a borrow a call stored in a holder (`refs.push(&x)`,
+/// `keep(&mut v, &s)`) keeps its lender borrowed until the holder's last
+/// use, so a shorter borrow that ends before it (a call's, a reference's)
+/// doesn't end the lender's borrow: rustc rejects moving s anywhere
+/// above the holder's last use (and `x = &b;`, were x `mut`). Main ended s's borrow
+/// at `look(&s)`, at r's last use and (for t) at u's last use while q
+/// still borrowed t; x's at `look(&x)` / `look_ref(&x)`; and y's at
+/// `look_ref(&y)` while `ry = &y` still borrowed it. Each
+/// lender is now unborrowed exactly once, on the row of the last
+/// borrower's last use, and drawn as shared down to there.
+#[test]
+fn a_stored_borrow_keeps_its_lender_shared_until_the_holders_last_use() {
+    let cases: [(&str, &str, &str, &str, &[&str], &str); 6] = [
+        ("stored_ref_var_push_973", "x is no longer immutably borrowed", "", "refs.push(&x);",
+         &["let n = look(&x);"], "println!(\"{} {}\", refs.len(), n);"),
+        ("stored_ref_var_push_973", "m is no longer mutably borrowed", "", "muts.push(&mut m);",
+         &[], "println!(\"{}\", muts.len());"),
+        ("stored_borrow_sharers_974", "s's resource is no longer immutably borrowed", "s is the owner of the resource", "keep(&mut v, &s);",
+         &["let n = look(&s);", "println!(\"{} {}\", r, n);"], "println!(\"{}\", v.len());"),
+        ("stored_borrow_sharers_974", "t's resource is no longer immutably borrowed", "t is the owner of the resource", "keep(&mut u, &t);",
+         &["println!(\"{}\", u.len());"], "println!(\"{}\", q);"),
+        ("stored_borrow_sharers_974", "x is no longer immutably borrowed", "", "keep_ref(&mut w, &x);",
+         &["let k = look_ref(&x);"], "println!(\"{} {}\", w.len(), k);"),
+        ("stored_borrow_sharers_974", "y is no longer immutably borrowed", "", "let ry = &y;",
+         &["let j = look_ref(&y);"], "println!(\"{} {}\", ry.len(), j);"),
+    ];
+    let mut failures = Vec::new();
+    for (name, back_text, owner_text, store_src, early_srcs, end_src) in cases {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let (store_row, end_row) = (code_row_y(&code, store_src), code_row_y(&code, end_src));
+        // The calls / references that end their part of the borrow
+        // early sit between the store and the end.
+        for src in early_srcs {
+            let row = code_row_y(&code, src);
+            assert!(row > store_row && row < end_row, "{name}: `{src}` isn't between the store and the end");
+        }
+        let back = dots_listing_tooltip(&timeline, back_text);
+        if !(back.len() == 1 && (back[0].1 - end_row).abs() < 1.0) {
+            failures.push(format!("{name}: \"{back_text}\" should be on the last use's row only (y={end_row}), got {back:?}"));
+        }
+        if !owner_text.is_empty() {
+            let owner = state_lines_with_tooltip(&timeline, owner_text);
+            let free: Vec<_> = owner.iter().filter(|(a, b)| b.min(end_row) - a.max(store_row) > 0.5).collect();
+            if !free.is_empty() {
+                failures.push(format!("{name}: drawn as \"{owner_text}\" at {free:?}, between the store (y={store_row}) and the end (y={end_row})"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

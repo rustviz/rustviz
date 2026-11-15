@@ -3406,7 +3406,8 @@ impl Event {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref(), holds_copy_value(from))
+                    // `refs.push(&mut m)` stores a borrow of m itself (#973).
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref() && !*of_ref_var, *of_ref_var || holds_copy_value(from))
                 } else {
                     // `&mut r` borrows the reference r holds, a value (#914).
                     hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
@@ -3416,7 +3417,8 @@ impl Event {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref(), holds_copy_value(from))
+                    // `refs.push(&x)` stores a borrow of x itself (#973).
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref() && !*of_ref_var, *of_ref_var || holds_copy_value(from))
                 } else {
                     // `&r` borrows the reference r holds, a value (#925).
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
@@ -3424,12 +3426,15 @@ impl Event {
             }
             // A reference copied out of `it` gave back its part of the
             // borrow `it` still holds (#575).
-            Event::StaticReacquire{ from, is, still_borrowed_by, ..} | Event::MutableReacquire{ from, is, still_borrowed_by, ..}
+            Event::StaticReacquire{ from, is, still_borrowed_by, of_ref_var, ..} | Event::MutableReacquire{ from, is, still_borrowed_by, of_ref_var, ..}
                 if !still_borrowed_by.is_empty() =>
             {
                 let mutable = matches!(self, Event::MutableReacquire { .. });
                 let from_name = target_name(from);
-                hover_messages::event_dot_reacquire_still_borrowed(&self.deref_name(my_name), &from_name, still_borrowed_by, mutable, holds_copy_value(is))
+                // `look(&x)` with x a reference variable borrowed x
+                // itself (#938, #974).
+                let of_ref_var = *of_ref_var && ref_lender(is).is_some();
+                hover_messages::event_dot_reacquire_still_borrowed(&self.deref_name(my_name), &from_name, still_borrowed_by, mutable, holds_copy_value(is), of_ref_var)
             }
             Event::MutableReacquire{ is, of_ref_var: true, ..} if ref_lender(is).is_some() => {
                 hover_messages::event_dot_mut_reacquire_ref_var(ref_lender(is).unwrap().name())
