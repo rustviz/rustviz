@@ -4082,8 +4082,8 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         // (`point(&mut hold, &t)`, #513): the borrow lasts past
         // the call, until the borrow checker ends it.
         let stored_suffix: String = match external_event {
-            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives), .. }
-            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives), .. } => {
+            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone), .. }
+            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone), .. } => {
                 let styled_place = styled_name_html(place);
                 // The place's value moves on while the borrow is live
                 // (`let w = hold;`, `let w = pass(hold);`): the borrow
@@ -4109,19 +4109,26 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
                     ),
                 };
                 // A copy of the place's value (`let w = hold;` with
-                // `hold: Option<&String>`) holds the borrow too (#997).
-                let copied = match copied_to.as_slice() {
+                // `hold: Option<&String>`) holds the borrow too (#997),
+                // and so does a clone (`let w = hold.clone();`, #1003):
+                // its references are copies of hold's. (It is called a
+                // clone, not a copy: hold's type needn't be Copy.)
+                let also = |names: &[String], one: &str, many: &str| match names {
                     [] => String::new(),
-                    [one] => format!(", and while {}, a copy of {}, is in use", styled_name_html(one), styled_place),
-                    many => format!(
-                        ", and while {}, copies of {}, are in use",
-                        join_names(&many.iter().map(|n| styled_name_html(n)).collect::<Vec<_>>()),
-                        styled_place,
+                    [n] => format!(", and while {}, {} of {}, is in use", styled_name_html(n), one, styled_place),
+                    names => format!(
+                        ", and while {}, {} of {}, are in use",
+                        join_names(&names.iter().map(|n| styled_name_html(n)).collect::<Vec<_>>()),
+                        many, styled_place,
                     ),
                 };
+                let copied = also(copied_to, "a copy", "copies");
+                let cloned = also(cloned_to, "a clone", "clones");
+                // A move of a clone's value comes after the clone.
+                let later = if *moves_of_clone { [copied, cloned, moved_on] } else { [moved_on, copied, cloned] };
                 format!(
-                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}{}",
-                    styled_fn_name, styled_place, styled_from_name, styled_place, moved_on, copied,
+                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}",
+                    styled_fn_name, styled_place, styled_from_name, styled_place, later.concat(),
                 )
             }
             _ => String::new(),
