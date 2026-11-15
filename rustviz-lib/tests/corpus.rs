@@ -17934,6 +17934,72 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary 2)",
         ],
     },
+    // #971: a tuple literal in a let chain is taken apart like a lone
+    // `if let (x, _) = (f, s)` (#327): f's String goes to x once, s's
+    // stays in the tuple, which is dropped at the end of the if branch
+    // (or the `return`), or before the code after the `if` when the
+    // condition fails (rustc, edition 2024). f and s own nothing after
+    // the condition, so no drop flag; `c && let (z, _) = (k, m)` builds
+    // the tuple only when c holds, so k and m keep one. Main drew f
+    // moved twice ("Move from f to (temporary)" and "Move from f to
+    // x"), the tuple as an actor ("Move from (..) to (temporary)"), "s's
+    // resource is moved into a temporary that is dropped at the end of
+    // this statement", and drop-flag joins for f and s.
+    TooltipExpect {
+        name: "edition2024/tuple_let_chain_971",
+        must_contain: &[
+            "Move from f to x",
+            "f was moved: the condition moves f to x before it can turn out false, so the move has happened even when the body is skipped, and f can't be used after the if. When the condition fails after that move, x goes out of scope and its resource is dropped.",
+            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above.",
+            "s's resource is moved into the temporary tuple (f, s)",
+            "s was moved: the condition moves s into the temporary tuple (f, s) before it can turn out false, so the move has happened even when the body is skipped, and s can't be used after the if. When the condition fails, the temporary tuple (f, s) is dropped, and with it s's resource.",
+            "The temporary tuple (f, s) is dropped here, at the end of the if branch, and with it s's resource",
+            "s goes out of scope. No resource is dropped: s was moved or dropped in every branch above.",
+            "Move from g to y",
+            "t was moved: the condition moves t into the temporary tuple (g, t) before it can turn out false, so the else branch runs after that move, and t can't be used here. When the condition fails, the temporary tuple (g, t) is dropped, and with it t's resource.",
+            "The temporary tuple (g, t) is dropped here, at the end of the if branch, and with it t's resource",
+            "g goes out of scope. No resource is dropped: g was moved or dropped in every branch above.",
+            "t goes out of scope. No resource is dropped: t was moved or dropped in every branch above.",
+            "Move from k to z",
+            "The temporary tuple (k, m) is dropped here, at the end of the if branch, and with it m's resource",
+            "m was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when m goes out of scope.",
+            "Move from a to p",
+            "The temporary tuple (a, b) is dropped when the if branch leaves early, and with it b's resource",
+            "Move from o to w",
+            "o was moved: the condition moves o into the temporary tuple (o, u) before it can turn out false, so the move has happened even when the body is skipped, and o can't be used after the if. If the pattern doesn't match, the temporary tuple (o, u) is dropped, and with it o's resource; if it matches and the condition fails after that, w goes out of scope and its resource is dropped.",
+            "The temporary tuple (o, u) is dropped here, at the end of the if branch, and with it u's resource",
+        ],
+        must_not_contain: &[
+            "Move from f to (temporary)",
+            "Move from s to (temporary)",
+            "Move from g to (temporary)",
+            "Move from t to (temporary)",
+            "Move from k to (temporary)",
+            "Move from m to (temporary)",
+            "Move from a to (temporary)",
+            "Move from b to (temporary)",
+            "Move from o to (temporary)",
+            "Move from u to (temporary)",
+            "Move from (..)",
+            "(temporary) is the owner of the resource",
+            "the literal (..) builds",
+            "moved into a temporary that is dropped at the end of this statement",
+            // s's String is dropped with the tuple, and f's with x:
+            // neither is owned after the condition
+            "f was moved in at least one branch above",
+            "s was moved in at least one branch above",
+            "g was moved in at least one branch above",
+            "t was moved in at least one branch above",
+            "u was moved in at least one branch above",
+            "o was moved in at least one branch above",
+            "the condition moves s before it can turn out false",
+            "the condition moves t before it can turn out false",
+            "the condition moves b before it can turn out false",
+            // m is moved only when c holds
+            "m goes out of scope. Its resource is dropped.",
+            "m may have been moved (consumed in at least one branch above)",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

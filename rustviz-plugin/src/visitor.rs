@@ -527,10 +527,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ),
       _ => (Vec::new(), String::new()),
     };
-    let how_moved = |rap: &ResourceAccessPoint| if literal_vars.contains(rap) {
-      ChainFailHow::Literal(literal_text.clone())
-    } else {
-      ChainFailHow::Move
+    // A move into a literal scrutinee's temporary (what `_` / `..`
+    // leave of `(f, s)` in `let (x, _) = (f, s)`, #971) is dropped with
+    // that temporary when the condition fails, whatever the pattern.
+    let how_moved = |rap: &ResourceAccessPoint, to: &ResourceTy| match to {
+      ResourceTy::Temporary { tuple: Some(t), .. } if binding => ChainFailHow::Literal(t.clone()),
+      _ if literal_vars.contains(rap) => ChainFailHow::Literal(literal_text.clone()),
+      _ => ChainFailHow::Move,
     };
     // Also the events of a conditional inside the part (`{ if c { z =
     // a; } z > 0 }`): they last the same way.
@@ -557,7 +560,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // What the event does to the place it takes from.
       match ev {
         ExternalEvent::Move { from: from @ ResourceTy::Value(rap), to, .. } if is_outer(from) =>
-          push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: how_moved(rap) }),
+          push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: how_moved(rap, to) }),
         // An outer closure that can only be called once: the call
         // moves it (#579).
         ExternalEvent::ClosureCall { closure: c @ ResourceTy::Value(rap), .. } if is_outer(c) =>
@@ -4387,6 +4390,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // the pattern doesn't match; the else branch shows that (#327).
     let mut scrutinee_moves: Vec<ResourceAccessPoint> = Vec::new();
     let mut iflet_tuple: Option<&'tcx rustc_hir::LetExpr<'tcx>> = None;
+    // The same for the `let` parts of a let chain (`if let (x, _) = (f,
+    // s) && c`, #971). What the else branch starts with is
+    // `chain_fail`'s; the if branch drops each tuple like a lone `if
+    // let` does.
+    let mut chain_tuples: Vec<&'tcx rustc_hir::LetExpr<'tcx>> = Vec::new();
     let mut chain_fail = ChainFail::default();
     // Events handed out ids in the if-branch's range that stay
     // before the split (see the let-chain case below).
@@ -4417,6 +4425,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let chain_lo = self.preprocessed_events.len();
         let mut walk = ChainWalk { body_end: span_end_line(&if_expr.span, &self.tcx), ..ChainWalk::default() };
         self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
+        chain_tuples = self.chain_tuple_lets(guard_expr);
         if_lo = walk.first_lo.unwrap_or(start);
         chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
         let binds = self.chain_binding_events(&(if_lo..*self.unique_id), &decls);
@@ -4468,20 +4477,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
     self.unbranched_temps.extend(scrutinee_temps.iter().cloned());
     self.exit_frames.push(ExitFrame::Branch { len: frame_len, hide, binds: Vec::new(), binds_at: 0 });
-    // An exit in the if branch drops the tuple scrutinee (#327).
-    let live_tuple = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()).map(|let_expr| LiveTuple {
-      frame: self.exit_frames.len() - 1,
-      len: entry_len,
-      scrutinee: let_expr.init,
-      tuple: match self.tuple_scrutinee_target(let_expr.init) {
-        ResourceTy::Temporary { tuple: Some(t), .. } => t,
-        _ => String::new(),
-      },
-      pat: let_expr.pat,
-      at: TupleDropAt::IfExit,
-    });
-    let live = live_tuple.is_some();
-    self.live_tuples.extend(live_tuple);
+    // An exit in the if branch drops the tuple scrutinee (#327), or
+    // those of a let chain's parts (#971).
+    let if_tuples: Vec<&'tcx rustc_hir::LetExpr<'tcx>> = iflet_tuple.filter(|_| !scrutinee_moves.is_empty())
+      .into_iter().chain(chain_tuples.iter().copied()).collect();
+    for let_expr in &if_tuples {
+      let live_tuple = LiveTuple {
+        frame: self.exit_frames.len() - 1,
+        len: entry_len,
+        scrutinee: let_expr.init,
+        tuple: self.tuple_scrutinee_text(let_expr.init),
+        pat: let_expr.pat,
+        at: TupleDropAt::IfExit,
+      };
+      self.live_tuples.push(live_tuple);
+    }
     let mut arm_borrows = self.arm_borrows_begin();
     let arm_lines = |this: &Self, e: &Expr<'_>| {
       let sm = this.tcx.sess.source_map();
@@ -4491,9 +4501,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.arm_frames.push(arm_lines(self, if_expr));
     self.visit_expr(&if_expr);
     self.arm_frames.pop();
-    if live {
-      self.live_tuples.pop();
-    }
+    let live_len = self.live_tuples.len() - if_tuples.len();
+    self.live_tuples.truncate(live_len);
     // Everything declared in each branch, also inside an inline
     // construct nested in it (an `else if let`'s bindings, #501):
     // see raps_declared_since. A name an earlier, out-of-scope
@@ -4830,10 +4839,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let at = if else_expr.is_some() { TupleDropAt::Else } else { TupleDropAt::NoElse };
       front.extend(self.tuple_drop_events(let_expr.init, &tuple_name, None, at).into_iter().map(|e| (if_end, e)));
       else_ev.splice(0..0, front);
-
-      // A branch that leaves early drops it at its exit instead:
-      // see drop_locals_on_exit.
-      if !if_diverges {
+    }
+    // A branch that leaves early drops it at its exit instead: see
+    // drop_locals_on_exit. A let chain's later tuple first, as Rust
+    // drops them.
+    if !if_diverges {
+      for let_expr in if_tuples.iter().rev() {
+        let tuple_name = self.tuple_scrutinee_text(let_expr.init);
         let evs = self.tuple_drop_events(let_expr.init, &tuple_name, Some(let_expr.pat), TupleDropAt::IfEnd);
         if_ev.extend(evs.into_iter().map(|e| (if_end, e)));
       }
@@ -6191,9 +6203,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// `match (x, y) { .. }`, `if let P = (x, y) { .. }`: a tuple of
-  /// variables that a match or `if let` scrutinizes already has its
-  /// moves and its drop drawn as "the temporary tuple (x, y)" (#327),
-  /// so it gets no `(temporary)` column as well.
+  /// variables that a match or `if let` (or a let-chain part, #971)
+  /// scrutinizes already has its moves and its drop drawn as "the
+  /// temporary tuple (x, y)" (#327), so it gets no `(temporary)` column
+  /// as well.
   /// The same for a constructor scrutinee (`match Some(f)`, #807).
   fn is_drawn_tuple_scrutinee(&self, expr: &'tcx Expr<'tcx>) -> bool {
     self.literal_elems(expr).is_some() && self.tuple_scrutinee_position(expr) && !self.tuple_scrutinee_moves(expr).is_empty()
@@ -6270,9 +6283,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     pairs.iter().all(|(p, _)| pat_is_irrefutable(p, typeck))
   }
 
+  /// The `let` parts of the let chain `cond` whose scrutinee is a tuple
+  /// literal (or a constructor) taken apart like a lone `if let`'s
+  /// (#327, #971), in source order.
+  fn chain_tuple_lets(&self, cond: &'tcx Expr<'tcx>) -> Vec<&'tcx rustc_hir::LetExpr<'tcx>> {
+    let mut out = Vec::new();
+    let mut stack = vec![cond];
+    while let Some(e) = stack.pop() {
+      match e.kind {
+        ExprKind::DropTemps(inner) => stack.push(inner),
+        ExprKind::Binary(op, l, r) if op.node == rustc_hir::BinOpKind::And => {
+          stack.push(r);
+          stack.push(l);
+        }
+        ExprKind::Let(l) if self.is_drawn_tuple_scrutinee(l.init) => out.push(l),
+        _ => {}
+      }
+    }
+    out
+  }
+
+  /// The text that names a tuple scrutinee's temporary (see
+  /// `tuple_scrutinee_target`).
+  fn tuple_scrutinee_text(&self, scrutinee: &'tcx Expr<'tcx>) -> String {
+    match self.tuple_scrutinee_target(scrutinee) {
+      ResourceTy::Temporary { tuple: Some(t), .. } => t,
+      _ => String::new(),
+    }
+  }
+
   /// Whether the `let` expression `l` is an `if`'s condition, or a part
   /// of a let chain that is (`if a && let P = e && c`, #949).
-  fn is_if_condition_let(&self, l: &'tcx Expr<'tcx>) -> bool {
+  pub(crate) fn is_if_condition_let(&self, l: &'tcx Expr<'tcx>) -> bool {
     use rustc_hir::Node;
     let mut cur = l;
     loop {
