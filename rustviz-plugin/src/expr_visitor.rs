@@ -117,6 +117,8 @@ pub struct StoredBorrow {
   /// The variable borrowed (`s`).
   pub lender: String,
   pub is_mut: bool,
+  /// The id of the call's PassByStaticReference / PassByMutableReference.
+  pub id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -3550,14 +3552,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `&t` in `hold`: t stays borrowed past the call (#513).
       if let Some((place, end_line)) = self.stored_borrow(arg, &from_ro, line_num) {
         let mutable = arg_ty.ref_mutability() == Some(Mutability::Mut);
+        let id = *self.unique_id;
         self.stored_borrows.push(StoredBorrow {
-          holder: place.name().to_owned(), at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable,
+          holder: place.name().to_owned(), at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable, id,
         });
         if of_ref_var {
           self.stored_ref_var_lends.insert((place.name().to_owned(), from_ro.real_name()));
         }
-        let id = *self.unique_id;
-        let stored_in = StoredIn(Some(place.name().to_owned()));
+        let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new());
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
@@ -7692,16 +7694,49 @@ pub fn print_out_of_scope(&mut self){
       .collect();
     // A borrow a call may have stored in `v` (`keep(&mut v, &s)`,
     // #513) keeps s shared until the loan ends, as a live `let r = &s;`
-    // does (#974). Once `v` is moved on (`let w = v;`), the borrow is
-    // w's, not v's.
-    for sb in self.stored_borrows.iter().filter(|sb| !sb.is_mut) {
+    // does (#974). Once `v` is moved on (`let w = v;`, `let h = H { v
+    // };`, `let w = pass(v);`), the borrow goes with its value: w holds
+    // it from there on (#990), and the call's text names w too.
+    let mut moved_on: Vec<(usize, Vec<String>)> = Vec::new();
+    for sb in self.stored_borrows.iter() {
       let Some(rd) = self.raps.get(&sb.holder) else { continue };
-      let base = sb.holder.split('.').next().unwrap_or(&sb.holder);
-      let mut seen = (None, None);
-      first_and_moved(self.preprocessed_events, base, sb.at, &mut seen);
-      sharers.push(Sharer {
-        name: sb.holder.clone(), hash: *rd.rap.hash(), from: sb.at, to: sb.until, moved: seen.1, lenders: vec![sb.lender.clone()], from_kept_call: false, stored: true,
-      });
+      let mut holder = sb.holder.clone();
+      let mut hash = *rd.rap.hash();
+      let mut from = sb.at;
+      let mut names: Vec<String> = Vec::new();
+      loop {
+        let next = holder_move(self.preprocessed_events, sb.id, &holder, from, sb.until);
+        if !sb.is_mut {
+          sharers.push(Sharer {
+            name: holder.clone(), hash, from, to: sb.until, moved: next.as_ref().map(|(m, _)| *m), lenders: vec![sb.lender.clone()], from_kept_call: false, stored: true,
+          });
+        }
+        let Some((m, Some(dest))) = next else { break };
+        if names.contains(&dest) || dest == sb.holder {
+          break;
+        }
+        hash = self.raps.get(&dest).map_or(hash, |rd| *rd.rap.hash());
+        names.push(dest.clone());
+        holder = dest;
+        from = m;
+      }
+      if !names.is_empty() {
+        moved_on.push((sb.id, names));
+      }
+    }
+    for (id, names) in moved_on.iter() {
+      set_stored_moved_to(self.preprocessed_events, *id, names);
+      for evs in self.event_line_map.values_mut() {
+        for e in evs.iter_mut() {
+          if let ExternalEvent::PassByStaticReference { id: i, stored_in, .. }
+            | ExternalEvent::PassByMutableReference { id: i, stored_in, .. } = e
+          {
+            if i == id {
+              stored_in.1 = names.clone();
+            }
+          }
+        }
+      }
     }
     sharers.sort_by(|a, b| a.hash.cmp(&b.hash).then_with(|| a.name.cmp(&b.name)));
     // A `for` loop's iterator that borrows the lender with no loop
@@ -7966,6 +8001,83 @@ fn first_and_moved(events: &[(usize, ExternalEvent)], base: &str, start: usize, 
   if let (Some(first), Some(m)) = (seen.0, seen.1) {
     if m < first {
       seen.1 = None;
+    }
+  }
+}
+
+/// The first move, after line `start` and up to `until`, of the value
+/// `holder` (a variable or a field of one) holds, and the variable or
+/// field it moves to (#990): `w` for `let w = v;`, `h.v` for `let h =
+/// H { v };`, `h2.v` for holder `h.v` and `let h2 = h;`, and for `let
+/// w = pass(v);` the variable the call's result goes to. Only a move on
+/// the path of the call `call_id` that stored the borrow (in the same
+/// event list, not in an arm of a later `if` / `match`) is followed; a
+/// move in an arm, or into something without a column of its own
+/// (`take(v)`, `stash(&mut z, v)`), gives the line without a
+/// destination.
+fn holder_move(events: &[(usize, ExternalEvent)], call_id: usize, holder: &str, start: usize, until: usize) -> Option<(usize, Option<String>)> {
+  fn moves<'e>(events: &'e [(usize, ExternalEvent)], nested: bool, out: &mut Vec<(usize, bool, &'e ResourceTy, &'e ResourceTy)>) {
+    for (line, ev) in events {
+      match ev {
+        ExternalEvent::Branch { branches, .. } => {
+          for b in branches {
+            moves(&b.e_data, true, out);
+          }
+        }
+        ExternalEvent::Move { from, to, .. } => out.push((*line, nested, from, to)),
+        _ => {}
+      }
+    }
+  }
+  // The event list the call is in.
+  fn list_of(events: &[(usize, ExternalEvent)], call_id: usize) -> Option<&[(usize, ExternalEvent)]> {
+    events.iter().find_map(|(_, ev)| match ev {
+      ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| list_of(&b.e_data, call_id)),
+      _ => None,
+    }).or_else(|| events.iter().any(|(_, ev)| ev.get_id() == call_id
+      && matches!(ev, ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. })).then_some(events))
+  }
+  let mut all = Vec::new();
+  moves(list_of(events, call_id).unwrap_or(events), false, &mut all);
+  let &(line, nested, from, to) = all.iter()
+    .filter(|(line, _, from, _)| *line > start && *line <= until && match from {
+      ResourceTy::Value(f) if !f.is_fn() => holder == f.name().as_str()
+        || holder.strip_prefix(f.name().as_str()).is_some_and(|rest| rest.starts_with('.')),
+      _ => false,
+    })
+    .min_by_key(|(line, _, _, _)| *line)?;
+  let ResourceTy::Value(f) = from else { return None };
+  let dest = match to {
+    _ if nested => None,
+    ResourceTy::Value(callee) if callee.is_fn() => {
+      // Moved into a call whose result goes on to a variable.
+      all.iter().find_map(|(l, n, fr, t)| match (fr, t) {
+        (ResourceTy::Value(c), ResourceTy::Value(dest)) if *l == line && !n && c == callee && !dest.is_fn() =>
+          Some(dest.name().to_owned()),
+        _ => None,
+      })
+    }
+    ResourceTy::Value(dest) => Some(format!("{}{}", dest.name(), &holder[f.name().len()..])),
+    _ => None,
+  };
+  Some((line, dest))
+}
+
+/// Records, on the call event `id` that may have stored a borrow
+/// (`keep(&mut v, &s)`), the variables v's value moves on to (#990).
+fn set_stored_moved_to(events: &mut [(usize, ExternalEvent)], id: usize, names: &[String]) {
+  for (_, ev) in events.iter_mut() {
+    match ev {
+      ExternalEvent::Branch { branches, .. } => {
+        for b in branches.iter_mut() {
+          set_stored_moved_to(&mut b.e_data, id, names);
+        }
+      }
+      ExternalEvent::PassByStaticReference { id: i, stored_in, .. }
+      | ExternalEvent::PassByMutableReference { id: i, stored_in, .. } if *i == id => {
+        stored_in.1 = names.to_vec();
+      }
+      _ => {}
     }
   }
 }

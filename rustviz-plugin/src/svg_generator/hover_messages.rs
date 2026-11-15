@@ -4082,12 +4082,26 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         // (`point(&mut hold, &t)`, #513): the borrow lasts past
         // the call, until the borrow checker ends it.
         let stored_suffix: String = match external_event {
-            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place)), .. }
-            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place)), .. } => {
+            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to), .. }
+            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to), .. } => {
                 let styled_place = styled_name_html(place);
+                // The place's value moves on while the borrow is live
+                // (`let w = hold;`, `let w = pass(hold);`): the borrow
+                // goes with it (#990).
+                let moved_on = match moved_to.as_slice() {
+                    [] => String::new(),
+                    [one] => format!(
+                        ", and after the borrow moves on to {0}, while {0} is in use",
+                        styled_name_html(one),
+                    ),
+                    many => format!(
+                        ", and after the borrow moves on to {}, while each of them is in use",
+                        many.iter().map(|n| styled_name_html(n)).collect::<Vec<_>>().join(", then "),
+                    ),
+                };
                 format!(
-                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use",
-                    styled_fn_name, styled_place, styled_from_name, styled_place,
+                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}",
+                    styled_fn_name, styled_place, styled_from_name, styled_place, moved_on,
                 )
             }
             _ => String::new(),
