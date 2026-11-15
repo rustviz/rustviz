@@ -17290,6 +17290,37 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=*p acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
+    // ─── a stored borrow moves on with its holder's value (#990) ───
+    TooltipExpect {
+        name: "stored_borrow_holder_moved_990",
+        // Main stopped at the holder's move (`let w = v;`) and said the
+        // lender was no longer borrowed at `look(&s)` / r's last use,
+        // while w (xa, h.v, wc) still held the borrow. That text is
+        // also right on the real end rows, so the rows are checked by
+        // `a_stored_borrow_moves_on_with_its_holders_value`.
+        must_contain: &[
+            "keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use, and after the borrow moves on to w, while w is in use",
+            "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
+            "t's resource is no longer borrowed by r, but is still immutably borrowed by w2",
+            "keep reads from a; keep's signature lets it store this reference in va, so a stays borrowed while va is in use, and after the borrow moves on to wa, then xa, while each of them is in use",
+            "a's resource is no longer borrowed by look, but is still immutably borrowed by xa",
+            "b's resource is no longer borrowed by look, but is still immutably borrowed by h.v",
+            "c's resource is no longer borrowed by look, but is still immutably borrowed by wc",
+            "keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in v3, so m stays borrowed while v3 is in use, and after the borrow moves on to w3, while w3 is in use",
+        ],
+        must_not_contain: &[
+            // The holder's value moved on: the old name no longer
+            // holds the borrow.
+            "=keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "but is still immutably borrowed by v",
+            "but is still immutably borrowed by va",
+            "but is still immutably borrowed by wa",
+            "but is still immutably borrowed by vb",
+            "but is still immutably borrowed by vc",
+            // After w4's last use nothing holds d any more.
+            "d's resource is no longer borrowed by look",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -23069,6 +23100,52 @@ fn a_stored_borrow_keeps_its_lender_shared_until_the_holders_last_use() {
             if !free.is_empty() {
                 failures.push(format!("{name}: drawn as \"{owner_text}\" at {free:?}, between the store (y={store_row}) and the end (y={end_row})"));
             }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #990: after `keep(&mut v, &s)` may store `&s` in v, moving v's value
+/// on (`let w = v;`, twice, into a struct field `H { v: vb }`, or
+/// through `pass(vc)`, whose signature gives its result the argument's
+/// lifetime) moves the borrow with it, so the lender stays borrowed
+/// until the last holder's last use: rustc rejects moving s (t, a, b,
+/// c) anywhere above it. Main ended the borrow at `look(&s)` (and at r's
+/// last use for t) and drew the lender as its owner from there. Each
+/// lender is now unborrowed exactly once, on the row of the last
+/// holder's last use, and drawn as shared down to there.
+#[test]
+fn a_stored_borrow_moves_on_with_its_holders_value() {
+    let name = "stored_borrow_holder_moved_990";
+    let cases: [(&str, &str, &str, &[&str], &str); 5] = [
+        ("s's resource is no longer immutably borrowed", "s is the owner of the resource", "keep(&mut v, &s);",
+         &["let w = v;", "let n = look(&s);"], "println!(\"{} {}\", w.len(), n);"),
+        ("t's resource is no longer immutably borrowed", "t is the owner of the resource", "keep(&mut v2, &t);",
+         &["let w2 = v2;", "println!(\"{}\", r);"], "println!(\"{}\", w2.len());"),
+        ("a's resource is no longer immutably borrowed", "a is the owner of the resource", "keep(&mut va, &a);",
+         &["let wa = va;", "let xa = wa;", "let na = look(&a);"], "println!(\"{} {}\", xa.len(), na);"),
+        ("b's resource is no longer immutably borrowed", "b is the owner of the resource", "keep(&mut vb, &b);",
+         &["let h = H { v: vb };", "let nb = look(&b);"], "println!(\"{} {}\", h.v.len(), nb);"),
+        ("c's resource is no longer immutably borrowed", "c is the owner of the resource", "keep(&mut vc, &c);",
+         &["let wc = pass(vc);", "let nc = look(&c);"], "println!(\"{} {}\", wc.len(), nc);"),
+    ];
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let mut failures = Vec::new();
+    for (back_text, owner_text, store_src, early_srcs, end_src) in cases {
+        let (store_row, end_row) = (code_row_y(&code, store_src), code_row_y(&code, end_src));
+        for src in early_srcs {
+            let row = code_row_y(&code, src);
+            assert!(row > store_row && row < end_row, "{name}: `{src}` isn't between the store and the end");
+        }
+        let back = dots_listing_tooltip(&timeline, back_text);
+        if !(back.len() == 1 && (back[0].1 - end_row).abs() < 1.0) {
+            failures.push(format!("{name}: \"{back_text}\" should be on the last use's row only (y={end_row}), got {back:?}"));
+        }
+        let owner = state_lines_with_tooltip(&timeline, owner_text);
+        let free: Vec<_> = owner.iter().filter(|(a, b)| b.min(end_row) - a.max(store_row) > 0.5).collect();
+        if !free.is_empty() {
+            failures.push(format!("{name}: drawn as \"{owner_text}\" at {free:?}, between the store (y={store_row}) and the end (y={end_row})"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
