@@ -156,7 +156,8 @@ pub struct RapData {
   // `let r = &String::from("a");`: the column name of the temporary r
   // borrows, which lives as long as r's `let` does (#400). Lets the
   // branch / block code that ends r's scope end the temporary's too.
-  pub extended_temp: Option<String>,
+  // Several for `let w = W { a: &f(), b: &g() };` (#856).
+  pub extended_temp: Vec<String>,
   // An unbound temporary's (#457) declaring scope: the block, or match
   // arm body, whose branch declares it, so a branch's decl set covers it.
   pub temp_owner: Option<rustc_hir::HirId>,
@@ -355,6 +356,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // is moved out of (`make_q().a`), by the expression that makes it
   // (#469).
   pub temp_cols: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
+  // The `(temporary N)` column of a temporary borrowed inside a `let`'s
+  // initializer and extended with it (`let w = W { r: &String::new() };`,
+  // #856), by the `&` expression that borrows it.
+  pub nested_ext_temps: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
   // The `(temporary N)` column of an unbound temporary that is a
   // constructor call (`Some(make());`), with the id of the move into it
   // from the constructor, which the constructor's arguments replace
@@ -669,6 +674,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       unbranched_temps: HashSet::new(),
       loop_iterators: Vec::new(),
       temp_cols: HashMap::new(),
+      nested_ext_temps: HashMap::new(),
       ctor_temps: HashMap::new(),
       destructure_srcs: HashMap::new(),
       destructure_moved: HashSet::new(),
@@ -1258,7 +1264,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     match self.raps.entry(key) {
       std::collections::hash_map::Entry::Vacant(v) => {
         self.rap_hashes += 1;
-        v.insert(RapData { rap: r, scope, is_global, fn_start_line, extended_temp: None, temp_owner: None, extra_scopes: Vec::new() });
+        v.insert(RapData { rap: r, scope, is_global, fn_start_line, extended_temp: Vec::new(), temp_owner: None, extra_scopes: Vec::new() });
       }
       // A later variable of the same name in the same fn shares the
       // column of the first (sibling blocks, #308) and ends at its own
@@ -3481,6 +3487,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `get_ref_data`, plus the further lenders of a reference that
   /// borrows from several variables (see `RefData::co_lenders`).
   pub fn get_ref_data_co(&self, expr: &'tcx Expr<'tcx>) -> (ResourceTy, VecDeque<String>, Vec<ResourceTy>){
+    // `&String::new()` inside `let w = W { r: &String::new() };`: the
+    // temporary's own column (#856).
+    if let Some(tmp) = self.nested_ext_temps.get(&expr.hir_id) {
+      return (ResourceTy::Value(tmp.clone()), VecDeque::new(), Vec::new());
+    }
     // A call's result: who it borrows from is decided by the callee's
     // signature (`ref_flow.rs`, #171), not by its receiver.
     if matches!(expr.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
@@ -5912,7 +5923,9 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         }
         None => {} // taking addrOf some anonymous resource, ie: &String::from("")
       }
-      let res = match fetch_rap(rhs, &self.tcx, &self.raps) {
+      // A temporary a `let` extends has a column of its own (#856).
+      let nested_tmp = self.nested_ext_temps.get(&rhs.hir_id).cloned();
+      let res = match nested_tmp.or_else(|| fetch_rap(rhs, &self.tcx, &self.raps)) {
         Some(x) => ResourceTy::Value(x),
         // `&p.name` with p a reference borrows the field through p (#266).
         None => match self.field_access_through_ref(rhs) {
