@@ -19510,6 +19510,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e no longer borrows",
         ],
     },
+    TooltipExpect {
+        name: "adapter_loops_on_mut_1066",
+        // #1066: `for (x, y) in a.iter_mut().zip(b.iter())` with `b: &mut
+        // Vec<_>` (or `self.b.iter()` through `&mut self`) ended b's
+        // borrow on the `for` line ("iter no longer borrows the resource b
+        // points to", "self.b's resource is no longer immutably
+        // borrowed"), but the zipped iterator holds both reborrows until
+        // the loop ends: `b.push(0)` / `self.b.push(0)` in the body is
+        // E0502, `self.n += 1` there compiles. With `b.iter_mut()`,
+        // `b.len()` in the body after y's last use is E0502 too. #1067:
+        // `*e += ..` with `(i, e)` from `v.iter_mut().enumerate()` (v a
+        // `&mut Vec`, or `self.a.iter_mut()`) and `*x` / `*y` from a zip
+        // weren't drawn on the column they write into, and each tuple
+        // binding's end drew an arrow to nowhere ("e's mutable borrow ends
+        // (what it borrows from isn't shown)"; e's own dot says it ends).
+        // The rows are pinned by the row test below.
+        must_contain: &[
+            "self.b is immutably borrowed by the `for` loop's iterator; self.b is read-only until the loop ends",
+            "the `for` loop's iterator no longer borrows self.b",
+            "the `for` loop's iterator no longer borrows self.a",
+            "the resource self points to is modified through x",
+            "the resource self points to is modified through e",
+            "the resource b points to is immutably borrowed by the `for` loop's iterator through b; b is read-only until the loop ends",
+            "b holds a mutable reference, but the resource it points to is currently shared through it, so b can only read it",
+            "the `for` loop's iterator no longer borrows the resource b points to",
+            "the resource b points to is mutably borrowed by the `for` loop's iterator through b; b can't be used until the loop ends",
+            "the resource a points to is modified through x",
+            "the resource b points to is modified through y",
+            "the resource v points to is modified through e",
+            "e's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "self.b's resource is no longer immutably borrowed",
+            "self.b is read-only while the borrow is live",
+            "iter no longer borrows the resource b points to",
+            "iter_mut no longer borrows the resource b points to",
+            "b is read-only while the borrow is live",
+            "(what it borrows from isn't shown)",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -26117,6 +26157,57 @@ fn loop_over_a_mut_ref_keeps_it_borrowed_until_the_loop_ends() {
         ("v", "for x in v.iter() {", "iter no longer borrows the resource v points to"),
         ("r", "for x in r.iter() {", "iter no longer borrows the resource r points to"),
     ] {
+        let at = (label_x(&tl, column), code_row_y(&code, src));
+        let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
+        assert!(!ends_there.contains(&at), "{:?} still on the `for` line `{}`: {:?}", end, src, ends_there);
+    }
+}
+
+/// #1066 / #1067 (`adapter_loops_on_mut_1066`): where each text sits. A
+/// `for` loop over `a.iter_mut().zip(b.iter())` keeps b (a `&mut`, or
+/// `self.b` through `&mut self`) borrowed until the loop's `}`, not just
+/// the `for` line; writes through a destructured element (`(i, e)` of
+/// `.enumerate()`, `(x, y)` of `.zip(..)`) are drawn on the column they
+/// write into.
+#[test]
+fn adapter_loops_over_a_mut_ref_keep_it_borrowed_and_draw_writes() {
+    let rv = run_with_local_backend("adapter_loops_on_mut_1066");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let closes = code_rows_y(&code, "}");
+    let add_writes = code_rows_y(&code, "*x += *y;");
+    let enum_writes = code_rows_y(&code, "*e += i as i32;");
+    // Fixture order: Two::add's loop `}` is the second `}` (after the
+    // struct's), add's the seventh, both's the ninth.
+    let rows = [
+        ("self", code_row_y(&code, "for (x, y) in self.a.iter_mut().zip(self.b.iter()) {"),
+            "self.b is immutably borrowed by the `for` loop's iterator; self.b is read-only until the loop ends"),
+        ("self", add_writes[0], "the resource self points to is modified through x"),
+        ("self", closes[1], "the `for` loop's iterator no longer borrows self.b"),
+        ("self", closes[1], "the `for` loop's iterator no longer borrows self.a"),
+        ("self", enum_writes[0], "the resource self points to is modified through e"),
+        ("b", code_row_y(&code, "for (x, y) in a.iter_mut().zip(b.iter()) {"),
+            "the resource b points to is immutably borrowed by the `for` loop's iterator through b; b is read-only until the loop ends"),
+        ("a", add_writes[1], "the resource a points to is modified through x"),
+        ("b", closes[6], "the `for` loop's iterator no longer borrows the resource b points to"),
+        ("b", code_row_y(&code, "for (x, y) in a.iter_mut().zip(b.iter_mut()) {"),
+            "the resource b points to is mutably borrowed by the `for` loop's iterator through b; b can't be used until the loop ends"),
+        ("a", code_row_y(&code, "*x += 1;"), "the resource a points to is modified through x"),
+        ("b", code_row_y(&code, "*y += 2;"), "the resource b points to is modified through y"),
+        ("b", closes[8], "the `for` loop's iterator no longer borrows the resource b points to"),
+        ("v", enum_writes[1], "the resource v points to is modified through e"),
+    ];
+    for (column, y, text) in rows {
+        let at = (label_x(&tl, column), y);
+        let dots = dots_where(&tl, |lines| lines.iter().any(|l| l == text));
+        assert!(dots.contains(&at), "expected {:?} on {}'s column at {:?}, found {:?}", text, column, at, dots);
+    }
+    // The `for` lines no longer end b's borrow.
+    for (src, end) in [
+        ("for (x, y) in self.a.iter_mut().zip(self.b.iter()) {", "self.b's resource is no longer immutably borrowed"),
+        ("for (x, y) in a.iter_mut().zip(b.iter()) {", "iter no longer borrows the resource b points to"),
+        ("for (x, y) in a.iter_mut().zip(b.iter_mut()) {", "iter_mut no longer borrows the resource b points to"),
+    ] {
+        let column = if src.contains("self") { "self" } else { "b" };
         let at = (label_x(&tl, column), code_row_y(&code, src));
         let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
         assert!(!ends_there.contains(&at), "{:?} still on the `for` line `{}`: {:?}", end, src, ends_there);
