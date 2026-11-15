@@ -6,9 +6,8 @@
 // "maybe moved" and nothing is dropped with a runtime drop flag.
 #![allow(irrefutable_let_patterns)]
 
-// f's String goes to x, which `return` drops; the code after the `if`
-// never runs. (Drawn as for a one-arm `match`: `g.len()` is drawn, and
-// x's and g's drops are drawn at their scope ends, #1004.)
+// f's String goes to x, which `return` drops, with g; the code after the
+// `if` never runs, so nothing is drawn for it (#1004).
 fn early(f: String, g: String) -> usize {
     if let x = f {
         return x.len();
