@@ -3708,6 +3708,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     tys.peek().is_none() || tys.any(|ty| erase(ty) == erase(lhs_ty))
   }
 
+  /// `v = if c { f } else { g };` (or a `match`) where v came from `let
+  /// v;` and has no value yet: drawn like `let v = if …` (#1006). v's
+  /// value is paired with each branch's before the branches are visited
+  /// (`match_rhs_arm`; or after, for a value declared in the branch,
+  /// #994), so it lands in that branch: only the branch that ran moved
+  /// f (or g), and the join says so. Returns false, having done
+  /// nothing, for any other assignment.
+  fn init_from_branches(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+    let (ExprKind::Assign(..), ExprKind::Path(QPath::Resolved(None, path))) = (expr.kind, lhs_expr.kind) else { return false };
+    let Res::Local(hirid) = path.res else { return false };
+    let branching = matches!(rhs_expr.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal))
+      && !rhs_expr.span.from_expansion();
+    if !branching {
+      return false;
+    }
+    let Some(decl) = self.uninit_locals.remove(&hirid) else { return false };
+    let prev = self.defer_arm_binds.replace(rhs_expr.span);
+    self.init_deferred_local(hirid, decl, rhs_expr);
+    self.defer_arm_binds = prev;
+    self.visit_expr(rhs_expr);
+    self.bind_left_arms(rhs_expr);
+    self.mark_branch_results_kept(&binding_name(&self.tcx, hirid), rhs_expr);
+    // (An immutable `let x;` can't be assigned twice, E0384: a loop
+    // that assigns it leaves right after.)
+    if matches!(decl.annotation.1, Mutability::Mut) {
+      self.drop_earlier_iteration(hirid, lhs_expr);
+    }
+    true
+  }
+
   fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
     // `a = lhs` inside a destructuring assignment: draw it as
     // `a = <the part of the RHS lhs holds>`. That part was
@@ -3719,6 +3749,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       None => rhs_expr,
     };
     self.visit_expr(lhs_expr);
+    if destructure_hid.is_none() && self.init_from_branches(expr, lhs_expr, rhs_expr) {
+      return;
+    }
     if destructure_hid.is_none() {
       self.visit_expr(rhs_expr);
     }
@@ -7727,26 +7760,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.break_pats.push((init.hir_id, pat, self.current_scope, self.inside_branch));
       } else {
         // A branch whose value is a variable declared in it is paired
-        // once it has been visited (#994). (Not yet for a pattern that
-        // takes the value apart, `let (a, b) = if …`.)
+        // once it has been visited (#994).
         let prev = self.defer_arm_binds.take();
-        if matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..)) && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
+        let conditional = matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..));
+        if conditional && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
           self.defer_arm_binds = Some(init.span);
+          self.bind_pat(pat, init, is_skipped);
+        } else if conditional && self.destructures_by_value(pat, init) {
+          // `let (a, b) = if …`: each branch's value is taken apart
+          // in that branch (#1007).
+          self.defer_arm_binds = Some(init.span);
+          self.declare_pat_bindings(pat, init);
+          self.bind_pat_arms(pat, init);
+        } else {
+          self.bind_pat(pat, init, is_skipped);
         }
-        self.bind_pat(pat, init, is_skipped);
         self.defer_arm_binds = prev;
       }
       self.visit_expr(init);
-      // (Any the branches' visits didn't pair, as a last resort, after
-      // the conditional.)
-      #[expect(clippy::disallowed_methods, reason = "sorted by span on the next line")]
-      let mut left: Vec<&'tcx Expr<'tcx>> = self.deferred_arm_binds.values()
-        .map(|(body, _)| *body).filter(|b| init.span.contains(b.span)).collect();
-      left.sort_by_key(|b| b.span.lo());
-      for body in left {
-        warn!("process_let_binding: branch value at {:?} wasn't paired when its branch was visited", body.span);
-        self.bind_deferred_arm(body);
-      }
+      self.bind_left_arms(init);
       // A reference returned by a call in a branch keeps that call's
       // borrow (#337).
       if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
@@ -7903,6 +7935,70 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     Some(merge)
   }
 
+  /// After the conditional `init` has been visited: pairs the branch
+  /// values put off (`deferred_arm_binds`, #994) that its branches'
+  /// visits didn't, as a last resort, after it.
+  fn bind_left_arms(&mut self, init: &'tcx Expr<'tcx>) {
+    #[expect(clippy::disallowed_methods, reason = "sorted by span on the next line")]
+    let mut left: Vec<&'tcx Expr<'tcx>> = self.deferred_arm_binds.values()
+      .map(|(body, _)| *body).filter(|b| init.span.contains(b.span)).collect();
+    left.sort_by_key(|b| b.span.lo());
+    for body in left {
+      warn!("bind_left_arms: branch value at {:?} wasn't paired when its branch was visited", body.span);
+      self.bind_deferred_arm(body);
+    }
+  }
+
+  /// Whether `pat` takes a value of `init`'s type apart into
+  /// variables that each own (or copy) their part: tuples, tuple
+  /// structs, structs and slices of by-value bindings and `_`, with no
+  /// `ref`, `@` or or-pattern, and `init` not a reference (whose parts
+  /// would be bound as references). `let (a, b) = if …` with such a
+  /// pattern is bound branch by branch (#1007).
+  fn destructures_by_value(&self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) -> bool {
+    fn simple(p: &Pat<'_>) -> bool {
+      match p.kind {
+        PatKind::Wild => true,
+        PatKind::Binding(ann, _, _, None) => matches!(ann.0, rustc_hir::ByRef::No),
+        PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) => ps.iter().all(simple),
+        PatKind::Struct(_, fs, _) => fs.iter().all(|f| simple(f.pat)),
+        _ => false,
+      }
+    }
+    if !matches!(pat.kind, PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..)) || !simple(pat) {
+      return false;
+    }
+    if init.span.from_expansion() || matches!(init.kind, ExprKind::Match(_, _, src) if src != rustc_hir::MatchSource::Normal) {
+      return false;
+    }
+    let typeck = self.tcx.typeck(init.hir_id.owner);
+    if typeck.expr_ty(init).is_ref() {
+      return false;
+    }
+    let mut ok = true;
+    pat.walk_always(|p| {
+      if let PatKind::Binding(_, hirid, _, _) = p.kind {
+        if self.own_ref_binding(hirid).is_some() || typeck.node_type(hirid).is_ref() {
+          ok = false;
+        }
+      }
+    });
+    ok
+  }
+
+  /// Declares each variable of `pat` (`a`, `b` in `let (a, b) = if
+  /// …`), with no value yet: each branch gives them theirs
+  /// (`bind_pat_arms`, #1007).
+  fn declare_pat_bindings(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) {
+    let mut bs = Vec::new();
+    binding_pats(pat, &mut bs);
+    for b in bs {
+      let PatKind::Binding(annotation, hirid, _, _) = b.kind else { continue };
+      let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
+      self.define_lhs(binding_name(&self.tcx, hirid), bool_of_mut(annotation.1), init, lhs_ty);
+    }
+  }
+
   /// `let r = &String::from("a");` (also `&mut`, `&s.clone()`,
   /// `&User { .. }`): the `&` borrows a temporary, and because a `let`
   /// borrows it, Rust extends the temporary's lifetime to the end of
@@ -8054,7 +8150,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Otherwise fall back to [`bind_walk`], which registers every
   /// binding in the pattern against the whole init — semantically
   /// approximate, but never silently empty.
-  fn bind_pat(
+  pub(crate) fn bind_pat(
     &mut self,
     pat: &'tcx Pat<'tcx>,
     init: &'tcx Expr<'tcx>,

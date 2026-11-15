@@ -18206,6 +18206,91 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "is live in a conditional expression",
         ],
     },
+    TooltipExpect {
+        // #1006: `v = if c { f } else { g };` assigning a `let v;` local is
+        // drawn like `let v = if …`: only the branch that ran moved its
+        // String into v, and the other's is dropped at its scope end with
+        // a runtime drop flag. It used to draw both moves unconditionally,
+        // and both scope ends said nothing was dropped.
+        name: "assign_branch_value_1006",
+        must_contain: &[
+            "v acquired ownership of a resource (in all branches above)",
+            "f was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when f goes out of scope.",
+            "f goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "g goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "w acquired ownership of a resource (in all branches above)",
+            "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "q goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            // the branch's own x moves into u (#994)
+            "Move from x to u",
+            "x goes out of scope. No resource is dropped.",
+            "u acquired ownership of a resource (in all branches above)",
+            "a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. No resource is dropped.",
+            "g goes out of scope. No resource is dropped.",
+            "p goes out of scope. No resource is dropped.",
+            "q goes out of scope. No resource is dropped.",
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "x goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        // #1007: `let (a, b) = if …` takes each branch's value apart in
+        // that branch, as `let (a, b) = value;` would. It used to bind a
+        // and b each from the whole of every branch's value: t's Strings
+        // were said to be dropped at t's scope end (they go to a and b),
+        // a got no arrow from t, h and k were each moved twice (into a
+        // and into b), and their scope ends said nothing was dropped
+        // (they are moved only when the else branch runs).
+        name: "let_tuple_branch_value_1007",
+        must_contain: &[
+            "Move from t.0 to a",
+            "Move from t.1 to b",
+            "t goes out of scope. t.0 and t.1 were moved out earlier, so no resource is dropped.",
+            "t.0 goes out of scope. No resource is dropped.",
+            "t.1 goes out of scope. No resource is dropped.",
+            "Move from h to a",
+            "Move from k to b",
+            "a acquired ownership of a resource (in all branches above)",
+            "b acquired ownership of a resource (in all branches above)",
+            "f goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "h goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Move from p to x",
+            "Move from q to y",
+            "Move from r to x",
+            "Move from s to y",
+            "x acquired ownership of a resource (in all branches above)",
+            "r goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Move from pr.0 to m",
+            "Move from pr.1 to w",
+            "pr goes out of scope. pr.0 and pr.1 were moved out earlier, so no resource is dropped.",
+            "m acquired ownership of a resource in every branch that reaches this point (the None arm returned)",
+        ],
+        must_not_contain: &[
+            "t goes out of scope. Its resource is dropped.",
+            "t.0 goes out of scope. Its resource is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "Move from h to b",
+            "Move from k to a",
+            "Move from p to y",
+            "Move from q to x",
+            "Move from r to y",
+            "Move from s to x",
+            "h goes out of scope. No resource is dropped.",
+            "k goes out of scope. No resource is dropped.",
+            "r goes out of scope. No resource is dropped.",
+            "s goes out of scope. No resource is dropped.",
+            "pr goes out of scope. Its resource is dropped.",
+            "pr.0 goes out of scope. Its resource is dropped.",
+            // m has no value yet when the None arm returns
+            "m goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

@@ -234,6 +234,17 @@ pub struct RapData {
   pub local_later: bool,
 }
 
+/// How the value of a branch of an `if` / `match` is bound, once the
+/// branch has been visited (`deferred_arm_binds`, #994).
+#[derive(Debug, Clone)]
+pub enum ArmBind<'tcx> {
+  /// To one variable (`let v = if …`, `v = if …`).
+  Rhs(ResourceTy, Evt),
+  /// Taken apart by a pattern whose variables are already declared
+  /// (`let (a, b) = if …`, #1007).
+  Pat(&'tcx Pat<'tcx>),
+}
+
 /// A `let` binding with no initializer (`let x;`), remembered until
 /// its first assignment so that assignment can register the RAP with
 /// the `let`'s scope and render as initialization (#234).
@@ -358,7 +369,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // it is paired once its body has been (`deferred_arm_binds`, keyed
   // by the body's HirId, see `bind_deferred_arm`).
   pub defer_arm_binds: Option<rustc_span::Span>,
-  pub deferred_arm_binds: HashMap<rustc_hir::HirId, (&'tcx Expr<'tcx>, Vec<(ResourceTy, Evt)>)>,
+  pub deferred_arm_binds: HashMap<rustc_hir::HirId, (&'tcx Expr<'tcx>, Vec<ArmBind<'tcx>>)>,
+  // While a branch's value is matched against the variables of a
+  // pattern that were declared ahead of the conditional (`let (a, b) =
+  // if …`, #1007): `define_lhs` leaves an existing variable alone.
+  pub bind_existing: bool,
 
   // A constructor call's HirId -> the range of event ids its arguments
   // used (moves and copies into the constructor). The constructor is
@@ -782,6 +797,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       rhs_arm_ids: HashMap::new(),
       defer_arm_binds: None,
       deferred_arm_binds: HashMap::new(),
+      bind_existing: false,
       ctor_arg_ids: HashMap::new(),
       exit_drops: HashSet::new(),
       unlent_refs: HashSet::new(),
@@ -2130,7 +2146,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// bound to `lhs`, recording the event ids it used (`rhs_arm_ids`).
   fn match_rhs_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt) {
     if self.defer_arm_binds.is_some_and(|within| self.arm_value_uses_local_in(body, within)) {
-      self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push((lhs, evt));
+      self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Rhs(lhs, evt));
       return;
     }
     let lo = *self.unique_id;
@@ -2178,10 +2194,66 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn bind_deferred_arm(&mut self, body: &'tcx Expr<'tcx>) {
     let Some((_, binds)) = self.deferred_arm_binds.remove(&body.hir_id) else { return };
     let lo = *self.unique_id;
-    for (lhs, evt) in binds {
-      self.match_rhs(lhs, body, evt);
+    for bind in binds {
+      match bind {
+        ArmBind::Rhs(lhs, evt) => self.match_rhs(lhs, body, evt),
+        ArmBind::Pat(pat) => self.pair_pat_with_value(pat, body),
+      }
     }
     self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
+  }
+
+  /// `let (a, b) = if … / match …;` (#1007): `a` and `b` are declared
+  /// first (`declare_pat_bindings`), then each branch's value is taken
+  /// apart by the pattern, in that branch, as `let (a, b) = value;`
+  /// would: `(h, k)` moves h into a and k into b, a branch's own tuple
+  /// `t` moves t.0 into a and t.1 into b. Like `match_rhs_arm`, a value
+  /// that uses a variable declared in the branch is paired once the
+  /// branch has been visited (#994). A nested conditional as the value
+  /// pairs each of its own branches.
+  pub fn bind_pat_arms(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) {
+    match init.kind {
+      ExprKind::If(_, then, els) => {
+        self.bind_pat_arm(pat, then);
+        if let Some(e) = els {
+          self.bind_pat_arm(pat, e);
+        }
+      }
+      ExprKind::Match(_, arms, _) => {
+        for arm in arms.iter() {
+          self.bind_pat_arm(pat, arm.body);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  fn bind_pat_arm(&mut self, pat: &'tcx Pat<'tcx>, body: &'tcx Expr<'tcx>) {
+    let Some(value) = branch_value_expr(body) else { return };
+    if matches!(value.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) && !value.span.from_expansion() {
+      self.bind_pat_arms(pat, value);
+      return;
+    }
+    if self.defer_arm_binds.is_some_and(|within| self.arm_value_uses_local_in(body, within)) {
+      self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Pat(pat));
+      return;
+    }
+    let lo = *self.unique_id;
+    self.pair_pat_with_value(pat, body);
+    self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
+  }
+
+  /// Takes the value of branch body `body` apart with `pat`, whose
+  /// variables are already declared (see `bind_pat_arms`). A branch of
+  /// type `!` gives no value.
+  fn pair_pat_with_value(&mut self, pat: &'tcx Pat<'tcx>, body: &'tcx Expr<'tcx>) {
+    let Some(value) = branch_value_expr(body) else { return };
+    if self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value).is_none_or(|ty| ty.is_never()) {
+      return;
+    }
+    let prev = std::mem::replace(&mut self.bind_existing, true);
+    self.bind_pat(pat, value, false);
+    self.bind_existing = prev;
   }
 
   /// Removes from `preprocessed_events`, and returns in order, the
@@ -4184,6 +4256,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Add a RAP to our collection of raps for a let stmt
   pub fn define_lhs(&mut self, name: String, mutability: bool, expr: &'tcx Expr, ty: Ty <'tcx>) {
+    // (Declared ahead of the conditional whose branch value it now
+    // gets, #1007.)
+    if self.bind_existing && self.raps.contains_key(&name) {
+      return;
+    }
     let is_special = ty_is_special_owner(&ty);
     if ty.is_ref() {
       let (lender, aliasing, static_lender, co_lenders) = self.get_ref_data_full(&expr);
@@ -9526,6 +9603,20 @@ pub fn branch_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> 
     _ => return None,
   }
   Some(out)
+}
+
+/// The expression branch body `body` evaluates to: its block's tail,
+/// through nested blocks. `None` for a block with no tail (it ends in
+/// a `return` or a panic, or its value is `()`).
+pub fn branch_value_expr<'tcx>(body: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+  let mut e = body;
+  loop {
+    match e.kind {
+      ExprKind::Block(b, _) => e = b.expr?,
+      ExprKind::DropTemps(inner) => e = inner,
+      _ => return Some(e),
+    }
+  }
 }
 
 /// Whether the pass-by-reference event `id` (looked up in `events`,
