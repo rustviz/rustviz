@@ -16894,6 +16894,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/shared_name_in_chain_969",
+        // #969: block locals of one name in two let-chain conditions share
+        // a column. The second one's events were drawn as a branch of the
+        // column across the second `if` ("w has no value yet" where no w
+        // exists), and the scope ends read "Its resource is dropped here
+        // only if no branch above moved it" and "Its resource is dropped.",
+        // false: each w is moved into `drop`. Each w now reads as it does
+        // with a name of its own.
+        must_contain: &[
+            "w acquires ownership of a resource",
+            "w's resource is moved into drop, which drops it",
+            "w goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "w goes out of scope. Its resource is dropped",
+            "w has no value yet",
+            "w is live in a conditional expression",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -18063,6 +18083,29 @@ fn each_variable_sharing_a_column_goes_out_of_scope() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #969: block locals named `w` in two let-chain conditions share a
+/// column. Each one goes out of scope once, on its own condition's row,
+/// having been moved into `drop` (as with a name of its own); nothing
+/// says one is dropped there.
+#[test]
+fn chain_block_locals_sharing_a_column_each_go_out_of_scope_once() {
+    let rv = run_with_local_backend("edition2024/shared_name_in_chain_969");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let ends = dots_listing_tooltip(&timeline, "w goes out of scope. No resource is dropped.");
+    let want: Vec<f64> = [
+        "if let Some(x) = o && { let w = s; drop(w); x > 1 } && x > 5 {",
+        "if let Some(x) = o && { let w = t; drop(w); x > 1 } && x > 5 {",
+        "if let Some(x) = o && { let w = a; drop(w); x > 1 } {",
+        "if let Some(x) = o && { let w = b; drop(w); x > 1 } {",
+    ].iter().map(|line| code_rows_y(&code, line)[0]).collect();
+    let mut got: Vec<f64> = ends.iter().map(|d| d.1).collect();
+    got.sort_by(f64::total_cmp);
+    assert!(
+        got.len() == want.len() && got.iter().zip(&want).all(|(g, w)| (g - w).abs() < 1.0),
+        "w's scope ends at {got:?}, want one at each of {want:?}"
+    );
 }
 
 /// #916: same-named references in different arms of a conditional share
