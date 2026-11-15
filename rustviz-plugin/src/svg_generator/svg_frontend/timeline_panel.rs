@@ -1209,6 +1209,9 @@ fn render_branch_dots(
                 .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
                 .map(|(_, e)| e);
             let reassigned_next = matches!(next, Some(Event::OwnerDropAtReassign { maybe_moved: true, .. }));
+            // This `if`'s let-chain condition, not only a branch body,
+            // may have moved it (#940, #953).
+            let by_cond = chain_condition_moved_here(branch_history);
             Some(if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
                 // Only a Box's contents were moved (`let w = *e;`,
                 // #921): e keeps its heap allocation on every path.
@@ -1227,13 +1230,10 @@ fn render_branch_dots(
                     _ if reassigned_next => hover_messages::ContentsDropAt::Reassign,
                     _ => hover_messages::ContentsDropAt::ScopeEnd,
                 };
-                // A let-chain's condition, not only a branch body,
-                // may have moved them (#940).
-                let by_cond = branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data));
                 hover_messages::event_dot_branch_merge_box_contents_moved(
                     &is.real_name(), rap.is_mut(), rap.holds_phrase(), at, by_cond)
             } else if reassigned_next {
-                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name())
+                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond)
             } else {
                 // A `&mut` reference moved on some paths (`if b {
                 // x } else { y }` returned, #674) owns nothing to
@@ -1243,6 +1243,7 @@ fn render_branch_dots(
                     is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
                     rap.is_mut(),
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
+                    by_cond,
                 )
             })
         } else if all_moved {
@@ -2165,6 +2166,17 @@ fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
         _ => false,
     })
+}
+
+// Whether this conditional's own let-chain condition may have moved the
+// column's value before a later part failed: the else branch (or the
+// implicit empty one) starts with the `MaybeMovedAt::ChainFail` event
+// (#940, #953). Not one nested in a branch: for an outer conditional's
+// join, a condition inside one of its branches is part of that branch,
+// so "if the branch that ran didn't move it" stays true.
+fn chain_condition_moved_here(branch_history: &[BranchData]) -> bool {
+    branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)|
+        matches!(e, Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. }, .. })))
 }
 
 // Whether what makes this column maybe-moved at its end (as

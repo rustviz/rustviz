@@ -2923,23 +2923,46 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // says that (`event_dot_go_out_of_scope_maybe_moved`). `value`: it holds
 // a value or a reference, which owns nothing to drop.
 // `mutable`: only a `let mut` binding can be assigned again (a second
-// assignment to an immutable one is E0384).
-pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mutable: bool, note: &str) -> String {
+// assignment to an immutable one is E0384). `by_cond`: a let-chain's
+// condition, not only a branch, may have moved it (`if let … && { let
+// w = s; … }`, #953); see `branch_merge_moved`.
+pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mutable: bool, note: &str, by_cond: bool) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let again = if mutable { " (until it's assigned again)" } else { "" };
+    let moved = branch_merge_moved(&my_name_fmt, by_cond);
     if value {
-        return format!(
-            "{0} was moved in at least one branch above, so it can't be used after the branches{1}.",
-            my_name_fmt, again
-        );
+        return format!("{}{}.", moved, again);
     }
     let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} was moved in at least one branch above, so it can't be used after the branches{3}. \
-         If the branch that ran didn't move it, its resource{1} is dropped{2} when {0} goes out \
-         of scope.",
-        my_name_fmt, holds, rest, again
+        "{0}{3}. {4}, its resource{1} is dropped{2} when {5} goes out of scope.",
+        moved, holds, rest, again, branch_merge_unless(by_cond), my_name_fmt
     )
+}
+
+// The start of a join's text for a variable moved on some paths into it:
+// "s was moved in at least one branch above, so it can't be used after
+// the branches". `by_cond`: a let-chain's condition moved it, possibly
+// with no branch body moving it at all (#953): on the path where the
+// condition moves s and a later part fails, the branch that runs (the
+// else, or the skipped body) doesn't move s, yet s is gone. So it says
+// "s may have been moved above, so it can't be used after the if", the
+// wording of a Box's contents moved there (#940).
+fn branch_merge_moved(name: &str, by_cond: bool) -> String {
+    if by_cond {
+        format!(
+            "{0} may have been moved above, so it can't be used after the {1}",
+            name, styled_name_html(&"if".to_owned())
+        )
+    } else {
+        format!("{} was moved in at least one branch above, so it can't be used after the branches", name)
+    }
+}
+
+// The condition under which a maybe-moved variable's resource is still
+// there to drop (see `branch_merge_moved`).
+fn branch_merge_unless(by_cond: bool) -> &'static str {
+    if by_cond { "If nothing above moved it" } else { "If the branch that ran didn't move it" }
 }
 
 /// Where the contents of a Box that some branches moved out of (`let w
@@ -3008,12 +3031,11 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned
 // again before it goes out of scope: the old value, if it's still there,
 // is dropped at that assignment instead (#335).
-pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String) -> String {
+pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: bool) -> String {
+    let name = styled_name_html(my_name);
     format!(
-        "{0} was moved in at least one branch above, so it can't be used after the branches \
-         until it's assigned again. If the branch that ran didn't move it, its resource is \
-         dropped when {0} is assigned again.",
-        styled_name_html(my_name)
+        "{} until it's assigned again. {}, its resource is dropped when {} is assigned again.",
+        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond), name
     )
 }
 
