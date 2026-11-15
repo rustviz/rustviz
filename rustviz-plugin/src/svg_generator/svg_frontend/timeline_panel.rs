@@ -1552,6 +1552,7 @@ fn render_dot(
         let event_y = event_dot_y(history, i);
         held = holds_value_after(held, event);
         moved_out = match event {
+            e if e.is_box_payload_move() => moved_out && !held,
             Event::Move { .. } | Event::LoopExitMove { definite: true, .. } => true,
             _ => moved_out && !held,
         };
@@ -1868,6 +1869,7 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
         match e {
             // After a loop that may have been left through a `break`
             // following a move, it may have been moved too.
+            e if e.is_box_payload_move() => {}
             Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { tuple: None, .. } | Event::ClosureCall { .. } => { moved = true; acquired = false; }
             Event::Acquire { .. } => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
@@ -1995,6 +1997,7 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             Event::OrAltMove { tuple: None, .. } => maybe = true,
             // Moved by one of several `break`s of a loop: only if that
             // `break` ended the loop (#561).
+            e if e.is_box_payload_move() => {}
             Event::Move { break_alt: Some(alt), .. } => maybe = !alt.in_loop,
             Event::Acquire { is: ResourceTy::Value(_), .. }
             | Event::Copy { is: ResourceTy::Value(_), .. }
@@ -2074,6 +2077,7 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
                     all = None;
                 }
             }
+            e if e.is_box_payload_move() => {}
             Event::LoopExitMove { .. }
             | Event::Acquire { .. } | Event::Copy { .. }
             | Event::Move { .. } | Event::ClosureCall { .. }
@@ -2222,6 +2226,7 @@ fn moved_by_leavers(branch_history: &[BranchData], out: &mut Vec<Vec<BranchExit>
 // included.
 fn moves_somewhere(events: &[(usize, Event)]) -> bool {
     events.iter().any(|(_, e)| match e {
+        e if e.is_box_payload_move() => false,
         Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { tuple: None, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moves_somewhere(&b.e_data)),
         _ => false,
@@ -2836,7 +2841,7 @@ fn struct_partial_move_split(
     hash: u64,
 ) -> Option<PartialMoveSplit> {
     let rap = &visualization_data.timelines.get(&hash)?.resource_access_point;
-    let ResourceAccessPoint::Struct(Struct { owner, .. }) = rap else { return None };
+    let ResourceAccessPoint::Struct(Struct { owner, is_box, .. }) = rap else { return None };
     let root = if rap.is_member() { *owner } else { hash };
     let prefix = format!("{}.", rap.name());
     let fields: Vec<(&Timeline, &String, bool)> = visualization_data
@@ -2860,6 +2865,12 @@ fn struct_partial_move_split(
         let child_prefix = format!("{}.", name);
         let is_leaf = !fields.iter().any(|(_, n, _)| n.starts_with(&child_prefix));
         if !holds_resource_at_scope_end(timeline) {
+            // A Copy part of a Box's payload moved out with all of it
+            // (`x => …` on `match *b`, #898): nothing of it is ever
+            // dropped, so the Box's scope end has nothing to say of it.
+            if *is_copy && *is_box {
+                continue;
+            }
             // Moved in one arm of a `match` on the struct, or one
             // branch of an `if`, and not in the others (#395).
             if maybe_moved_at_end(&timeline.history) {
@@ -2941,6 +2952,7 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         | Event::MutableBorrow { is: ResourceTy::Value(_), .. }
         | Event::OrAltBorrow { end: false, .. }
         | Event::InitRefParam { .. } => true,
+        e if e.is_box_payload_move() => held,
         Event::Move { .. } | Event::LoopExitMove { definite: true, .. } | Event::ClosureCall { .. } => false,
         // A variable that has gone out of scope holds nothing. When
         // same-named variables of disjoint branches share a column

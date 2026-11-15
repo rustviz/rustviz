@@ -1140,6 +1140,16 @@ fn binding_pats<'tcx>(pat: &'tcx Pat<'tcx>, out: &mut Vec<&'tcx Pat<'tcx>>) {
   }
 }
 
+/// Whether `pat` has a `&`, `box` or deref pattern in it (`Some(&k)`).
+fn pat_has_pointer_pat(pat: &Pat<'_>) -> bool {
+  let mut found = false;
+  pat.walk(|p| {
+    found |= matches!(p.kind, PatKind::Ref(..) | PatKind::Box(_) | PatKind::Deref(_));
+    !found
+  });
+  found
+}
+
 /// Refuse an or-pattern that binds `name` from different parts of the
 /// variable `whole`, which a tuple (or struct) literal a `let` matches
 /// moved into a temporary (`let (p, (x, _) | (_, x)) = (s, u);`): what
@@ -5012,10 +5022,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if matches!(e, Evt::Move | Evt::Copy) && !inline {
           member_binds.push(to_ro.clone());
         }
+        // `x => …` on `match *b`, with b a Box drawn as its payload's
+        // part columns: the whole payload moves out, parts and all
+        // (#898); x's own parts are bound below (`member_binds`). (An
+        // inline arm's event does this in `add_external_event`. These
+        // join the arm with the pattern's other events; see the drain
+        // after the arm's pattern.)
+        let box_payload = match (&ext_ev, inline) {
+          (ExternalEvent::Move { from, is_partial: false, .. }, false) => box_payload_of(from).map(|b| b.name().clone()),
+          _ => None,
+        };
         if inline {
           self.add_external_event(pat_line, ext_ev);
         } else {
           branch_e_data.push((pat_line, ext_ev));
+        }
+        if let Some(b) = box_payload {
+          self.move_struct_fields_away(pat_line, &b);
         }
         match e {               // A borrow, mut/immut must be returned at the end of the block
           Evt::SBorrow => {
@@ -7437,7 +7460,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
           }
-          None if or_conflicts.is_empty() || is_skipped => self.bind_walk(pat, init, is_skipped),
+          None if or_conflicts.is_empty() || is_skipped => {
+            if is_skipped || !self.bind_inside_member(pat, member, member_ty, init) {
+              self.bind_walk(pat, init, is_skipped);
+            }
+          }
           // `Some(x)` on `t.0` in `let ((Some(x), _) | (_, Some(x))) =
           // t;`: `x` is still bound from `t.0` or `t.1`.
           None => {
@@ -7467,6 +7494,50 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
+  }
+
+  /// `Some(s)` on `t.0` in `let (Some(s), n) = t else { .. };` (or on
+  /// `b.0` in `let (Some(s), n) = *b else { .. };`): a sub-pattern that
+  /// doesn't destructure the part `member` into part columns of its own
+  /// still takes what it binds out of that part only, so each binding is
+  /// bound from `member`, as `if let (Some(s), n) = t` does
+  /// (`get_dec_of_pat_parts`), not from the whole `init` (#899). Only
+  /// by-value bindings of values holding no reference (a `ref` binding
+  /// borrows, and a reference copied out carries its loan), and none
+  /// under a `&` / `box` / deref pattern (what that binds is behind a
+  /// pointer, #874): false, and nothing bound, otherwise.
+  fn bind_inside_member(
+    &mut self,
+    pat: &'tcx Pat<'tcx>,
+    member: &str,
+    member_ty: rustc_middle::ty::Ty<'tcx>,
+    init: &'tcx Expr<'tcx>,
+  ) -> bool {
+    let Some(from) = self.raps.get(member).map(|rd| rd.rap.to_owned()) else { return false };
+    let mut bs = Vec::new();
+    binding_pats(pat, &mut bs);
+    let typeck = self.tcx.typeck(pat.hir_id.owner);
+    let by_value = |b: &&Pat<'tcx>| matches!(b.kind, PatKind::Binding(ann, hirid, _, _)
+      if matches!(ann.0, rustc_hir::ByRef::No)
+        && !typeck.node_type(hirid).walk().any(|g| matches!(g.kind(), rustc_middle::ty::GenericArgKind::Lifetime(_))));
+    if bs.is_empty() || !bs.iter().all(by_value) || pat_has_pointer_pat(pat) {
+      return false;
+    }
+    let line_num = span_to_line(&init.span, &self.tcx);
+    for b in bs {
+      let PatKind::Binding(annotation, hirid, _, _) = b.kind else { continue };
+      let name = binding_name(&self.tcx, hirid);
+      let lhs_ty = typeck.node_type(hirid);
+      let evt = self.bind_evt(lhs_ty, hirid);
+      self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+      let to = self.raps.get(&name).unwrap().rap.to_owned();
+      // `let (Some(k), n) = t else { .. }` with `t.0: Option<i32>`: k
+      // gets a copy of a value inside t.0.
+      let partial = copies_from_inside(&evt, lhs_ty, member_ty, &ResourceTy::Value(from.clone()));
+      self.update_rap(&from, line_num);
+      self.add_ev(line_num, evt, ResourceTy::Value(to), ResourceTy::Value(from.clone()), partial);
+    }
+    true
   }
 
   /// `let ((x, _) | (_, x)) = t;` (#597): `to` is `x`, bound from one
