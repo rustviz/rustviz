@@ -6997,6 +6997,43 @@ pub fn print_out_of_scope(&mut self){
       }
     }
 
+    // A reference copied into one that outlives it (`x = w;` with `w`
+    // declared in an inner block) shares its loan, so MIR gives it the
+    // same end as the copy's last use, which can come after `w`'s own
+    // scope end. `w` can't give the lender back there: it ends with
+    // its scope (a plain end, no arrow), and the copy, still in scope
+    // at the loan's end, gives the lender back (#913).
+    let mut outlived: HashMap<String, usize> = HashMap::new();
+    {
+      // Where the reference goes out of scope: its block's end, which
+      // `print_out_of_scope` draws later, or a scope end already drawn
+      // (a loop body's `let`, `emit_scope_end`).
+      // (`raps` outlives one fn: match the column, not just the name.)
+      let scope_end = |name: &str| {
+        let rd = self.raps.get(name).filter(|rd| rd.rap.is_ref() && rd.extra_scopes.is_empty())?;
+        self.preprocessed_events.iter().find_map(|(l, e)| match e {
+          ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rd.rap.hash() => Some(*l),
+          _ => None,
+        }).or(rd.is_global.then_some(rd.scope))
+      };
+      #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each (ref, lender) pair is decided on its own")]
+      for (lender, refs) in lender_to_refs.iter() {
+        let ends: Vec<(String, usize, Option<usize>)> = refs.iter()
+          .filter(|r| ultimate_refs.contains(&(r.to_string(), lender.to_owned())))
+          .filter(|r| self.borrow_map.get(*r).is_some_and(|d| d.co_lenders.is_empty()))
+          .map(|r| (r.clone(), self.borrow_map.get(r).unwrap().lifetime, scope_end(r)))
+          .collect();
+        for (r, lifetime, end) in ends.iter() {
+          let Some(end) = end.filter(|e| *e < *lifetime) else { continue };
+          let carried_on = ends.iter().any(|(o, l, e)| o != r && l == lifetime && e.is_none_or(|e| e >= *l));
+          if carried_on {
+            ultimate_refs.remove(&(r.clone(), lender.to_owned()));
+            outlived.insert(r.clone(), end);
+          }
+        }
+      }
+    }
+
     // if a reference borrowed from an anonymous owner then it must be an ultimate ref
     #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "only inserts into the ultimate_refs set")]
     for (name, ref_data) in self.borrow_map.iter() {
@@ -7058,10 +7095,22 @@ pub fn print_out_of_scope(&mut self){
           self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data, holders);
           continue;
         }
-        self.add_external_event(*lifetime, ExternalEvent::RefDie { 
+        let end = outlived.get(k).copied().unwrap_or(*lifetime);
+        let id = *self.unique_id;
+        self.add_external_event(end, ExternalEvent::RefDie { 
           from: ResourceTy::Value(from_ro.clone()), to: to_ro, num_curr_borrowers: get_borrowers(from_ro.name(), &self.borrow_map).len() - 1, 
-          id: *self.unique_id });
+          id });
         *self.unique_id += 1;
+        // An end at the scope end (#913) goes before the scope end
+        // already drawn there (a loop body's binding), not after it.
+        if outlived.contains_key(k) && self.preprocessed_events.last().is_some_and(|(_, e)| e.get_id() == id) {
+          let gos = self.preprocessed_events.iter().position(|(l, e)| *l == end
+            && matches!(e, ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == from_ro.hash()));
+          if let Some(i) = gos {
+            let ev = self.preprocessed_events.pop().unwrap();
+            self.preprocessed_events.insert(i, ev);
+          }
+        }
       }
       else {
         // otherwise it does return a resource
