@@ -4648,23 +4648,37 @@ pub fn or_at_returns(lines: &[usize]) -> String {
     }
 }
 
+/// The `return` that runs of those on `lines`: "the `return` on line
+/// 3", "whichever `return` (line 3 or 7) runs".
+fn whichever_return(lines: &[usize]) -> String {
+    match lines {
+        [_] => returns_on_lines(lines),
+        _ => format!(
+            "whichever `return` ({}) runs",
+            returns_on_lines(lines).trim_start_matches("the `return` on ")
+        ),
+    }
+}
+
 /// A scope end that `return`s directly in a loop body come before
 /// (#1020), whose drops aren't drawn on their own rows. `title` is what
 /// the dot says otherwise. A variable the loop body declared never gets
 /// here on a path through the body (`always`): it goes out of scope at
 /// the `return` (or at an exit drawn with its own drops), so the text
-/// says so. One declared before the loop (`maybe`) is dropped at the
-/// `return` if that runs: said when this dot drops something (`drops`).
+/// says so; likewise any variable at a scope end after a `loop` that
+/// nothing breaks out of, which the code never reaches (#1041). One
+/// declared before the loop (`maybe`) is dropped at the `return` if that
+/// runs: said when this dot drops something (`drops`).
 pub fn event_dot_scope_end_after_loop_return(title: &str, early: &EarlyReturns, drops: bool) -> String {
     let mut out = title.to_owned();
-    if let Some(line) = early.always {
-        let at = format!("goes out of scope at {}", returns_on_lines(&[line]));
+    if !early.always.is_empty() {
+        let at = format!("goes out of scope at {}", whichever_return(&early.always));
         out = if out.contains("goes out of scope at the end of the block") {
             out.replacen("goes out of scope at the end of the block", &at, 1)
         } else if out.contains("goes out of scope") {
             out.replacen("goes out of scope", &at, 1)
         } else {
-            format!("{}. This happens at {}", out.trim_end_matches('.'), returns_on_lines(&[line]))
+            format!("{}. This happens at {}", out.trim_end_matches('.'), whichever_return(&early.always))
         };
         out = out.replace(" here ", " there ");
     }

@@ -2075,17 +2075,105 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.loop_returns.push(LoopReturn { line, vars, iters });
   }
 
+  /// Whether `l` is a `loop` (not a `for` / `while`, not from a macro)
+  /// that nothing breaks out of: no `break` inside it targets it or
+  /// anything outside it, and no `continue` targets anything outside it.
+  /// It never ends; only a `return` (or a panic) leaves it (#1041).
+  fn loop_never_ends(&self, l: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::LoopSource;
+    if !matches!(l.kind, ExprKind::Loop(_, _, LoopSource::Loop, _)) || l.span.from_expansion() {
+      return false;
+    }
+    struct Leaves<'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, l: HirId, found: bool }
+    impl<'tcx> Visitor<'tcx> for Leaves<'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        let inside = |t: HirId| self.tcx.hir_parent_iter(t).any(|(id, _)| id == self.l);
+        match e.kind {
+          ExprKind::Break(dest, _) => self.found |= !dest.target_id.is_ok_and(inside),
+          ExprKind::Continue(dest) => self.found |= !dest.target_id.is_ok_and(|t| t == self.l || inside(t)),
+          _ => {}
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let mut v = Leaves { tcx: self.tcx, l: l.hir_id, found: false };
+    intravisit::walk_expr(&mut v, l);
+    !v.found
+  }
+
+  /// Whether the `return` `ret` sits directly in the body of a `loop`
+  /// that never ends (`loop_never_ends`), which itself sits directly in
+  /// the function's body: only statements, plain blocks, `let` values and
+  /// other such loops between them, no branch, `for` / `while` loop or
+  /// closure. The loop body always runs, and a `return` is the only way
+  /// out, so this one leaves the function whenever the code gets to it:
+  /// its drops are drawn on its row, and nothing after the loop runs, as
+  /// for a body drawn inline that always returns (#1004, #1041).
+  fn returns_from_breakless_loop(&self, ret: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    if self.in_closure(ret) || ret.span.from_expansion()
+      || self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. }))
+    {
+      return false;
+    }
+    let mut in_loop = false;
+    let mut child = ret.hir_id;
+    for (id, node) in self.tcx.hir_parent_iter(ret.hir_id) {
+      let from = std::mem::replace(&mut child, id);
+      match node {
+        Node::Stmt(_) | Node::Block(_) => {}
+        Node::LetStmt(LetStmt { init: Some(init), .. }) if in_loop && init.hir_id == from => {}
+        Node::Expr(Expr { kind: ExprKind::Block(_, None) | ExprKind::DropTemps(_), .. }) => {}
+        Node::Expr(l) if self.loop_never_ends(l) => in_loop = true,
+        Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_) => return in_loop,
+        _ => return false,
+      }
+    }
+    false
+  }
+
+  /// A `loop` that never ends (`loop_never_ends`): the closing braces
+  /// after it on its own path are never reached: those of the blocks it
+  /// is a statement (or the tail) of, and on up through plain blocks,
+  /// `let` values and enclosing loops like it, up to anything that may
+  /// run without it (an `if` / `match`, a labelled block, a loop that can
+  /// end). Where the loop sits directly in the function's body, its
+  /// `return`s drop everything on their rows (`returns_from_breakless_loop`)
+  /// and those braces draw nothing; elsewhere (in a `for` body, say), a
+  /// variable in scope at a `return` in it whose scope ends at one of them
+  /// is always dropped at a `return`, which its scope end says (#1041).
+  fn note_breakless_loop(&mut self, l: &'tcx Expr<'tcx>) {
+    use rustc_hir::Node;
+    if self.in_closure(l) || !self.loop_never_ends(l) {
+      return;
+    }
+    let mut child = l.hir_id;
+    for (id, node) in self.tcx.hir_parent_iter(l.hir_id) {
+      let from = std::mem::replace(&mut child, id);
+      match node {
+        Node::Stmt(_) => {}
+        Node::LetStmt(LetStmt { init: Some(init), .. }) if init.hir_id == from => {}
+        Node::Block(b) => { self.dead_ends.insert(span_end_line(&b.span, &self.tcx)); }
+        Node::Expr(Expr { kind: ExprKind::Block(_, None) | ExprKind::DropTemps(_), .. }) => {}
+        Node::Expr(m) if self.loop_never_ends(m) => {}
+        _ => break,
+      }
+    }
+  }
+
   /// Marks the scope ends that the `return`s `note_return_in_loop`
   /// recorded come before (#1020), once the function is visited:
   /// - the `GoOutOfScope` of each variable in scope at one of them that
   ///   comes after it (not one at an exit drawn with its own drops, in
   ///   `exit_ids`, nor that of a later variable sharing the column, #589):
   ///   for a variable the loop body declared, its first, at the body's
-  ///   end;
+  ///   end; one the code never reaches (`dead_ends`, #1041) is always
+  ///   dropped at one of them instead;
   /// - the drop of a `for` loop's head temporary where the loop ends;
   /// - the drop of a `for` loop's iterator variable where its loop ends.
   pub fn mark_loop_returns(&mut self, exit_ids: &HashSet<usize>) {
     let returns = std::mem::take(&mut self.loop_returns);
+    let dead = std::mem::take(&mut self.dead_ends);
     if returns.is_empty() {
       return;
     }
@@ -2118,10 +2206,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut e = EarlyReturns::default();
         for r in &returns {
           match r.vars.iter().find(|(v, _)| v.hash() == ro.hash()) {
-            Some((_, true)) if ends_after(r, ro, true, line) => { e.always.get_or_insert(r.line); }
+            Some((_, true)) if e.always.is_empty() && ends_after(r, ro, true, line) => e.always.push(r.line),
             Some((_, false)) if ends_after(r, ro, false, line) => e.maybe.push(r.line),
             _ => {}
           }
+        }
+        // Never reached (after a `loop` nothing breaks out of): every
+        // path that leaves through the loop does so at one of the
+        // `return`s (#1041).
+        if dead.contains(&line) && !e.maybe.is_empty() {
+          e.always.append(&mut e.maybe);
+          e.always.sort_unstable();
+          e.always.dedup();
         }
         if e != EarlyReturns::default() {
           *early = Some(e);
@@ -3243,7 +3339,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn ends_at_exits(&self, e: &'tcx Expr<'tcx>, branch: bool) -> bool {
     use rustc_hir::Node;
     match e.kind {
-      ExprKind::Ret(_) | ExprKind::Continue(_) => branch,
+      ExprKind::Continue(_) => branch,
+      // Or a `return` that ends every path, drawn with its drops
+      // (#1041).
+      ExprKind::Ret(_) => branch || self.returns_from_breakless_loop(e),
+      // A `loop` that never ends, through its body (#1041).
+      ExprKind::Loop(b, ..) if !branch && self.loop_never_ends(e) => self.block_ends_at_exits(b, false),
       // A `break` out of a labelled block drops nothing drawn.
       ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
         matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
@@ -3950,7 +4051,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // (#363), except what `ret` moves to the caller (#410). Inside
         // a branch, those drops are drawn on the branch's columns, at
         // the `return`.
-        if self.returns_before_body_end(expr) {
+        // (Or one directly in a `loop` that never ends, #1041.)
+        let breakless = self.returns_from_breakless_loop(expr);
+        if breakless || self.returns_before_body_end(expr) {
           self.drop_locals_at_fn_return(expr, ret);
         } else {
           self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, false, "return");
@@ -3958,7 +4061,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if !self.in_closure(expr) {
           self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
         }
-        self.note_return_in_loop(expr);
+        if !breakless {
+          self.note_return_in_loop(expr);
+        }
       }
 
       // a block eg: {}
@@ -4088,6 +4193,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       ExprKind::If(guard_expr, if_expr, else_expr) => self.visit_if(expr, guard_expr, if_expr, else_expr),
 
       ExprKind::Loop(block, _, loop_ty, _span) => {
+        self.note_breakless_loop(expr);
         // What a `break` / `continue` in the body drops (#410). A
         // for-loop's frame is pushed where its body is visited, in the
         // ForLoopDesugar arm.
