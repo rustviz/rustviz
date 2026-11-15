@@ -19279,6 +19279,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        // #1021: `v = v;` (rustc: useless assignment) moves v's value out
+        // and straight back in; nothing is dropped and v owns the same
+        // value after (checked with a Drop-printing type). Nothing is drawn
+        // on v for it, as for `v = if c { v } else { g };` (#1010). It used
+        // to draw a move and a reassignment that dropped v's "previous
+        // resource", and after a branch, v as maybe moved.
+        name: "self_assign_1021",
+        must_contain: &[
+            // keep2: only the else branch's `v = g` drops v's old String
+            "v acquires ownership of a new resource; its previous resource is dropped",
+            "v isn't moved in any of the branches above",
+            "v's resource is moved to the caller",
+            "w goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+            "p.name goes out of scope. Its resource is dropped.",
+            "p goes out of scope. Its resource is dropped.",
+            // a Copy value is copied, as in any Copy assignment
+            "n is assigned a copy of n",
+        ],
+        must_not_contain: &[
+            "Move from v to v",
+            "=v's resource is moved",
+            "v was moved in at least one branch above",
+            "Move from w to w",
+            "=w's resource is moved",
+            "w acquires ownership of a new resource",
+            "w goes out of scope. No resource is dropped.",
+            "Move from t to t",
+            "=t's resource is moved",
+            "t acquires ownership of a new resource",
+            "t was moved in at least one branch above",
+            "t goes out of scope. Its resource is dropped here only if",
+            "Move from p.name to p.name",
+            "=p.name's resource is moved",
+            "p.name acquires ownership of a new resource",
+            "p.name goes out of scope. No resource is dropped.",
+            "p.name was moved out earlier",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
