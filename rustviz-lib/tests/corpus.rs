@@ -17265,6 +17265,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u may have been moved",
         ],
     },
+    TooltipExpect {
+        name: "box_payload_write_through_ref_941",
+        // #941: `**rb = …` with `rb: &mut Box<String>` replaces the String
+        // in bx's Box, not the Box: only the old String is dropped, and
+        // the place written is `**rb` (`*rb` is the Box). bx read "bx
+        // acquires ownership of a new resource; its previous resource
+        // (including the String it holds) is dropped", rb "*rb acquires
+        // …". Checked with a `Drop`-printing type (and the Box's address
+        // is unchanged).
+        must_contain: &[
+            "*bx acquires ownership of a new resource; its previous resource is dropped",
+            "**rb acquires ownership of a new resource; its previous resource is dropped",
+            "Move from String::from to **rb",
+            "*cx acquires ownership of a new resource; its previous resource is dropped",
+            "***rrc acquires ownership of a new resource; its previous resource is dropped",
+            "**p acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "bx acquires ownership of a new resource; its previous resource (including the String it holds) is dropped",
+            "cx acquires ownership of a new resource; its previous resource (including the String it holds) is dropped",
+            "=*rb acquires ownership of a new resource; its previous resource is dropped",
+            "=*rrc acquires ownership of a new resource; its previous resource is dropped",
+            "=*p acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

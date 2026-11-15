@@ -3990,7 +3990,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `*x = …` with x a reference to part of a variable's resource
     // (`v.get_mut(0)`, `&mut v[0]`): only that part is overwritten, and
     // the variable isn't given a new resource (#861).
-    let part_owner = self.part_owner_behind_ref(&lhs_rty, lhs_expr, lhs_ty);
+    // (Not `**rb = v` through a reference to a Box: that writes the
+    // Box's contents, drawn as `*bx` below, #941.)
+    let part_owner = if self.box_deref_through_ref(lhs_expr).is_some() {
+      None
+    } else {
+      self.part_owner_behind_ref(&lhs_rty, lhs_expr, lhs_ty)
+    };
+    let mut payload_behind_ref = false;
     let drop_target: Option<ResourceAccessPoint> =
       if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
         match &lhs_rty {
@@ -4022,7 +4029,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // need rap_holds_resource_now here. A reference to
             // part of the owner's resource overwrites only that part:
             // its drop is stated with the write (`write_part_behind_ref`).
-            if part_owner.is_some() { None } else { self.owner_behind_ref(p_rap, "") }
+            //
+            // `**rb = v` with `rb: &mut Box<String>` writes the
+            // Box's contents: only the old String is dropped, the
+            // owner keeps its Box (#941), drawn as `*bx`
+            // (`payload`). A Box deref further in (`***x` through
+            // a `Box<Box<_>>`) isn't modelled: no drop on the owner's
+            // column (the reference's dot says the old value is
+            // dropped).
+            if part_owner.is_some() {
+              None
+            } else {
+              match self.box_deref_through_ref(lhs_expr) {
+                None => self.owner_behind_ref(p_rap, ""),
+                Some(true) => {
+                  payload_behind_ref = true;
+                  self.owner_behind_ref(p_rap, "")
+                }
+                Some(false) => None,
+              }
+            }
           }
           ResourceTy::DerefField(p_rap, _, _) => {
             // `r.a = v` after `let r = &mut s;`: the field being
@@ -4121,6 +4147,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       self.add_ev(line_num, Evt::Bind, compound, ResourceTy::Anonymous, false);
     } else {
+      // `**rb = v` / `**rb += v` write the place `**rb`, not `*rb`
+      // (the Box, or the reference, rb points to): the reference's
+      // dot names it as written (#941).
+      let lhs_rty = match lhs_rty.clone() {
+        ResourceTy::Deref(rap) if !lhs_ty.is_ref() => match self.multi_deref_place(lhs_expr, &rap) {
+          Some(place) => {
+            let write = rap.place_write();
+            ResourceTy::DerefField(rap, place, write)
+          }
+          None => ResourceTy::Deref(rap),
+        },
+        other => other,
+      };
       let n_events = self.preprocessed_events.len();
       let first_id = *self.unique_id;
       self.match_rhs(lhs_rty.clone(), rhs_expr, e);
@@ -4184,9 +4223,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
 
     let n_before_drops = self.preprocessed_events.len();
+    let payload_target = drop_target.as_ref().map(|r| *r.hash());
     for ((rap, maybe_moved), parts) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts) {
       let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
-      let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash());
+      let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
+        || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
       self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
         ro: rap,
         id: *self.unique_id,
@@ -7866,6 +7907,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (The line's arrows are drawn from `event_line_map`'s copy.)
     self.preprocessed_events.iter_mut().for_each(|(_, e)| retarget(e));
     self.event_line_map.values_mut().flatten().for_each(retarget);
+  }
+
+  /// `**rb = …` (`*(*rb)`, `***rrb`, …) whose operands are references
+  /// reaching a `Box`: `Some(true)` when only the outermost `*` goes
+  /// into a Box (`rb: &mut Box<String>`), so the write replaces the
+  /// Box's contents, not the Box (#941); `Some(false)` when a Box is
+  /// dereferenced further in (`***x` with `x: &mut Box<Box<_>>`);
+  /// `None` when no operand is a Box (`**r` with `r: &mut &mut
+  /// String`, or a single `*r`).
+  fn box_deref_through_ref(&self, lhs_expr: &'tcx Expr<'tcx>) -> Option<bool> {
+    let typeck = self.tcx.typeck(lhs_expr.hir_id.owner);
+    let ExprKind::Unary(UnOp::Deref, outer) = lhs_expr.kind else { return None };
+    let mut boxes = Vec::new();
+    let mut operand = outer;
+    loop {
+      boxes.push(typeck.node_type(operand.hir_id).is_box());
+      match operand.kind {
+        ExprKind::Unary(UnOp::Deref, inner) => operand = inner,
+        _ => break,
+      }
+    }
+    if boxes.len() < 2 || !boxes.contains(&true) {
+      return None;
+    }
+    Some(boxes[0] && !boxes[1..].contains(&true))
+  }
+
+  /// `**rb` (two or more `*`) with `rb` a reference: the place as
+  /// written, for the reference's dot (#941). `None` for a single `*`.
+  fn multi_deref_place(&self, lhs_expr: &'tcx Expr<'tcx>, rap: &ResourceAccessPoint) -> Option<String> {
+    let ExprKind::Unary(UnOp::Deref, mut inner) = lhs_expr.kind else { return None };
+    let mut depth = 1;
+    while let ExprKind::Unary(UnOp::Deref, i) = inner.kind {
+      inner = i;
+      depth += 1;
+    }
+    if depth < 2 || !rap.is_ref() {
+      return None;
+    }
+    Some(self.plain_source_text(lhs_expr)
+      .filter(|p| p.starts_with('*'))
+      .unwrap_or_else(|| format!("{}{}", "*".repeat(depth), rap.name())))
   }
 
   /// `*b = o` / `*b = make()` with `b` a [`box_payload_write`]: the
