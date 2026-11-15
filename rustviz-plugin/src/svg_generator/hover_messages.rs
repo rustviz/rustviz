@@ -3121,11 +3121,36 @@ pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> 
 // The same while a `for` loop's iterator borrows only a field of what
 // r points to (`for e in self.items.iter()` with `self: &mut Self`;
 // #1060): the other fields can still be written through r.
-pub fn state_mut_ref_field_borrowed_by_loop_iterator(my_name: &String, place: &String) -> String {
-    format!(
-        "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator, so {1} is read-only until the loop ends",
-        styled_name_html(my_name), styled_name_html(place)
-    )
+pub fn state_mut_ref_field_borrowed_by_loop_iterator(my_name: &String, place: &String, is_mut: bool) -> String {
+    if is_mut {
+        format!(
+            "{0} holds a mutable reference, but {1} is mutably borrowed by the `for` loop's iterator, so {1} can't be used until the loop ends",
+            styled_name_html(my_name), styled_name_html(place)
+        )
+    } else {
+        format!(
+            "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator, so {1} is read-only until the loop ends",
+            styled_name_html(my_name), styled_name_html(place)
+        )
+    }
+}
+
+// The same while a reference variable borrows only that field
+// (`let r = &mut self.items;`, `let first = self.items.first_mut()
+// .unwrap();`; #1073): the rest of what my_name points to can still
+// be used through it, so its line keeps its normal style.
+pub fn state_mut_ref_field_borrowed_by(my_name: &String, place: &String, borrower: &String, is_mut: bool) -> String {
+    if is_mut {
+        format!(
+            "{0} holds a mutable reference, but {1} is mutably borrowed by {2}, so {1} can't be used while the borrow is live",
+            styled_name_html(my_name), styled_name_html(place), styled_name_html(borrower)
+        )
+    } else {
+        format!(
+            "{0} holds a mutable reference, but {1} is immutably borrowed by {2}, so {1} is read-only while the borrow is live",
+            styled_name_html(my_name), styled_name_html(place), styled_name_html(borrower)
+        )
+    }
 }
 
 // should not appear for visualization in a correct program

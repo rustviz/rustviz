@@ -5362,7 +5362,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return None;
     }
     match &self.borrow_map.get(r.name())?.lender {
-      ResourceTy::Value(q) | ResourceTy::Deref(q) if q.is_ref() && !q.is_fn() => {
+      // (A field of what q points to: `first` from
+      // `self.items.first_mut().unwrap()`, #1073.)
+      ResourceTy::Value(q) | ResourceTy::Deref(q) | ResourceTy::DerefField(q, _, _) if q.is_ref() && !q.is_fn() => {
         match self.borrow_map.get(q.name())?.lender {
           ResourceTy::Caller => Some(q.clone()),
           _ => self.callers_ref_behind_ref(q, depth + 1),
