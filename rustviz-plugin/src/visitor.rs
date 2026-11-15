@@ -661,7 +661,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           ResourceTy::Deref(rap) =>
             push(ChainEffectKind::Assign { rap: rap.clone(), place: Some(format!("*{}", rap.name())),
               drops_old: matches!(rap.place_write(), PlaceWrite::AssignDropsOld), held: true }),
-          ResourceTy::Index(rap, place, pw) | ResourceTy::DerefField(rap, place, pw) =>
+          ResourceTy::Index(rap, place, pw) | ResourceTy::DerefField(rap, place, pw, _) =>
             push(ChainEffectKind::Assign { rap: rap.clone(), place: Some(place.clone()),
               drops_old: matches!(pw, PlaceWrite::AssignDropsOld), held: true }),
           _ => {}
@@ -5177,7 +5177,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// write isn't to a field behind a reference. (An overwritten old
   /// value that needs drop is drawn as its drop, on the same column.)
   fn write_field_behind_ref(&mut self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize) {
-    let ResourceTy::DerefField(p_rap, place, write) = lhs_rty else { return };
+    let ResourceTy::DerefField(p_rap, place, write, _) = lhs_rty else { return };
     if let Some(field) = self.field_column_behind_ref(lhs_expr, p_rap) {
       self.add_ev(line_num, Evt::Bind, ResourceTy::Index(field, place.clone(), *write), ResourceTy::Anonymous, false);
     }
@@ -5364,7 +5364,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     match &self.borrow_map.get(r.name())?.lender {
       // (A field of what q points to: `first` from
       // `self.items.first_mut().unwrap()`, #1073.)
-      ResourceTy::Value(q) | ResourceTy::Deref(q) | ResourceTy::DerefField(q, _, _) if q.is_ref() && !q.is_fn() => {
+      ResourceTy::Value(q) | ResourceTy::Deref(q) | ResourceTy::DerefField(q, _, _, _) if q.is_ref() && !q.is_fn() => {
         match self.borrow_map.get(q.name())?.lender {
           ResourceTy::Caller => Some(q.clone()),
           _ => self.callers_ref_behind_ref(q, depth + 1),
@@ -5685,8 +5685,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       // A reference-typed field (`h.r = &x`) is not an owned or Copy
       // value; leave its wording alone.
-      ResourceTy::DerefField(rap, place, _) if is_assign && !lhs_ty.is_ref() =>
-        ResourceTy::DerefField(rap, place, assign_kind()),
+      ResourceTy::DerefField(rap, place, _, holds) if is_assign && !lhs_ty.is_ref() =>
+        ResourceTy::DerefField(rap, place, assign_kind(), holds),
       // A write to a union (`u.f = e`, `u = U { .. }`) is flagged
       // too, with the Copy-ness of the value written, so the dot
       // can say "assigned a copy of y" or "acquires ownership of
@@ -6042,7 +6042,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
           }
-          ResourceTy::DerefField(p_rap, _, _) => {
+          ResourceTy::DerefField(p_rap, _, _, _) => {
             // `r.a = v` after `let r = &mut s;`: the field being
             // overwritten is the lender's `s.a`, so that's where
             // the old value is dropped (#152). Only when the lender
@@ -8331,7 +8331,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // with `v: &mut Vec<_>`, `self.items.iter_mut()`) stays live
           // until the loop ends too: its own borrow ends after the
           // iterator's (#1046, #1060).
-          if let ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _) = &lender {
+          if let ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _, _) = &lender {
             if r.is_ref() && self.borrow_map.contains_key(r.name()) {
               let floor = self.borrow_floor.entry(r.name().to_owned()).or_insert(body_end);
               *floor = (*floor).max(body_end);

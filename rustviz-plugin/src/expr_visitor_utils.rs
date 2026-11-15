@@ -1002,7 +1002,7 @@ pub fn collect_event_live_vars(
                     // column, so r is live in the branch too.
                     match rty {
                         ResourceTy::Value(rap) | ResourceTy::Deref(rap)
-                        | ResourceTy::DerefField(rap, _, _) => {
+                        | ResourceTy::DerefField(rap, _, _, _) => {
                             if !rap.is_fn() && !rap.is_unbound_temporary() {
                                 out.insert(rap.clone());
                             }

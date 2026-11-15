@@ -1612,7 +1612,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn event_touches_skipped(&self, event: &ExternalEvent) -> bool {
     let touches_ty = |r: &ResourceTy| -> bool {
       match r {
-        ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::Index(rap, _, _) | ResourceTy::DerefField(rap, _, _) => {
+        ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::Index(rap, _, _) | ResourceTy::DerefField(rap, _, _, _) => {
           self.skip_raps.contains(rap.name())
         }
         _ => false,
@@ -2376,7 +2376,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Caller, .. }
           if *f.hash() == hash && mine(*line) => true,
         // `&self.s` returned: a reborrow through `self` goes to the caller (#784).
-        ExternalEvent::Copy { from: ResourceTy::DerefField(f, place, _), to: ResourceTy::Caller, .. }
+        ExternalEvent::Copy { from: ResourceTy::DerefField(f, place, _, _), to: ResourceTy::Caller, .. }
           if place.starts_with('&') && *f.hash() == hash && mine(*line) => true,
         ExternalEvent::Branch { branches, .. } => branches.iter()
           .any(|b| handed(this, &b.e_data, hash, mine, swapped_here, true, caller_only)),
@@ -3354,7 +3354,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// reference (#1060).
   pub(crate) fn mut_call_chain_root(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
     match self.call_chain_root(e)? {
-      (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _), Mutability::Mut) => Some(r),
+      (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _, _), Mutability::Mut) => Some(r),
       _ => None,
     }
   }
@@ -3507,7 +3507,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if place.hir_id == path.hir_id {
         return None;
       }
-      let Some(ResourceTy::DerefField(fr, fname, w)) = self.field_through_ref(place) else { return None };
+      let Some(ResourceTy::DerefField(fr, fname, w, holds)) = self.field_through_ref(place) else { return None };
       if fr.hash() != r.hash() {
         return None;
       }
@@ -3546,7 +3546,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if !kept {
         continue;
       }
-      add(ResourceTy::DerefField(fr, fname, w), is_mut);
+      add(ResourceTy::DerefField(fr, fname, w, holds), is_mut);
     }
     (!out.is_empty()).then_some(out)
   }
@@ -3562,7 +3562,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         return None;
       }
       let is_mut = self.closure_field_captures(call, closure, m.id, r)?.into_iter()
-        .find_map(|(l, is_mut)| matches!(&l, ResourceTy::DerefField(_, p, _) if p == place).then_some(is_mut))?;
+        .find_map(|(l, is_mut)| matches!(&l, ResourceTy::DerefField(_, p, _, _) if p == place).then_some(is_mut))?;
       let rustc_hir::Node::Expr(callee) = self.tcx.parent_hir_node(closure.hir_id) else { return None };
       let name = match callee.kind {
         ExprKind::MethodCall(seg, ..) => seg.ident.as_str().to_owned(),
@@ -3584,7 +3584,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// the call; None when the closure captures r some other way (all of
   /// `*self`, for `self.len()`, or `self` itself, as a `move` closure
   /// does), or the call's result may hold its borrows without holding
-  /// the closure.
+  /// the closure (rustc says it does).
   fn closure_field_captures(&self, call: &'tcx Expr<'tcx>, closure: &'tcx Expr<'tcx>, r_id: rustc_hir::HirId, r: &ResourceAccessPoint) -> Option<Vec<(ResourceTy, bool)>> {
     use rustc_middle::hir::place::{PlaceBase, ProjectionKind};
     let ExprKind::Closure(c) = closure.kind else { return None };
@@ -3595,7 +3595,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // The closure's borrows reach the result if every value from the
     // closure up to the call's result holds the closure (`map(|x| …)`
     // returns a `Map` that holds it), and end with the call if one of
-    // them can't hold a borrow at all.
+    // them can't hold a borrow at all. A call that returns a value that
+    // can hold borrows but not the closure (`find(|x| …)` returns an
+    // `Option<&i32>`) may still keep them through its signature: rustc's
+    // borrow checker says whether the closure's loans outlive the call
+    // (#1101).
     let mut kept = true;
     let mut cur = closure;
     while cur.hir_id != call.hir_id {
@@ -3606,7 +3610,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         break;
       }
       if !holds_closure(t) {
-        return None;
+        if !matches!(p.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+          || self.loans_issued_in_kept_after_call(p.span, closure.span) != Some(false) {
+          return None;
+        }
+        kept = false;
+        break;
       }
       cur = p;
     }
@@ -3646,7 +3655,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
       };
       if kept {
-        out.push((ResourceTy::DerefField(r.to_owned(), name, PlaceWrite::Update), is_mut));
+        out.push((ResourceTy::DerefField(r.to_owned(), name, PlaceWrite::Update, self.field_holds(ty, call.hir_id.owner)), is_mut));
       }
     }
     Some(out)
@@ -4083,7 +4092,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let place = self.tcx.sess.source_map().span_to_snippet(expr.span).ok()
       .filter(|s| !expr.span.from_expansion() && !s.contains('\n'))
       .or_else(|| expr_to_rap_name(expr, &self.tcx))?;
-    Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
+    Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update, self.field_holds(typeck.node_type(expr.hir_id), expr.hir_id.owner)))
+  }
+
+  /// What a place of type `ty` holds, for its tooltips: a value (Copy,
+  /// or nothing to drop) or a resource (#484, #1100).
+  pub(crate) fn field_holds(&self, ty: Ty<'tcx>, owner: rustc_hir::OwnerId) -> FieldHolds {
+    FieldHolds { value: !self.needs_drop(ty, owner) }
   }
 
   /// The reference variable `base` that the element place `elem`
@@ -4165,8 +4180,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return Some(ResourceTy::DerefField(rap, crate::svg_generator::hover_messages::reborrow_place_through(&text()?, &through_text), PlaceWrite::Update));
     }
     let ExprKind::Field(..) = p.kind else { return None };
-    let ResourceTy::DerefField(rap, _, w) = self.field_through_ref(p)? else { return None };
-    Some(ResourceTy::DerefField(rap, text()?, w))
+    let ResourceTy::DerefField(rap, _, w, holds) = self.field_through_ref(p)? else { return None };
+    Some(ResourceTy::DerefField(rap, text()?, w, holds))
   }
 
   /// The returned value `e` is part of a variable or static that has a
@@ -4244,7 +4259,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let place = self.plain_source_text(expr)
       .filter(|p| p.starts_with('*'))
       .unwrap_or_else(|| format!("{}{}", "*".repeat(depth), ref_name));
-    Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
+    Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update, self.field_holds(typeck.node_type(expr.hir_id), expr.hir_id.owner)))
   }
 
   /// The elements of an array literal (or `vec![…]`) going into `lhs`.
@@ -4396,7 +4411,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `&mut *q`: r points where q points.
       ResourceTy::Value(q) | ResourceTy::Deref(q) => self.owner_behind_ref_at(q, suffix, depth + 1),
       // `&mut q.a`: r points to q's pointee's field `.a`.
-      ResourceTy::DerefField(q, place, _) => {
+      ResourceTy::DerefField(q, place, _, _) => {
         let field = place.strip_prefix(q.name().as_str()).filter(|f| f.starts_with('.'))?;
         self.owner_behind_ref_at(q, &format!("{}{}", field, suffix), depth + 1)
       }
@@ -4545,7 +4560,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // call update_rap, so without this nudge the ref's lifetime
     // stays pinned to its declaration line and the renderer draws a
     // degenerate (zero-height) ref-line.
-    if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::DerefField(rap, _, _) = &from_ro {
+    if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::DerefField(rap, _, _, _) = &from_ro {
       self.update_rap(rap, line_num);
     }
     let mut to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
@@ -6738,7 +6753,7 @@ pub fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[
   // A field reached through a reference (`self.items` in
   // `self.items.first_mut().unwrap()`; #1073).
   for l in lenders {
-    if let ResourceTy::DerefField(r, place, _) = l {
+    if let ResourceTy::DerefField(r, place, _, _) = l {
       self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], Some(place.as_str()), &fns);
     }
   }
@@ -6810,7 +6825,7 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
   let lenders = self.call_lenders(head);
   if let Some(fields) = self.field_call_lenders(head, &lenders).filter(|f| f.len() > 1) {
     for (field, _) in fields {
-      let ResourceTy::DerefField(r, place, _) = &field else { continue };
+      let ResourceTy::DerefField(r, place, _, _) = &field else { continue };
       if !r.is_mutref() {
         continue;
       }
@@ -6866,7 +6881,7 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
   for (root, _) in self.loop_head_chain_roots(head) {
     let through = match &root {
       ResourceTy::Value(r) if r.is_ref() => Some((r.clone(), None)),
-      ResourceTy::DerefField(r, place, _) => Some((r.clone(), Some(place.clone()))),
+      ResourceTy::DerefField(r, place, _, _) => Some((r.clone(), Some(place.clone()))),
       _ => None,
     };
     if let Some((r, place)) = through {
@@ -10780,6 +10795,8 @@ fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, 
           // place passed is inside what it points to (#1078).
           (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _), None) => hashes.contains(r.hash()),
           (ResourceTy::DerefField(r, p, _), Some(want)) => hashes.contains(r.hash()) && p == want,
+          (ResourceTy::Value(r), None) => hashes.contains(r.hash()),
+          (ResourceTy::DerefField(r, p, _, _), Some(want)) => hashes.contains(r.hash()) && p == want,
           _ => false,
         },
       _ => false,

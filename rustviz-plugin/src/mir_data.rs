@@ -1303,6 +1303,44 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
     }
 
+    /// Whether a loan issued inside `within` (a closure literal passed
+    /// to the call at `call`: its captures' borrows) is still in scope
+    /// for rustc's borrow checker right after the call returns, i.e.
+    /// whether anything (the call's result) keeps the closure's borrows.
+    /// `self.items.iter().find(|x| **x as usize == self.n)` returns an
+    /// `Option<&i32>` that holds only the borrow of `self.items`: the
+    /// closure's borrow of `self.n` ends with the call (#1101). Uses the
+    /// `Borrows` dataflow rustc's borrowck runs, like
+    /// `nll_loan_end_lines`. None when the call isn't found in the MIR.
+    pub fn loans_issued_in_kept_after_call(&self, call: Span, within: Span) -> Option<bool> {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let mut afters: Vec<Location> = Vec::new();
+        for data in body.basic_blocks.iter() {
+            let term = data.terminator();
+            if let TerminatorKind::Call { target: Some(target), fn_span, .. } = &term.kind {
+                if term.source_info.span == call || *fn_span == call {
+                    afters.push(Location { block: *target, statement_index: 0 });
+                }
+            }
+        }
+        if afters.is_empty() {
+            return None;
+        }
+        let borrows = Borrows::new(self.tcx, body, &bwf.region_inference_context, &bwf.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        for after in afters {
+            cursor.seek_before_primary_effect(after);
+            for b in cursor.get().iter() {
+                let Some((issued, _)) = bwf.borrow_set.location_map().get_index(b.index()) else { continue };
+                if within.contains(self.location_to_span(*issued, bwf)) {
+                    return Some(true);
+                }
+            }
+        }
+        Some(false)
+    }
+
     /// The last line in `lines` (first, last) on which the variable
     /// `name` (its RAP name, see `mir_local_names`) is live, from
     /// Polonius' liveness: its last use, or the end of a loop it's used
