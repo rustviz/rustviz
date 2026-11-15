@@ -1377,6 +1377,10 @@ pub enum ChainFailHow {
     Out(String),
     /// Calls it, a closure that can only be called once (#579).
     Call,
+    /// Moves it into the temporary that a literal scrutinee builds
+    /// (`Some(o)`, `(a, 1)`), whose text this is, for a pattern that can
+    /// fail to take apart (`if let Some(Some(x)) = Some(o) && ..`, #949).
+    Literal(String),
 }
 
 /// Where a `for` loop's iterator is dropped (#482, #592).

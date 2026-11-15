@@ -455,6 +455,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // from the constructor, which the constructor's arguments replace
   // once they are visited (#783).
   pub ctor_temps: HashMap<rustc_hir::HirId, (ResourceAccessPoint, usize)>,
+  // Constructor calls that a `let` pattern takes apart like a tuple
+  // literal (`let W(y) = W(g);`, #950): no actor, see
+  // `note_let_ctor_literals`.
+  pub let_ctor_literals: HashSet<rustc_hir::HirId>,
   // State for the destructuring assignment being visited
   // (`(a, b) = (b, a);`, see `visit_destructuring_assign`). rustc
   // lowers it to `{ let (lhs, lhs) = (b, a); a = lhs; b = lhs; }`;
@@ -789,6 +793,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       nested_ext_temps: HashMap::new(),
       let_else_literal_temps: HashMap::new(),
       ctor_temps: HashMap::new(),
+      let_ctor_literals: HashSet::new(),
       destructure_srcs: HashMap::new(),
       destructure_moved: HashSet::new(),
       destructure_swapped: Vec::new(),
