@@ -3421,8 +3421,8 @@ fn field_lent_through_ref_title(state: &State, rap: &ResourceAccessPoint, visual
         ResourceTy::DerefField(r, place, _) if r.hash() == rap.hash() => Some(place.clone()),
         _ => None,
     };
-    // The latest field borrow live at `line`.
-    let mut live: Option<(usize, String, bool, Option<String>)> = None;
+    // The field borrows live at `line`.
+    let mut live: Vec<(usize, String, bool, Option<String>)> = Vec::new();
     for &(l, e) in &history {
         if l > line {
             continue;
@@ -3436,35 +3436,77 @@ fn field_lent_through_ref_title(state: &State, rap: &ResourceAccessPoint, visual
         let borrower = match to {
             // A reference variable: live until it gives the field back.
             ResourceTy::Value(b) if !b.is_fn() => {
-                let back = history.iter().any(|&(l2, e2)| l2 >= l && l2 <= line && matches!(e2,
-                    Event::MutableReacquire { from: ResourceTy::Value(f), is: i, .. }
-                    | Event::StaticReacquire { from: ResourceTy::Value(f), is: i, .. }
-                        if f.hash() == b.hash() && field(i).as_ref() == Some(&place)));
+                let back = history.iter().any(|&(l2, e2)| l2 >= l && l2 <= line && match e2 {
+                    Event::MutableReacquire { from, is: i, .. } | Event::StaticReacquire { from, is: i, .. } =>
+                        field(i).as_ref() == Some(&place) && match from {
+                            ResourceTy::Value(f) => f.hash() == b.hash(),
+                            // Given back by the `for` loop that took b
+                            // over (#1080).
+                            ResourceTy::Anonymous => true,
+                            _ => false,
+                        },
+                    _ => false,
+                });
                 if back {
                     continue;
                 }
-                Some(b.name().to_owned())
+                // A value holding the borrow that a `for` loop took
+                // (`for (o, i) in pairs`; #1080): the loop's iterator
+                // holds it from there on.
+                if moved_into_loop(visualization_data, rap, b, l).is_some_and(|lm| lm <= line) {
+                    None
+                } else {
+                    Some(b.name().to_owned())
+                }
             }
             // A call: a `for` loop's iterator keeps it until the loop
             // ends; any other call gives it back on its own line, or
             // its result's borrow is the variable's above.
             ResourceTy::Value(_) => {
-                if loop_iterator_holds(visualization_data, rap, line).flatten().as_ref() != Some(&place) {
+                if !loop_iterator_holds_all(visualization_data, rap, line).contains(&Some(place.clone())) {
                     continue;
                 }
                 None
             }
             _ => continue,
         };
-        if live.as_ref().is_none_or(|(l0, ..)| l >= *l0) {
-            live = Some((l, place, is_mut, borrower));
+        live.push((l, place, is_mut, borrower));
+    }
+    // The latest borrow, with every field the same borrower took on
+    // that row (`self.items` and `self.other` in `let it =
+    // self.items.iter().chain(self.other.iter());`; #1080).
+    let (l0, _, _, borrower) = live.iter().max_by_key(|(l, ..)| *l)?.clone();
+    let mut places: Vec<(String, bool)> = Vec::new();
+    for (l, p, m, bw) in &live {
+        if *l != l0 || *bw != borrower {
+            continue;
+        }
+        match places.iter_mut().find(|(x, _)| x == p) {
+            Some(entry) => entry.1 |= *m,
+            None => places.push((p.clone(), *m)),
         }
     }
-    let (_, place, is_mut, borrower) = live?;
     Some(match borrower {
-        None => hover_messages::state_mut_ref_field_borrowed_by_loop_iterator(rap.name(), &place, is_mut),
-        Some(b) => hover_messages::state_mut_ref_field_borrowed_by(rap.name(), &place, &b, is_mut),
+        None => hover_messages::state_mut_ref_fields_borrowed_by_loop_iterator(rap.name(), &places),
+        Some(b) => hover_messages::state_mut_ref_fields_borrowed_by(rap.name(), &places, &b),
     })
+}
+
+/// The row where the value `b`, holding a borrow of a field of what
+/// `rap` points to made on row `from`, was moved into a `for` loop (`for
+/// (o, i) in pairs`; #1080): from then on the loop's iterator holds that
+/// borrow. That move has no column to go to, and the loop gives the field
+/// back where it ends, on rap's column alone (`from` Anonymous; see
+/// `emit_borrow_ends`).
+fn moved_into_loop(visualization_data: &VisualizationData, rap: &ResourceAccessPoint, b: &ResourceAccessPoint, from: usize) -> Option<usize> {
+    let moved = visualization_data.timelines.get(b.hash())?.history.iter().find_map(|(l, e)| match e {
+        Event::Move { to: ResourceTy::Anonymous, .. } if *l > from => Some(*l),
+        _ => None,
+    })?;
+    let given_back_by_loop = visualization_data.timelines.get(rap.hash())?.history.iter().any(|(l, e)| *l > moved && matches!(e,
+        Event::MutableReacquire { from: ResourceTy::Anonymous, is: ResourceTy::DerefField(r, ..), .. }
+        | Event::StaticReacquire { from: ResourceTy::Anonymous, is: ResourceTy::DerefField(r, ..), .. } if r.hash() == rap.hash()));
+    given_back_by_loop.then_some(moved)
 }
 
 /// Whether `rap`'s segment from `line` lies where a `for` loop's
@@ -3476,6 +3518,14 @@ fn field_lent_through_ref_title(state: &State, rap: &ResourceAccessPoint, visual
 /// (`self.items.iter()`; #1060), Some(None) when it is rap's resource
 /// (or all of what rap points to), None when it doesn't borrow it there.
 fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAccessPoint, line: usize) -> Option<Option<String>> {
+    loop_iterator_holds_all(visualization_data, rap, line).into_iter().next()
+}
+
+/// `loop_iterator_holds`, for every borrow of rap (or of a field of
+/// what it points to) a `for` loop's iterator holds at `line`: several
+/// fields with `for (a, b) in self.items.iter().zip(self.other.iter_mut())`
+/// (#1080).
+fn loop_iterator_holds_all(visualization_data: &VisualizationData, rap: &ResourceAccessPoint, line: usize) -> Vec<Option<String>> {
     fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, StaticLender, Option<String>)>) {
         for (_, ev) in events {
             match ev {
@@ -3507,12 +3557,12 @@ fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAcc
     let mut ends = Vec::new();
     loop_ends(&visualization_data.external_events, *rap.hash(), &mut ends);
     if ends.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let timeline = visualization_data.timelines.get(rap.hash())?;
+    let Some(timeline) = visualization_data.timelines.get(rap.hash()) else { return Vec::new() };
     let mut history = Vec::new();
     flat(&timeline.history, &mut history);
-    ends.into_iter().find(|(id, lender, _)| {
+    ends.into_iter().filter(|(id, lender, _)| {
         let Some(end) = history.iter().find_map(|(l, e)| match e {
             Event::StaticReacquire { id: i, .. } | Event::MutableReacquire { id: i, .. } if i == id => Some(*l),
             _ => None,
@@ -3528,7 +3578,7 @@ fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAcc
             _ => None,
         }).max();
         lent.is_some_and(|from| from <= line && line < end)
-    }).map(|(_, _, place)| place)
+    }).map(|(_, _, place)| place).collect()
 }
 
 fn or_alt_lend_at<'a>(
@@ -5932,7 +5982,7 @@ fn render_timeline(
     render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[]);
 
     let apexes = CollapsedApexes::of(history);
-    let cuts = field_borrow_rows(rap, history);
+    let cuts = field_borrow_rows(rap, history, visualization_data);
     for (seg_start, seg_end, state) in states {
         // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
         // A field borrow through a `&mut` reference doesn't change its
@@ -5973,7 +6023,7 @@ fn render_timeline(
 /// The rows where a borrow of a field of what the `&mut` reference
 /// `rap` points to starts or ends (`self.items` in `for e in
 /// self.items.iter_mut()`; #1073), sorted. Empty for anything else.
-fn field_borrow_rows(rap: &ResourceAccessPoint, history: &[(usize, Event)]) -> Vec<usize> {
+fn field_borrow_rows(rap: &ResourceAccessPoint, history: &[(usize, Event)], visualization_data: &VisualizationData) -> Vec<usize> {
     if !rap.is_mutref() {
         return Vec::new();
     }
@@ -5984,6 +6034,17 @@ fn field_borrow_rows(rap: &ResourceAccessPoint, history: &[(usize, Event)]) -> V
         | Event::StaticReacquire { is: ResourceTy::DerefField(r, ..), .. } if r.hash() == rap.hash() => Some(*l),
         _ => None,
     }).collect();
+    // Where a `for` loop takes over a value that holds such a borrow
+    // (#1080): the text names the loop's iterator from there.
+    for (l, e) in history {
+        if let Event::MutableLend { is: ResourceTy::DerefField(r, ..), to: ResourceTy::Value(b), .. }
+            | Event::StaticLend { is: ResourceTy::DerefField(r, ..), to: ResourceTy::Value(b), .. } = e
+        {
+            if r.hash() == rap.hash() && !b.is_fn() {
+                rows.extend(moved_into_loop(visualization_data, rap, b, *l));
+            }
+        }
+    }
     rows.sort_unstable();
     rows.dedup();
     rows

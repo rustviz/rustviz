@@ -2892,16 +2892,30 @@ pub fn state_holder_starts_empty(my_name: &String) -> String {
     )
 }
 
+/// What the value of a holder (`it` in `let it = v.iter();`) borrows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HolderLender {
+    /// The data a reference points to (`v: &Vec<i32>`; #393).
+    Pointee,
+    /// A field reached through a reference (`self.items`; #1080).
+    FieldThroughRef,
+    /// A variable's own resource or value.
+    Own,
+}
+
 // The holder's dot where its value starts borrowing `from`. When
 // `from` is itself a reference (a reference parameter `v: &Vec<i32>`
 // in `let it = v.iter();`; #393), the value borrows the data `from`
 // points to, not the reference. A lender with nothing to drop (an
 // `i32`) holds a "value", not a "resource" (#484).
-pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from_is_ref: bool, holds_value: bool) -> String {
-    let what = if from_is_ref {
-        format!("the data {} points to", styled_name_html(from_name))
-    } else {
-        format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" })
+// A field reached through a reference (`self.items` in `let it =
+// self.items.iter();` with `self: &mut Self`; #1080) is named as the
+// place it is.
+pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from: HolderLender, holds_value: bool) -> String {
+    let what = match from {
+        HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
+        HolderLender::FieldThroughRef => styled_name_html(from_name),
+        HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
     };
     format!(
         "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",
@@ -3149,6 +3163,53 @@ pub fn state_mut_ref_field_borrowed_by(my_name: &String, place: &String, borrowe
         format!(
             "{0} holds a mutable reference, but {1} is immutably borrowed by {2}, so {1} is read-only while the borrow is live",
             styled_name_html(my_name), styled_name_html(place), styled_name_html(borrower)
+        )
+    }
+}
+
+// The same while a reference variable (or a value holding a borrow)
+// borrows several fields of what my_name points to (`let it =
+// self.items.iter().chain(self.other.iter());`, `let p =
+// r.other.iter_mut().zip(r.items.iter());`; #1080): the other fields
+// can still be used through it. `places` pairs each field with whether
+// it is borrowed mutably.
+pub fn state_mut_ref_fields_borrowed_by(my_name: &String, places: &[(String, bool)], borrower: &String) -> String {
+    if let [(place, is_mut)] = places {
+        return state_mut_ref_field_borrowed_by(my_name, place, borrower, *is_mut);
+    }
+    fields_borrowed(my_name, places, &styled_name_html(borrower), "while the borrow is live")
+}
+
+// The same when a `for` loop's iterator took over that value (`for (o,
+// i) in pairs`; #1080).
+pub fn state_mut_ref_fields_borrowed_by_loop_iterator(my_name: &String, places: &[(String, bool)]) -> String {
+    if let [(place, is_mut)] = places {
+        return state_mut_ref_field_borrowed_by_loop_iterator(my_name, place, *is_mut);
+    }
+    fields_borrowed(my_name, places, "the `for` loop's iterator", "until the loop ends")
+}
+
+fn fields_borrowed(my_name: &String, places: &[(String, bool)], borrower: &str, until: &str) -> String {
+    let names = |m: bool| -> Vec<String> {
+        places.iter().filter(|(_, x)| *x == m).map(|(p, _)| styled_name_html(p)).collect()
+    };
+    let (muts, shared) = (names(true), names(false));
+    let me = styled_name_html(my_name);
+    if shared.is_empty() {
+        format!(
+            "{} holds a mutable reference, but {} are mutably borrowed by {}, so they can't be used {}",
+            me, join_and(&muts), borrower, until
+        )
+    } else if muts.is_empty() {
+        format!(
+            "{} holds a mutable reference, but {} are immutably borrowed by {}, so they are read-only {}",
+            me, join_and(&shared), borrower, until
+        )
+    } else {
+        let verb = |v: &Vec<String>| if v.len() == 1 { "is" } else { "are" };
+        format!(
+            "{0} holds a mutable reference, but {1} {2} mutably borrowed and {3} immutably borrowed by {4}, so {1} can't be used and {3} {5} read-only {6}",
+            me, join_and(&muts), verb(&muts), join_and(&shared), borrower, verb(&shared), until
         )
     }
 }

@@ -722,7 +722,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return (mixed.into_iter().map(|(l, _)| l).collect(), false);
     }
     match init.kind {
-      ExprKind::Call(..) | ExprKind::MethodCall(..) => (self.call_lenders(init), self.call_borrow_is_mut(init)),
+      ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+        let lenders = self.call_lenders(init);
+        // `let it = self.items.iter().chain(self.other.iter());`: only
+        // those fields of what self points to (#1080).
+        match self.field_call_lenders(init, &lenders) {
+          Some(fields) => (fields.iter().map(|(l, _)| l.clone()).collect(), fields.iter().any(|(_, m)| *m)),
+          None => (lenders, self.call_borrow_is_mut(init)),
+        }
+      }
       // `let refs = [&a, &b];` (`vec![&a, &b]` is a call; #349).
       ExprKind::Array(..) | ExprKind::Repeat(..) => (self.value_lenders(init), self.value_borrow_is_mut(init)),
       // `let it2 = it;` / `let t2 = third;`: the new variable holds
@@ -744,7 +752,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// kinds are present: a holder with one kind records it once.
   pub fn holder_lender_muts(&self, init: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
     let mut out: Vec<(ResourceTy, bool)> = Vec::new();
-    if !self.collect_lender_muts(init, &mut out) {
+    // Fields of what a reference points to, borrowed each its own way
+    // (`r.other.iter_mut().zip(r.items.iter())`, #1080).
+    let ctor = matches!(init.kind, ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
+      if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))));
+    if matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !ctor {
+      if let Some(fields) = self.field_call_lenders(init, &self.call_lenders(init)) {
+        out = fields;
+      }
+    } else if !self.collect_lender_muts(init, &mut out) {
       return Vec::new();
     }
     if out.iter().any(|(_, m)| *m) && out.iter().any(|(_, m)| !*m) { out } else { Vec::new() }

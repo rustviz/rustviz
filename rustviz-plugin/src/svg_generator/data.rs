@@ -2717,6 +2717,17 @@ impl std::fmt::Display for State {
 }
 
 
+/// What a holder's borrow is of, for `event_dot_holder_borrow`: what a
+/// reference points to, a field reached through one (`self.items` in
+/// `let it = self.items.iter();`, #1080), or a variable's own data.
+pub(crate) fn holder_lender_kind(rty: &ResourceTy) -> hover_messages::HolderLender {
+    match rty {
+        ResourceTy::DerefField(..) => hover_messages::HolderLender::FieldThroughRef,
+        _ if rty.is_ref() => hover_messages::HolderLender::Pointee,
+        _ => hover_messages::HolderLender::Own,
+    }
+}
+
 // Whether `rty` is an owner (`i32`, a Copy struct or field, or a non-Copy
 // one with nothing to drop), whose tooltips say "value" rather than
 // "resource" (#274, #484). A `*r`
@@ -3900,7 +3911,7 @@ impl Event {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
                     // `refs.push(&mut m)` stores a borrow of m itself (#973).
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, from.is_ref() && !*of_ref_var, *of_ref_var || holds_copy_value(from))
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
                 } else {
                     // `&mut r` borrows the reference r holds, a value (#914).
                     hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
@@ -3911,7 +3922,7 @@ impl Event {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
                     // `refs.push(&x)` stores a borrow of x itself (#973).
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, from.is_ref() && !*of_ref_var, *of_ref_var || holds_copy_value(from))
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
                 } else {
                     // `&r` borrows the reference r holds, a value (#925).
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
