@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import './index.css';
 import { extensions } from './setup';
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { syntaxHighlighting } from '@codemirror/language';
+import { oneDarkHighlightStyle } from '@codemirror/theme-one-dark';
 import axios from 'axios';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import ErrorCard from './ErrorCard';
@@ -28,6 +30,7 @@ import {
   type Selection,
   type UserExample,
 } from './userExamples';
+import { applyTheme, isDark, loadTheme, saveTheme, THEMES, type ThemeId } from './theme';
 
 // API origin. Empty (relative URL) when the playground binary serves the
 // SPA itself (local dev); set via .env.pages for the GitHub Pages build so
@@ -54,6 +57,35 @@ const initialNarrow =
   typeof window.matchMedia === 'function' &&
   window.matchMedia(`(max-width: ${NARROW_VIEWPORT_PX}px)`).matches;
 
+// Editor colours for a page theme, from the --cm-* variables in
+// index.css. Light keeps CodeMirror's default look (as before themes);
+// the dark themes add One Dark's token colours, which read well on
+// mdBook's dark code-block backgrounds.
+function editorColours(dark: boolean): Extension {
+  return EditorView.theme(
+    {
+      '&': { backgroundColor: 'var(--cm-bg)', color: 'var(--cm-fg)' },
+      '.cm-content': { caretColor: 'var(--cm-fg)' },
+      '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--cm-fg)' },
+      '.cm-gutters': {
+        backgroundColor: 'var(--cm-gutter-bg)',
+        color: 'var(--cm-gutter-fg)',
+        borderRight: '1px solid var(--border)',
+      },
+      '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'var(--cm-active-line)' },
+      '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
+        { backgroundColor: 'var(--cm-selection)' },
+    },
+    { dark },
+  );
+}
+const LIGHTISH_EDITOR: Extension = editorColours(false);
+const DARK_EDITOR: Extension = [editorColours(true), syntaxHighlighting(oneDarkHighlightStyle)];
+function editorTheme(t: ThemeId): Extension {
+  if (t === 'light') return [];
+  return isDark(t) ? DARK_EDITOR : LIGHTISH_EDITOR;
+}
+
 // Thin wrapper around CodeMirror's EditorView so the React layer can
 // hold a single `Editor` instance across renders without re-creating
 // the underlying view (which would lose cursor position, undo
@@ -71,11 +103,13 @@ class Editor {
   // and clear within the same call frame — the change listener fires
   // in between and sees the flag set.
   private programmatic = false;
+  private themeSlot = new Compartment();
 
   public constructor(
     editorContainer: HTMLElement,
     code: string,
     onUserChange: (code: string) => void,
+    theme: ThemeId,
   ) {
     const updateListener = EditorView.updateListener.of(update => {
       if (!update.docChanged) return;
@@ -84,7 +118,7 @@ class Editor {
     });
     const initial_state = EditorState.create({
       doc: code,
-      extensions: [...extensions, updateListener],
+      extensions: [...extensions, updateListener, this.themeSlot.of(editorTheme(theme))],
     });
     this.view = new EditorView({ state: initial_state, parent: editorContainer });
   }
@@ -109,6 +143,10 @@ class Editor {
     }
   }
 
+  public setTheme(theme: ThemeId): void {
+    this.view.dispatch({ effects: this.themeSlot.reconfigure(editorTheme(theme)) });
+  }
+
   public destroy(): void {
     this.view.destroy();
   }
@@ -124,7 +162,32 @@ class Editor {
 // overlap (or hiding them outright) they move into a `⋯` overflow
 // popover. The popover items are duplicated in the JSX so CSS can
 // flip which set is visible without React re-rendering.
-const TitleBar: React.FC = () => {
+// Colour theme menu in the title bar: mdBook's five themes, so the
+// playground can match the tutorial (see theme.ts for the default).
+const ThemePicker: React.FC<{ theme: ThemeId; onChange: (t: ThemeId) => void }> = ({
+  theme,
+  onChange,
+}) => (
+  <label className="theme-picker" title="Colour theme">
+    <span className="theme-picker-label">Theme</span>
+    <select
+      value={theme}
+      onChange={e => onChange(e.target.value as ThemeId)}
+      aria-label="Colour theme"
+    >
+      {THEMES.map(t => (
+        <option key={t.id} value={t.id}>
+          {t.label}
+        </option>
+      ))}
+    </select>
+  </label>
+);
+
+const TitleBar: React.FC<{ theme: ThemeId; onThemeChange: (t: ThemeId) => void }> = ({
+  theme,
+  onThemeChange,
+}) => {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
 
   // <details> doesn't close on outside click on its own — wire it up
@@ -160,6 +223,7 @@ const TitleBar: React.FC = () => {
         </a>
       </div>
       <div className="titlebar-meta">
+        <ThemePicker theme={theme} onChange={onThemeChange} />
         <code className="titlebar-version">rustc {__RUST_VERSION__}</code>
         <code className="titlebar-version">rustviz-plugin {__PLUGIN_VERSION__}</code>
         {/* Overflow menu — hidden by CSS at wide widths, shown when
@@ -493,6 +557,20 @@ const App: React.FC = () => {
   const [errorKind, setErrorKind] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState('');
   const [editor, setEditor] = useState<Editor | null>(null);
+  // Colour theme. index.html already applied the saved one before first
+  // paint; only an explicit choice is saved, so a viewer who never picks
+  // one follows the default if it changes.
+  const [theme, setTheme] = useState<ThemeId>(() => loadTheme());
+  const themeRef = useRef(theme);
+  useEffect(() => {
+    themeRef.current = theme;
+    applyTheme(theme);
+    editor?.setTheme(theme);
+  }, [theme, editor]);
+  const handleThemeChange = (t: ThemeId) => {
+    setTheme(t);
+    saveTheme(t);
+  };
   const [code_svg, setCodeSvg] = useState<string | null>(null);
   const [timeline_svg, setTimelineSvg] = useState<string | null>(null);
 
@@ -584,7 +662,7 @@ const App: React.FC = () => {
       window.history.replaceState(
         null, '', window.location.pathname + window.location.search);
     }
-    const newEditor = new Editor(editorHostRef.current, initialCode, handleEditorChange);
+    const newEditor = new Editor(editorHostRef.current, initialCode, handleEditorChange, themeRef.current);
     setEditor(newEditor);
     return () => {
       newEditor.destroy();
@@ -840,7 +918,7 @@ const App: React.FC = () => {
 
   return (
     <div className="app-shell">
-      <TitleBar />
+      <TitleBar theme={theme} onThemeChange={handleThemeChange} />
       <PanelGroup direction="vertical" className="main-split" autoSaveId="rustviz-vertical">
         {/* Top row: prose on the left, code editor on the right.
             minSize=0 with no `collapsible` means the handle drags

@@ -1,9 +1,31 @@
 /* ─── Base ──────────────────────────────────────────────────────── */
 
 :root {
+  --titlebar-height: 48px;
+  --radius: 6px;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* ─── Colour themes ─────────────────────────────────────────────
+   mdBook's five themes, picked by data-rv-theme on <html> (src/theme.ts;
+   index.html sets it before first paint). The same attribute selects the
+   visualization panels' palette, which the plugin declares inside each
+   SVG. Light is the playground's original look (also the fallback before
+   the attribute is set). The others take their colours from mdBook's
+   variables.css: page background and text, the sidebar's for the title
+   bar, theme-hover for the toolbar, links lightened where mdBook's fall
+   short of 4.5:1. --bg-viz is the panel background the plugin uses in
+   that theme, so the SVGs sit seamlessly in the bottom panel. --cm-* is
+   the editor (light keeps CodeMirror's own look; see Editor in App.tsx). */
+
+:root,
+[data-rv-theme="light"] {
   --bg: #fafafa;
   --bg-panel: #ffffff;
+  --bg-toolbar: #f6f6f6;
+  --bg-viz: #f1f1f1;
   --bg-titlebar: #2b2b2b;
+  --border-titlebar: #1a1a1a;
   --fg: #1f1f1f;
   --fg-muted: #6e6e6e;
   --fg-titlebar: #f5f5f5;
@@ -13,9 +35,161 @@
   --accent: #cc7116;
   --accent-hover: #b86310;
   --accent-disabled: #d8b793;
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
-  --titlebar-height: 48px;
-  --radius: 6px;
+  --accent-fg: #ffffff;
+  --accent-disabled-fg: #ffffff;
+  --accent-titlebar: #cc7116;
+  --link: #cc7116;
+  --code-bg: rgba(0, 0, 0, 0.05);
+  --warning-fg: #5c3d00;
+  --warning-bg: #fff4d6;
+  --warning-border: #f0d58c;
+  --focus: #2563eb;
+  --focus-titlebar: #6cb6ff;
+}
+
+[data-rv-theme="rust"] {
+  --bg: #e1e1db;
+  --bg-panel: #e1e1db;
+  --bg-toolbar: #d9d9d1;
+  --bg-viz: #f6f7f6;
+  --bg-titlebar: #3b2e2a;
+  --border-titlebar: #2a201d;
+  --fg: #262625;
+  --fg-muted: #5c5a52;
+  --fg-titlebar: #c8c9db;
+  --fg-titlebar-muted: #a9a2a0;
+  --border: #cfcfc6;
+  --border-strong: #b3a497;
+  --accent: #a8461a;
+  --accent-hover: #8f3a14;
+  --accent-disabled: #cdb3a3;
+  --accent-fg: #ffffff;
+  --accent-disabled-fg: #5c4a3f;
+  --accent-titlebar: #e69f67;
+  --link: #1f5f86;
+  --code-bg: rgba(0, 0, 0, 0.06);
+  --warning-fg: #5c3d00;
+  --warning-bg: #fff4d6;
+  --warning-border: #f0d58c;
+  --focus: #1f5f86;
+  --focus-titlebar: #e69f67;
+  --cm-bg: #e1e1db;
+  --cm-fg: #262625;
+  --cm-gutter-bg: #d9d9d1;
+  --cm-gutter-fg: #5c5a52;
+  --cm-active-line: rgba(0, 0, 0, 0.04);
+  --cm-selection: rgba(31, 95, 134, 0.22);
+}
+
+[data-rv-theme="coal"] {
+  --bg: #141617;
+  --bg-panel: #141617;
+  --bg-toolbar: #1f2124;
+  --bg-viz: #1d1f21;
+  --bg-titlebar: #292c2f;
+  --border-titlebar: #0e0f10;
+  --fg: #98a3ad;
+  --fg-muted: #7f8a94;
+  --fg-titlebar: #a1adb8;
+  --fg-titlebar-muted: #8a949e;
+  --border: #2f3336;
+  --border-strong: #43484d;
+  --accent: #e08a3c;
+  --accent-hover: #eb9d55;
+  --accent-disabled: #4a3a2b;
+  --accent-fg: #141617;
+  --accent-disabled-fg: #a8957f;
+  --accent-titlebar: #e08a3c;
+  --link: #3d8fc0;
+  --code-bg: rgba(255, 255, 255, 0.08);
+  --warning-fg: #f3d68a;
+  --warning-bg: #2e2614;
+  --warning-border: #5c4a1c;
+  --focus: #6cb6ff;
+  --focus-titlebar: #6cb6ff;
+  --cm-bg: #1d1f21;
+  --cm-fg: #c5c8c6;
+  --cm-gutter-bg: #1d1f21;
+  --cm-gutter-fg: #868a8e;
+  --cm-active-line: rgba(255, 255, 255, 0.04);
+  --cm-selection: rgba(108, 182, 255, 0.25);
+}
+
+[data-rv-theme="navy"] {
+  --bg: #161923;
+  --bg-panel: #161923;
+  --bg-toolbar: #1f2433;
+  --bg-viz: #1d1f21;
+  --bg-titlebar: #282d3f;
+  --border-titlebar: #10131b;
+  --fg: #bcbdd0;
+  --fg-muted: #9395ad;
+  --fg-titlebar: #c8c9db;
+  --fg-titlebar-muted: #9c9db3;
+  --border: #2a3045;
+  --border-strong: #737480;
+  --accent: #e08a3c;
+  --accent-hover: #eb9d55;
+  --accent-disabled: #4a3a2b;
+  --accent-fg: #161923;
+  --accent-disabled-fg: #a8957f;
+  --accent-titlebar: #e08a3c;
+  --link: #4d9fd1;
+  --code-bg: rgba(255, 255, 255, 0.08);
+  --warning-fg: #f3d68a;
+  --warning-bg: #2e2614;
+  --warning-border: #5c4a1c;
+  --focus: #6cb6ff;
+  --focus-titlebar: #6cb6ff;
+  --cm-bg: #1d1f21;
+  --cm-fg: #c5c8c6;
+  --cm-gutter-bg: #1d1f21;
+  --cm-gutter-fg: #868a8e;
+  --cm-active-line: rgba(255, 255, 255, 0.04);
+  --cm-selection: rgba(108, 182, 255, 0.25);
+}
+
+[data-rv-theme="ayu"] {
+  --bg: #0f1419;
+  --bg-panel: #0f1419;
+  --bg-toolbar: #191f26;
+  --bg-viz: #191f26;
+  --bg-titlebar: #14191f;
+  --border-titlebar: #0a0e12;
+  --fg: #c5c5c5;
+  --fg-muted: #8a919a;
+  --fg-titlebar: #c8c9db;
+  --fg-titlebar-muted: #9a9cab;
+  --border: #232a33;
+  --border-strong: #5c6773;
+  --accent: #ffb454;
+  --accent-hover: #ffc477;
+  --accent-disabled: #4a3c27;
+  --accent-fg: #0f1419;
+  --accent-disabled-fg: #a8957f;
+  --accent-titlebar: #ffb454;
+  --link: #0096cf;
+  --code-bg: rgba(255, 255, 255, 0.08);
+  --warning-fg: #f3d68a;
+  --warning-bg: #2e2614;
+  --warning-border: #5c4a1c;
+  --focus: #6cb6ff;
+  --focus-titlebar: #6cb6ff;
+  --cm-bg: #191f26;
+  --cm-fg: #e6e1cf;
+  --cm-gutter-bg: #191f26;
+  --cm-gutter-fg: #818c98;
+  --cm-active-line: rgba(255, 255, 255, 0.04);
+  --cm-selection: rgba(108, 182, 255, 0.25);
+}
+
+/* Keyboard focus: visible in every theme, never on mouse clicks. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.titlebar :focus-visible {
+  outline-color: var(--focus-titlebar);
 }
 
 * {
@@ -36,7 +210,7 @@ body {
 }
 
 a {
-  color: var(--accent);
+  color: var(--link);
   text-decoration: none;
 }
 a:hover { text-decoration: underline; }
@@ -44,7 +218,7 @@ a:hover { text-decoration: underline; }
 code {
   font-family: "Source Code Pro", "SF Mono", Consolas, "Ubuntu Mono", Menlo, monospace;
   font-size: 0.9em;
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--code-bg);
   padding: 1px 5px;
   border-radius: 3px;
 }
@@ -73,7 +247,7 @@ code {
   padding: 0 20px;
   background: var(--bg-titlebar);
   color: var(--fg-titlebar);
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid var(--border-titlebar);
   flex-shrink: 0;
   gap: 16px;
 }
@@ -94,7 +268,7 @@ code {
 }
 
 .titlebar-title a {
-  color: var(--accent);
+  color: var(--accent-titlebar);
 }
 .titlebar-title a:hover { text-decoration: none; }
 
@@ -127,6 +301,32 @@ code {
   background: rgba(255, 255, 255, 0.08);
   color: var(--fg-titlebar);
   font-size: 11px;
+}
+
+/* Colour theme menu (src/theme.ts). Stays in the title bar at every
+   width; below 540px only the menu itself shows. */
+.theme-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-titlebar-muted);
+}
+.theme-picker select {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  color: var(--fg-titlebar);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.theme-picker select:hover { background: rgba(255, 255, 255, 0.14); }
+/* The open list is drawn by the browser on the page's colours, not the
+   title bar's. */
+.theme-picker option {
+  color: var(--fg);
+  background: var(--bg-panel);
 }
 
 .titlebar-stars {
@@ -200,7 +400,7 @@ code {
   flex-wrap: wrap;
   row-gap: 6px;
   padding: 10px 16px;
-  background: #f6f6f6;
+  background: var(--bg-toolbar);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -214,9 +414,9 @@ code {
   padding: 8px 16px;
   font-size: 13px;
   line-height: 1.4;
-  color: #5c3d00;
-  background: #fff4d6;
-  border-bottom: 1px solid #f0d58c;
+  color: var(--warning-fg);
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
   flex-shrink: 0;
 }
 .storage-warning span { flex: 1; }
@@ -246,6 +446,7 @@ code {
   border: 1px solid var(--border-strong);
   border-radius: 4px;
   background: var(--bg-panel);
+  color: var(--fg);
   cursor: pointer;
   max-width: 280px;
 }
@@ -260,7 +461,7 @@ code {
   -webkit-appearance: none;
   appearance: none;
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -271,6 +472,7 @@ code {
 .cm-button:hover:not(:disabled) { background: var(--accent-hover); }
 .cm-button:disabled {
   background: var(--accent-disabled);
+  color: var(--accent-disabled-fg);
   cursor: not-allowed;
 }
 
@@ -348,7 +550,7 @@ code {
 
 /* ─── Visualization panel (bottom) ──────────────────────────────── */
 
-.viz-panel { background: #f1f1f1; }
+.viz-panel { background: var(--bg-viz); }
 
 .viz-content {
   flex: 1;
@@ -455,7 +657,7 @@ code {
   right: 0;
   top: calc(100% + 6px);
   background: var(--bg-titlebar);
-  border: 1px solid #1a1a1a;
+  border: 1px solid var(--border-titlebar);
   border-radius: 6px;
   padding: 6px;
   min-width: 240px;
@@ -517,6 +719,7 @@ a.titlebar-overflow-item:hover {
    selected value already names what's loaded). */
 @media (max-width: 540px) {
   .titlebar { padding: 0 12px; gap: 10px; }
+  .theme-picker-label { display: none; }
 
   .editor-toolbar { padding: 8px 10px; gap: 4px; }
   .example-picker label { display: none; }

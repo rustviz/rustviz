@@ -93,6 +93,9 @@ get back the visualization with no local install. Available at
 and the compile API is on Google Cloud Run. You can also run the same playground
 locally — it's the [`playground/`](playground/) crate in this workspace.
 
+The playground offers mdBook's five colour themes and starts in Navy
+(dark); the choice is remembered in the browser.
+
 See [`playground/README.md`](playground/README.md) for the local quick-start
 and the operational notes for the production deploy.
 
@@ -118,6 +121,7 @@ fn main() {
 ```
 ````
 
+The figures follow the book's theme (Light, Rust, Coal, Navy or Ayu).
 See [`mdbook-rustviz/README.md`](mdbook-rustviz/README.md) for setup
 instructions and `mdbook-rustviz/test-book/` for a small worked
 example. The hands-on Rust tutorial at
