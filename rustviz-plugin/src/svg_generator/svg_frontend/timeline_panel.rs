@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1227,8 +1227,11 @@ fn render_branch_dots(
                     _ if reassigned_next => hover_messages::ContentsDropAt::Reassign,
                     _ => hover_messages::ContentsDropAt::ScopeEnd,
                 };
+                // A let-chain's condition, not only a branch body,
+                // may have moved them (#940).
+                let by_cond = branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data));
                 hover_messages::event_dot_branch_merge_box_contents_moved(
-                    &is.real_name(), rap.is_mut(), rap.holds_phrase(), at)
+                    &is.real_name(), rap.is_mut(), rap.holds_phrase(), at, by_cond)
             } else if reassigned_next {
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name())
             } else {
@@ -2298,6 +2301,10 @@ fn moves_only_box_contents(branch_history: &[BranchData]) -> bool {
         for (_, e) in events {
             match e {
                 Event::Move { is: ResourceTy::Deref(_), .. } => any = true,
+                // A let-chain's condition that moved `*e` before it
+                // failed (`&& { let w = *e; … }`, #940): the path into
+                // the else branch.
+                Event::LoopExitMove { at: MaybeMovedAt::ChainFail { how: ChainFailHow::Out(_), .. }, .. } => any = true,
                 Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { .. } | Event::ClosureCall { .. } => return None,
                 Event::Branch { branch_history, .. } => {
                     for b in branch_history.iter().filter(|b| !b.diverges) {

@@ -10482,6 +10482,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=b goes out of scope. Its resource is dropped.",
             "=b goes out of scope. Its resource is dropped (including the String it holds).",
             "only if no branch above moved it",
+            // #940: the condition moves b's contents, not b, and no
+            // branch does.
+            "b was moved in at least one branch above",
         ],
     },
     TooltipExpect {
@@ -17147,6 +17150,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y is no longer borrowed by look_ref, but is still immutably borrowed by ry",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "edition2024/box_contents_moved_by_chain_940",
+        // #940: a let-chain's condition that may move a Box's contents
+        // (`&& { let w = *e; … }`) moves `*e`, not e: e keeps its heap
+        // allocation on every path. If the condition failed before the
+        // move, the old String is dropped at the next `*e = …`, at `f =
+        // …` (with the old Box), or at g's scope end. The joins said "e
+        // was moved in at least one branch above" and that e's resource
+        // is dropped at its scope end. Checked with a `Drop`-printing
+        // type.
+        must_contain: &[
+            "e's contents may have been moved out above, so e can't be used after the if until *e is assigned again. If nothing above moved them, the String is dropped when *e is assigned again.",
+            "*e acquires ownership of a new resource. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag).",
+            "f's contents may have been moved out above, so f can't be used after the if until f is assigned again. If nothing above moved them, the String is dropped when f is assigned again. The Box's heap allocation is freed then either way.",
+            "f acquires ownership of a new resource. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag). Its previous Box's heap allocation is freed here either way.",
+            "g's contents may have been moved out above, so g can't be used after the if. If nothing above moved them, the String is dropped when g goes out of scope. The Box's heap allocation is freed then either way.",
+        ],
+        must_not_contain: &[
+            "e was moved in at least one branch above",
+            "f was moved in at least one branch above",
+            "g was moved in at least one branch above",
+            "f acquires ownership of a new resource. Its previous resource (including the String it holds) is dropped",
+        ],
     },
 ];
 
