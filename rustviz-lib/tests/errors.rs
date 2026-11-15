@@ -17,16 +17,19 @@ use rustviz_lib::{error_kind, ErrorKind, Rustviz, DOES_NOT_COMPILE_INTRO, UNSUPP
 /// *one* of them to still be refused; one that starts visualizing is
 /// skipped. If they all start working, add a new one here.
 ///
-/// The first is a deliberate refusal, not a bug: a match guard that
-/// assigns a new reference to a variable declared outside it leaves it
-/// pointing to one of two values in the later arms, which RustViz can't
-/// draw yet (#603). The second is an ordinary crash (#210).
+/// The first is a deliberate refusal, not a bug: a match guard in a
+/// loop's body that assigns a new reference to a variable declared
+/// outside it leaves it pointing to one of two values in the later arms,
+/// and the loans can come back round to the guard; where they end isn't
+/// worked out for that yet (#603 draws it outside loops). The second is
+/// an ordinary crash (#210).
 const KNOWN_PANICKING: &[(&str, &str)] = &[
-    // A match guard that assigns a new reference to an outer variable
-    // (#603). (A guard that moves one, #247, renders now.)
+    // A match guard in a loop that assigns a new reference to an outer
+    // variable. (A guard that moves one, #247, and one outside a loop
+    // that assigns a reference, #603, render now.)
     (
-        "guard_assigns_reference",
-        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    let opt = Some(5);\n    match opt {\n        Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n        _ => println!(\"{}\", r),\n    }\n}\n",
+        "guard_assigns_reference_in_loop",
+        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    for n in 0..2 {\n        match Some(n) {\n            Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n            _ => println!(\"{}\", r),\n        }\n    }\n}\n",
     ),
     // Calling a closure with a `&mut` argument (#210).
     (
@@ -145,12 +148,13 @@ fn plugin_panic_prints_one_clean_unsupported_line() {
 /// so in words). As with `KNOWN_PANICKING`, a snippet that starts working
 /// is skipped, but at least one must still trip a guard.
 const GUARD_REASONS: &[(&str, &str, &str)] = &[
-    // A match guard that assigns a new reference to an outer variable
-    // (#603). (Shadowing a moved variable (#253), then a guard that moves
-    // one (#247), used to be the example here; both render now.)
+    // A match guard in a loop that assigns a new reference to an outer
+    // variable. (Shadowing a moved variable (#253), a guard that moves one
+    // (#247), and one outside a loop that assigns a reference (#603) used
+    // to be the example here; they render now.)
     (
-        "guard_assigns_reference",
-        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    let opt = Some(5);\n    match opt {\n        Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n        _ => println!(\"{}\", r),\n    }\n}\n",
+        "guard_assigns_reference_in_loop",
+        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    for n in 0..2 {\n        match Some(n) {\n            Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n            _ => println!(\"{}\", r),\n        }\n    }\n}\n",
         "match guards that assign a new reference to a variable declared outside the guard",
     ),
     // A write through `*r` in both arms of an if/else (#264): the layout

@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainUse, FailPath, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -3859,6 +3859,16 @@ pub fn event_dot_chain_fail_move(
     path: FailPath,
     how: &ChainFailHow,
 ) -> String {
+    match how {
+        ChainFailHow::AssignNoValue { .. } | ChainFailHow::MoveThenAssign { .. } =>
+            return chain_fail_new_value(my_name, path, how),
+        ChainFailHow::AssignThenMove { .. } => {
+            let mut out = chain_fail_assign_then_move(my_name, path, how);
+            out.push_str(&cond_fail_dropped(dropped, if matches!(path, FailPath::Guard(_)) { "guard" } else { "condition" }));
+            return out;
+        }
+        _ => {}
+    }
     let (name, moves, act) = cond_move_parts(my_name, to, how, &fail_subject(path));
     let if_kw = styled_name_html(&"if".to_owned());
     let mut out = match (definite, path) {
@@ -3918,6 +3928,143 @@ pub fn event_dot_chain_fail_move(
     }
     out.push_str(&cond_fail_dropped(dropped, what));
     out
+}
+
+// "a", "a and b", "a, b and c", each styled.
+fn names_and(names: &[String]) -> String {
+    let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
+    match fmt.len() {
+        0 | 1 => fmt.concat(),
+        n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+    }
+}
+
+// At the start of the `else` branch (`path`: or the path that skips the
+// body, or a later arm after a failed guard) of an `if` whose let-chain
+// condition gives the variable a new value before a part that can still
+// fail, when on that path it may hold the new value or nothing (#603):
+// it held none before the condition (`drop(z); if let Some(a) = y && {
+// z = a; … }`), or the condition moved it first (`take(z) && { z = a;
+// true }`). rustc rejects a use there (E0382), and a drop flag decides
+// what is dropped at the scope end.
+fn chain_fail_new_value(my_name: &String, path: FailPath, how: &ChainFailHow) -> String {
+    let name = styled_name_html(my_name);
+    let (subj, short) = match path {
+        FailPath::Guard(_) => (fail_subject(path), "the guard"),
+        _ => (fail_subject(path), "the condition"),
+    };
+    let (before, act, old) = match how {
+        ChainFailHow::AssignNoValue { before } => {
+            let before = match before {
+                NoValueBefore::Moved(Some(line)) => format!("{0} held no value before {1} (it was moved on line {2}); ", name, subj, line),
+                NoValueBefore::Moved(None) => format!("{0} held no value before {1}; ", name, subj),
+                NoValueBefore::MovedByCondition(_) => format!("{0} held no value once the first part of {1} moved it; ", name, subj),
+                NoValueBefore::Maybe => format!("{0} may have held no value before {1} (a branch above may have moved it); ", name, subj),
+            };
+            (before, format!("{} assigns to {}", short, name),
+             matches!(how, ChainFailHow::AssignNoValue { before: NoValueBefore::Maybe }))
+        }
+        ChainFailHow::MoveThenAssign { old, to } => {
+            let moves = if to.is_empty() { format!("{} moves {}", subj, name) } else { format!("{} moves {} to {}", subj, name, names_and(to)) };
+            (String::new(), format!("{}, then assigns to {}", moves, name), *old)
+        }
+        _ => unreachable!("chain_fail_new_value of a move"),
+    };
+    let holds = if old {
+        format!("{} holds its previous value, the new one, or nothing", name)
+    } else {
+        format!("{} holds the new value or nothing", name)
+    };
+    let runs = match path {
+        FailPath::Guard(_) => "matching goes on with the later arms after that assignment, so here".to_owned(),
+        FailPath::Else => "the else branch runs after that assignment, so here".to_owned(),
+        FailPath::NoElse => format!(
+            "the body is skipped but the assignment has happened, so after the {}", styled_name_html(&"if".to_owned())),
+    };
+    let and = if before.is_empty() { "and" } else { "and then" };
+    let why = if matches!(path, FailPath::Guard(_)) {
+        " (the borrow checker counts every later arm as one that may run after a failed guard)"
+    } else {
+        ""
+    };
+    format!(
+        "{0} may have been assigned a new value: {1}when {2} {3} turns out false, {4} {5}, and can't be used until it's assigned again{6}",
+        name, before, act, and, runs, holds, why
+    )
+}
+
+// After a let-chain condition (or a match guard) that may have given
+// the variable a new value when it held none, or after moving it (#603,
+// `ChainFailHow::may_hold_new`): it holds that value or nothing, so the
+// drop flag decides "only if it still holds it", not whether something
+// above moved it (it was moved, and may have been given a new value
+// since). Its scope end:
+pub fn event_dot_go_out_of_scope_chain_new_value(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} still holds it \
+         (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest
+    )
+}
+
+// Its next assignment:
+pub fn event_dot_owner_drop_at_reassign_chain_new_value(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
+         {0} still holds it (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest
+    )
+}
+
+// The join of the conditional whose condition it was (`kw`: "if" or
+// "match"). `value`: what it holds has nothing to drop. `mutable`: it
+// can be assigned again. `reassigned`: it is, before its scope ends.
+pub fn event_dot_branch_merge_chain_new_value(my_name: &String, kw: &str, value: bool, mutable: bool, reassigned: bool, note: &str) -> String {
+    let name = styled_name_html(my_name);
+    let kw = styled_name_html(&kw.to_owned());
+    let mut out = format!(
+        "{0} may have no value after the {1}, so it can't be used after the {1}{2}.",
+        name, kw, if mutable { " (until it's assigned again)" } else { "" });
+    if !value {
+        let (holds, rest) = split_drop_note(note);
+        out.push_str(&format!(
+            " If it has one, its resource{0} is dropped{1} when {2} {3}.",
+            holds, rest, name, if reassigned { "is assigned again" } else { "goes out of scope" }));
+    }
+    out
+}
+
+// `event_dot_chain_fail_move` when the condition gives the variable a
+// new value and then moves it (#603): `{ z = a; true } && take(z)`. On
+// the failing path it holds its previous value (an earlier part
+// failed) or nothing (a part after the move failed): the maybe-moved
+// state, in one sentence for both.
+fn chain_fail_assign_then_move(my_name: &String, path: FailPath, how: &ChainFailHow) -> String {
+    let ChainFailHow::AssignThenMove { place, drops_old, to } = how else {
+        unreachable!("chain_fail_assign_then_move of another effect");
+    };
+    let name = styled_name_html(my_name);
+    let target = styled_name_html(place.as_ref().unwrap_or(my_name));
+    let cond = fail_subject(path);
+    let dropping = if *drops_old { " (dropping its previous one)" } else { "" };
+    let moves = if to.is_empty() { format!("moves {}", name) } else { format!("moves {} to {}", name, names_and(to)) };
+    let when = format!("when {} assigns {} a new value{}, then {} and turns out false", cond, target, dropping, moves);
+    match path {
+        FailPath::Guard(_) => format!(
+            "{0} may have been moved: {1}, matching goes on with the later arms after that move, so {0} \
+             can't be used here (the borrow checker counts every later arm as one that may run after a \
+             failed guard)",
+            name, when),
+        FailPath::Else => format!(
+            "{0} may have been moved: {1}, the else branch runs after that move, so {0} can't be used here",
+            name, when),
+        FailPath::NoElse => format!(
+            "{0} may have been moved: {1}, the body is skipped but the move has happened, so {0} can't be \
+             used after the {2}",
+            name, when, styled_name_html(&"if".to_owned())),
+    }
 }
 
 // Where a `while` loop ends, when its condition moves the variable
@@ -4108,6 +4255,94 @@ pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, holds_v
             me, x, held(holds_value)
         )
     }
+}
+
+// ── A new reference assigned by a failing condition (#603) ─────────
+//
+// `if let Some(_n) = y && { r = &s; r.len() > 3 } { … } else { … }`:
+// when the condition assigns `&s` to `r` and then turns out false, the
+// else branch (or the path that skips the body, or a later arm after a
+// failed guard) runs after that assignment; when it fails before it,
+// `r` still points to `t`. Which one happened is decided at run time, so
+// the borrow checker treats both `s` and `t` as borrowed while `r` is
+// live there (an `ExternalEvent::OrAltBorrow` with `chain`). `sources`
+// is [s, t]: the new lender, then the old one.
+
+// `&s` / `&mut s`, styled.
+fn chain_ref_expr(new: &str, mutable: bool) -> String {
+    styled_name_html(&format!("{}{}", if mutable { "&mut " } else { "&" }, new))
+}
+
+// The reference's dot where that starts.
+pub fn event_dot_chain_ref_borrow(my_name: &String, sources: &[String], mutable: bool, path: FailPath) -> String {
+    let r = styled_name_html(my_name);
+    let (new, old) = (styled_name_html(&sources[0]), styled_name_html(&sources[1]));
+    let assigns = format!("{} assigns {} to {}", fail_subject(path), chain_ref_expr(&sources[0], mutable), r);
+    match path {
+        FailPath::Guard(_) => format!(
+            "{0} may have been assigned a new reference: when {1} and then turns out false, matching goes on \
+             with the later arms after that assignment, so here {0} points to {2} or to {3} (the borrow \
+             checker counts every later arm as one that may run after a failed guard)",
+            r, assigns, new, old),
+        FailPath::Else => format!(
+            "{0} may have been assigned a new reference: when {1} and then turns out false, the else branch \
+             runs after that assignment, so here {0} points to {2} or to {3}",
+            r, assigns, new, old),
+        FailPath::NoElse => format!(
+            "{0} may have been assigned a new reference: when {1} and then turns out false, the body is \
+             skipped but the assignment has happened, so after the {4} {0} points to {2} or to {3}",
+            r, assigns, new, old, styled_name_html(&"if".to_owned())),
+    }
+}
+
+// The dot of `s` or `t` (`my_name`) where that starts, adapted from
+// `event_dot_or_alt_lend`.
+pub fn event_dot_chain_ref_lend(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool, path: FailPath) -> String {
+    let me = styled_name_html(my_name);
+    let r = styled_name_html(into);
+    let (new, old) = (styled_name_html(&sources[0]), styled_name_html(&sources[1]));
+    let borrow = chain_ref_expr(&sources[0], mutable);
+    let cond = fail_subject(path);
+    let how = if mutable { "mutably" } else { "immutably" };
+    let when = if *my_name == sources[0] {
+        format!("If {} assigned {} to {} before turning out false, {}'s {} is {} borrowed by {} here.",
+            cond, borrow, r, me, held(holds_value), how, r)
+    } else if matches!(path, FailPath::Guard(_)) {
+        format!("If {} turned out false before assigning {} to {}, or didn't run (its arm's pattern didn't match), \
+                 {}'s {} is still {} borrowed by {} here.", cond, borrow, r, me, held(holds_value), how, r)
+    } else {
+        format!("If {} turned out false before assigning {} to {}, {}'s {} is still {} borrowed by {} here.",
+            cond, borrow, r, me, held(holds_value), how, r)
+    };
+    let while_live = if mutable {
+        format!("{} can't be used while {}'s borrow is live", me, r)
+    } else {
+        format!("{} is read-only while {}'s borrow is live", me, r)
+    };
+    format!(
+        "{0} points to {1} or to {2} here. {3} Which one {0} points to is decided at run time, so the borrow \
+         checker treats {4} as borrowed either way: {5}.",
+        r, new, old, when, me, while_live)
+}
+
+// The end of that borrow, on `s`'s or `t`'s column.
+pub fn event_dot_chain_ref_reacquire(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool, path: FailPath) -> String {
+    format!(
+        "{1}'s borrow ends here, so {0}'s {2} is no longer {3} borrowed (the borrow checker counted it as \
+         borrowed whether or not {4} had assigned {5} to {1})",
+        styled_name_html(my_name), styled_name_html(into), held(holds_value),
+        if mutable { "mutably" } else { "immutably" }, fail_subject(path), chain_ref_expr(&sources[0], mutable))
+}
+
+// A segment of `s` or `t` while that borrow is live.
+pub fn state_chain_ref_lent(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool) -> String {
+    let me = styled_name_html(my_name);
+    let r = styled_name_html(into);
+    format!(
+        "{0}'s {1} may be {2} borrowed by {3} ({3} points to {4} or to {5}); either way, {0} {6} until {3}'s borrow ends",
+        me, held(holds_value), if mutable { "mutably" } else { "immutably" }, r,
+        styled_name_html(&sources[0]), styled_name_html(&sources[1]),
+        if mutable { "can't be used" } else { "is read-only" })
 }
 
 // At the start of the `else` branch (`path`: or the path that skips the
