@@ -350,6 +350,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // the If / Match arm of `visit_expr` can put those events in the
   // right branch (`branch_ids`).
   pub rhs_arm_ids: HashMap<rustc_hir::HirId, (usize, usize)>,
+  // While `process_let_binding` pairs the branches' values with `x`
+  // ahead of visiting them: the span of the conditional. A branch
+  // whose value is (or uses) a variable declared inside it (`if let
+  // Some(y) = o { y }`, `{ let y = f; y }`) can't be paired yet, as
+  // that variable isn't known until the branch is visited (#994):
+  // it is paired once its body has been (`deferred_arm_binds`, keyed
+  // by the body's HirId, see `bind_deferred_arm`).
+  pub defer_arm_binds: Option<rustc_span::Span>,
+  pub deferred_arm_binds: HashMap<rustc_hir::HirId, (&'tcx Expr<'tcx>, Vec<(ResourceTy, Evt)>)>,
 
   // A constructor call's HirId -> the range of event ids its arguments
   // used (moves and copies into the constructor). The constructor is
@@ -771,6 +780,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       break_uninit: Vec::new(),
       deferred_decl_at: HashMap::new(),
       rhs_arm_ids: HashMap::new(),
+      defer_arm_binds: None,
+      deferred_arm_binds: HashMap::new(),
       ctor_arg_ids: HashMap::new(),
       exit_drops: HashSet::new(),
       unlent_refs: HashSet::new(),
@@ -2118,8 +2129,58 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `match_rhs` for one branch of an `if` / `match` whose value is
   /// bound to `lhs`, recording the event ids it used (`rhs_arm_ids`).
   fn match_rhs_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt) {
+    if self.defer_arm_binds.is_some_and(|within| self.arm_value_uses_local_in(body, within)) {
+      self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push((lhs, evt));
+      return;
+    }
     let lo = *self.unique_id;
     self.match_rhs(lhs, body, evt);
+    self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
+  }
+
+  /// Whether the value branch body `body` produces (its block's tail,
+  /// not a nested `if` / `match`, whose own branches are looked at
+  /// one by one) uses a variable declared within `within`: one that
+  /// doesn't exist until the branch is visited (#994).
+  fn arm_value_uses_local_in(&self, body: &'tcx Expr<'tcx>, within: rustc_span::Span) -> bool {
+    let mut e = body;
+    loop {
+      match e.kind {
+        ExprKind::Block(b, _) => match b.expr {
+          Some(t) => e = t,
+          None => return false,
+        },
+        ExprKind::DropTemps(t) => e = t,
+        ExprKind::If(..) | ExprKind::Match(..) => return false,
+        _ => break,
+      }
+    }
+    struct Locals<'tcx> { tcx: TyCtxt<'tcx>, within: rustc_span::Span, found: bool }
+    impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for Locals<'tcx> {
+      fn visit_path(&mut self, path: &rustc_hir::Path<'tcx>, _id: rustc_hir::HirId) {
+        if let Res::Local(hid) = path.res {
+          if self.within.contains(self.tcx.hir_span(hid)) {
+            self.found = true;
+          }
+        }
+        rustc_hir::intravisit::walk_path(self, path);
+      }
+    }
+    let mut v = Locals { tcx: self.tcx, within, found: false };
+    rustc_hir::intravisit::Visitor::visit_expr(&mut v, e);
+    v.found
+  }
+
+  /// Pairs the value of branch body `body`, now visited, with the
+  /// `let` it is bound to, if that was put off (`deferred_arm_binds`,
+  /// #994): its events come last in the branch, before its variables
+  /// go out of scope.
+  pub fn bind_deferred_arm(&mut self, body: &'tcx Expr<'tcx>) {
+    let Some((_, binds)) = self.deferred_arm_binds.remove(&body.hir_id) else { return };
+    let lo = *self.unique_id;
+    for (lhs, evt) in binds {
+      self.match_rhs(lhs, body, evt);
+    }
     self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
   }
 

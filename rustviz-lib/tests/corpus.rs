@@ -4249,6 +4249,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquired ownership of a resource in every branch that reaches this point (the _ arm panicked)",
             "t goes out of scope. No resource is dropped: t was moved or dropped in every branch above that reaches this point.",
             "s goes out of scope. Its resource is dropped.",
+            // m gets a copy of what consume returns in the 0 arm (#994:
+            // a copy in counts at the join).
+            "m is bound to a value in every branch that reaches this point (the _ arm panicked)",
         ],
         must_not_contain: &[
             // #694: no join dot when every branch moved or dropped it.
@@ -4256,7 +4259,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquired ownership of a resource (in all branches above)",
             "s acquired ownership of a resource (in all branches above that reach this point)",
             "t was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
-            "m is bound to a value",
+            "m is bound to a value (in all branches above)",
+            "m isn't moved in any of the branches above",
         ],
     },
     TooltipExpect {
@@ -18033,8 +18037,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h goes out of scope. No resource is dropped.",
             "k goes out of scope. No resource is dropped.",
             "m goes out of scope. No resource is dropped.",
-            "The pattern always matches the temporary tuple (p, q), so the body is never skipped and nothing is dropped here: the tuple is dropped when the if branch ends",
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
+            // a body that always returns is drawn inline too (#995)
+            "p goes out of scope. No resource is dropped.",
+            "q goes out of scope. No resource is dropped.",
             // controls: these patterns can fail
             "The pattern didn't match, so the temporary tuple (o, u) is dropped here, and with it o's and u's resources",
             "The pattern didn't match, so the temporary value Some(e) is dropped here, and with it e's resource",
@@ -18058,6 +18064,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f was moved or dropped in every branch above",
             "a was moved or dropped in every branch above",
             "b was moved or dropped in every branch above",
+            // nor one that skips a body that always returns (#995)
+            "so the body is never skipped",
+            "p was moved or dropped in every branch above",
+            "q was moved or dropped in every branch above",
+            "p is live in a conditional expression",
         ],
     },
     TooltipExpect {
@@ -18119,16 +18130,90 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q was moved or dropped in every branch above",
         ],
     },
+    TooltipExpect {
+        // #994: a branch whose value is a variable declared in it (an
+        // `if let` binding, a `let` in the block, a match arm's binding)
+        // moves that variable's String into the `let`'s variable, so
+        // nothing is dropped where the branch's variable goes out of
+        // scope. The pairing used to happen before the branch was
+        // visited, when that variable wasn't known yet: an arrow from
+        // nowhere, and a drop of the String the `let` took.
+        name: "branch_value_local_994",
+        must_contain: &[
+            "Move from x to v",
+            "x goes out of scope. No resource is dropped.",
+            "Move from y to w",
+            "y goes out of scope. No resource is dropped.",
+            "h goes out of scope. Its resource is dropped.",
+            "Move from z to u",
+            "z goes out of scope. No resource is dropped.",
+            "Move from s to t",
+            "s goes out of scope. No resource is dropped.",
+            // the inner k (k₂), not the outer one it shadows
+            "Move from k₂ to m",
+            "k₂ goes out of scope. No resource is dropped.",
+            "k's resource is moved into drop, which drops it",
+            "Copy from d to cnt",
+            "cnt is initialized with a copy of d",
+            // a copy in counts as a value at the join
+            "cnt is bound to a value (in all branches above)",
+        ],
+        must_not_contain: &[
+            "x goes out of scope. Its resource is dropped.",
+            "y goes out of scope. Its resource is dropped.",
+            "z goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped.",
+            "k₂ goes out of scope. Its resource is dropped.",
+            "• s acquires ownership of a resource• s goes out of scope. Its resource is dropped.",
+            "=Move from k to m",
+            "cnt isn't moved in any of the branches above",
+        ],
+    },
+    TooltipExpect {
+        // #995: a lone `if let` whose pattern always matches always runs
+        // its body, so it's drawn inline like a plain block (or a one-arm
+        // `match`) even when the body always returns / breaks or assigns
+        // a `let y;` local: no path that skips it, no "maybe moved" join,
+        // no drop flag. (Known gap, as for a one-arm `match`: the code
+        // after an `if` whose body always returns is drawn, and the
+        // return's drops (x's, g's) are drawn at the scope ends, #1004.)
+        name: "edition2024/irrefutable_iflet_inline_995",
+        must_contain: &[
+            "Move from f to x",
+            "f goes out of scope. No resource is dropped.",
+            "a goes out of scope. No resource is dropped.",
+            "s1 goes out of scope. No resource is dropped.",
+            "y goes out of scope. Its resource is dropped.",
+            "p goes out of scope. No resource is dropped.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r",
+            "Move from s to t",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f still owns its resource here",
+            "p still owns its resource here",
+            "s still owns its resource here",
+            "the branch that moved",
+            "g isn't moved in any of the branches above",
+            "r isn't moved in any of the branches above",
+            "=f goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+            "a was moved in at least one branch above",
+            "s1 was moved in at least one branch above",
+            "y was assigned a value in only some of the branches above",
+            "Rust tracks this with a runtime drop flag",
+            "s may have been moved",
+            "is live in a conditional expression",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
-/// dot (a `<g>` with a triangle): the dead `else`'s note, and #981's
-/// dot on the path that skips a body that always returns.
+/// dot (a `<g>` with a triangle): the dead `else`'s note.
 #[test]
 fn never_runs_dots_are_not_drop_dots() {
     for (name, text) in [
         ("edition2024/dead_else_987", "so this else branch never runs: nothing in it happens to"),
-        ("edition2024/irrefutable_iflet_literal_981", "so the body is never skipped and nothing is dropped here"),
     ] {
         let rv = run_with_local_backend(name);
         let timeline = rv.timeline_panel_string();

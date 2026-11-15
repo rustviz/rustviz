@@ -4554,6 +4554,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.arm_frames.push(arm_lines(self, if_expr));
     self.visit_expr(&if_expr);
     self.arm_frames.pop();
+    self.bind_deferred_arm(if_expr);
     let live_len = self.live_tuples.len() - if_tuples.len();
     self.live_tuples.truncate(live_len);
     // Everything declared in each branch, also inside an inline
@@ -4650,6 +4651,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.arm_frames.push(arm_lines(self, e));
           self.visit_expr(e);
           self.arm_frames.pop();
+          self.bind_deferred_arm(e);
           self.borrow_map = borrows;
           self.arm_loans.truncate(arm_loans);
           dead_else_notes = self.discard_dead_else(lo..*self.unique_id, e, &outer);
@@ -4659,6 +4661,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.arm_frames.push(arm_lines(self, e));
           self.visit_expr(e);
           self.arm_frames.pop();
+          self.bind_deferred_arm(e);
           get_decl_of_expr(e, &self.tcx, &self.raps)
         }
       }
@@ -4777,11 +4780,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // (#410).
         let exit_branch = self.expr_diverges(if_expr)
           && body_ev.iter().any(|(_, e)| self.exit_drops.contains(&e.get_id()));
-        // An `if let` whose pattern matches every value always runs
-        // its body (`always_matches`, also for a literal taken apart
-        // the way it was built, #981): there's no implicit empty
-        // `else` path, so what the body does to outer variables is
-        // drawn inline, not as a branch.
         // A body that assigns a `let x;` local is drawn as a branch
         // too when x may have no value on the implicit `else` path
         // (#244): the join says so.
@@ -4794,13 +4792,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           && assigned_in_if.iter().any(|id| self.uninit_locals.contains_key(id))
           && branch_leaves(self.tcx, BranchBody::Expr(if_expr)).exits.iter()
             .all(|x| matches!(x, BranchExit::Return | BranchExit::Panic | BranchExit::Other));
-        let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_matches) || exit_branch
-          || assigns_maybe_init || assigns_then_exits
-          || (self.expr_diverges(if_expr) && {
-            let sm = self.tcx.sess.source_map();
-            let (split, if_end) = (sm.lookup_char_pos(if_expr.span.lo()).line, sm.lookup_char_pos(if_expr.span.hi()).line);
-            self.borrow_may_end_at_exit(if_expr, split, if_end, &if_scope)
-          });
+        //
+        // An `if let` whose pattern matches every value always runs
+        // its body (`always_matches`, also for a literal taken apart
+        // the way it was built, #981): there's no implicit empty
+        // `else` path, so the body is drawn inline, like a plain
+        // block (or a one-arm `match`), whatever it does (#995). (The
+        // borrow checker still treats a `let x;` it assigns as maybe
+        // unassigned after the `if`, but at run time the body always
+        // assigned it, and nothing is dropped with a drop flag.)
+        let drawn_as_branch = !always_matches
+          && (events_move_out_of_outer(&body_ev, &if_scope) || exit_branch
+            || assigns_maybe_init || assigns_then_exits
+            || (self.expr_diverges(if_expr) && {
+              let sm = self.tcx.sess.source_map();
+              let (split, if_end) = (sm.lookup_char_pos(if_expr.span.lo()).line, sm.lookup_char_pos(if_expr.span.hi()).line);
+              self.borrow_may_end_at_exit(if_expr, split, if_end, &if_scope)
+            }));
         // A tuple scrutinee's variables are moved whether or not the
         // body runs (#327), so that's a second path as well, unless
         // the pattern always matches (#981).
@@ -4811,7 +4819,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
             // The body may be skipped, so a `return` / `break` /
             // panic in it doesn't end the columns it's drawn on;
-            // its drops aren't drawn (#410).
+            // its drops aren't drawn (#410). (Nor are they in a body
+            // that always runs, #995, as in a one-arm `match`: the
+            // code after the `if` is drawn. But a tuple scrutinee's
+            // drop is said on the columns of what it took, which
+            // have nothing else to say it.)
+            if always_matches {
+              let tuple_drops: HashSet<usize> = self.preprocessed_events.iter()
+                .filter(|(_, e)| if_ids.contains(&e.get_id()) && matches!(e, ExternalEvent::TupleTempDrop { .. }))
+                .map(|(_, e)| e.get_id()).collect();
+              self.exit_drops.retain(|id| !tuple_drops.contains(id));
+            }
             self.discard_exit_drops(if_ids.clone());
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v)) {
                 self.preprocessed_events.push((
@@ -4941,14 +4959,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
         liveness.insert(r.clone());
       }
-      // A pattern that always matches (#981): this path never runs.
-      // (Its `else` block, if any, is dead and was taken out above,
-      // #987.)
-      let at = match (always_matches, else_expr.is_some()) {
-        (true, _) => TupleDropAt::NeverSkipped,
-        (false, true) => TupleDropAt::Else,
-        (false, false) => TupleDropAt::NoElse,
-      };
+      // (A pattern that always matches, #981, is drawn inline above,
+      // #995: there's no path where it fails.)
+      let at = if else_expr.is_some() { TupleDropAt::Else } else { TupleDropAt::NoElse };
       front.extend(self.tuple_drop_events(let_expr.init, &tuple_name, None, at).into_iter().map(|e| (if_end, e)));
       else_ev.splice(0..0, front);
     }
@@ -5310,6 +5323,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.arm_frames.push((split, merge, begin, end));
       self.visit_expr(arm.body);
       self.arm_frames.pop();
+      self.bind_deferred_arm(arm.body);
       if live {
         self.live_tuples.pop();
       }
@@ -7712,9 +7726,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if matches!(init.kind, ExprKind::Loop(..)) && !matches!(pat.kind, PatKind::Binding(..)) {
         self.break_pats.push((init.hir_id, pat, self.current_scope, self.inside_branch));
       } else {
+        // A branch whose value is a variable declared in it is paired
+        // once it has been visited (#994). (Not yet for a pattern that
+        // takes the value apart, `let (a, b) = if …`.)
+        let prev = self.defer_arm_binds.take();
+        if matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..)) && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
+          self.defer_arm_binds = Some(init.span);
+        }
         self.bind_pat(pat, init, is_skipped);
+        self.defer_arm_binds = prev;
       }
       self.visit_expr(init);
+      // (Any the branches' visits didn't pair, as a last resort, after
+      // the conditional.)
+      #[expect(clippy::disallowed_methods, reason = "sorted by span on the next line")]
+      let mut left: Vec<&'tcx Expr<'tcx>> = self.deferred_arm_binds.values()
+        .map(|(body, _)| *body).filter(|b| init.span.contains(b.span)).collect();
+      left.sort_by_key(|b| b.span.lo());
+      for body in left {
+        warn!("process_let_binding: branch value at {:?} wasn't paired when its branch was visited", body.span);
+        self.bind_deferred_arm(body);
+      }
       // A reference returned by a call in a branch keeps that call's
       // borrow (#337).
       if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
