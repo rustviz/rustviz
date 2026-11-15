@@ -5156,6 +5156,9 @@ fn is_place_expr(e: &Expr) -> bool {
   }
 }
 
+/// Iterator adapters that hand out their receiver's items as they are.
+const SAME_ITEMS: &[&str] = &["rev", "skip", "take", "step_by", "skip_while", "take_while", "filter", "peekable", "fuse", "inspect"];
+
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// The `ExprKind::Assign` arm of `visit_expr`: `lhs = rhs`.
   /// `r.n = 2` / `r.n += 1` through a reference to a local struct (#854):
@@ -5198,16 +5201,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// variable each points into (as `mut_call_chain_root`), following
   /// the head's adapters: `enumerate` pairs an index with its
   /// receiver's item, `zip` pairs its receiver's item with its
-  /// argument's, and `rev` / `skip` / `take` / ... hand out their
-  /// receiver's items (#1067).
-  fn loop_pat_write_roots(&self, pat: &'tcx Pat<'tcx>, head: &'tcx Expr<'tcx>, out: &mut Vec<(String, ResourceAccessPoint)>) {
-    const SAME_ITEMS: &[&str] = &["rev", "skip", "take", "step_by", "skip_while", "take_while", "filter", "peekable", "fuse", "inspect"];
+  /// argument's (also as `std::iter::zip(a, b)`; #1082), and `rev` /
+  /// `skip` / `take` / ... hand out their receiver's items (#1067).
+  fn loop_pat_write_roots(&self, pat: &'tcx Pat<'tcx>, head: &'tcx Expr<'tcx>, out: &mut Vec<(String, Vec<ResourceAccessPoint>)>) {
     let typeck = self.tcx.typeck(pat.hir_id.owner);
     match (pat.kind, head.kind) {
       (PatKind::Binding(BindingMode(rustc_hir::ByRef::No, _), hirid, _, None), _) => {
         if typeck.pat_ty(pat).ref_mutability() == Some(Mutability::Mut) && typeck.pat_adjustments().get(pat.hir_id).is_none() {
-          if let Some(root) = self.mut_call_chain_root(head).or_else(|| self.moved_mut_ref_arg(head)) {
-            out.push((binding_name(&self.tcx, hirid), root));
+          if let Some(roots) = self.loop_item_roots(head) {
+            out.push((binding_name(&self.tcx, hirid), roots));
           }
         }
       }
@@ -5221,11 +5223,62 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.loop_pat_write_roots(&ps[1], arg, out);
         }
       }
+      (PatKind::Tuple(ps, dd), ExprKind::Call(f, [a, b])) if ps.len() == 2 && dd.as_opt_usize().is_none() && self.is_iter_zip_fn(f) => {
+        self.loop_pat_write_roots(&ps[0], a, out);
+        self.loop_pat_write_roots(&ps[1], b, out);
+      }
       (_, ExprKind::MethodCall(seg, rcvr, _, _)) if SAME_ITEMS.contains(&seg.ident.as_str()) => {
         self.loop_pat_write_roots(pat, rcvr, out);
       }
       _ => {}
     }
+  }
+
+  /// `std::iter::zip` (`core::iter::zip`), called as a function.
+  fn is_iter_zip_fn(&self, f: &'tcx Expr<'tcx>) -> bool {
+    let ExprKind::Path(ref qpath) = f.kind else { return false };
+    let Res::Def(DefKind::Fn, def_id) = self.tcx.typeck(f.hir_id.owner).qpath_res(qpath, f.hir_id) else { return false };
+    !def_id.is_local() && self.tcx.item_name(def_id).as_str() == "zip"
+      && matches!(self.tcx.crate_name(def_id.krate).as_str(), "core" | "std")
+  }
+
+  /// The variables what a `for` loop's `&mut` items point into (as
+  /// `mut_call_chain_root`, or a `&mut` reference moved into an adapter,
+  /// `moved_mut_ref_arg`), following `rev` / `skip` / ... to their
+  /// receiver. `chain` hands out its receiver's items and then its
+  /// argument's, so an item points into either (`a.iter_mut().chain(b)`;
+  /// #1082). None when one of them isn't known: `x` in
+  /// `a.iter_mut().chain(once(&mut z))` doesn't always point into a.
+  fn loop_item_roots(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<ResourceAccessPoint>> {
+    match e.kind {
+      ExprKind::MethodCall(seg, rcvr, [arg], _) if seg.ident.as_str() == "chain" => {
+        let mut roots = self.loop_item_roots(rcvr)?;
+        for r in self.loop_item_roots(arg)? {
+          if !roots.contains(&r) {
+            roots.push(r);
+          }
+        }
+        Some(roots)
+      }
+      ExprKind::MethodCall(seg, rcvr, _, _) if SAME_ITEMS.contains(&seg.ident.as_str()) && self.has_chain_call(rcvr) =>
+        self.loop_item_roots(rcvr),
+      // `.chain(..).map(f)`: f may hand out anything.
+      _ if self.has_chain_call(e) => None,
+      _ => self.mut_call_chain_root(e).or_else(|| self.moved_mut_ref_arg(e)).map(|r| vec![r]),
+    }
+  }
+
+  /// Whether the method chain `e` has a `chain` call in it
+  /// (`a.iter_mut().chain(b.iter_mut()).rev()`).
+  fn has_chain_call(&self, e: &'tcx Expr<'tcx>) -> bool {
+    let mut e = e;
+    while let ExprKind::MethodCall(seg, rcvr, _, _) = e.kind {
+      if seg.ident.as_str() == "chain" {
+        return true;
+      }
+      e = rcvr;
+    }
+    false
   }
 
   /// `b` in `a.iter_mut().zip(b)` with `b: &mut Vec<_>`: a `&mut`
@@ -5252,13 +5305,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// when it is an owner (`v.iter_mut().rev()`) or a parameter.
   fn part_holder(&self, r: &ResourceAccessPoint, depth: usize) -> Option<ResourceAccessPoint> {
     let unlent = self.borrow_map.get(r.name()).is_some_and(|d| matches!(d.lender, ResourceTy::Anonymous));
-    match self.loop_ref_into.get(r.name()).filter(|_| unlent && depth < 16) {
+    match self.loop_ref_into.get(r.name()).and_then(|v| v.first()).filter(|_| unlent && depth < 16) {
       Some(h) if !h.is_ref() => Some(h.clone()),
       Some(h) if self.borrow_map.get(h.name()).is_some_and(|d| matches!(d.lender, ResourceTy::Caller)) => Some(h.clone()),
       // `for row in v.iter_mut() { for e in row.iter_mut() { .. } }`.
       Some(h) => self.part_holder(h, depth + 1),
       None => self.owner_behind_ref(r, "").filter(|o| !o.is_fn())
         .or_else(|| self.callers_ref_behind_ref(r, 0)),
+    }
+  }
+
+  /// Each variable `part_holder` may stand for when r is a loop
+  /// variable whose items come from a `chain` (`for x in
+  /// a.iter_mut().chain(b.iter_mut())`, also `for e in row.iter_mut()`
+  /// nested in such a loop over rows; #1082): x points into a's
+  /// resource on some iterations and into b's on the others. Otherwise
+  /// `part_holder` alone.
+  fn part_holders(&self, r: &ResourceAccessPoint, depth: usize) -> Vec<ResourceAccessPoint> {
+    let unlent = self.borrow_map.get(r.name()).is_some_and(|d| matches!(d.lender, ResourceTy::Anonymous));
+    match self.loop_ref_into.get(r.name()).filter(|_| unlent && depth < 16) {
+      Some(roots) => {
+        let mut out: Vec<ResourceAccessPoint> = Vec::new();
+        for h in roots {
+          let hs = if !h.is_ref() || self.borrow_map.get(h.name()).is_some_and(|d| matches!(d.lender, ResourceTy::Caller)) {
+            vec![h.clone()]
+          } else {
+            self.part_holders(h, depth + 1)
+          };
+          for h in hs {
+            if !out.contains(&h) {
+              out.push(h);
+            }
+          }
+        }
+        out
+      }
+      None => self.part_holder(r, depth).into_iter().collect(),
     }
   }
 
@@ -5304,12 +5386,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// column too, like an element write `v[0] += 1` (#861): "v's
   /// resource is modified through x", or for `=` a plain assignment to
   /// the place `*x` that says the old value is dropped if it needs drop.
+  ///
+  /// When x may point into any of several variables' resources (`for x
+  /// in a.iter_mut().chain(b.iter_mut())`; #1082), the write is drawn on
+  /// each of their columns, and each tooltip says x points into one of
+  /// them (`place_with_alternatives`).
   fn write_part_behind_ref(&mut self, owner: ResourceAccessPoint, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize, write: PlaceWrite) {
     let written = self.plain_source_text(lhs_expr).unwrap_or_else(|| format!("*{}", lhs_rty.real_name()));
     let place = match write {
       PlaceWrite::Update | PlaceWrite::UpdateValue => written.trim_start_matches(|c: char| c == '*' || c.is_whitespace()).to_owned(),
       _ => written,
     };
+    let holders = match lhs_rty {
+      ResourceTy::Deref(r) => self.part_holders(r, 0),
+      _ => Vec::new(),
+    };
+    if holders.len() > 1 && holders.contains(&owner) {
+      let ResourceTy::Deref(r) = lhs_rty else { return };
+      let place = place_with_alternatives(&place, r.name(), &holders);
+      for h in holders {
+        self.add_ev(line_num, Evt::Bind, ResourceTy::Index(h, place.clone(), write), ResourceTy::Anonymous, false);
+      }
+      return;
+    }
     self.add_ev(line_num, Evt::Bind, ResourceTy::Index(owner, place, write), ResourceTy::Anonymous, false);
   }
 
@@ -7876,7 +7975,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut head_loan: Option<(ResourceTy, bool, usize)> = None;
         // The loop variable's `loop_ref_into` entry, and the one it
         // shadows (a loop nested in another with the same variable).
-        let mut loop_ref_prev: Vec<(String, Option<ResourceAccessPoint>)> = Vec::new();
+        let mut loop_ref_prev: Vec<(String, Option<Vec<ResourceAccessPoint>>)> = Vec::new();
         if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
           let pat_name = binding_name(&self.tcx, pat_hirid);
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -7934,8 +8033,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // it goes into v's resource, or the resource v points to
             // (#1046).
             if matches!(lender, ResourceTy::Anonymous) && pat_ty.ref_mutability() == Some(Mutability::Mut) {
-              if let Some(root) = self.mut_call_chain_root(head_arg) {
-                let prev = self.loop_ref_into.insert(pat_name.clone(), root);
+              if let Some(roots) = self.loop_item_roots(head_arg) {
+                let prev = self.loop_ref_into.insert(pat_name.clone(), roots);
                 loop_ref_prev.push((pat_name.clone(), prev));
               }
             }
@@ -8061,10 +8160,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if !head_is_iterator {
             let mut roots = Vec::new();
             self.loop_pat_write_roots(user_pat, head_arg, &mut roots);
-            for (name, root) in roots {
+            for (name, roots) in roots {
               let unlent = self.borrow_map.get(&name).is_some_and(|d| matches!(d.lender, ResourceTy::Anonymous));
               if unlent {
-                let prev = self.loop_ref_into.insert(name.clone(), root);
+                let prev = self.loop_ref_into.insert(name.clone(), roots);
                 loop_ref_prev.push((name, prev));
               }
             }

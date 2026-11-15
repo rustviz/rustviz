@@ -1866,6 +1866,71 @@ pub fn event_dot_ref_acquire(my_name: &String, is_mut: bool) -> String {
     }
 }
 
+// What a reference that may point into any of several variables'
+// resources points into (`for x in a.iter_mut().chain(b.iter_mut())`;
+// #1082): "the resource a or b points to", "a's or b's resource", or
+// each one in turn when they differ ("a's resource or the value b
+// points to"). Each holder: (name, is a reference, holds a value).
+fn one_of_holders(alts: &[(String, bool, bool)]) -> String {
+    fn or_join(items: &[String]) -> String {
+        match items {
+            [init @ .., last] if !init.is_empty() => format!("{} or {}", init.join(", "), last),
+            _ => items.join(""),
+        }
+    }
+    match alts {
+        [(_, is_ref, value), rest @ ..] if rest.iter().all(|(_, r, v)| r == is_ref && v == value) => {
+            let names: Vec<String> = alts.iter().map(|(n, ..)| n.clone()).collect();
+            if *is_ref {
+                format!("the {} {} points to", held(*value), or_list(&names))
+            } else {
+                let owners: Vec<String> = names.iter().map(|n| format!("{}'s", styled_name_html(n))).collect();
+                format!("{} {}", or_join(&owners), held(*value))
+            }
+        }
+        _ => {
+            let each: Vec<String> = alts.iter().map(|(n, is_ref, value)| holder_phrase(n, *is_ref, *value)).collect();
+            or_join(&each)
+        }
+    }
+}
+
+// "the resource a points to" / "a's resource".
+fn holder_phrase(holder: &String, holder_is_ref: bool, holds_value: bool) -> String {
+    if holder_is_ref {
+        format!("the {} {} points to", held(holds_value), styled_name_html(holder))
+    } else {
+        format!("{}'s {}", styled_name_html(holder), held(holds_value))
+    }
+}
+
+// `*x += 1` drawn on a's column with x from `a.iter_mut().chain(b.iter_mut())`
+// (#1082): x points into a's resource on the iterations over a and into
+// b's on the others, so the write goes into a's only on some of them.
+pub fn event_dot_write_element_one_of(holder: &String, place: &String, holder_is_ref: bool, holds_value: bool, ptr: &String, alts: &[(String, bool, bool)]) -> String {
+    format!(
+        "{} is modified through {} when {} points into it ({} points into {})",
+        holder_phrase(holder, holder_is_ref, holds_value),
+        styled_name_html(place),
+        styled_name_html(ptr),
+        styled_name_html(ptr),
+        one_of_holders(alts)
+    )
+}
+
+// An assignment through such an x (`*x = 0`), drawn on a's column: the
+// assignment's own text `msg`, and when it lands there.
+pub fn event_dot_write_one_of(msg: String, holder: &String, holder_is_ref: bool, holds_value: bool, ptr: &String, alts: &[(String, bool, bool)]) -> String {
+    format!(
+        "{}, when {} points into {} ({} points into {})",
+        msg,
+        styled_name_html(ptr),
+        holder_phrase(holder, holder_is_ref, holds_value),
+        styled_name_html(ptr),
+        one_of_holders(alts)
+    )
+}
+
 // In-place update through a dereference: `*r += 1;`, `r.f += 1;`. The
 // place `*r` / `r.f` is (part of) what r points to (owned by r's lender,
 // or by the Box), so nothing is acquired; the existing resource is
@@ -2931,9 +2996,11 @@ pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, r
 // be used (or is read-only) meanwhile, even after the last use of e.
 //
 // A `&T` passed as it is to the head's adapter (`a.iter_mut().zip(b)`
-// with `b: &Vec<_>`; #1076) is copied into the iterator, which reads
-// through the copy until the loop ends. b is a shared reference, so it
-// was read-only all along: no "b is read-only until the loop ends".
+// with `b: &Vec<_>`; #1076), or one whose pointee the head's call reads
+// (`v.iter()` with `v: &Vec<_>`; #1081), is copied into the iterator,
+// which reads through the copy until the loop ends. b is a shared
+// reference, so it was read-only all along: no "b is read-only until
+// the loop ends".
 pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, is_mut: bool, ref_is_mut: bool, pointee_copy: bool) -> String {
     if !ref_is_mut {
         format!(
@@ -2963,9 +3030,16 @@ pub fn event_dot_loop_iterator_reacquire_through_ref(ref_name: &String, pointee_
 // The same for a field reached through a `&mut` reference
 // (`for e in self.items.iter_mut()` with `self: &mut Self`; #1060),
 // drawn on the reference's column. Only that field is lent: `self.n
-// += 1` in the body compiles, `self.items.len()` doesn't.
-pub fn event_dot_lend_field_through_ref_to_loop_iterator(place: &String, is_mut: bool) -> String {
-    if is_mut {
+// += 1` in the body compiles, `self.items.len()` doesn't. Through a
+// `&T` (`self.items.iter()` with `self: &Self`; #1081) the field was
+// read-only all along.
+pub fn event_dot_lend_field_through_ref_to_loop_iterator(place: &String, is_mut: bool, ref_is_mut: bool) -> String {
+    if !ref_is_mut {
+        format!(
+            "{0} is immutably borrowed by the `for` loop's iterator until the loop ends",
+            styled_name_html(place)
+        )
+    } else if is_mut {
         format!(
             "{0} is mutably borrowed by the `for` loop's iterator; {0} can't be used until the loop ends",
             styled_name_html(place)

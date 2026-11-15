@@ -553,6 +553,59 @@ impl Hash for ResourceTy {
   }
 }
 
+/// Separates the parts of a place label that names the variables a write
+/// may go into (`place_with_alternatives`). Not in any source text.
+const ALT_SEP: char = '\u{1f}';
+const ALT_ITEM_SEP: char = '\u{1e}';
+
+/// The label of a write through `ptr` (`x` in `*x += 1`) drawn on each
+/// of `holders`' columns because x points into one of them, which one
+/// depending on the iteration (`for x in a.iter_mut().chain(b.iter_mut())`;
+/// #1082): the place as written, then x, then each holder with whether
+/// it is a reference and whether what it holds (or points to) is a value.
+/// `split_alternatives` reads it back; only the dot's tooltip uses them.
+pub fn place_with_alternatives(place: &str, ptr: &str, holders: &[ResourceAccessPoint]) -> String {
+    let alts: Vec<String> = holders.iter().map(|h| {
+        let (is_ref, value) = if h.is_ref() { (true, h.points_to_copy()) } else { (false, h.holds_value()) };
+        format!("{}{}{}", if is_ref { 'r' } else { 'o' }, if value { 'v' } else { 'r' }, h.name())
+    }).collect();
+    format!("{place}{ALT_SEP}{ptr}{ALT_SEP}{}", alts.join(&ALT_ITEM_SEP.to_string()))
+}
+
+/// A place label without the alternatives `place_with_alternatives`
+/// added, and those: the reference written through, and each holder
+/// (name, is a reference, holds a value).
+pub fn split_alternatives(place: &str) -> (&str, Option<(&str, Vec<(&str, bool, bool)>)>) {
+    let mut parts = place.splitn(3, ALT_SEP);
+    let label = parts.next().unwrap_or(place);
+    match (parts.next(), parts.next()) {
+        (Some(ptr), Some(alts)) => {
+            let alts = alts.split(ALT_ITEM_SEP).filter_map(|a| {
+                let mut cs = a.chars();
+                let (k, v) = (cs.next()?, cs.next()?);
+                Some((cs.as_str(), k == 'r', v == 'v'))
+            }).collect();
+            (label, Some((ptr, alts)))
+        }
+        _ => (label, None),
+    }
+}
+
+/// The tooltip `msg` of a write drawn on r's column, when the reference
+/// written through may point into any of `alts` (`split_alternatives`;
+/// #1082): it says which ones, and that the write goes into r's only on
+/// the iterations where it points there.
+fn with_alternatives(msg: String, r: &ResourceAccessPoint, place: &str, write: &PlaceWrite, alts: Option<(&str, Vec<(&str, bool, bool)>)>) -> String {
+    let Some((ptr, alts)) = alts else { return msg };
+    let ptr = ptr.to_owned();
+    let alts: Vec<(String, bool, bool)> = alts.into_iter().map(|(n, is_ref, value)| (n.to_owned(), is_ref, value)).collect();
+    match write {
+        PlaceWrite::Update | PlaceWrite::UpdateValue =>
+            hover_messages::event_dot_write_element_one_of(r.name(), &place.to_owned(), r.is_ref(), element_update_holds_value(r, place, write), &ptr, &alts),
+        _ => hover_messages::event_dot_write_one_of(msg, r.name(), r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() }, &ptr, &alts),
+    }
+}
+
 /// Dot text for a Copy value assigned to the place `place`, worded as a
 /// plain assignment is on main: "a copy of x" when the source is a named
 /// place (`*r = y`, `v[i] = x`), "a new value" otherwise (a literal, an
@@ -581,6 +634,7 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
 /// in `*x += 1` as x's last use.
 fn push_history_event(history: &mut Vec<(usize, Event)>, line: usize, event: Event) {
     if let Event::Acquire { is: ResourceTy::Index(_, place, _), .. } = &event {
+        let place = split_alternatives(place).0;
         let ends_through = |e: &Event| match e {
             Event::MutableReacquire { from: ResourceTy::Value(f), .. } if f.is_fn() =>
                 place.contains(&format!(".{}(", f.name())),
@@ -3620,7 +3674,9 @@ impl Event {
                     // `v[i]`: it reads like a plain assignment, and v
                     // doesn't acquire anything. `v[i] += k` modifies
                     // the element in place.
-                    match write {
+                    let (place, alts) = split_alternatives(place);
+                    let place = &place.to_owned();
+                    let msg = match write {
                         // `r.n = 2` through a reference to a local struct (#854):
                         // drawn on the field's own column `s.n`, the place
                         // written through is `r.n`.
@@ -3635,7 +3691,8 @@ impl Event {
                         // it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
-                    }
+                    };
+                    with_alternatives(msg, r, place, write, alts)
                 } else if is.holds_borrow() && matches!(from, ResourceTy::Value(r) if !r.is_fn()) {
                     // `let it2 = it;`: the value moves, and the borrow
                     // it holds moves with it (#336).
@@ -3745,12 +3802,15 @@ impl Event {
             Event::Copy{ from, is: ResourceTy::Index(r, place, write), of, ..} => {
                 // `v[i] = y;` with y: Copy assigns a new value to the
                 // place `v[i]`.
-                match write {
+                let (place, alts) = split_alternatives(place);
+                let place = &place.to_owned();
+                let msg = match write {
                     PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     // `v[i] = Some(y);`: a new value, built from y (#866).
                     _ if matches!(of, CopyOf::IntoCtor(_)) => hover_messages::event_dot_copyable_assign(place),
                     _ => place_assign_copy_message(place, from),
-                }
+                };
+                with_alternatives(msg, r, place, write, alts)
             }
             Event::Copy{ from, is: is @ (ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _)), of, ..} => {
                 // `*r = y;` / `r.f = y;` with y: Copy assigns a new value
