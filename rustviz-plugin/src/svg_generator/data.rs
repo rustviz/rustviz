@@ -2478,11 +2478,18 @@ fn ends_reference(e: &Event) -> bool {
         | Event::Duplicate { to: ResourceTy::Caller, .. })
 }
 
-/// An event that gives a reference column a (new) reference.
+/// An event that gives a reference column a (new) reference. Not a
+/// write through the column into what it points to (`*r = &t`, `is`
+/// is `*r`, #904): r keeps the reference it has, so its own end on
+/// that row isn't the end of an old one, and its line ends there.
 fn starts_reference(e: &Event) -> bool {
-    matches!(e,
-        Event::StaticBorrow { .. } | Event::MutableBorrow { .. }
-        | Event::Acquire { .. } | Event::Copy { .. } | Event::InitRefParam { .. })
+    match e {
+        Event::StaticBorrow { is, .. } | Event::MutableBorrow { is, .. }
+        | Event::Acquire { is, .. } | Event::Copy { is, .. } =>
+            !matches!(is, ResourceTy::Deref(_) | ResourceTy::DerefField(..)),
+        Event::InitRefParam { .. } => true,
+        _ => false,
+    }
 }
 
 /// Whether a reference column still holds a reference after the events
@@ -3769,6 +3776,23 @@ impl Visualizable for VisualizationData {
             // reacquire in between), so the lend to `w` continues the
             // same revocation rather than starting a second one.
             (State::RevokedPrivilege{ .. }, Event::MutableLend{ .. }) => (*previous_state).clone(),
+
+            // A reference variable re-pointed through the `&mut` that
+            // borrows it (`*r = &t` with `r = &mut x`, #904): x still
+            // can't be used while r's borrow is live, and holds the new
+            // reference (or none, after the old one's end) once it is
+            // given back.
+            (State::RevokedPrivilege{ to, borrow_to, .. }, Event::StaticBorrow{ .. })
+            | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::MutableBorrow{ .. })
+            | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::StaticDie{ .. })
+            | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::MutableDie{ .. }) if self.is_ref(hash) => {
+                let holds = match event {
+                    Event::StaticBorrow { .. } => State::PartialPrivilege { s: LineState::Full },
+                    Event::MutableBorrow { .. } => State::FullPrivilege { s: LineState::Full },
+                    _ => State::OutOfScope,
+                };
+                State::RevokedPrivilege { to: to.clone(), borrow_to: borrow_to.clone(), prev_state: Box::new(holds) }
+            }
                 
             // self statically borrowed resource, and it returns; TODO what about references to self?
             (State::PartialPrivilege{ .. }, Event::StaticDie{ .. }) =>
