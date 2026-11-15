@@ -17,6 +17,47 @@ pub fn escape_tooltip_name(name: &str) -> String {
         .replace('"', "&amp;quot;")
 }
 
+/// Make every `data-tooltip-text="..."` value in a finished SVG valid XML
+/// (#1049). Names go through `escape_tooltip_name`, but the prose around
+/// them is written in many places and may quote Rust operators (`&&`,
+/// `<`), so a bare `&` or `<` in an attribute value is escaped here, once,
+/// for all of them. An `&` that already starts an entity (`&lt;`, `&amp;`,
+/// `&#38;`) is left alone, so the span markup and escaped names are
+/// unchanged.
+pub fn escape_tooltip_attrs(svg: &str) -> String {
+    const KEY: &str = "data-tooltip-text=\"";
+    let mut out = String::with_capacity(svg.len() + 16);
+    let mut rest = svg;
+    while let Some(i) = rest.find(KEY) {
+        let (head, tail) = rest.split_at(i + KEY.len());
+        out.push_str(head);
+        let end = tail.find('"').unwrap_or(tail.len());
+        let (value, after) = tail.split_at(end);
+        let bytes = value.as_bytes();
+        for (j, c) in value.char_indices() {
+            match c {
+                '<' => out.push_str("&lt;"),
+                '&' if !starts_entity(&bytes[j + 1..]) => out.push_str("&amp;"),
+                _ => out.push(c),
+            }
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// True if `b` (the bytes after an `&`) is `name;`, `#digits;` or
+/// `#xhex;`.
+fn starts_entity(b: &[u8]) -> bool {
+    let (skip, n) = match (b.first(), b.get(1)) {
+        (Some(b'#'), Some(b'x')) => (2, b[2..].iter().take_while(|c| c.is_ascii_hexdigit()).count()),
+        (Some(b'#'), _) => (1, b[1..].iter().take_while(|c| c.is_ascii_digit()).count()),
+        _ => (0, b.iter().take_while(|c| c.is_ascii_alphanumeric()).count()),
+    };
+    n > 0 && b.get(skip + n) == Some(&b';')
+}
+
 // What a column holds, as named in tooltips (#274). A Copy type (`i32`,
 // `bool`, a `#[derive(Clone, Copy)]` struct) can't implement `Drop`
 // (rustc rejects `Copy` + `Drop`, E0184), so it has nothing to clean up
@@ -4314,5 +4355,28 @@ pub fn acquire_from_try_holds(kind: TryHolds) -> &'static str {
         TryHolds::CopyOwner => "is initialized with the value",
         TryHolds::Plain => "is bound to the value",
         TryHolds::Resource => "acquires ownership of the resource",
+    }
+}
+
+#[cfg(test)]
+mod escape_tooltip_attrs_tests {
+    use super::escape_tooltip_attrs;
+
+    #[test]
+    fn bare_ampersand_and_lt_in_a_tooltip_attribute_are_escaped() {
+        let svg = r#"<g data-tooltip-text="at the end of this `&&` / `||` operand a<b"/>"#;
+        assert_eq!(
+            escape_tooltip_attrs(svg),
+            r#"<g data-tooltip-text="at the end of this `&amp;&amp;` / `||` operand a&lt;b"/>"#
+        );
+    }
+
+    #[test]
+    fn existing_entities_and_other_attributes_are_untouched() {
+        let svg = r#"<g d="a&b" data-tooltip-text="&lt;span&gt;x&amp;lt;&amp;amp;&#38;&#x26; & &x"/>"#;
+        assert_eq!(
+            escape_tooltip_attrs(svg),
+            r#"<g d="a&b" data-tooltip-text="&lt;span&gt;x&amp;lt;&amp;amp;&#38;&#x26; &amp; &amp;x"/>"#
+        );
     }
 }

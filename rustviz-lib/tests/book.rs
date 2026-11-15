@@ -1871,6 +1871,12 @@ fn check(s: &Snippet, outcome: &Outcome, failures: &mut Vec<String>, notes: &mut
         failures.push(format!("{}: a panel is not SVG", s.id));
         return;
     }
+    for (panel, svg) in [("code", code), ("timeline", timeline)] {
+        if let Some(e) = common::svg::xml_error(svg) {
+            failures.push(format!("{}: {} panel is not well-formed XML (#1049): {}", s.id, panel, e));
+            return;
+        }
+    }
     if !timeline.contains("tooltip-trigger") {
         failures.push(format!("{}: timeline has no tooltip-trigger elements", s.id));
         return;

@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::svg_generator::svg_frontend::templates::*;
 use log::info;
+use crate::svg_generator::hover_messages::escape_tooltip_attrs;
 
 #[derive(Serialize)]
 struct SvgData {
@@ -1136,5 +1137,11 @@ pub fn render_svg(
         .render("timeline_svg_template", &svg_data)
         .unwrap();
 
-    (final_code_svg_content, final_timeline_svg_content, svg_data.height)
+    // Prose in tooltips may quote `&&` / `<` (#1049): make every
+    // attribute value valid XML before the SVG leaves the plugin.
+    (
+        escape_tooltip_attrs(&final_code_svg_content),
+        escape_tooltip_attrs(&final_timeline_svg_content),
+        svg_data.height,
+    )
 }

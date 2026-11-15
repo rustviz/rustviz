@@ -17775,6 +17775,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "from the caller",
         ],
     },
+    // ─── A tooltip quoting `&&` / `||` is escaped in the SVG (#1049) ───
+    TooltipExpect {
+        name: "xml_operand_tooltip_1049",
+        // The text a student reads still has the plain operators. That the
+        // attribute holds `&amp;&amp;` (so the SVG is well-formed XML) is
+        // checked for every fixture by `assert_well_formed`; this entry
+        // pins that the escaping did not double up (`&amp;amp;` would show
+        // a student "&amp;&amp;").
+        must_contain: &[
+            "This temporary String is dropped at the end of this `&&` / `||` operand: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "&amp;",
+            "`&amp;&amp;`",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17888,6 +17904,11 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         "{}: timeline has no tooltip-trigger elements (annotations missing)",
         name
     );
+    for (panel, svg) in [("code", &code), ("timeline", &timeline)] {
+        if let Some(e) = common::svg::xml_error(svg) {
+            panic!("{}: {} panel is not well-formed XML (#1049): {}", name, panel, e);
+        }
+    }
     let crossed = arrows_crossing_dots(&timeline);
     assert!(
         crossed.is_empty(),
@@ -21378,10 +21399,11 @@ fn arrows_are_drawn_beneath_dots_and_function_icons() {
 
 /// Every tooltip attribute is escaped: no bare `<`, and every `&` starts
 /// an entity. An operator named `&` or `<` used to be written raw, and
-/// the timeline SVG was not valid XML (#376).
+/// the timeline SVG was not valid XML (#376); prose quoting `&&` did the
+/// same (#1049).
 #[test]
 fn tooltip_attributes_are_escaped() {
-    for name in ["operator_name_escaped", "comparison_operand_borrows"] {
+    for name in ["operator_name_escaped", "comparison_operand_borrows", "xml_operand_tooltip_1049", "edition2024/temporary_let_chain_scrutinee"] {
         let t = run_with_local_backend(name).timeline_panel_string();
         for chunk in t.split("data-tooltip-text=\"").skip(1) {
             let raw = &chunk[..chunk.find('"').unwrap()];
