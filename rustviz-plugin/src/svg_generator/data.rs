@@ -1765,9 +1765,16 @@ pub enum ExternalEvent {
     // a branch above having moved it on some paths (#1012):
     // `Some(by_cond)`, as for `OwnerDropAtReassign`'s `by_cond`. Then
     // it has a value after the loop also if nothing moved it before.
+    // `nested`: the loop is inside another that `ro` was declared
+    // before (#1032), and every run of it may start with `ro` holding
+    // nothing (on the outer loop's first time round, a branch above
+    // having moved it) or holding a value (one the outer loop's time
+    // round before gave it): only a drop flag knows what its next
+    // assignment drops (`InitBy::DropFlag`).
     LoopMaybeInit {
         ro: ResourceAccessPoint,
         before_loop: Option<bool>,
+        nested: bool,
         id: usize
     },
     // At the end of a bare `loop` (#1000): `ro`, declared before the
@@ -2304,7 +2311,7 @@ pub enum Event {
     // See ExternalEvent::LoopIteratorDrop.
     LoopIteratorDrop { left: LoopLeft },
     // See ExternalEvent::LoopMaybeInit.
-    LoopMaybeInit { before_loop: Option<bool> },
+    LoopMaybeInit { before_loop: Option<bool>, nested: bool },
     // See ExternalEvent::LoopExitKept.
     LoopExitKept { reassigned: bool },
     // See ExternalEvent::LoopExitMove.
@@ -2627,10 +2634,10 @@ pub enum InitBy {
     /// sure.
     OuterLoop { moves: bool },
     /// An assignment in a loop's body to a variable that rustc says
-    /// only may hold a value here, though nothing drawn above says so
-    /// (#1027): a loop above, inside this one, may have ended before
-    /// giving it a value (`if c { drop(s); } for … { while … { s = …; }
-    /// s = …; }`). Only a drop flag knows.
+    /// only may hold a value here (#1027): a loop above, inside this
+    /// one, may have ended before giving it a value (`if c { drop(s); }
+    /// for … { while … { s = …; } s = …; }`), drawn as a `LoopMaybeInit`
+    /// with `nested` at that loop's end (#1032). Only a drop flag knows.
     DropFlag,
 }
 
@@ -3132,7 +3139,10 @@ impl Event {
                 hover_messages::event_dot_loop_exit_kept(my_name, *reassigned, false)
             }
             // (The timeline panel words it with what follows.)
-            Event::LoopMaybeInit { before_loop } => {
+            Event::LoopMaybeInit { nested: true, .. } => {
+                hover_messages::event_dot_loop_maybe_init_nested(my_name, true, true)
+            }
+            Event::LoopMaybeInit { before_loop, .. } => {
                 hover_messages::event_dot_loop_maybe_init(my_name, true, true, None, *before_loop)
             }
             Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
@@ -4643,8 +4653,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopIteratorDrop{ left, .. } => {
           vec![(line_num, Event::LoopIteratorDrop { left: *left })]
         },
-        ExternalEvent::LoopMaybeInit{ before_loop, .. } => {
-          vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop })]
+        ExternalEvent::LoopMaybeInit{ before_loop, nested, .. } => {
+          vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop, nested: *nested })]
         },
         ExternalEvent::LoopExitKept{ reassigned, .. } => {
           vec![(line_num, Event::LoopExitKept { reassigned: *reassigned })]
@@ -5018,8 +5028,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopIteratorDrop{ro, left, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left }, line_number);
             },
-            ExternalEvent::LoopMaybeInit{ro, before_loop, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop }, line_number);
+            ExternalEvent::LoopMaybeInit{ro, before_loop, nested, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop, nested }, line_number);
             },
             ExternalEvent::LoopExitKept{ro, reassigned, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitKept { reassigned }, line_number);

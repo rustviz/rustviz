@@ -166,6 +166,10 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     // A let-chain's condition, not only a branch, may have moved one of
     // `maybe_moved` (#281): "nothing above" instead of "no branch above".
     by_cond: bool,
+    // A loop that moves one of `maybe_moved` on some time rounds only
+    // may have moved it (#1031): whether it's dropped isn't down to
+    // whether something above moved it, so "only if it still holds it".
+    kept: bool,
     // A `Box` a field was moved out of (#602): Rust still frees the
     // box's heap allocation, so the text says so.
     boxed: bool,
@@ -204,7 +208,19 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             out.push_str(&format!(" {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
         }
         let (maybe_s, maybe_plural) = join(maybe_moved);
-        if by_cond {
+        if kept && maybe_plural {
+            out.push_str(&format!(
+                " {} may have been moved out above, so each is dropped here only if it still holds \
+                 its value (Rust tracks this with runtime drop flags).",
+                maybe_s
+            ));
+        } else if kept {
+            out.push_str(&format!(
+                " {0} may have been moved out above, so it's dropped here only if {0} still holds \
+                 it (Rust tracks this with a runtime drop flag).",
+                maybe_s
+            ));
+        } else if by_cond {
             out.push_str(&format!(
                 " {} may have been moved out above, so {} dropped here only if nothing above moved \
                  it (Rust tracks this with {}).",
@@ -3340,6 +3356,32 @@ pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, r
                 None => "goes out of scope",
             },
             or_not_moved_above(before_loop)
+        ));
+    }
+    out
+}
+
+// Where a loop inside another ends, for a variable declared before the
+// outer one that may hold nothing where this loop starts (on the outer
+// loop's first time round, a branch above may have moved it) and that
+// this loop may end before assigning (#1032). Whatever value it has
+// here, from this loop or from the outer loop's time round before, is
+// dropped by its next assignment (in the outer loop's body, or this
+// loop's next run), or at its scope end: nothing can move it before it
+// is assigned again.
+pub fn event_dot_loop_maybe_init_nested(my_name: &String, value: bool, mutable: bool) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let mut out = format!(
+        "{0} may have no value after the loop: it may have none where the loop starts, and the loop \
+         may end before assigning it, so it can't be used after the loop{1}.",
+        my_name_fmt,
+        if mutable { " (until it's assigned again)" } else { "" },
+    );
+    if !value {
+        out.push_str(&format!(
+            " If it has one, its resource is dropped when {0} is assigned again (or, if it isn't, when \
+             it goes out of scope).",
+            my_name_fmt
         ));
     }
     out

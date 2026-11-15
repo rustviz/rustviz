@@ -18793,11 +18793,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `drop(t)` above moved the first "x", the second is dropped
         // at `t = …"z"`). Checked with rustc and a `Drop`-printing type:
         // c = false / true, loops 0, 1, 2 times round.
-        // (Known wrong, not pinned: x's scope end in field_join still
-        // says x.name is dropped "only if nothing above moved it",
-        // ambiguous in the same way as #1029's: #1031. And s's column
-        // is drawn as "the owner" from the inner loop to `s = …"c"`:
-        // #1032.)
+        // #1031: x's scope end in field_join said x.name is dropped
+        // "only if nothing above moved it", which read as if the
+        // `drop(x.name)` above settled it (k = 2: the second "b" is
+        // dropped there). #1032: the inner loop's end leaves s (p,
+        // p.name) without an owner line down to `s = …"c"`; its dot
+        // says why (the line is checked by
+        // `a_loop_inside_another_that_may_not_assign_draws_no_owner_line`).
         must_contain: &[
             "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
             "p acquires ownership of a new resource. Its previous resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag).",
@@ -18805,6 +18807,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when q is assigned again (or, if it isn't, when it goes out of scope).",
             "x.name was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when x.name is assigned again (or, if it isn't, when it goes out of scope).",
             "t acquires ownership of a new resource. Its previous resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. x.name may have been moved out above, so it's dropped here only if x.name still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have no value after the loop: it may have none where the loop starts, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If it has one, its resource is dropped when s is assigned again (or, if it isn't, when it goes out of scope).",
+            "p may have no value after the loop: it may have none where the loop starts, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If it has one, its resource is dropped when p is assigned again (or, if it isn't, when it goes out of scope).",
+            "p.name may have no value after the loop: it may have none where the loop starts, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If it has one, its resource is dropped when p.name is assigned again (or, if it isn't, when it goes out of scope).",
         ],
         must_not_contain: &[
             "s acquires ownership of a new resource; its previous resource is dropped",
@@ -18813,6 +18819,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the branch that ran didn't move it, its resource is dropped when q goes out of scope.",
             "If the branch that ran didn't move it, its resource is dropped when x.name goes out of scope.",
             "t acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it",
+            "x.name may have been moved out above, so it's dropped here only if nothing above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_struct_line_1031",
+        // #1032: `s = …` in a loop inside another, after a branch that
+        // may have moved s: each run of the inner loop may start with s
+        // holding nothing (the outer loop's first time round, c = true)
+        // or a value (one the outer loop's time round before gave it),
+        // and may end before assigning it (i = 0). Its end used to draw
+        // nothing for s, which kept its owner line ("s is the owner of
+        // the resource") down to `s = …"c"`, where s may hold nothing
+        // (`(assign a)[drop a]<after inner>(assign c0)(end)[drop c0]`
+        // for c = true, o = 1, i = 0). Now a dot there says s may have
+        // no value, and whatever it has is dropped by its next
+        // assignment (nested_tail: the inner loop's next run, c = false,
+        // o = 2, i = 1) or at its scope end; nothing can move it before
+        // that (rustc rejects a use there). The same for p and p.name.
+        // #1031: a loop that moves x.name (y.a, y.b) on its first time
+        // round only: x's scope end said x.name is dropped "only if
+        // nothing above moved it", which read as if the `drop(x.name)`
+        // above settled it; with k = 2 the second "b" is dropped there.
+        // Checked with rustc and a `Drop`-printing type: c = false /
+        // true, loops 0, 1, 2, 3 times round.
+        must_contain: &[
+            "s may have no value after the loop: it may have none where the loop starts, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If it has one, its resource is dropped when s is assigned again (or, if it isn't, when it goes out of scope).",
+            "p may have no value after the loop: it may have none where the loop starts, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If it has one, its resource is dropped when p is assigned again (or, if it isn't, when it goes out of scope).",
+            "p.name may have no value after the loop: it may have none where the loop starts, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If it has one, its resource is dropped when p.name is assigned again (or, if it isn't, when it goes out of scope).",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "p acquires ownership of a new resource. Its previous resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag).",
+            "s goes out of scope. Its resource is dropped here only if the loop above assigned s or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. x.name may have been moved out above, so it's dropped here only if x.name still holds it (Rust tracks this with a runtime drop flag).",
+            "y goes out of scope. y.a and y.b may have been moved out above, so each is dropped here only if it still holds its value (Rust tracks this with runtime drop flags).",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "Its previous resource is dropped here only if the loop above assigned s",
+            "x.name may have been moved out above, so it's dropped here only if nothing above moved it",
+            "y.a and y.b may have been moved out above, so each is dropped here only if nothing above moved it",
         ],
     },
 ];
@@ -24988,4 +25033,66 @@ fn a_stored_borrow_is_held_by_values_made_from_its_holder() {
         failures.push(format!("g's borrow should end after `println!(\"{{}}\", ng);` (y={after}), got {ends:?}"));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #1032: a loop inside another, after a branch that may have moved s,
+/// may end before assigning s (`if c { drop(s); } for … { while n < i {
+/// s = …; } s = …"c"; }`): on the outer loop's first time round s may
+/// hold nothing from the inner loop's end to the next assignment. The
+/// column used to keep its owner line ("s is the owner of the
+/// resource") through that stretch. Now the inner loop's closing row
+/// has a dot saying s may have no value, and no owner line runs from
+/// it to the next assignment (as after any maybe-moved dot), while one
+/// still runs inside the inner loop and after the assignment.
+#[test]
+fn a_loop_inside_another_that_may_not_assign_draws_no_owner_line() {
+    for (name, var, inner_src, after_src) in [
+        ("loop_struct_line_1031", "s", "s = String::from(\"b\");", "s = String::from(\"c\");"),
+        ("loop_struct_line_1031", "p", "p = P { name: String::from(\"b\") };", "p = P { name: String::from(\"c\") };"),
+        ("loop_struct_line_1031", "p.name", "p = P { name: String::from(\"b\") };", "p = P { name: String::from(\"c\") };"),
+        ("loop_drop_flags_1026", "s", "s = String::from(\"b\");", "s = String::from(\"c\");"),
+        ("loop_drop_flags_1026", "p", "p = P { name: String::from(\"b\") };", "p = P { name: String::from(\"c\") };"),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let inner_row = code_rows_y(&code, inner_src)[0];
+        let close_row = code_rows_y(&code, "}").into_iter().find(|y| *y > inner_row).expect("the inner loop's closing brace");
+        let after_row = code_rows_y(&code, after_src).into_iter().find(|y| *y > close_row).expect("the assignment after the inner loop");
+        let text = format!(
+            "{var} may have no value after the loop: it may have none where the loop starts, and the loop may end \
+             before assigning it, so it can't be used after the loop (until it's assigned again). If it has one, its \
+             resource is dropped when {var} is assigned again (or, if it isn't, when it goes out of scope)."
+        );
+        let owner = column_lines_with_tooltip(&timeline, &format!("{var} is the owner of the resource"));
+        let through: Vec<_> = owner.iter().filter(|(a, b)| b.min(after_row) - a.max(close_row) > 0.5).collect();
+        assert!(
+            through.is_empty(),
+            "{name}: {var} drawn as the owner at {through:?}, between the inner loop's end (y={close_row}) and `{after_src}` (y={after_row})",
+        );
+        let dots = dots_with_tooltip(&timeline, &text);
+        let near: Vec<_> = dots.iter().filter(|d| d.1 > inner_row && d.1 < after_row).collect();
+        assert!(
+            near.len() == 1 && (near[0].1 - close_row).abs() < 1.0,
+            "{name}: {var} should have one maybe-no-value dot on the inner loop's closing row (y={close_row}): {dots:?}",
+        );
+        assert!(
+            owner.iter().any(|(a, b)| *a <= inner_row + 0.5 && *b >= close_row - 0.5),
+            "{name}: {var} has no owner line from `{inner_src}` (y={inner_row}) to the inner loop's end (y={close_row}): {owner:?}",
+        );
+        assert!(
+            owner.iter().any(|(a, b)| *a <= after_row + 0.5 && *b > after_row + 0.5),
+            "{name}: {var} has no owner line after `{after_src}` (y={after_row}): {owner:?}",
+        );
+    }
+}
+
+/// The y ranges of the vertical column lines (`<line>`s of their own,
+/// not in a group) whose tooltip is exactly `text`.
+fn column_lines_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
+    start_tags(svg, "line")
+        .into_iter()
+        .filter(|l| attr(l, "x1").is_some() && attr(l, "x1") == attr(l, "x2") && timeline_tooltips(l) == [text])
+        .filter_map(|l| Some((attr(l, "y1")?.parse::<f64>().ok()?, attr(l, "y2")?.parse::<f64>().ok()?)))
+        .map(|(a, b)| (a.min(b), a.max(b)))
+        .collect()
 }
