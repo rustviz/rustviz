@@ -2158,11 +2158,14 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
 }
 
 // True when a let-chain's condition may have moved this column's value
-// before failing (#281), or a `while` loop's (#968), so a drop-flag
-// message says "nothing above" moved it rather than "no branch above".
+// before failing (#281), or a `while` loop's (#968), or a loop body
+// before a `break` outside any branch that breaks (#980), so a
+// drop-flag message says "nothing above" moved it rather than "no
+// branch above".
 fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
     history.iter().any(|(_, e)| match e {
-        Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }, .. } => true,
+        Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
+            | MaybeMovedAt::Loop { nothing_above: true }, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
         _ => false,
     })
