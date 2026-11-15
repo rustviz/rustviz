@@ -1750,9 +1750,14 @@ pub enum ExternalEvent {
     // that assignment ran (a `while` / `for` whose body never ran, a
     // `break` before it; #786). After the loop it may have no value: a
     // drop flag decides whether its next assignment or its scope end
-    // drops anything.
+    // drops anything. `before_loop`: `ro` isn't a `let x;` local but a
+    // variable that only may have held a value where the loop started,
+    // a branch above having moved it on some paths (#1012):
+    // `Some(by_cond)`, as for `OwnerDropAtReassign`'s `by_cond`. Then
+    // it has a value after the loop also if nothing moved it before.
     LoopMaybeInit {
         ro: ResourceAccessPoint,
+        before_loop: Option<bool>,
         id: usize
     },
     // At the end of a bare `loop` (#1000): `ro`, declared before the
@@ -2280,7 +2285,7 @@ pub enum Event {
     // See ExternalEvent::LoopIteratorDrop.
     LoopIteratorDrop { left: LoopLeft },
     // See ExternalEvent::LoopMaybeInit.
-    LoopMaybeInit,
+    LoopMaybeInit { before_loop: Option<bool> },
     // See ExternalEvent::LoopExitKept.
     LoopExitKept { reassigned: bool },
     // See ExternalEvent::LoopExitMove.
@@ -2832,7 +2837,7 @@ impl Display for Event {
             Event::LoopIteratorDrop { .. } => {
                 write!(f, "The for loop's iterator is dropped")
             },
-            Event::LoopMaybeInit => {
+            Event::LoopMaybeInit { .. } => {
                 write!(f, "May have no value when the loop ends")
             },
             Event::LoopExitKept { .. } => {
@@ -3093,8 +3098,8 @@ impl Event {
                 hover_messages::event_dot_loop_exit_kept(my_name, *reassigned, false)
             }
             // (The timeline panel words it with what follows.)
-            Event::LoopMaybeInit => {
-                hover_messages::event_dot_loop_maybe_init(my_name, true, true, None)
+            Event::LoopMaybeInit { before_loop } => {
+                hover_messages::event_dot_loop_maybe_init(my_name, true, true, None, *before_loop)
             }
             Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
                 hover_messages::event_dot_temporary_part_drop(ty, when, part)
@@ -4120,7 +4125,7 @@ impl Visualizable for VisualizationData {
             (_, Event::LoopIteratorDrop { .. }) => (*previous_state).clone(),
             // May have no value after the loop (#786): no line until
             // it's assigned again, like a maybe-moved one.
-            (_, Event::LoopMaybeInit) => State::OutOfScope,
+            (_, Event::LoopMaybeInit { .. }) => State::OutOfScope,
             // Owns a value at every `break` (#1000): what the body did
             // after the last one led back round, not out of the loop.
             (_, Event::LoopExitKept { .. }) => State::FullPrivilege { s: LineState::Full },
@@ -4604,8 +4609,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopIteratorDrop{ left, .. } => {
           vec![(line_num, Event::LoopIteratorDrop { left: *left })]
         },
-        ExternalEvent::LoopMaybeInit{ .. } => {
-          vec![(line_num, Event::LoopMaybeInit)]
+        ExternalEvent::LoopMaybeInit{ before_loop, .. } => {
+          vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop })]
         },
         ExternalEvent::LoopExitKept{ reassigned, .. } => {
           vec![(line_num, Event::LoopExitKept { reassigned: *reassigned })]
@@ -4977,8 +4982,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopIteratorDrop{ro, left, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left }, line_number);
             },
-            ExternalEvent::LoopMaybeInit{ro, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit, line_number);
+            ExternalEvent::LoopMaybeInit{ro, before_loop, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop }, line_number);
             },
             ExternalEvent::LoopExitKept{ro, reassigned, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitKept { reassigned }, line_number);

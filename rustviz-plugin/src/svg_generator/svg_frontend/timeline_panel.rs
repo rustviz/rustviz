@@ -1234,7 +1234,15 @@ fn render_branch_dots(
                 hover_messages::event_dot_branch_merge_box_contents_moved(
                     &is.real_name(), rap.is_mut(), rap.holds_phrase(), at, by_cond)
             } else if reassigned_next {
-                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond)
+                // That assignment is in a loop's body (#1012), which
+                // may end before it runs: unless every `break` out of
+                // the loop comes after it (`LoopExitKept`).
+                let in_loop = matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), .. }))
+                    && !full.iter()
+                        .filter(|(l, _)| *l > *merge_point)
+                        .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
+                        .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
+                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, in_loop)
             } else {
                 // A `&mut` reference moved on some paths (`if b {
                 // x } else { y }` returned, #674) owns nothing to
@@ -1409,7 +1417,7 @@ fn render_scope_end_dot(
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note()),
+                title: hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note(), loop_maybe_init_before(history)),
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -1721,8 +1729,15 @@ fn render_dot(
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_init(&name, &note, *maybe_moved)
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Loop), .. } = event {
                         // A loop above may have ended before assigning
-                        // it (#786).
-                        hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note)
+                        // it (#786), maybe after a branch moved it
+                        // before the loop (#1012).
+                        hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note, loop_maybe_init_before(&history[..i]))
+                    } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), maybe_moved: true, by_cond, .. } = event {
+                        // The first thing a loop's body does to it,
+                        // which only may hold a value as the loop
+                        // starts (#1012).
+                        hover_messages::event_dot_owner_drop_at_reassign_maybe_entry(&name, &note, *by_cond
+                            || maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)))
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), .. } = event {
                         // Its first assignment, in a loop body (#786).
                         hover_messages::event_dot_init_drops_earlier_iteration(&name)
@@ -1771,7 +1786,7 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
-                Event::LoopMaybeInit => {
+                Event::LoopMaybeInit { before_loop } => {
                     // A loop above may have ended before assigning it
                     // (#786): like a conditional's maybe-initialized
                     // join, say when its value, if any, is dropped.
@@ -1786,7 +1801,7 @@ fn render_dot(
                         None
                     };
                     data.title = hover_messages::event_dot_loop_maybe_init(
-                        &name, rap.holds_value() || rap.is_ref(), rap.is_mut(), reassigned);
+                        &name, rap.holds_value() || rap.is_ref(), rap.is_mut(), reassigned, *before_loop);
                 }
                 Event::LoopExitKept { reassigned } => {
                     let rap = &visualization_data.timelines[hash].resource_access_point;
@@ -2064,7 +2079,7 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             Event::Branch { branch_history, maybe_init, .. }
                 if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => maybe = false,
             // Or by a loop that may have ended before assigning it (#786).
-            Event::LoopMaybeInit => maybe = false,
+            Event::LoopMaybeInit { .. } => maybe = false,
             Event::Branch { branch_history, ty, .. } => {
                 let (mixed, all_moved) = merge_move_kind(branch_history, ty);
                 if mixed {
@@ -2094,6 +2109,14 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
         }
     }
     maybe
+}
+
+// The `before_loop` of the last `LoopMaybeInit` in `history` (#1012).
+fn loop_maybe_init_before(history: &[(usize, Event)]) -> Option<bool> {
+    history.iter().rev().find_map(|(_, e)| match e {
+        Event::LoopMaybeInit { before_loop } => Some(*before_loop),
+        _ => None,
+    }).flatten()
 }
 
 // A drop-flag assignment to a maybe-initialized `let x;` local (#244),
@@ -2141,7 +2164,7 @@ fn init_after(start: Option<InitJoin>, history: &[(usize, Event)]) -> Option<Ini
             Event::Branch { branch_history, maybe_init, .. } => {
                 init = init_join(*maybe_init, reaching_end_states(branch_history));
             }
-            Event::LoopMaybeInit => init = Some(InitJoin::Loop),
+            Event::LoopMaybeInit { .. } => init = Some(InitJoin::Loop),
             e if holds_value_after(false, e) => init = None,
             _ => {}
         }
@@ -3295,7 +3318,7 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         // assignment to the one that ended.
         Event::OwnerGoOutOfScope | Event::RefGoOutOfScope => false,
         // May have no value after a loop (#786).
-        Event::LoopMaybeInit => false,
+        Event::LoopMaybeInit { .. } => false,
         // (Not one that returns or panics after assigning a `let x;`
         // local: on the paths that get past the conditional, x still
         // has no value, #930. A `break` out of a loop takes the value

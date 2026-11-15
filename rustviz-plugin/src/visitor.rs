@@ -2444,7 +2444,61 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       given.push(ro);
     }
+    // Those that only may hold a value where it starts (#1012), and
+    // what each holds where the loop comes back round: `Held` also
+    // when the loop never moves it (it keeps what it had, and may give
+    // it a value). A struct's field columns go with it. Not in a loop
+    // inside another that it was declared before: there the first time
+    // round this loop may follow an earlier run of it, not only the
+    // branch above.
+    let enclosing_len = self.exit_frames.iter().rev()
+      .filter_map(|f| match f { ExitFrame::Loop { id, len, .. } if *id != loop_expr.hir_id => Some(*len), _ => None })
+      .max();
+    let mut rounds: Vec<(String, Ownership)> = Vec::new();
+    for (name, round, moved) in self.round_states_loop(loop_expr.span) {
+      let round = if round == Ownership::Maybe && !moved { Ownership::Held } else { round };
+      let members = self.struct_members_deep(&name);
+      rounds.push((name, round));
+      rounds.extend(members.iter().map(|m| (m.name().clone(), round)));
+    }
+    let mut maybe_entry: Vec<MaybeEntry> = Vec::new();
+    for (name, round) in rounds {
+      let root = name.split('.').next().unwrap_or("");
+      if !outer.iter().any(|o| o == root) || deferred.contains(root) || self.skip_raps.contains(&name)
+        || enclosing_len.is_some_and(|l| self.in_scope[..l.min(self.in_scope.len())].iter().any(|o| o == root)) {
+        continue;
+      }
+      let Some(rd) = self.raps.get(&name) else { continue };
+      let ro = rd.rap.clone();
+      if ro.is_ref() || ro.is_fn() || maybe_entry.iter().any(|m| m.ro == ro)
+        || self.rap_ownership_now(&name) != Ownership::Maybe
+        || before_cond.is_some_and(|at| self.rap_ownership_before(at, &name) != Ownership::Maybe) {
+        continue;
+      }
+      let by_cond = self.moved_by_chain_condition(&ro) || self.maybe_moved_by_let_now(&name);
+      maybe_entry.push(MaybeEntry { ro, round, by_cond });
+    }
     self.loop_given.push((loop_expr.hir_id, given));
+    self.loop_maybe_entry.push((loop_expr.hir_id, maybe_entry));
+  }
+
+  /// Whether an assignment to `rap` here is the first thing since the
+  /// start of the body of a loop it's in that changes it, where `rap`
+  /// only may hold a value as the loop starts (`loop_maybe_entry`,
+  /// #1012): the first time round, the assignment drops the old value
+  /// only if no branch above moved it; a later time round, only if the
+  /// time round before left it holding one. Only the innermost loop
+  /// here: in an inner loop, "the first time round" would be each run
+  /// of it.
+  fn maybe_entry_untouched_now(&self, rap: &ResourceAccessPoint) -> bool {
+    let Some(loop_at) = self.exit_frames.iter().rposition(|f| matches!(f, ExitFrame::Loop { .. })) else { return false };
+    let ExitFrame::Loop { id: innermost, .. } = self.exit_frames[loop_at] else { return false };
+    if !self.loop_maybe_entry.iter().any(|(id, entry)| *id == innermost && entry.iter().any(|m| m.ro == *rap)) {
+      return false;
+    }
+    let (events, hide) = self.loop_path_events(loop_at);
+    path_own(&events, rap, &hide, PathOwn::Yes) == PathOwn::Yes
+      && path_own(&events, rap, &hide, PathOwn::No) == PathOwn::No
   }
 
   /// Whether an assignment to `rap` here, which holds no value on the
@@ -2507,6 +2561,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Some((id, _)) if *id == loop_expr.hir_id => self.loop_given.pop().map(|(_, g)| g).unwrap_or_default(),
       _ => Vec::new(),
     };
+    let maybe_entry = match self.loop_maybe_entry.last() {
+      Some((id, _)) if *id == loop_expr.hir_id => self.loop_maybe_entry.pop().map(|(_, e)| e).unwrap_or_default(),
+      _ => Vec::new(),
+    };
     let (mine, rest): (Vec<BreakState>, Vec<BreakState>) =
       std::mem::take(&mut self.break_states).into_iter().partition(|b| b.target == loop_expr.hir_id);
     self.break_states = rest;
@@ -2566,12 +2624,53 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => {}
       }
     }
+    // One that only may have held a value as the loop started (#1012):
+    // the loop can end before giving it one (a `while` / `for` whose
+    // body never ran, a `break` before the assignment the first time
+    // round), so what it holds after the loop is also what it held
+    // before it. When every time round leaves it holding a value, it
+    // has one after the loop if the loop assigned it or nothing moved
+    // it before (`before_loop`); when every time round leaves it
+    // moved, it may have been moved (`LoopRound`). (One that every
+    // `break` comes after an assignment to is `kept` above; other
+    // mixes are left as the body's end draws them.)
+    let mut maybe_init: Vec<(ResourceAccessPoint, Option<bool>)> =
+      maybe_init.into_iter().map(|ro| (ro, None)).collect();
+    let mut round_moved: Vec<ResourceAccessPoint> = Vec::new();
+    for MaybeEntry { ro, round, by_cond } in maybe_entry {
+      if broke_moved.contains(&ro) || !current(self, &ro) || kept.iter().any(|(k, _)| *k == ro) {
+        continue;
+      }
+      // The ways out of the loop: its `break`s, and for a `while` /
+      // `for` its start, where nothing in the body has changed it yet.
+      let untouched = mine.iter().filter(|b| b.untouched.contains(&ro)).count() + usize::from(!bare);
+      let assigned = mine.iter().filter(|b| b.assigned.contains(&ro)).count();
+      let exits = mine.len() + usize::from(!bare);
+      let ok = untouched > 0 && match round {
+        Ownership::Held => untouched + assigned == exits,
+        _ => untouched == exits,
+      };
+      if !ok {
+        continue;
+      }
+      match (round, self.rap_ownership_now(ro.name())) {
+        (Ownership::Held, Ownership::Held) => maybe_init.push((ro, Some(by_cond))),
+        (Ownership::None, Ownership::None) => round_moved.push(ro),
+        _ => {}
+      }
+    }
     for (ro, reassigned) in kept {
       self.add_external_event(line, ExternalEvent::LoopExitKept { ro, reassigned, id: *self.unique_id });
       *self.unique_id += 1;
     }
-    for ro in maybe_init {
-      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, id: *self.unique_id });
+    for (ro, before_loop) in maybe_init {
+      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, before_loop, id: *self.unique_id });
+      *self.unique_id += 1;
+    }
+    for ro in round_moved {
+      self.add_external_event(line, ExternalEvent::LoopExitMove {
+        ro, definite: false, at: MaybeMovedAt::LoopRound, id: *self.unique_id,
+      });
       *self.unique_id += 1;
     }
   }
@@ -2677,7 +2776,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         (r.clone(), own)
       }).collect())
       .unwrap_or_default();
-    self.break_states.push(BreakState { target, assigned, given });
+    let untouched = self.loop_maybe_entry.iter().rev().find(|(id, _)| *id == target)
+      .map(|(_, e)| e.iter()
+        .filter(|m| path_own(&events, &m.ro, &hide, PathOwn::Yes) == PathOwn::Yes
+          && path_own(&events, &m.ro, &hide, PathOwn::No) == PathOwn::No)
+        .map(|m| m.ro.clone())
+        .collect())
+      .unwrap_or_default();
+    self.break_states.push(BreakState { target, assigned, given, untouched });
   }
 
   /// The events on the path from the start of the loop whose frame is
@@ -4611,6 +4717,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       if drop_target.is_some() && maybe_init.is_none() && self.maybe_init_by_loop_now(rap) {
         maybe_init = Some(InitBy::Loop);
+      }
+      // `s = …` in a loop's body where s only may hold a value as the
+      // loop starts (a branch above moved it, #1012), with nothing in
+      // between: the first time round, the old value is dropped only
+      // if no branch above moved it; a later time round, only if the
+      // time round before left s holding one. Marked as an
+      // `EarlierIteration` drop that's also `maybe_moved`.
+      if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
+        && maybe_moved.iter().all(|m| *m) && loop_head.iter().all(|l| !*l)
+        && drop_target.iter().chain(field_drop_targets.iter()).all(|r| self.maybe_entry_untouched_now(r)) {
+        maybe_init = Some(InitBy::EarlierIteration);
       }
     }
 
@@ -10052,7 +10169,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if self.skip_raps.contains(ro.name()) || ro.is_ref() {
         continue;
       }
-      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, id: *self.unique_id });
+      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, before_loop: None, id: *self.unique_id });
       *self.unique_id += 1;
     }
   }

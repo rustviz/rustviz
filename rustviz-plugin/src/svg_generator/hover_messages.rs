@@ -3184,12 +3184,14 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool
 
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned
 // again before it goes out of scope: the old value, if it's still there,
-// is dropped at that assignment instead (#335).
-pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: bool) -> String {
+// is dropped at that assignment instead (#335). `in_loop`: that
+// assignment is in a loop's body, which may end before it runs (#1012).
+pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: bool, in_loop: bool) -> String {
     let name = styled_name_html(my_name);
     format!(
-        "{} until it's assigned again. {}, its resource is dropped when {} is assigned again.",
-        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond), name
+        "{} until it's assigned again. {}, its resource is dropped when {} is assigned again{}.",
+        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond), name,
+        if in_loop { " (or, if it isn't, when it goes out of scope)" } else { "" }
     )
 }
 
@@ -3311,45 +3313,87 @@ pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
 // `event_dot_branch_merge_maybe_init`. `reassigned`: s is assigned
 // again before its scope ends, on every path (`Some(true)`) or only in
 // a branch of a later conditional (`Some(false)`).
-pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>) -> String {
+//
+// `before_loop`: s only may have held a value as the loop started (a
+// branch above moved it on some paths, #1012), `Some(by_cond)` (see
+// `moved_above`): after the loop s holds one if the loop assigned it or
+// if nothing moved it before.
+pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>, before_loop: Option<bool>) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let mut out = format!(
-        "{0} may have no value after the loop: the loop may end before assigning it, so it can't be \
+        "{0} may have no value after the loop: {2}the loop may end before assigning it, so it can't be \
          used after the loop{1}.",
         my_name_fmt,
-        if mutable { " (until it's assigned again)" } else { "" }
+        if mutable { " (until it's assigned again)" } else { "" },
+        match before_loop {
+            Some(by_cond) => format!("{} may have moved it, and ", moved_above_maybe(by_cond)),
+            None => String::new(),
+        }
     );
     if !value {
         out.push_str(&format!(
-            " If the loop assigned it, its resource is dropped when {0} {1}.",
+            " If the loop assigned it{2}, its resource is dropped when {0} {1}.",
             my_name_fmt,
             match reassigned {
                 Some(true) => "is assigned again",
                 Some(false) => "is assigned again (or, if it isn't, when it goes out of scope)",
                 None => "goes out of scope",
-            }
+            },
+            or_not_moved_above(before_loop)
         ));
     }
     out
 }
 
 // The next assignment after the loop.
-pub fn event_dot_owner_drop_at_reassign_after_loop(my_name: &String, note: &str) -> String {
+// `before_loop`: as for `event_dot_loop_maybe_init`.
+pub fn event_dot_owner_drop_at_reassign_after_loop(my_name: &String, note: &str, before_loop: Option<bool>) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only \
-         if the loop above assigned {0} (Rust tracks this with a runtime drop flag).",
-        styled_name_html(my_name), holds, rest
+         if the loop above assigned {0}{3} (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest, or_not_moved_above(before_loop)
     )
 }
 
 // Its scope end, when it isn't assigned again.
-pub fn event_dot_go_out_of_scope_after_loop(my_name: &String, note: &str) -> String {
+pub fn event_dot_go_out_of_scope_after_loop(my_name: &String, note: &str, before_loop: Option<bool>) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if the loop above assigned \
-         {0} (Rust tracks this with a runtime drop flag).",
-        styled_name_html(my_name), holds, rest
+         {0}{3} (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest, or_not_moved_above(before_loop)
+    )
+}
+
+// " or no branch above moved it" for `before_loop` (see
+// `event_dot_loop_maybe_init`).
+fn or_not_moved_above(before_loop: Option<bool>) -> String {
+    match before_loop {
+        Some(by_cond) => format!(" or {} moved it", moved_above(by_cond)),
+        None => String::new(),
+    }
+}
+
+// "A branch above" / "Something above": what may have moved a variable
+// before a loop (`moved_above`'s counterpart).
+fn moved_above_maybe(by_cond: bool) -> &'static str {
+    if by_cond { "something above" } else { "a branch above" }
+}
+
+// A reassignment in a loop body, first thing the body does to s, where
+// s only may hold a value as the loop starts (a branch above moved it
+// on some paths, #1012): the first time round the old value is there
+// only if no branch above moved it; a later time round, only if the
+// time round before left s holding one (it may have moved it, or given
+// it a new one). Starts ". Its previous " (`reassign_subsumes_acquire`).
+pub fn event_dot_owner_drop_at_reassign_maybe_entry(my_name: &String, note: &str, by_cond: bool) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
+         {0} still holds it (Rust tracks this with a runtime drop flag): the first time round the loop, \
+         only if {3} moved it; a later time round, only if the time round before left {0} holding one.",
+        styled_name_html(my_name), holds, rest, moved_above(by_cond)
     )
 }
 
