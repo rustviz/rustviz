@@ -16471,6 +16471,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from m to g",
         ],
     },
+    // ─── `&mut m` coerced to `&mut String` is a reborrow of `*m` (#926) ───
+    TooltipExpect {
+        name: "coerced_reborrow_arrow_926",
+        must_contain: &[
+            // let s: &mut String = &mut gm; reads like the written `&mut *ge`.
+            "Mutable reborrow from gm to s",
+            "Mutable reborrow from ge to t",
+            "Return mutably borrowed resource from s to *gm",
+            "Return mutably borrowed resource from t to *ge",
+            // add(&mut gn): the call reborrows through gn as `add(&mut *gn)` would.
+            "add reads and writes through gn (mutable reborrow — gn can't be used until add returns)",
+            "the resource gn points to is mutably borrowed by add through gn; gn can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from gm to s",
+            "Return mutably borrowed resource from s to gm",
+            "add reads from/writes to gn",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

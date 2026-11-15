@@ -3421,7 +3421,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // into a generic `T` has no such adjustment: r is moved.
           // `f(&mut r.a)` with r a reference reborrows through r too.
           let is_reborrow = matches!(from_ro, ResourceTy::DerefField(..)) || match arg.kind {
-            ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, tycheck_results),
+            ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, tycheck_results)
+              || is_coerced_ref_var_reborrow(arg, tycheck_results),
             _ => is_implicit_mut_reborrow(arg, tycheck_results),
           };
           // An existing `&mut` (not a fresh `&mut x` written at the
@@ -3687,6 +3688,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // in this case we are borrowing from b; `&p.name` with p a
       // reference is a reborrow of the field through p (#266).
       let lender = self.rap_or_field_through_ref(&expr);
+      // `&mut m` coerced to `&mut String` borrows `*m`, as `&mut *m`
+      // does: the borrow is given back to `*m` (#926).
+      let lender = match lender {
+        ResourceTy::Value(x) if is_coerced_ref_var_reborrow(expr, self.tcx.typeck(expr.hir_id.owner)) =>
+          ResourceTy::Deref(x),
+        other => other,
+      };
       let mut aliasing = get_aliasing_data(&lender, &self.borrow_map);
       // if expr has type &&
       let ty = self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id);
@@ -6020,10 +6028,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Both resolve to the same source RAP, so decide here from the
       // syntax rather than from r's kind downstream. `&p.f` through a
       // reference p is a reborrow too.
+      // `&mut m` coerced to `&mut String` reborrows `*m` too (#926).
       let is_reborrow = matches!(res, ResourceTy::DerefField(..)) || is_explicit_reborrow(
         innermost_addr_of_operand(rhs),
         self.tcx.typeck(rhs.hir_id.owner),
-      );
+      ) || is_coerced_ref_var_reborrow(rhs, self.tcx.typeck(rhs.hir_id.owner));
       // `&mut r` / `&r` borrowing the reference variable r itself
       // (#914, #925).
       let of_ref_var = ref_var_borrow(rhs, self.tcx.typeck(rhs.hir_id.owner));
