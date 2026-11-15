@@ -3241,6 +3241,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, text, w))
   }
 
+  /// The returned value `e` is part of a variable or static that has a
+  /// column, not all of it: `v[0]` / `g[1][0]` / `ORIGIN.x` (a Copy
+  /// element or field copied out, #1052), or `&PRIMES` / `&PRIMES[0]`
+  /// (a reference to (part of) a static, #1053). Returns
+  /// `Index(<holder>, <place>)`, drawn on the holder's column; for a
+  /// reference the place starts with `&` / `&mut `.
+  pub fn returned_part(&mut self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    if e.span.from_expansion() {
+      return None;
+    }
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    let ty = typeck.node_type(e.hir_id);
+    let line_num = expr_to_line(e, &self.tcx);
+    if let ExprKind::AddrOf(_, mutbl, place) = e.kind {
+      let mut base = place;
+      while let ExprKind::Index(b, _, _) | ExprKind::Field(b, _) = base.kind {
+        base = b;
+      }
+      let ExprKind::Path(QPath::Resolved(_, p)) = base.kind else { return None };
+      static_of_path(p)?;
+      let rap = self.raps.get(&path_key(p, &self.tcx)).map(|rd| rd.rap.to_owned())?;
+      self.update_rap(&rap, line_num);
+      let amp = if mutbl == Mutability::Mut { "&mut " } else { "&" };
+      let label = self.place_label(place, rap.name());
+      return Some(ResourceTy::Index(rap, format!("{amp}{label}"), Default::default()));
+    }
+    if ty.is_ref() {
+      return None;
+    }
+    let rap = match e.kind {
+      ExprKind::Index(recv, _, _) => expr_to_rap_name(recv, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .map(|rd| rd.rap.to_owned())
+        .filter(|r| !r.is_fn())?,
+      ExprKind::Field(..) => self.static_field_holder(e)?,
+      _ => return None,
+    };
+    self.update_rap(&rap, line_num);
+    let place = self.place_label(e, rap.name());
+    Some(ResourceTy::Index(rap, place, Default::default()))
+  }
+
   /// `expr` is `*r` (or `**r`, ...) with `r` a reference RAP: the value
   /// read is the one `r` points to, never `r` itself (#670). Returns
   /// `DerefField(r, "*r")`, drawn on r's column like `p.x` above.

@@ -4000,6 +4000,12 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } =>
                 hover_messages::event_dot_copy_through_deref_field(
                     r.name(), place, &"the caller".to_string(), r.points_to_copy()),
+            // `&PRIMES` / `v[0]` returned (#1053, #1052).
+            ExternalEvent::Copy { from: ResourceTy::Index(r, place, _), .. } if place.starts_with('&') =>
+                hover_messages::event_dot_static_ref_to_caller(r.name(), place),
+            ExternalEvent::Copy { from: ResourceTy::Index(r, place, _), .. } =>
+                hover_messages::event_dot_copy_element_to_caller(
+                    r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() }),
             _ => message(&rap.name().to_string()),
         };
 

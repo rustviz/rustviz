@@ -1667,6 +1667,28 @@ pub fn event_dot_copy_out_of_element(holder: &String, place: &String, holder_is_
     }
 }
 
+// `v[0]` / `ORIGIN.x` returned (#1052): only that element or field is
+// copied to the caller; `holder` keeps all of its contents.
+pub fn event_dot_copy_element_to_caller(holder: &String, place: &String, holder_is_ref: bool, holds_value: bool) -> String {
+    format!("{} and returned to the caller", event_dot_copy_out_of_element(holder, place, holder_is_ref, holds_value))
+}
+
+// `&PRIMES` / `&mut TOTAL` / `&PRIMES[0]` returned (#1053): a reference to
+// (part of) the static `holder` goes to the caller. Nothing is copied,
+// and the borrow doesn't end in this function. `place` is the expression
+// as written, with its `&` / `&mut `.
+pub fn event_dot_static_ref_to_caller(holder: &String, place: &String) -> String {
+    let (what, target) = match place.strip_prefix("&mut ") {
+        Some(t) => ("a mutable reference", t),
+        None => ("a reference", place.strip_prefix('&').unwrap_or(place)),
+    };
+    format!(
+        "{what} to {0} is returned to the caller; the data it points to is not copied. {1} is a static, so the borrow can last for the whole program",
+        styled_name_html(&target.trim().to_owned()),
+        styled_name_html(holder)
+    )
+}
+
 // In-place update of one element of a resource: `a[i] += 1;`. The
 // element lives inside the resource `holder` owns (or, when `holder`
 // is a reference, inside the resource it points to), so `holder`
